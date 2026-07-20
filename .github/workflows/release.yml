@@ -24,7 +24,7 @@ jobs:
           node-version: 22.18.0
           package-manager-cache: false
       - name: Set up Python acceptance runtime
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Set up Go acceptance runtime
