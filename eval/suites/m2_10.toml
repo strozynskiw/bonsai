@@ -1,0 +1,464 @@
+id = "m2_10"
+seed = 210
+
+[[tasks]]
+id = "t01_readme_agentic"
+fixture = "fixtures/tiny_project"
+prompt = "Update README.md to mention that bonsai is an agentic coding harness."
+
+[tasks.mock]
+read = ["README.md"]
+final_response = "Updated README.md."
+[[tasks.mock.write]]
+path = "README.md"
+content = """
+# Tiny Project
+
+This fixture is intentionally small. Eval tasks mutate it in isolated copies.
+
+bonsai is an agentic coding harness.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["agentic coding harness"]
+exact_file = "expected/readme_agentic.md"
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["Updated README.md"]
+
+[[tasks]]
+id = "t02_config_port"
+fixture = "fixtures/tiny_project"
+prompt = "Change the app port in config/app.toml to 8080."
+
+[tasks.mock]
+read = ["config/app.toml"]
+final_response = "Changed the app port to 8080."
+[[tasks.mock.write]]
+path = "config/app.toml"
+content = """
+name = "tiny"
+port = 8080
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "config/app.toml"
+contains = ["port = 8080"]
+not_contains = ["port = 3000"]
+
+[[tasks]]
+id = "t03_cli_eval_help"
+fixture = "fixtures/tiny_project"
+prompt = "Document the eval command in docs/cli.md."
+
+[tasks.mock]
+read = ["docs/cli.md"]
+final_response = "Documented the eval command."
+[[tasks.mock.write]]
+path = "docs/cli.md"
+content = """
+# CLI
+
+Run `bonsai --help` to inspect supported commands.
+
+Use `bonsai eval --mode mock` to run the deterministic eval suite.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "docs/cli.md"
+contains = ["bonsai eval --mode mock"]
+
+[[tasks]]
+id = "t04_greeting_bonsai"
+fixture = "fixtures/tiny_project"
+prompt = "Change the greeting function to return hello bonsai."
+
+[tasks.mock]
+read = ["src/lib.rs"]
+final_response = "Updated the greeting function."
+[[tasks.mock.write]]
+path = "src/lib.rs"
+content = """
+pub fn greeting() -> &'static str {
+    "hello bonsai"
+}
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "src/lib.rs"
+contains = ["hello bonsai"]
+not_contains = ["\"hello\""]
+
+[[tasks]]
+id = "t05_todo_done"
+fixture = "fixtures/tiny_project"
+prompt = "Mark the eval coverage todo as done in notes/todo.txt."
+
+[tasks.mock]
+read = ["notes/todo.txt"]
+final_response = "Marked eval coverage as done."
+[[tasks.mock.write]]
+path = "notes/todo.txt"
+content = """
+DONE: wire eval coverage
+TODO: write docs
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "notes/todo.txt"
+contains = ["DONE: wire eval coverage"]
+
+[[tasks]]
+id = "t06_add_changelog"
+fixture = "fixtures/tiny_project"
+prompt = "Add a CHANGELOG.md entry for the eval harness."
+
+[tasks.mock]
+read = []
+final_response = "Added CHANGELOG.md."
+[[tasks.mock.write]]
+path = "CHANGELOG.md"
+content = """
+# Changelog
+
+- Add deterministic eval harness coverage.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "CHANGELOG.md"
+contains = ["deterministic eval harness"]
+
+[[tasks]]
+id = "t07_ready_marker"
+fixture = "fixtures/tiny_project"
+prompt = "Create a .bonsai-eval-ready marker file."
+
+[tasks.mock]
+read = []
+final_response = "Created the eval readiness marker."
+[[tasks.mock.write]]
+path = ".bonsai-eval-ready"
+content = "ready\n"
+
+[[tasks.graders]]
+type = "file-state"
+path = ".bonsai-eval-ready"
+contains = ["ready"]
+
+[[tasks.graders]]
+type = "test-pass"
+command = "sh scripts/check_evals.sh"
+timeout_secs = 5
+
+[[tasks]]
+id = "t08_live_notes"
+fixture = "fixtures/tiny_project"
+prompt = "Add docs/live.md with a note about live eval mode."
+
+[tasks.mock]
+read = []
+final_response = "Added live eval documentation."
+[[tasks.mock.write]]
+path = "docs/live.md"
+content = """
+# Live Eval
+
+Live mode runs the same suite against a configured provider.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "docs/live.md"
+contains = ["configured provider"]
+
+[[tasks]]
+id = "t09_feature_flags"
+fixture = "fixtures/tiny_project"
+prompt = "Add config/features.toml enabling evals."
+
+[tasks.mock]
+read = []
+final_response = "Added eval feature flags."
+[[tasks.mock.write]]
+path = "config/features.toml"
+content = """
+[features]
+evals = true
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "config/features.toml"
+contains = ["evals = true"]
+
+[[tasks]]
+id = "t10_math_module"
+fixture = "fixtures/tiny_project"
+prompt = "Add src/math.rs with a double function."
+
+[tasks.mock]
+read = []
+final_response = "Added the math module."
+[[tasks.mock.write]]
+path = "src/math.rs"
+content = """
+pub fn double(value: i32) -> i32 {
+    value * 2
+}
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "src/math.rs"
+contains = ["pub fn double", "value * 2"]
+
+[[tasks]]
+id = "t11_readme_badge"
+fixture = "fixtures/tiny_project"
+prompt = "Add a mock-eval badge line to README.md."
+
+[tasks.mock]
+read = ["README.md"]
+final_response = "Added the mock eval badge."
+[[tasks.mock.write]]
+path = "README.md"
+content = """
+# Tiny Project
+
+mock-eval: passing
+
+This fixture is intentionally small. Eval tasks mutate it in isolated copies.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["mock-eval: passing"]
+
+[[tasks]]
+id = "t12_decision_note"
+fixture = "fixtures/tiny_project"
+prompt = "Add notes/decisions.md explaining why fixtures are small."
+
+[tasks.mock]
+read = []
+final_response = "Added the fixture decision note."
+[[tasks.mock.write]]
+path = "notes/decisions.md"
+content = """
+# Decisions
+
+Fixtures stay small so eval failures are easy to inspect.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "notes/decisions.md"
+contains = ["easy to inspect"]
+
+[[tasks]]
+id = "t13_script_checks_ready"
+fixture = "fixtures/tiny_project"
+prompt = "Update scripts/check_evals.sh to check for the ready marker and print ok."
+
+[tasks.mock]
+read = ["scripts/check_evals.sh"]
+final_response = "Updated the eval check script."
+[[tasks.mock.write]]
+path = "scripts/check_evals.sh"
+content = """
+#!/bin/sh
+test -f .bonsai-eval-ready
+echo ok
+"""
+
+[[tasks.mock.write]]
+path = ".bonsai-eval-ready"
+content = "ready\n"
+
+[[tasks.graders]]
+type = "test-pass"
+command = "sh scripts/check_evals.sh"
+timeout_secs = 5
+
+[[tasks.graders]]
+type = "file-state"
+path = "scripts/check_evals.sh"
+contains = ["echo ok"]
+
+[[tasks]]
+id = "t14_config_mode"
+fixture = "fixtures/tiny_project"
+prompt = "Add mode = \"mock\" to config/app.toml."
+
+[tasks.mock]
+read = ["config/app.toml"]
+final_response = "Added mock mode to config/app.toml."
+[[tasks.mock.write]]
+path = "config/app.toml"
+content = """
+name = "tiny"
+port = 3000
+mode = "mock"
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "config/app.toml"
+contains = ["mode = \"mock\""]
+
+[[tasks]]
+id = "t15_usage_doc"
+fixture = "fixtures/tiny_project"
+prompt = "Add docs/usage.md with the basic mock eval command."
+
+[tasks.mock]
+read = []
+final_response = "Added usage documentation."
+[[tasks.mock.write]]
+path = "docs/usage.md"
+content = """
+# Usage
+
+Run `bonsai eval --mode mock --json` for a deterministic report.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "docs/usage.md"
+contains = ["bonsai eval --mode mock --json"]
+
+[[tasks]]
+id = "t16_export_math"
+fixture = "fixtures/tiny_project"
+prompt = "Export a math module from src/lib.rs."
+
+[tasks.mock]
+read = ["src/lib.rs"]
+final_response = "Exported the math module."
+[[tasks.mock.write]]
+path = "src/lib.rs"
+content = """
+pub mod math;
+
+pub fn greeting() -> &'static str {
+    "hello"
+}
+"""
+
+[[tasks.mock.write]]
+path = "src/math.rs"
+content = """
+pub fn double(value: i32) -> i32 {
+    value * 2
+}
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "src/lib.rs"
+contains = ["pub mod math;"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "src/math.rs"
+contains = ["pub fn double"]
+
+[[tasks]]
+id = "t17_security_doc"
+fixture = "fixtures/tiny_project"
+prompt = "Add SECURITY.md with a short note about no secrets in fixtures."
+
+[tasks.mock]
+read = []
+final_response = "Added SECURITY.md."
+[[tasks.mock.write]]
+path = "SECURITY.md"
+content = """
+# Security
+
+Do not put secrets in eval fixtures.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "SECURITY.md"
+contains = ["Do not put secrets"]
+
+[[tasks]]
+id = "t18_clear_todos"
+fixture = "fixtures/tiny_project"
+prompt = "Replace notes/todo.txt with completed items only."
+
+[tasks.mock]
+read = ["notes/todo.txt"]
+final_response = "Cleared the todo list."
+[[tasks.mock.write]]
+path = "notes/todo.txt"
+content = """
+DONE: wire eval coverage
+DONE: write docs
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "notes/todo.txt"
+contains = ["DONE: wire eval coverage", "DONE: write docs"]
+not_contains = ["TODO"]
+
+[[tasks]]
+id = "t19_mock_suite_note"
+fixture = "fixtures/tiny_project"
+prompt = "Add a mock suite note to README.md."
+
+[tasks.mock]
+read = ["README.md"]
+final_response = "Added a mock suite note."
+[[tasks.mock.write]]
+path = "README.md"
+content = """
+# Tiny Project
+
+This fixture is intentionally small. Eval tasks mutate it in isolated copies.
+
+Mock suite tasks are deterministic.
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["Mock suite tasks are deterministic"]
+
+[[tasks]]
+id = "t20_package_eval_script"
+fixture = "fixtures/tiny_project"
+prompt = "Add an eval script to package.json."
+
+[tasks.mock]
+read = ["package.json"]
+final_response = "Added the package eval script."
+[[tasks.mock.write]]
+path = "package.json"
+content = """
+{
+  "name": "tiny-project",
+  "private": true,
+  "scripts": {
+    "test": "echo ok",
+    "eval": "bonsai eval --mode mock"
+  }
+}
+"""
+
+[[tasks.graders]]
+type = "file-state"
+path = "package.json"
+contains = ["\"eval\": \"bonsai eval --mode mock\""]

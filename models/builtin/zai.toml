@@ -1,0 +1,151 @@
+[[targets]]
+connection = "zai"
+model = "zai/glm-5.2"
+remote_model = "glm-5.2"
+recommended = true
+default = true
+token_counter = "tiktoken"
+reasoning_codec = "zai-reasoning-effort"
+recommended_effort = "off"
+discouraged_efforts = ["default", "high", "xhigh", "max"]
+context_window = 1000000
+# Match the bounded GLM 5.2 turns already proven on OpenCode: the full 131K
+# allowance can otherwise be consumed entirely by reasoning before any action.
+pinned = true
+output_limit = 12000
+pricing = { input_micros_per_million = 1400000, output_micros_per_million = 4400000, cache_read_micros_per_million = 260000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-5.1"
+remote_model = "glm-5.1"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 200000
+output_limit = 131072
+pricing = { input_micros_per_million = 1400000, output_micros_per_million = 4400000, cache_read_micros_per_million = 260000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-5-turbo"
+remote_model = "glm-5-turbo"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 200000
+output_limit = 131072
+pricing = { input_micros_per_million = 1200000, output_micros_per_million = 4000000, cache_read_micros_per_million = 240000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-5"
+remote_model = "glm-5"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 3200000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.7"
+remote_model = "glm-4.7"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2200000, cache_read_micros_per_million = 110000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.7-flashx"
+remote_model = "glm-4.7-flashx"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 200000
+output_limit = 131072
+pricing = { input_micros_per_million = 70000, output_micros_per_million = 400000, cache_read_micros_per_million = 10000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.7-flash"
+remote_model = "glm-4.7-flash"
+roles = ["cheap"]
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 200000
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.6"
+remote_model = "glm-4.6"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2200000, cache_read_micros_per_million = 110000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.5"
+remote_model = "glm-4.5"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 131072
+output_limit = 98304
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2200000, cache_read_micros_per_million = 110000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.5-air"
+remote_model = "glm-4.5-air"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 131072
+output_limit = 98304
+pricing = { input_micros_per_million = 200000, output_micros_per_million = 1100000, cache_read_micros_per_million = 30000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.5-flash"
+remote_model = "glm-4.5-flash"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 131072
+output_limit = 98304
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"

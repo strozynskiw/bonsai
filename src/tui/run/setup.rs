@@ -1,0 +1,519 @@
+use super::*;
+
+pub(in crate::tui::run) struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    restored: bool,
+    /// Whether the kitty keyboard-protocol flags were pushed at startup, so
+    /// restore only pops what was actually pushed — a pop at a terminal that
+    /// never saw the push is another stray sequence in its input stream.
+    keyboard_enhanced: bool,
+    alternate_screen: bool,
+    mouse_capture: bool,
+    bracketed_paste: bool,
+}
+
+impl TerminalSession {
+    pub(in crate::tui::run) fn enter(screen_reader: bool) -> Result<Self> {
+        enable_raw_mode().context("failed to enable raw mode")?;
+        let mut stdout = io::stdout();
+        let alternate_screen = !screen_reader;
+        let mouse_capture = !screen_reader;
+        if alternate_screen && let Err(err) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(err).context("failed to enter alternate screen");
+        }
+        if mouse_capture && let Err(err) = execute!(stdout, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            if alternate_screen {
+                let _ = execute!(stdout, LeaveAlternateScreen);
+            }
+            return Err(err).context("failed to enable mouse capture");
+        }
+        if let Err(err) = execute!(stdout, EnableBracketedPaste) {
+            let _ = disable_raw_mode();
+            if mouse_capture {
+                let _ = execute!(stdout, DisableMouseCapture);
+            }
+            if alternate_screen {
+                let _ = execute!(stdout, LeaveAlternateScreen);
+            }
+            return Err(err).context("failed to enable bracketed paste");
+        }
+        // Push the keyboard protocol so `Alt+<key>` is delivered as a
+        // single `KeyEvent` with the ALT modifier rather than the legacy
+        // VT100 "ESC <key>" sequence. Without this, terminals that don't
+        // speak the kitty/iTerm2 protocol split the keystroke into Esc
+        // + the letter — so e.g. `Alt+I` (implement plan) clears the
+        // composer and types `i` instead.
+        //
+        // Gated on a support probe rather than pushed blind: pushing the
+        // flags at a terminal that doesn't (fully) speak the protocol can
+        // leave stray/partial reply bytes in the input stream, where
+        // crossterm's parser resynchronizes by consuming the very next
+        // byte — the user's first keystroke. The probe itself is a
+        // query/reply round-trip crossterm parses safely (raw mode is
+        // already on), so nothing leaks into the event queue.
+        let keyboard_enhanced = match crossterm::terminal::supports_keyboard_enhancement() {
+            Ok(true) => match execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                )
+            ) {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::debug!("keyboard enhancement push failed: {err}");
+                    false
+                }
+            },
+            Ok(false) => {
+                tracing::debug!("keyboard enhancement not supported; keeping legacy key encoding");
+                false
+            }
+            Err(err) => {
+                tracing::debug!("keyboard enhancement probe failed: {err}");
+                false
+            }
+        };
+
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: terminal_viewport(screen_reader),
+            },
+        );
+        let terminal = match terminal {
+            Ok(terminal) => terminal,
+            Err(err) => {
+                let mut cleanup_stdout = io::stdout();
+                if keyboard_enhanced {
+                    let _ = execute!(cleanup_stdout, PopKeyboardEnhancementFlags);
+                }
+                let _ = execute!(cleanup_stdout, DisableBracketedPaste);
+                if mouse_capture {
+                    let _ = execute!(cleanup_stdout, DisableMouseCapture);
+                }
+                if alternate_screen {
+                    let _ = execute!(cleanup_stdout, LeaveAlternateScreen);
+                }
+                let _ = disable_raw_mode();
+                return Err(err).context("failed to initialize terminal");
+            }
+        };
+        Ok(Self {
+            terminal,
+            restored: false,
+            keyboard_enhanced,
+            alternate_screen,
+            mouse_capture,
+            bracketed_paste: true,
+        })
+    }
+
+    pub(in crate::tui::run) fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+        &mut self.terminal
+    }
+
+    pub(in crate::tui::run) fn restore(&mut self) -> Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        let result = self.restore_best_effort();
+        if result.is_ok() {
+            self.restored = true;
+        }
+        result
+    }
+
+    fn restore_best_effort(&mut self) -> Result<()> {
+        drain_pending_terminal_events();
+        let mut first_error = None;
+        record_cleanup_error(
+            &mut first_error,
+            "failed to disable raw mode",
+            disable_raw_mode(),
+        );
+        record_cleanup_error(
+            &mut first_error,
+            "failed to reset terminal title",
+            crossterm::execute!(
+                self.terminal.backend_mut(),
+                crossterm::terminal::SetTitle("bonsai")
+            ),
+        );
+        if self.keyboard_enhanced {
+            record_cleanup_error(
+                &mut first_error,
+                "failed to pop keyboard enhancement flags",
+                execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags),
+            );
+        }
+        if self.bracketed_paste {
+            record_cleanup_error(
+                &mut first_error,
+                "failed to disable bracketed paste",
+                execute!(self.terminal.backend_mut(), DisableBracketedPaste),
+            );
+        }
+        if self.mouse_capture {
+            record_cleanup_error(
+                &mut first_error,
+                "failed to disable mouse capture",
+                execute!(self.terminal.backend_mut(), DisableMouseCapture),
+            );
+        }
+        if self.alternate_screen {
+            record_cleanup_error(
+                &mut first_error,
+                "failed to leave alternate screen",
+                execute!(self.terminal.backend_mut(), LeaveAlternateScreen),
+            );
+        }
+        record_cleanup_error(
+            &mut first_error,
+            "failed to show cursor",
+            self.terminal.show_cursor(),
+        );
+        record_cleanup_error(
+            &mut first_error,
+            "failed to flush terminal cleanup",
+            self.terminal.backend_mut().flush(),
+        );
+
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn terminal_viewport(screen_reader: bool) -> Viewport {
+    if screen_reader {
+        let height = crossterm::terminal::size()
+            .map(|(_, height)| height.max(1))
+            .unwrap_or(24);
+        Viewport::Inline(height)
+    } else {
+        Viewport::Fullscreen
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = self.restore_best_effort();
+            self.restored = true;
+        }
+    }
+}
+
+const TERMINAL_EVENT_DRAIN_LIMIT: usize = 256;
+const TERMINAL_EVENT_DRAIN_BUDGET: Duration = Duration::from_millis(10);
+
+fn drain_pending_terminal_events() {
+    let started_at = Instant::now();
+    let mut drained = 0usize;
+    while drained < TERMINAL_EVENT_DRAIN_LIMIT
+        && started_at.elapsed() < TERMINAL_EVENT_DRAIN_BUDGET
+        && event::poll(Duration::from_millis(0)).unwrap_or(false)
+    {
+        let _ = event::read();
+        drained = drained.saturating_add(1);
+    }
+    if drained == TERMINAL_EVENT_DRAIN_LIMIT || started_at.elapsed() >= TERMINAL_EVENT_DRAIN_BUDGET
+    {
+        tracing::debug!(
+            drained,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "terminal cleanup left pending input events undrained"
+        );
+    }
+}
+
+fn record_cleanup_error(
+    first_error: &mut Option<anyhow::Error>,
+    context: &'static str,
+    result: io::Result<()>,
+) {
+    match result {
+        Ok(()) => {}
+        Err(err) if first_error.is_none() => {
+            *first_error = Some(anyhow::anyhow!("{context}: {err}"));
+        }
+        Err(err) => {
+            // Keep only the first failure as the returned error so callers see
+            // the root cause, but log any later failures so a multi-part
+            // cleanup breakdown isn't silently lost.
+            tracing::debug!(context, error = %err, "secondary terminal cleanup step failed");
+        }
+    }
+}
+
+pub(in crate::tui::run) struct TuiSink {
+    pub(in crate::tui::run) sender: mpsc::UnboundedSender<UiEvent>,
+    pub(in crate::tui::run) completion_evidence:
+        crate::completion_report::CompletionEvidenceCollector,
+}
+
+impl OutputSink for TuiSink {
+    fn begin_completion_run(&self) {
+        self.completion_evidence.begin_run();
+    }
+
+    fn completion_evidence(&self) -> Option<crate::completion_report::CompletionEvidenceSnapshot> {
+        Some(self.completion_evidence.snapshot())
+    }
+
+    fn assistant_delta(&self, text: &str) {
+        let _ = self.sender.send(UiEvent::AssistantDelta(text.to_string()));
+    }
+
+    fn assistant_done(&self) {
+        let _ = self.sender.send(UiEvent::AssistantDone);
+    }
+
+    fn reasoning_delta(&self, text: &str) {
+        let _ = self.sender.send(UiEvent::ReasoningDelta(text.to_string()));
+    }
+
+    fn attempt_started(&self) {
+        let _ = self.sender.send(UiEvent::AttemptStarted);
+    }
+
+    fn attempt_discarded(&self) {
+        let _ = self.sender.send(UiEvent::AttemptDiscarded);
+    }
+
+    fn thinking(&self, text: &str) {
+        let _ = self.sender.send(UiEvent::Thinking(text.to_string()));
+    }
+
+    fn tool_calls_started(&self, calls: &[ToolCallStart]) {
+        if calls.is_empty() {
+            return;
+        }
+        for call in calls {
+            self.completion_evidence
+                .record_tool_started(&call.id, &call.name, &call.arguments);
+        }
+        let _ = self.sender.send(UiEvent::ToolCallsStarted {
+            calls: calls.to_vec(),
+            started_at: Instant::now(),
+        });
+    }
+
+    fn tool_started(&self, id: &str, name: &str, arguments: &str) {
+        self.completion_evidence
+            .record_tool_started(id, name, arguments);
+        let _ = self.sender.send(UiEvent::ToolStarted {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+            started_at: Instant::now(),
+        });
+    }
+
+    fn tool_output(&self, id: &str, output: &str) {
+        let _ = self.sender.send(UiEvent::ToolOutput {
+            id: id.to_string(),
+            output: output.to_string(),
+            updated_at: Instant::now(),
+        });
+    }
+
+    fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
+        self.completion_evidence
+            .record_tool_result(id, result, status, None);
+        let _ = self.sender.send(UiEvent::ToolFinished {
+            id: id.to_string(),
+            result: result.to_string(),
+            success: status.is_success(),
+            finished_at: Instant::now(),
+        });
+    }
+
+    fn tool_finished_with_diff(
+        &self,
+        id: &str,
+        result: &str,
+        status: crate::output::ToolExecutionStatus,
+        diff: FileDiff,
+    ) {
+        self.completion_evidence
+            .record_tool_result(id, result, status, Some(&diff));
+        let _ = self.sender.send(UiEvent::ToolFinishedWithDiff {
+            id: id.to_string(),
+            result: result.to_string(),
+            success: status.is_success(),
+            diff: Box::new(diff),
+            finished_at: Instant::now(),
+        });
+    }
+
+    fn workspace_changed(&self, paths: &[String], intent: &str) {
+        self.completion_evidence
+            .record_workspace_changes(paths, intent);
+        let _ = self.sender.send(UiEvent::WorkspaceChanged {
+            paths: paths.to_vec(),
+        });
+    }
+
+    fn queued_user_message_sent(&self, id: u64, text: &str) {
+        let _ = self.sender.send(UiEvent::QueuedUserMessageSent {
+            id,
+            text: text.to_string(),
+        });
+    }
+
+    fn context_updated(&self, report: crate::agent::ContextReport) {
+        let _ = self.sender.send(UiEvent::ContextUpdated(Box::new(report)));
+    }
+
+    fn status(&self, text: &str) {
+        let _ = self.sender.send(UiEvent::Status(text.to_string()));
+    }
+
+    fn compaction_status(&self, text: &str) {
+        let _ = self
+            .sender
+            .send(UiEvent::CompactionStatus(text.to_string()));
+    }
+
+    fn error(&self, text: &str) {
+        let _ = self
+            .sender
+            .send(UiEvent::Error(UiError::new("UI error", text)));
+    }
+}
+
+pub(in crate::tui::run) fn git_branch(project_root: &std::path::Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?;
+    let branch = branch.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completion_report::{
+        CompletionReport, CompletionSessionEvidence, CompletionStatus, classify_completion_status,
+    };
+    use crate::headless::{HeadlessSink, OutputFormat};
+    use crate::output::{OutputSink, ToolExecutionStatus};
+
+    #[test]
+    fn screen_reader_uses_inline_terminal_viewport() {
+        assert!(matches!(terminal_viewport(false), Viewport::Fullscreen));
+        assert!(matches!(
+            terminal_viewport(true),
+            Viewport::Inline(height) if height > 0
+        ));
+    }
+
+    fn run_script(sink: &dyn OutputSink) {
+        sink.begin_completion_run();
+        sink.tool_started("call-1", "bash", r#"{"command":"cargo test"}"#);
+        sink.tool_finished("call-1", "tests failed", ToolExecutionStatus::Failed);
+        sink.tool_started(
+            "call-2",
+            "bash",
+            r#"{"timeout_ms":5000,"command":"cargo test"}"#,
+        );
+        sink.tool_finished("call-2", "tests passed", ToolExecutionStatus::Succeeded);
+        sink.tool_started("call-3", "edit", r#"{"path":"src/main.rs"}"#);
+        sink.tool_finished_with_diff(
+            "call-3",
+            "update main",
+            ToolExecutionStatus::Succeeded,
+            crate::diff::build_file_diff(
+                "src/main.rs".to_string(),
+                Some("fn main() {}\n"),
+                "fn main() { println!(\"ok\"); }\n",
+            ),
+        );
+    }
+
+    fn report_for(sink: &dyn OutputSink) -> CompletionReport {
+        let evidence = sink.completion_evidence().unwrap();
+        let status = classify_completion_status(CompletionStatus::Completed, &evidence, None);
+        CompletionReport::from_evidence(
+            status,
+            evidence,
+            CompletionSessionEvidence {
+                verification: None,
+                review: None,
+                authorization_decisions: &[],
+                usage: crate::agent::UsageTotals::default(),
+                session_budget: crate::run_budget::SessionBudgetUsage::default(),
+                budget_exhaustion: None,
+            },
+        )
+    }
+
+    #[test]
+    fn tui_and_headless_sinks_normalize_the_same_completion_report() {
+        let headless = HeadlessSink::new(
+            OutputFormat::Json,
+            Box::new(Vec::<u8>::new()),
+            Box::new(Vec::<u8>::new()),
+        );
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let tui = TuiSink {
+            sender,
+            completion_evidence: crate::completion_report::CompletionEvidenceCollector::default(),
+        };
+
+        run_script(&headless);
+        run_script(&tui);
+
+        assert_eq!(report_for(&headless), report_for(&tui));
+    }
+
+    #[test]
+    fn failed_untrusted_output_surfaces_failed_tui_and_completion_evidence() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let tui = TuiSink {
+            sender,
+            completion_evidence: crate::completion_report::CompletionEvidenceCollector::default(),
+        };
+        let output = crate::tool::ToolOutput::untrusted_context_with_status(
+            "mcp:fake:do_write",
+            "Error: write not permitted",
+            ToolExecutionStatus::Failed,
+        );
+
+        tui.begin_completion_run();
+        tui.tool_started("call-mcp", "mcp__fake__do_write", "{}");
+        tui.tool_finished(
+            "call-mcp",
+            output.rendered_summary(),
+            output.execution_status(),
+        );
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(UiEvent::ToolStarted { .. })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(UiEvent::ToolFinished { success: false, .. })
+        ));
+        assert!(tui.completion_evidence().unwrap().unresolved_tool_failure);
+    }
+}

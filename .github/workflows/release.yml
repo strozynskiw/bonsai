@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify release
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js for TypeScript acceptance
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.18.0
+          package-manager-cache: false
+      - name: Set up Python acceptance runtime
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Set up Go acceptance runtime
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.23.x"
+          cache: false
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Test release manifest builder
+        run: |
+          rustc --edition 2024 -D warnings --test scripts/build-release-manifest.rs -o /tmp/build-release-manifest-tests
+          /tmp/build-release-manifest-tests
+      - name: Test RC soak evidence validator
+        run: python3 scripts/test_check_rc_soak.py
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --locked
+      - name: Run deterministic release-gating evals
+        run: cargo run --locked -- eval --mode mock --suite eval/suites/release_gating.toml --baseline eval/baselines/release-v1.toml --fail-on-task-failure
+      - name: Run deterministic language acceptance evals
+        run: cargo run --locked -- eval --mode mock --suite eval/suites/language_acceptance.toml --baseline eval/baselines/release-v1.toml --fail-on-task-failure
+      - name: Smoke install
+        run: |
+          cargo install --path . --locked --debug --force --root /tmp/bonsai-install-smoke
+          /tmp/bonsai-install-smoke/bin/bonsai --version
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.runs_on }}
+    env:
+      BONSAI_RELEASE_PUBLIC_KEY: ${{ vars.BONSAI_RELEASE_PUBLIC_KEY }}
+      BONSAI_RELEASE_TAG: ${{ github.ref_name }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: self-hosted, linux, x64
+            runner_class: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            include_completions: true
+          - runs_on: self-hosted, linux, arm64
+            runner_class: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            include_completions: false
+          - runs_on: macos-15
+            runner_class: macos-15
+            target: aarch64-apple-darwin
+            macos_deployment_target: "13.0"
+            include_completions: false
+          - runs_on: macos-15-intel
+            runner_class: macos-15-intel
+            target: x86_64-apple-darwin
+            macos_deployment_target: "13.0"
+            include_completions: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release verification key
+        run: |
+          test -n "${BONSAI_RELEASE_PUBLIC_KEY}"
+          test "$(printf '%s' "${BONSAI_RELEASE_PUBLIC_KEY}" | openssl base64 -d -A | wc -c | tr -d ' ')" = "32"
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build release binary
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke release binary
+        run: |
+          target/${{ matrix.target }}/release/bonsai --version
+      - name: Measure and compare release binary performance
+        env:
+          BONSAI_PERF_BINARY: target/${{ matrix.target }}/release/bonsai
+          BONSAI_PERF_REPORT: dist/bonsai-${{ github.ref_name }}-${{ matrix.target }}.performance.json
+          BONSAI_PERF_SAMPLES: "5"
+          BONSAI_PERF_RUNNER_CLASS: ${{ matrix.runner_class }}
+          PERFORMANCE_BASELINE: eval/baselines/performance/${{ matrix.target }}.json
+        run: |
+          mkdir -p dist
+          if [ -f "$PERFORMANCE_BASELINE" ]; then
+            export BONSAI_PERF_BASELINE="$PERFORMANCE_BASELINE"
+          else
+            echo "::notice::No reviewed ${{ matrix.target }} baseline yet; recording report-only evidence."
+          fi
+          cargo test --release --locked --target ${{ matrix.target }} \
+            --test performance_baseline -- --ignored --nocapture --test-threads=1
+          report_name="bonsai-${{ github.ref_name }}-${{ matrix.target }}.performance.json"
+          (cd dist && shasum -a 256 "$report_name" > "$report_name.sha256")
+      - name: Pack binary
+        run: |
+          release_name="bonsai-${{ github.ref_name }}-${{ matrix.target }}"
+          out_dir="target/${{ matrix.target }}/release"
+          mkdir -p dist
+          tar -czf "dist/${release_name}.tar.gz" -C "${out_dir}" bonsai
+          (cd dist && shasum -a 256 "${release_name}.tar.gz" > "${release_name}.tar.gz.sha256")
+          shasum -a 256 "${out_dir}/bonsai" | cut -d ' ' -f 1 > "dist/${release_name}.tar.gz.binary-sha256"
+          if [ "${{ matrix.include_completions }}" = "true" ]; then
+            "${out_dir}/bonsai" completions bash > dist/bonsai.bash
+            "${out_dir}/bonsai" completions zsh > dist/_bonsai
+            "${out_dir}/bonsai" completions fish > dist/bonsai.fish
+            (
+              cd dist
+              for completion in bonsai.bash _bonsai bonsai.fish; do
+                shasum -a 256 "${completion}" > "${completion}.sha256"
+              done
+            )
+          fi
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bonsai-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.binary-sha256
+            dist/*.performance.json
+            dist/bonsai.bash
+            dist/_bonsai
+            dist/bonsai.fish
+            !dist/*.txt
+
+  sbom:
+    name: Generate release SBOM
+    needs: verify
+    runs-on: self-hosted
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: .
+          format: spdx-json
+          syft-version: v1.46.0
+          artifact-name: bonsai-sbom
+          output-file: bonsai-${{ github.ref_name }}.spdx.json
+          upload-artifact: true
+          upload-release-assets: false
+
+  publish:
+    name: Publish release
+    needs: [build, sbom]
+    runs-on: self-hosted
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bonsai-*
+          merge-multiple: true
+          path: dist
+      - name: Prepare release assets
+        run: |
+          (cd dist && sort *.sha256 > SHA256SUMS)
+          echo "SHA256SUMS:"
+          cat dist/SHA256SUMS
+          if ! command -v gh >/dev/null; then
+            echo "GitHub CLI not available"
+            exit 1
+          fi
+      - name: Build and sign release manifest
+        env:
+          BONSAI_RELEASE_PRIVATE_KEY: ${{ secrets.BONSAI_RELEASE_PRIVATE_KEY }}
+          BONSAI_RELEASE_PUBLIC_KEY: ${{ vars.BONSAI_RELEASE_PUBLIC_KEY }}
+        run: |
+          test -n "${BONSAI_RELEASE_PRIVATE_KEY}"
+          test -n "${BONSAI_RELEASE_PUBLIC_KEY}"
+          umask 077
+          private_key="${RUNNER_TEMP}/bonsai-release-key.pem"
+          public_key="${RUNNER_TEMP}/bonsai-release-public.pem"
+          signature="${RUNNER_TEMP}/release-manifest.sig"
+          trap 'rm -f "${private_key}" "${public_key}" "${signature}"' EXIT
+          printf '%s\n' "${BONSAI_RELEASE_PRIVATE_KEY}" > "${private_key}"
+          openssl pkey -in "${private_key}" -pubout -out "${public_key}"
+          derived_key="$(openssl pkey -in "${private_key}" -pubout -outform DER | tail -c 32 | openssl base64 -A)"
+          test "${derived_key}" = "${BONSAI_RELEASE_PUBLIC_KEY}"
+          rustc --edition 2024 -D warnings scripts/build-release-manifest.rs \
+            -o "${RUNNER_TEMP}/build-release-manifest"
+          "${RUNNER_TEMP}/build-release-manifest" \
+            --tag "${{ github.ref_name }}" \
+            --repository "${{ github.repository }}" \
+            --dist dist \
+            --output dist/release-manifest.json
+          openssl pkeyutl -sign -rawin \
+            -inkey "${private_key}" \
+            -in dist/release-manifest.json \
+            -out "${signature}"
+          openssl base64 -A -in "${signature}" > dist/release-manifest.json.sig
+          printf '\n' >> dist/release-manifest.json.sig
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey "${public_key}" \
+            -in dist/release-manifest.json \
+            -sigfile "${signature}"
+      - name: Attest release provenance
+        if: ${{ github.event.repository.visibility == 'public' }}
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/SHA256SUMS
+            dist/release-manifest.json
+            dist/release-manifest.json.sig
+            dist/*.performance.json
+            dist/bonsai.bash
+            dist/_bonsai
+            dist/bonsai.fish
+            dist/bonsai-${{ github.ref_name }}.spdx.json
+      - name: Attest release SBOM
+        if: ${{ github.event.repository.visibility == 'public' }}
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: dist/*.tar.gz
+          sbom-path: dist/bonsai-${{ github.ref_name }}.spdx.json
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/*.tar.gz dist/*.sha256 dist/SHA256SUMS \
+            dist/release-manifest.json dist/release-manifest.json.sig \
+            dist/*.performance.json \
+            dist/bonsai.bash dist/_bonsai dist/bonsai.fish \
+            "dist/bonsai-${{ github.ref_name }}.spdx.json" \
+            --prerelease --generate-notes

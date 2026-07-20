@@ -1,0 +1,31 @@
+# Deterministic release references and material-regression gates. Wall-clock
+# duration remains diagnostic because shared CI runners are intentionally noisy.
+schema_version = 1
+
+[[profiles]]
+suite = "release_gating"
+provider = "mock-eval"
+model = "mock-eval-v0"
+effort = "default"
+score_percent = 100.0
+allowed_score_drop_percent = 0.0
+allowed_total_token_growth_percent = 5
+allowed_cache_reuse_drop_points = 5
+allowed_repair_turn_increase = 0
+total_tokens = 402909
+duration_ms = 1426
+cache_reuse_percent = 41
+repair_turns = 0
+
+[[profiles]]
+suite = "language_acceptance"
+provider = "mock-eval"
+model = "mock-eval-v0"
+effort = "default"
+score_percent = 100.0
+allowed_score_drop_percent = 0.0
+allowed_total_token_growth_percent = 5
+allowed_repair_turn_increase = 0
+total_tokens = 2192
+duration_ms = 22000
+repair_turns = 0

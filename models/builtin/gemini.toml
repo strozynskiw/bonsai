@@ -1,0 +1,144 @@
+# Google Gemini via its OpenAI-compatible endpoint
+# (https://generativelanguage.googleapis.com/v1beta/openai/), OpenAI Chat
+# Completions wire. Auth is a plain `Authorization: Bearer <GEMINI_API_KEY>` —
+# the native `x-goog-api-key` header is NOT used on this layer.
+#
+# Reasoning: the compat endpoint accepts OpenAI's top-level `reasoning_effort`
+# (values none/minimal/low/medium/high — NOTE: it does NOT accept "max" or
+# "xhigh", so the effort options below stop at "high"). That wire shape is
+# bonsai's `openai-chat-completions` codec. `reasoning_effort` and Gemini's
+# native `thinking_level` are mutually exclusive, so only the flat effort field
+# is emitted here.
+#
+# Pricing note (mirrors openai.toml): gemini-3.1-pro-preview and gemini-2.5-pro
+# bill a higher tier above a 200K-token input. Keep their working window at
+# 200K so per-target cost accounting stays exact at the low tier; the flat-priced
+# flash models keep the full 1M window.
+#
+# Caching: Gemini does automatic implicit prefix caching and maps read hits to
+# `usage.prompt_tokens_details.cached_tokens` on the compat layer. prompt_cache
+# is OFF on the connection: Gemini's OpenAI-compat surface strictly rejects the
+# `prompt_cache_key` field that flag would send (HTTP 400 "Unknown name
+# prompt_cache_key"), and its caching needs no client key anyway. Read-side
+# accounting is unaffected (cached_tokens is parsed unconditionally); the field
+# has been reported to populate unreliably through the compat shim, so VERIFY a
+# warm request reports cached tokens before trusting the cost discount.
+#
+# Model IDs current as of 2026-07: gemini-3.1-pro-preview is the served flagship
+# (a bare `gemini-3-pro` alias is NOT confirmed served — do not add it without
+# hitting GET /v1beta/openai/models). models.dev's Gemini pricing/windows were
+# demonstrably wrong at add time, so every target here is `pinned` with pricing
+# taken from Google's official pricing page.
+
+[[targets]]
+connection = "gemini"
+model = "gemini/gemini-3.1-pro-preview"
+remote_model = "gemini-3.1-pro-preview"
+# models.dev lists Gemini under its `google` block, so map metadata there.
+metadata_model = "google/gemini-3.1-pro-preview"
+recommended = true
+default = true
+recommended_effort = "medium"
+token_counter = "heuristic"
+reasoning_codec = "openai-chat-completions"
+pinned = true
+context_window = 200000
+# Full model output ceiling is 65536; capped to the reference-agent clamp as the
+# rumination-containment lever (same pattern as deepseek/glm), still leaving room
+# for a large diff plus a thinking budget.
+output_limit = 32000
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+connection = "gemini"
+model = "gemini/gemini-3.5-flash"
+remote_model = "gemini-3.5-flash"
+metadata_model = "google/gemini-3.5-flash"
+recommended = true
+recommended_effort = "medium"
+token_counter = "heuristic"
+reasoning_codec = "openai-chat-completions"
+pinned = true
+context_window = 1048576
+output_limit = 32000
+pricing = { input_micros_per_million = 1500000, output_micros_per_million = 9000000, cache_read_micros_per_million = 150000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+connection = "gemini"
+model = "gemini/gemini-2.5-pro"
+remote_model = "gemini-2.5-pro"
+metadata_model = "google/gemini-2.5-pro"
+recommended_effort = "medium"
+token_counter = "heuristic"
+reasoning_codec = "openai-chat-completions"
+pinned = true
+context_window = 200000
+output_limit = 32000
+pricing = { input_micros_per_million = 1250000, output_micros_per_million = 10000000, cache_read_micros_per_million = 125000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+connection = "gemini"
+model = "gemini/gemini-2.5-flash"
+remote_model = "gemini-2.5-flash"
+metadata_model = "google/gemini-2.5-flash"
+roles = ["cheap"]
+recommended_effort = "medium"
+token_counter = "heuristic"
+reasoning_codec = "openai-chat-completions"
+pinned = true
+context_window = 1048576
+output_limit = 32000
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 2500000, cache_read_micros_per_million = 30000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+# Cheapest modern entry (2026-05): flat-priced, so it keeps the full 1M window.
+# Confirmed served (live /models cache lists it); pricing verified against
+# ai.google.dev/gemini-api/docs/pricing 2026-07-19 ($0.25/$1.50, cached $0.025).
+# The "cheap" role stays on gemini-2.5-flash: a full flash beats a -lite tier
+# for delegated coding work until proven otherwise.
+[[targets]]
+connection = "gemini"
+model = "gemini/gemini-3.1-flash-lite"
+remote_model = "gemini-3.1-flash-lite"
+metadata_model = "google/gemini-3.1-flash-lite"
+recommended_effort = "medium"
+token_counter = "heuristic"
+reasoning_codec = "openai-chat-completions"
+pinned = true
+context_window = 1048576
+output_limit = 32000
+pricing = { input_micros_per_million = 250000, output_micros_per_million = 1500000, cache_read_micros_per_million = 25000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]

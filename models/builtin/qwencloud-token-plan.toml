@@ -1,0 +1,68 @@
+# Qwen Cloud Token Plan subscription (docs.qwencloud.com/token-plan): fixed
+# regional host, dedicated tp keys, sliding-window credit quotas — so every
+# target bills zero per-token like the other subscription plans
+# (kimi-coding-plan, mimo-coding-plan). models.dev carries the plan as
+# `alibaba-token-plan`; metadata_model maps there for backfill.
+#
+# Same DashScope serving stack as the `qwencloud` connection: automatic
+# strict-prefix caching, thinking-by-default models, the `thinking` envelope
+# accepted (kimi-thinking codec), no reasoning_content echo needed — all
+# verified live on the pay-as-you-go host; see models/builtin/qwencloud.toml.
+
+[[targets]]
+connection = "qwencloud-token-plan"
+model = "qwencloud-token-plan/qwen3.7-max"
+remote_model = "qwen3.7-max"
+metadata_model = "alibaba-token-plan/qwen3.7-max"
+recommended = true
+default = true
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 1000000
+# Same deliberate 32K reference-agent output clamp as the qwencloud targets.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+# The plan's flagship draw: Token Plan-EXCLUSIVE, absent from the
+# pay-as-you-go /models listing (verified live) and not yet on models.dev.
+# Specs are unverified pending a real Token Plan key — the 256K window is the
+# conservative max-preview-lineage floor (qwen3.6-max-preview shipped 262144);
+# claiming the family's 1M and being wrong would overflow compaction budgets.
+# Not the default for the same reason: a default model must be serving-proven
+# (a /models listing is not serving proof).
+[[targets]]
+connection = "qwencloud-token-plan"
+model = "qwencloud-token-plan/qwen3.8-max-preview"
+remote_model = "qwen3.8-max-preview"
+metadata_model = "alibaba-token-plan/qwen3.8-max-preview"
+recommended = true
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 262144
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "qwencloud-token-plan"
+model = "qwencloud-token-plan/qwen3.7-plus"
+remote_model = "qwen3.7-plus"
+metadata_model = "alibaba-token-plan/qwen3.7-plus"
+roles = ["cheap"]
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 1000000
+# Same deliberate 32K reference-agent output clamp as the qwencloud targets.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"

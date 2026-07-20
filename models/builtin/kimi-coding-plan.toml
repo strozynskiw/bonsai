@@ -1,0 +1,25 @@
+[[targets]]
+connection = "kimi-coding-plan"
+model = "kimi-coding-plan/kimi-for-coding"
+metadata_model = "kimi-for-coding/k2p7"
+remote_model = "kimi-for-coding"
+recommended = true
+default = true
+token_counter = "tiktoken"
+context_window = 262144
+output_limit = 32768
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+connection = "kimi-coding-plan"
+model = "kimi-coding-plan/kimi-for-coding-highspeed"
+# The high-speed route serves the same K2.7 model under a distinct wire id.
+metadata_model = "kimi-for-coding/k2p7"
+remote_model = "kimi-for-coding-highspeed"
+token_counter = "tiktoken"
+pinned = true
+context_window = 262144
+output_limit = 32768
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []

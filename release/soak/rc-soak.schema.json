@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/strozynskiw/bonsai/master/release/soak/rc-soak.schema.json",
+  "title": "Bonsai release-candidate soak record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "release",
+    "soak",
+    "observations",
+    "incidents"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://raw.githubusercontent.com/strozynskiw/bonsai/master/release/soak/rc-soak.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tag",
+        "peeled_commit",
+        "manifest_sha256",
+        "binary_sha256_by_target",
+        "performance_report_sha256_by_target"
+      ],
+      "properties": {
+        "tag": {
+          "type": "string",
+          "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.(0|[1-9][0-9]*)$"
+        },
+        "peeled_commit": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "binary_sha256_by_target": {
+          "$ref": "#/$defs/targetDigests"
+        },
+        "performance_report_sha256_by_target": {
+          "$ref": "#/$defs/targetDigests"
+        }
+      }
+    },
+    "soak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "minimum_hours"
+      ],
+      "properties": {
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "minimum_hours": {
+          "type": "integer",
+          "minimum": 336,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "timestamp",
+          "target",
+          "binary_sha256",
+          "surface",
+          "result"
+        ],
+        "properties": {
+          "timestamp": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "target": {
+            "$ref": "#/$defs/target"
+          },
+          "binary_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "surface": {
+            "enum": [
+              "headless",
+              "tui"
+            ]
+          },
+          "result": {
+            "enum": [
+              "passed",
+              "failed"
+            ]
+          }
+        }
+      }
+    },
+    "incidents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "timestamp",
+          "type",
+          "release_blocking",
+          "resolved_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+          },
+          "timestamp": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "type": {
+            "enum": [
+              "data-loss",
+              "security",
+              "migration",
+              "task-completion"
+            ]
+          },
+          "release_blocking": {
+            "type": "boolean"
+          },
+          "resolved_at": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "target": {
+      "enum": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ]
+    },
+    "targetDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ],
+      "properties": {
+        "x86_64-unknown-linux-gnu": {
+          "$ref": "#/$defs/sha256"
+        },
+        "aarch64-unknown-linux-gnu": {
+          "$ref": "#/$defs/sha256"
+        },
+        "aarch64-apple-darwin": {
+          "$ref": "#/$defs/sha256"
+        },
+        "x86_64-apple-darwin": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

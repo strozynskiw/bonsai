@@ -1,0 +1,47 @@
+[[targets]]
+connection = "zai-coding-plan"
+model = "zai-coding-plan/glm-5.2"
+metadata_model = "zai-coding-plan/glm-5.2"
+remote_model = "glm-5.2"
+recommended = true
+default = true
+token_counter = "tiktoken"
+reasoning_codec = "zai-reasoning-effort"
+recommended_effort = "off"
+discouraged_efforts = ["default", "high", "xhigh", "max"]
+context_window = 1000000
+pinned = true
+output_limit = 12000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "zai-coding-plan"
+model = "zai-coding-plan/glm-5-turbo"
+metadata_model = "zai-coding-plan/glm-5-turbo"
+remote_model = "glm-5-turbo"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 200000
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "zai-coding-plan"
+model = "zai-coding-plan/glm-4.7"
+metadata_model = "zai-coding-plan/glm-4.7"
+remote_model = "glm-4.7"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"

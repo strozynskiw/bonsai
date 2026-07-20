@@ -1,0 +1,136 @@
+id = "language_acceptance"
+seed = 104
+
+[budgets]
+max_logical_turns = 5
+max_provider_attempts = 5
+max_duration_ms = 30000
+max_reads_per_unchanged_path = 1
+
+[[tasks]]
+id = "rust_inspect_edit_verify"
+fixture = "fixtures/language_acceptance/rust"
+prompt = "Fix the Rust total function and run the locked test suite."
+
+[tasks.mock]
+final_response = "Fixed the Rust implementation; cargo test passes."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"src/lib.rs"}'
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"tests/total.rs"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"src/lib.rs","content":"pub fn total(values: &[i64]) -> i64 {\n    values.iter().sum()\n}\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"cargo test --locked"}'
+
+[[tasks.graders]]
+type = "test-pass"
+command = "cargo test --locked"
+timeout_secs = 30
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["cargo test passes"]
+
+[[tasks]]
+id = "typescript_inspect_edit_verify"
+fixture = "fixtures/language_acceptance/typescript"
+prompt = "Fix the TypeScript cart total and run the package test command."
+
+[tasks.mock]
+final_response = "Fixed the TypeScript implementation; npm test passes."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"src/cart.ts"}'
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"tests/cart.test.ts"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"src/cart.ts","content":"export interface LineItem {\n  price: number;\n  quantity: number;\n}\n\nexport function total(items: readonly LineItem[]): number {\n  return items.reduce((sum, item) => sum + item.price * item.quantity, 0);\n}\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"npm test"}'
+
+[[tasks.graders]]
+type = "test-pass"
+command = "npm test"
+timeout_secs = 30
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["npm test passes"]
+
+[[tasks]]
+id = "python_inspect_edit_verify"
+fixture = "fixtures/language_acceptance/python"
+prompt = "Fix the Python discount calculation and run the unittest suite."
+
+[tasks.mock]
+final_response = "Fixed the Python implementation; unittest passes."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"src/pricing/__init__.py"}'
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"tests/test_pricing.py"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"src/pricing/__init__.py","content":"def apply_discount(subtotal: int, percent: int) -> int:\n    \"\"\"Return the discounted subtotal in whole cents.\"\"\"\n    return subtotal - (subtotal * percent // 100)\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"python3 -m unittest discover -s tests -v"}'
+
+[[tasks.graders]]
+type = "test-pass"
+command = "python3 -m unittest discover -s tests -v"
+timeout_secs = 30
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["unittest passes"]
+
+[[tasks]]
+id = "go_inspect_edit_verify"
+fixture = "fixtures/language_acceptance/go"
+prompt = "Fix the Go total function and run all package tests."
+
+[tasks.mock]
+final_response = "Fixed the Go implementation; go test passes."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"calc/calc.go"}'
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"calc/calc_test.go"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"calc/calc.go","content":"package calc\n\nfunc Total(values []int) int {\n\ttotal := 0\n\tfor _, value := range values {\n\t\ttotal += value\n\t}\n\treturn total\n}\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"go test ./..."}'
+
+[[tasks.graders]]
+type = "test-pass"
+command = "go test ./..."
+timeout_secs = 30
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["go test passes"]

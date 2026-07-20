@@ -1,0 +1,8 @@
+/target
+.env
+log.txt
+.bonsai/
+__pycache__/
+*.py[cod]
+RELEASING.md
+ROADMAP.md

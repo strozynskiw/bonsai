@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "benchmark": {
+    "kind": "swe_bench_verified",
+    "dataset": "swe-bench_verified",
+    "dataset_version": "test",
+    "harness_commit": "f7bbbb2ccdf479001d6467c9e34af59e44a840f9",
+    "contract_commit": "b679692b8b7e274a6c89fd0842f25b02da4b9256"
+  },
+  "task": {
+    "id": "django__django-11099",
+    "workspace": "../../..",
+    "instruction": "Fix the issue described by the prepared SWE-bench instance.",
+    "base_commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "runner": {
+    "bonsai_binary": "../../../target/debug/bonsai",
+    "bonsai_revision": "local-fixture",
+    "provider": "openai",
+    "model": "gpt-5.4",
+    "reasoning_effort": "high",
+    "autonomy": "auto-accept",
+    "network": "deny",
+    "budgets": {
+      "max_turns": 64,
+      "max_generation_seconds": 300,
+      "max_output_chars": 200000,
+      "max_tool_seconds": 120,
+      "timeout_seconds": 1800,
+      "max_patch_bytes": 1000000
+    }
+  }
+}

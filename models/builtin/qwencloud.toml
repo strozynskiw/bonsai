@@ -1,0 +1,79 @@
+# Qwen Cloud pay-as-you-go (docs.qwencloud.com), served via the DashScope
+# international OpenAI-compatible endpoint. models.dev lists this provider
+# under its `alibaba` block — metadata_model maps each target there for
+# metadata backfill, but pricing is set explicitly below because models.dev's
+# alibaba rates lag the official qwencloud.com pricing page (e.g. it lists
+# qwen3.7-plus at $0.50/$3.00 against the documented $0.40/$1.60).
+#
+# Caching is automatic, server-side, and strictly prefix-based — no request
+# markers. Verified live (qwen3.7-plus): warm repeat of a ~6.9K-token prompt
+# reported cached_tokens 6272/6896 (~91%). The `qwencloud` connection opts
+# into prompt_cache_policy = "rolling-history" so every request stays an
+# exact byte prefix of the next. Cached input bills at 20% of the input rate
+# (cache_read_micros below).
+#
+# Reasoning: these are thinking-by-default models. The docs document
+# `enable_thinking` (bool) + `thinking_budget`; the endpoint ALSO accepts the
+# `thinking: {type: enabled|disabled}` envelope — both verified live
+# (disabled: reasoning_tokens absent; enabled: reasoning_content returned).
+# That envelope is exactly what the `kimi-thinking` codec emits, so it is
+# reused rather than adding an enable_thinking-specific codec. Effort is a
+# deliberate non-offer: `reasoning_effort` is accepted on the wire but appears
+# nowhere in the official docs, so per policy it stays off until documented.
+# Pricing is the base <=256K-input tier; the >256K tier bills ~3x and is not
+# representable as a single rate.
+
+[[targets]]
+connection = "qwencloud"
+model = "qwencloud/qwen3.7-plus"
+remote_model = "qwen3.7-plus"
+metadata_model = "alibaba/qwen3.7-plus"
+recommended = true
+default = true
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 1000000
+# 65536 advertised; capped at the reference-agent 32K output clamp — the
+# rumination-containment lever for thinking-by-default models (same pattern
+# as deepseek's 32000 and glm-5.2's 12000). `pinned` keeps a models.dev
+# refresh from clobbering the deliberate cap and pricing.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 400000, output_micros_per_million = 1600000, cache_read_micros_per_million = 80000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "qwencloud"
+model = "qwencloud/qwen3.7-max"
+remote_model = "qwen3.7-max"
+metadata_model = "alibaba/qwen3.7-max"
+recommended = true
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 1000000
+# Same deliberate 32K max_tokens cap as qwen3.7-plus — see the comment there.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 2500000, output_micros_per_million = 7500000, cache_read_micros_per_million = 500000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "qwencloud"
+model = "qwencloud/qwen3.6-flash"
+remote_model = "qwen3.6-flash"
+metadata_model = "alibaba/qwen3.6-flash"
+roles = ["cheap"]
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 1000000
+# Same deliberate 32K max_tokens cap as qwen3.7-plus — see the comment there.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 250000, output_micros_per_million = 1500000, cache_read_micros_per_million = 50000 }
+
+[[targets.reasoning_options]]
+type = "toggle"

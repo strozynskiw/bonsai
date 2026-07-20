@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a defect in Bonsai
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Before filing, please check
+        existing issues for duplicates. For suspected security vulnerabilities, do
+        **not** open a public issue — use the
+        [private security advisory form](https://github.com/strozynskiw/bonsai/security/advisories/new)
+        instead (see [SECURITY.md](https://github.com/strozynskiw/bonsai/blob/master/SECURITY.md)).
+  - type: input
+    id: version
+    attributes:
+      label: Bonsai version
+      description: Output of `bonsai --version`.
+      placeholder: bonsai 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture (e.g. macOS 15 arm64, Ubuntu 24.04 x86_64, Windows 11).
+      placeholder: macOS 15 arm64
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: Terminal emulator and multiplexer, if any (e.g. iTerm2, Ghostty, WezTerm, tmux).
+      placeholder: Ghostty + tmux
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      description: The connection/model in use when the bug occurred, if relevant.
+      placeholder: e.g. anthropic / claude-sonnet-5
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What went wrong, and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps that trigger the bug. Include the command line you launched Bonsai with.
+      placeholder: |
+        1. Run `bonsai` in ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: |
+        Relevant terminal output, panics, or tracing logs. **Redact API keys,
+        credentials, and any private code or transcripts before pasting.**
+      render: text

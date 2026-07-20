@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "harbor_commit": "2d3f78d55a703df2f76c005d7df44a5ce2d8adf5",
+  "trial_result": {
+    "task_name": "mock-terminal-task",
+    "agent_result": {
+      "n_input_tokens": 1200,
+      "n_cache_tokens": 800,
+      "n_output_tokens": 300,
+      "cost_usd": 0.01,
+      "metadata": {
+        "bonsai_terminal_state": "completed"
+      }
+    },
+    "verifier_result": {
+      "rewards": {
+        "reward": 1
+      }
+    }
+  }
+}

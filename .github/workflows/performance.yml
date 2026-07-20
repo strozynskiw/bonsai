@@ -1,0 +1,103 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  release-binary:
+    name: Release binary (${{ matrix.target }})
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: self-hosted, linux, x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runs_on: self-hosted, linux, arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runs_on: macos-15
+            os: macos-15
+            target: aarch64-apple-darwin
+            macos_deployment_target: "13.0"
+          - runs_on: macos-15-intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            macos_deployment_target: "13.0"
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Measure and compare the native release binary
+        env:
+          BONSAI_PERF_REPORT: target/perf/${{ matrix.target }}.json
+          BONSAI_PERF_SAMPLES: "5"
+          BONSAI_PERF_RUNNER_CLASS: ${{ matrix.os }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+          PERFORMANCE_BASELINE: eval/baselines/performance/${{ matrix.target }}.json
+        run: |
+          if [ -f "$PERFORMANCE_BASELINE" ]; then
+            export BONSAI_PERF_BASELINE="$PERFORMANCE_BASELINE"
+          else
+            echo "::notice::No reviewed ${{ matrix.target }} baseline yet; recording report-only evidence."
+          fi
+          cargo test --release --locked --test performance_baseline -- \
+            --ignored --nocapture --test-threads=1
+      - name: Publish performance summary
+        if: always()
+        env:
+          BONSAI_PERF_REPORT: target/perf/${{ matrix.target }}.json
+        run: |
+          if [ ! -f "$BONSAI_PERF_REPORT" ]; then
+            echo "No performance report was generated." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - "$BONSAI_PERF_REPORT" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          report = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          summary = report["summary"]
+          comparison = report.get("baseline")
+          print(f"### Performance · {report['identity']['target']}")
+          print()
+          print(f"Runner class: `{report['identity']['runner_class']}`")
+          print()
+          print("| Metric | Median | p95 |")
+          print("|---|---:|---:|")
+          for label, key, unit in (
+              ("Fresh startup", "fresh_startup_ms", "ms"),
+              ("Returning startup", "returning_startup_ms", "ms"),
+              ("Idle CPU", "idle_cpu_percent", "%"),
+              ("Idle RSS", "idle_rss_bytes", "bytes"),
+              ("Time to first output", "spawn_to_first_assistant_delta_ms", "ms"),
+              ("Persistence", "persistence_duration_ms", "ms"),
+              ("Context growth", "context_growth_tokens", "tokens"),
+              ("Cache reuse", "input_cache_hit_rate_percent", "%"),
+              ("Task cost", "representative_task_cost_micros", "µUSD"),
+          ):
+              metric = summary[key]
+              print(f"| {label} | {metric['median']} {unit} | {metric['p95']} {unit} |")
+          print()
+          print(f"Binary: {report['identity']['binary_bytes']} bytes · `{report['identity']['binary_sha256']}`")
+          if comparison is None:
+              print("\nBaseline comparison: report only (no reviewed target baseline).")
+          else:
+              state = "passed" if comparison["passed"] else "failed"
+              print(f"\nBaseline comparison: **{state}**.")
+              for violation in comparison["violations"]:
+                  print(f"- {violation}")
+          PY
+      - name: Upload performance evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bonsai-performance-${{ matrix.target }}
+          path: target/perf/${{ matrix.target }}.json
+          if-no-files-found: warn

@@ -1,0 +1,437 @@
+[[connections]]
+id = "opencode"
+display_name = "OpenCode Go"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://opencode.ai/zen/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+model_env = "OPENCODE_MODEL"
+base_url_env = "OPENCODE_BASE_URL"
+default_model = "opencode/qwen3.7-max"
+default_endpoint_path = "chat/completions"
+default_token_counter = "qwen3"
+# Zen gateway accepts `prompt_cache_key` and reports `prompt_tokens_details.cached_tokens`
+# (verified live: ~95% on a warm prefix). Enable the OpenAI-family cache key.
+prompt_cache = true
+# IMPORTANT — DO NOT REMOVE OR GLOBALIZE: OpenCode's Anthropic-wire Qwen and
+# MiniMax adapters must keep changing git/read-coverage state *after* stable
+# history. Otherwise every read/tool result changes the system tail before the
+# history breakpoint: live Qwen fell from 95% warm reuse to alternating
+# 60–91%/0% turns. OpenAI-chat models (GLM, DeepSeek, etc.) already use this
+# layout, so selecting it at the connection keeps their proven body unchanged.
+# Other connections retain their transport default unless explicitly opted in.
+prompt_cache_policy = "rolling-history"
+# The Go gateway's DeepSeek adapter rejects any request whose assistant tool-call
+# messages lack `reasoning_content` (HTTP 400 "Upstream request failed", naming
+# neither the field nor the message). Bonsai usually escapes it by accident — the
+# volatile-tail reshape appends a trailing user message, and the adapter only
+# faults when a tool result is the final message — so it bites exactly the lanes
+# with no volatile system tail to move. Verified live: harmless for this
+# connection's qwen/GLM/MiniMax models.
+reasoning_content_echo = true
+
+[[connections]]
+id = "opencode-zen"
+display_name = "OpenCode Zen"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+model_env = "OPENCODE_ZEN_MODEL"
+base_url_env = "OPENCODE_ZEN_BASE_URL"
+default_model = "opencode-zen/grok-code"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+prompt_cache = true
+# Zen's OpenAI- and Anthropic-upstream adapters (gpt-5.x, claude-opus-4-8) stream
+# a complete answer and close without ever sending `finish_reason` or `[DONE]`;
+# the last frames are `{"choices":[],"usage":{…}}` and a cost frame. Without this
+# every one of those models failed the truncation guard with "stream ended before
+# a terminal finish_reason". Zen's other families (GLM, DeepSeek, Kimi, Qwen,
+# MiniMax) do send finish_reason and are unaffected.
+usage_frame_ends_stream = true
+
+[[connections]]
+id = "codex"
+display_name = "Codex"
+auth = "codex-cache"
+transport = "codex-responses"
+default_base_url = "https://chatgpt.com/backend-api/codex"
+model_env = "CODEX_MODEL"
+base_url_env = "CODEX_BASE_URL"
+default_model = "openai/gpt-5.5"
+default_endpoint_path = "responses"
+default_token_counter = "tiktoken"
+# CodexProvider always sends `prompt_cache_key`; the flag keeps the catalog
+# metadata in parity with the builtin capability declaration.
+prompt_cache = true
+
+[[connections]]
+id = "anthropic"
+display_name = "Anthropic API"
+auth = "api-key"
+transport = "anthropic-messages"
+default_base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model_env = "ANTHROPIC_MODEL"
+base_url_env = "ANTHROPIC_BASE_URL"
+default_model = "anthropic/claude-sonnet-4-5"
+default_endpoint_path = "v1/messages"
+default_token_counter = "anthropic-count-tokens"
+# Anthropic caches ONLY with explicit `cache_control` breakpoints (tools
+# prefix, byte-stable system head, rolling history marker). Without this flag
+# every turn bills full input price — cache reads are 10x cheaper.
+prompt_cache = true
+
+[[connections]]
+id = "minimax"
+display_name = "MiniMax API"
+auth = "api-key"
+transport = "anthropic-messages"
+default_base_url = "https://api.minimax.io/anthropic"
+api_key_env = "MINIMAX_API_KEY"
+model_env = "MINIMAX_MODEL"
+base_url_env = "MINIMAX_BASE_URL"
+default_model = "minimax/MiniMax-M3"
+default_endpoint_path = "v1/messages"
+default_token_counter = "anthropic-count-tokens"
+# Pay-as-you-go API keys are distinct from Token/Coding Plan subscription
+# keys, even though both products share the Anthropic-compatible endpoint.
+prompt_cache = true
+
+[[connections]]
+id = "minimax-coding-plan"
+display_name = "MiniMax Coding Plan"
+auth = "api-key"
+transport = "anthropic-messages"
+default_base_url = "https://api.minimax.io/anthropic"
+api_key_env = "MINIMAX_CODING_PLAN_API_KEY"
+model_env = "MINIMAX_CODING_PLAN_MODEL"
+base_url_env = "MINIMAX_CODING_PLAN_BASE_URL"
+default_model = "minimax-coding-plan/MiniMax-M3"
+default_endpoint_path = "v1/messages"
+default_token_counter = "anthropic-count-tokens"
+# MiniMax's Anthropic endpoint supports explicit `cache_control` breakpoints
+# (docs: anthropic-api-compatible-cache; verified live ~95% warm). It also
+# caches automatically server-side, but explicit markers match the documented
+# contract.
+prompt_cache = true
+
+[[connections]]
+id = "zai"
+display_name = "Z.AI API"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+model_env = "ZAI_MODEL"
+base_url_env = "ZAI_BASE_URL"
+default_model = "zai/glm-5.2"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+# GLM tool rounds require their streamed reasoning_content to be replayed.
+reasoning_content_echo = true
+
+[[connections]]
+id = "zai-coding-plan"
+display_name = "Z.AI Coding Plan"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.z.ai/api/coding/paas/v4"
+api_key_env = "ZAI_CODING_PLAN_API_KEY"
+model_env = "ZAI_CODING_PLAN_MODEL"
+base_url_env = "ZAI_CODING_PLAN_BASE_URL"
+default_model = "zai-coding-plan/glm-5.2"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+reasoning_content_echo = true
+
+[[connections]]
+id = "moonshotai"
+display_name = "Moonshot AI API"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.moonshot.ai/v1"
+api_key_env = "MOONSHOT_API_KEY"
+model_env = "MOONSHOT_MODEL"
+base_url_env = "MOONSHOT_BASE_URL"
+default_model = "moonshotai/kimi-k2.7-code"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+# Kimi accepts prompt_cache_key and requires reasoning_content replay during
+# tool loops. Append-only project state preserves the cacheable prefix.
+prompt_cache = true
+prompt_cache_policy = "rolling-history"
+reasoning_content_echo = true
+
+[[connections]]
+id = "kimi-coding-plan"
+display_name = "Kimi Coding Plan"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.kimi.com/coding/v1"
+api_key_env = "KIMI_CODING_PLAN_API_KEY"
+model_env = "KIMI_CODING_PLAN_MODEL"
+base_url_env = "KIMI_CODING_PLAN_BASE_URL"
+default_model = "kimi-coding-plan/kimi-for-coding"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+prompt_cache = true
+prompt_cache_policy = "rolling-history"
+reasoning_content_echo = true
+
+[[connections]]
+id = "mimo"
+display_name = "Xiaomi MiMo API"
+auth = "api-key"
+# MiMo exposes both an OpenAI- and an Anthropic-compatible endpoint, each
+# accepting `Authorization: Bearer` or a bare `api-key` header. We use the
+# OpenAI endpoint (MiMo's primary, best-documented format) via bonsai's
+# openai-chat transport, which sends `Authorization: Bearer` — no `x-api-key`
+# and no `anthropic-version`, both of which the Anthropic path added and which
+# MiMo's gateway rejected with a 401.
+transport = "openai-chat"
+default_base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+model_env = "MIMO_MODEL"
+base_url_env = "MIMO_BASE_URL"
+default_model = "mimo/mimo-v2.5-pro"
+default_endpoint_path = "chat/completions"
+# A local heuristic counter avoids a remote token-count dependency.
+default_token_counter = "heuristic"
+# Prompt caching over MiMo's Anthropic endpoint is undocumented and unverified,
+# so no `cache_control` breakpoints are sent (prompt_cache defaults off). Enable
+# it here once a warm request is confirmed to return `cache_read_input_tokens`.
+
+[[connections]]
+id = "mimo-coding-plan"
+display_name = "Xiaomi MiMo Coding Plan"
+# The Token Plan gives each account its OWN dedicated base URL (region-specific,
+# e.g. token-plan-ams / token-plan-cn), shown in the MiMo console. There is no
+# universal host, so this connection uses endpoint setup: /authorize prompts for
+# the dedicated base URL (or set MIMO_CODING_PLAN_BASE_URL) plus the tp- key.
+# openai-chat sends `Authorization: Bearer`, which MiMo accepts (verified live).
+auth = "optional-api-key"
+transport = "openai-chat"
+default_base_url = "https://token-plan-ams.xiaomimimo.com/v1"
+api_key_env = "MIMO_CODING_PLAN_API_KEY"
+model_env = "MIMO_CODING_PLAN_MODEL"
+base_url_env = "MIMO_CODING_PLAN_BASE_URL"
+default_model = "mimo-coding-plan/mimo-v2.5-pro"
+default_endpoint_path = "chat/completions"
+default_token_counter = "heuristic"
+
+[[connections]]
+id = "openrouter"
+display_name = "OpenRouter"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model_env = "OPENROUTER_MODEL"
+base_url_env = "OPENROUTER_BASE_URL"
+default_model = "openrouter/gpt-5.2"
+default_endpoint_path = "chat/completions"
+default_token_counter = "heuristic"
+
+[[connections]]
+id = "openai"
+display_name = "OpenAI API"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model_env = "OPENAI_MODEL"
+base_url_env = "OPENAI_BASE_URL"
+default_model = "openai/gpt-5.6"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+# OpenAI Chat Completions uses the top-level `reasoning_effort` field rather
+# than the `reasoning: { effort }` envelope used by several compatible APIs.
+reasoning_codec = "openai-chat-completions"
+prompt_cache = true
+
+[[connections]]
+id = "openai-compatible"
+display_name = "OpenAI Compatible"
+auth = "optional-api-key"
+transport = "openai-chat"
+default_base_url = "http://localhost:11434/v1"
+api_key_env = "OPENAI_COMPATIBLE_API_KEY"
+model_env = "OPENAI_COMPATIBLE_MODEL"
+base_url_env = "OPENAI_COMPATIBLE_BASE_URL"
+default_endpoint_path = "chat/completions"
+default_token_counter = "heuristic"
+prompt_cache = true
+
+[[connections]]
+id = "anthropic-compatible"
+display_name = "Anthropic Compatible"
+auth = "optional-api-key"
+transport = "anthropic-messages"
+default_base_url = "http://localhost:8080"
+api_key_env = "ANTHROPIC_COMPATIBLE_API_KEY"
+model_env = "ANTHROPIC_COMPATIBLE_MODEL"
+base_url_env = "ANTHROPIC_COMPATIBLE_BASE_URL"
+default_endpoint_path = "v1/messages"
+default_token_counter = "anthropic-count-tokens"
+prompt_cache = true
+
+[[connections]]
+id = "deepseek"
+display_name = "DeepSeek API"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+model_env = "DEEPSEEK_MODEL"
+base_url_env = "DEEPSEEK_BASE_URL"
+default_model = "deepseek/deepseek-v4-flash"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+# DeepSeek does automatic, on-disk, strictly prefix-based context caching (a hit
+# is ~50x cheaper than a miss), reported as prompt_cache_hit_tokens /
+# prompt_cache_miss_tokens. Enable the OpenAI-family cache key + hit accounting.
+prompt_cache = true
+# Append-only project-state layout: store volatile state as immutable in-place
+# snapshots so every prior request stays an EXACT prefix of the next — the
+# condition DeepSeek's automatic cache requires to hit. Scoped to this connection
+# only; every other connection leaves this unset (= TransportDefault) and is
+# unaffected. See models/builtin/deepseek.toml.
+prompt_cache_policy = "rolling-history"
+# NOTE — deliberate divergence from the OpenCode gateway's DeepSeek adapter
+# (see the `opencode` connection above): that gateway REQUIRES reasoning_content
+# echoed back on assistant tool-call messages, but the DIRECT api.deepseek.com
+# does not accept reasoning_content as input, so reasoning_content_echo is
+# omitted (false) here. Do not copy the gateway's flag onto this connection.
+
+[[connections]]
+id = "qwencloud"
+display_name = "Qwen Cloud API"
+auth = "api-key"
+transport = "openai-chat"
+# Qwen Cloud (docs.qwencloud.com) pay-as-you-go serves through the DashScope
+# international OpenAI-compatible endpoint. DASHSCOPE_API_KEY is the env var
+# the official docs and the wider Qwen tooling ecosystem already use.
+default_base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+api_key_env = "DASHSCOPE_API_KEY"
+model_env = "DASHSCOPE_MODEL"
+base_url_env = "DASHSCOPE_BASE_URL"
+default_model = "qwencloud/qwen3.7-plus"
+default_endpoint_path = "chat/completions"
+default_token_counter = "qwen3"
+# Automatic server-side prefix caching, no explicit markers: verified live
+# (qwen3.7-plus, ~6.9K-token prompt) — cold cached_tokens: 0, immediate warm
+# repeat cached_tokens: 6272/6896 (~91%), reported in
+# prompt_tokens_details.cached_tokens on both response and stream usage frames.
+prompt_cache = true
+# Append-only project state so every prior request stays an exact byte prefix
+# of the next — the condition a strict-prefix automatic cache needs to hit
+# (same rationale as `deepseek`; scoped to this connection only).
+prompt_cache_policy = "rolling-history"
+# NOTE: no reasoning_content_echo — verified live that a tool round WITHOUT
+# reasoning_content on the assistant tool-call message succeeds against the
+# direct endpoint (unlike the OpenCode gateway's Qwen adapter). Mid-stream
+# system messages are also accepted (no strict-template 400).
+
+[[connections]]
+id = "qwencloud-token-plan"
+display_name = "Qwen Cloud Token Plan"
+auth = "api-key"
+transport = "openai-chat"
+# The Token Plan subscription (docs.qwencloud.com/token-plan) uses a fixed
+# regional host and its OWN key type — Token Plan and pay-as-you-go keys are
+# not interchangeable (docs: token-plan/migrate-from-coding-plan). Host shape
+# verified live: a bad key returns a proper InvalidApiKey JSON error.
+default_base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+api_key_env = "DASHSCOPE_TOKEN_PLAN_API_KEY"
+model_env = "DASHSCOPE_TOKEN_PLAN_MODEL"
+base_url_env = "DASHSCOPE_TOKEN_PLAN_BASE_URL"
+default_model = "qwencloud-token-plan/qwen3.7-max"
+default_endpoint_path = "chat/completions"
+default_token_counter = "qwen3"
+# Same DashScope serving stack as `qwencloud` above; cache verified there.
+prompt_cache = true
+prompt_cache_policy = "rolling-history"
+
+[[connections]]
+id = "gemini"
+display_name = "Google Gemini"
+auth = "api-key"
+transport = "openai-chat"
+# Gemini's OpenAI-compatible layer. Bearer auth (not the native x-goog-api-key).
+# No trailing slash — the transport appends `/chat/completions`.
+default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key_env = "GEMINI_API_KEY"
+model_env = "GEMINI_MODEL"
+base_url_env = "GEMINI_BASE_URL"
+default_model = "gemini/gemini-3.1-pro-preview"
+default_endpoint_path = "chat/completions"
+default_token_counter = "heuristic"
+# Gemini takes OpenAI's top-level `reasoning_effort` on this endpoint (see
+# gemini.toml); it does NOT use the `reasoning: {effort}` envelope.
+reasoning_codec = "openai-chat-completions"
+# Gemini caches implicitly and automatically — there is NO client-sent routing
+# key. Its OpenAI-compat layer also strictly rejects unknown request fields, so
+# emitting `prompt_cache_key` (what `prompt_cache = true` sends on openai-chat)
+# 400s with `Unknown name "prompt_cache_key": Cannot find field`. Leave
+# prompt_cache OFF: the read side is unaffected — `chat_completions_usage_from_value`
+# parses `prompt_tokens_details.cached_tokens` unconditionally — so Gemini's
+# implicit cache reuse is still accounted without sending any key. See gemini.toml.
+prompt_cache = false
+
+[[connections]]
+id = "xai"
+display_name = "xAI Grok"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+model_env = "XAI_MODEL"
+base_url_env = "XAI_BASE_URL"
+default_model = "xai/grok-build-0.1"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+# Chat Completions takes top-level `reasoning_effort` (low/medium/high); grok-4.5
+# and grok-build-0.1 are always-on reasoning models (no toggle). See grok.toml.
+reasoning_codec = "openai-chat-completions"
+# Automatic server-side prefix caching; read hits in
+# prompt_tokens_details.cached_tokens (verify live — chat completions keys off the
+# x-grok-conv-id header, which bonsai does not yet send).
+prompt_cache = true
+
+[[connections]]
+id = "mistral"
+display_name = "Mistral AI"
+auth = "api-key"
+transport = "openai-chat"
+default_base_url = "https://api.mistral.ai/v1"
+api_key_env = "MISTRAL_API_KEY"
+model_env = "MISTRAL_MODEL"
+base_url_env = "MISTRAL_BASE_URL"
+default_model = "mistral/devstral-medium-latest"
+default_endpoint_path = "chat/completions"
+default_token_counter = "tiktoken"
+# Mistral caches on an explicit `prompt_cache_key` (what openai-chat sends when
+# this is on), reporting hits in prompt_tokens_details.cached_tokens at ~10% of
+# input price. Magistral reasoning uses a `prompt_mode` wire bonsai has no codec
+# for, so no reasoning models are shipped (see mistral.toml).
+prompt_cache = true
+
+[[connections]]
+id = "tencent"
+display_name = "Tencent Hunyuan"
+auth = "api-key"
+transport = "openai-chat"
+# Defaults to Tencent's TokenHub INTERNATIONAL host, the verified OpenAI-compat
+# surface that serves Hy3 (OpenRouter's #1 model). Mainland accounts can override
+# HUNYUAN_BASE_URL to https://api.hunyuan.cloud.tencent.com/v1. Bearer auth (no
+# TC3-HMAC on the OpenAI-compat path). prompt_cache is left OFF: the cached-token
+# usage field is unverified. See tencent.toml for the full verify-live list.
+default_base_url = "https://tokenhub-intl.tencentmaas.com/v1"
+api_key_env = "HUNYUAN_API_KEY"
+model_env = "HUNYUAN_MODEL"
+base_url_env = "HUNYUAN_BASE_URL"
+default_model = "tencent/hy3"
+default_endpoint_path = "chat/completions"
+default_token_counter = "heuristic"

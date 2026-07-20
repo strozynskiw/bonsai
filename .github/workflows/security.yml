@@ -1,0 +1,48 @@
+name: Security
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rustsec:
+    name: RustSec advisory audit
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      checks: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit Cargo.lock
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    name: Dependency and license review
+    if: ${{ github.event_name == 'pull_request' && github.event.repository.visibility == 'public' }}
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          fail-on-scopes: runtime, development, unknown
+          vulnerability-check: true
+          license-check: true

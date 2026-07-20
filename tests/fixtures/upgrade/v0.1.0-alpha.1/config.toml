@@ -1,0 +1,5 @@
+# Frozen from the public v0.1.0-alpha.1 global Config schema. The token is
+# synthetic. Do not modernize this fixture when schemas change.
+api_key = "alpha-config-token"
+model = "qwen3.7-max"
+base_url = "https://opencode.ai/zen/go/v1"

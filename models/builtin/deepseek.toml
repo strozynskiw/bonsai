@@ -1,0 +1,71 @@
+# DeepSeek direct API (https://api.deepseek.com), OpenAI Chat Completions wire.
+#
+# Context caching is automatic, on-disk, and strictly prefix-based: a request
+# hits the cache only when it fully matches a cached prefix unit (docs:
+# guides/kv_cache). A hit is ~50x cheaper than a miss, reported per response as
+# prompt_cache_hit_tokens / prompt_cache_miss_tokens. The `deepseek` connection
+# selects prompt_cache_policy = "rolling-history" so bonsai stores volatile
+# project state as immutable append-only history — every prior request stays an
+# exact prefix of the next, which is exactly the condition DeepSeek's cache
+# needs to hit. Verified live (deepseek-v4-flash, 4-turn read/write task): 65%
+# input cache reuse, reported via prompt_cache_hit_tokens.
+#
+# Reasoning: v4 has a thinking mode toggled per request. Curl-verified against
+# api.deepseek.com — it accepts `thinking: {type: enabled|disabled}` AND
+# `reasoning_effort: <low|medium|high|max>`, including both together (unlike GLM
+# 5.2), with the chain-of-thought returned in `reasoning_content`. That wire
+# shape is exactly what bonsai's `zai-thinking` codec emits (toggle + effort
+# together), so reuse it rather than add a duplicate DeepSeek-specific codec.
+# `minimal` is rejected (400), so it is not offered. reasoning_content is NOT
+# echoed back on later turns (reasoning_content_echo stays off on the connection)
+# because the direct API does not accept it as input. Legacy deepseek-chat /
+# deepseek-reasoner deprecate 2026-07-24 in favor of these v4 names.
+
+[[targets]]
+connection = "deepseek"
+model = "deepseek/deepseek-v4-flash"
+remote_model = "deepseek-v4-flash"
+recommended = true
+default = true
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 1000000
+# The models advertise 384K output, but output_limit is the wire `max_tokens`
+# and the rumination containment lever (same pattern as glm-5.2's 12000): with
+# thinking enabled an uncapped turn can burn the entire allowance on
+# chain-of-thought. 32000 matches the reference-agent output clamp and still
+# leaves room for thinking plus a large diff. `pinned` keeps models.dev's 384K
+# from clobbering the deliberate cap on refresh.
+pinned = true
+output_limit = 32000
+# Native pay-as-you-go pricing (docs: quick_start/pricing). Cache hit is the
+# 50x-cheaper input rate; automatic caching has no separate write charge, so no
+# cache_write_micros is set.
+pricing = { input_micros_per_million = 140000, output_micros_per_million = 280000, cache_read_micros_per_million = 2800 }
+
+# Toggle thinking on/off (off = cheapest non-thinking flash) or dial the effort.
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "max"]
+
+[[targets]]
+connection = "deepseek"
+model = "deepseek/deepseek-v4-pro"
+remote_model = "deepseek-v4-pro"
+token_counter = "tiktoken"
+reasoning_codec = "zai-thinking"
+context_window = 1000000
+# Same deliberate 32K max_tokens cap as flash — see the comment there.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 435000, output_micros_per_million = 870000, cache_read_micros_per_million = 3625 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "max"]

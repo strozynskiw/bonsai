@@ -1,0 +1,23 @@
+id = "read_efficiency"
+seed = 272
+
+[[tasks]]
+id = "broad_review"
+fixture = "fixtures/broad_review"
+prompt = "Review every file under src for correctness bugs. Do not edit files. Report each concrete bug with its file path and explain the behavioral impact."
+
+[tasks.budgets]
+max_logical_turns = 8
+max_provider_attempts = 10
+max_duration_ms = 180000
+max_prompt_tokens = 200000
+max_completion_tokens = 20000
+max_uncached_prompt_tokens = 80000
+max_completion_tokens_per_turn = 12000
+max_missing_usage_turns = 0
+max_reads_per_unchanged_path = 2
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["src/parser.rs", "Priority::High", "src/store.rs", "task.id != id"]
+not_contains = ["No issues", "no issues"]

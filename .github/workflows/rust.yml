@@ -1,0 +1,22 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: CI (stable)
+    runs-on: self-hosted
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check
+      run: cargo check --locked --all-targets
+    - name: Run tests
+      run: cargo test --locked

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Bonsai Provider"
+  short_description: "Add or update Bonsai AI providers"
+  default_prompt: "Use $add-bonsai-provider to add or update a model provider integration in Bonsai."

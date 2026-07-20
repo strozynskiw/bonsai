@@ -1,0 +1,1053 @@
+[[targets]]
+context_window = 256000
+output_limit = 256000
+connection = "opencode-zen"
+model = "opencode-zen/grok-code"
+metadata_model = "opencode/grok-code"
+remote_model = "grok-code"
+default = true
+recommended = true
+roles = ["cheap"]
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 262144
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/qwen3-coder"
+metadata_model = "opencode/qwen3-coder"
+remote_model = "qwen3-coder"
+token_counter = "qwen3"
+recommended = true
+pricing = { input_micros_per_million = 450000, output_micros_per_million = 1800000 }
+reasoning_options = []
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.1-codex"
+metadata_model = "opencode/gpt-5.1-codex"
+remote_model = "gpt-5.1-codex"
+recommended = true
+pricing = { input_micros_per_million = 1070000, output_micros_per_million = 8500000, cache_read_micros_per_million = 107000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.1-codex-max"
+metadata_model = "opencode/gpt-5.1-codex-max"
+remote_model = "gpt-5.1-codex-max"
+recommended = true
+pricing = { input_micros_per_million = 1250000, output_micros_per_million = 10000000, cache_read_micros_per_million = 125000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5-codex"
+metadata_model = "opencode/gpt-5-codex"
+remote_model = "gpt-5-codex"
+recommended = true
+pricing = { input_micros_per_million = 1070000, output_micros_per_million = 8500000, cache_read_micros_per_million = 107000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+context_window = 200000
+output_limit = 32000
+connection = "opencode-zen"
+model = "opencode-zen/minimax-m3-free"
+metadata_model = "opencode/minimax-m3-free"
+remote_model = "minimax-m3-free"
+recommended = true
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 200000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/deepseek-v4-flash-free"
+metadata_model = "opencode/deepseek-v4-flash-free"
+remote_model = "deepseek-v4-flash-free"
+recommended = true
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["high", "max"]
+
+[[targets]]
+context_window = 262144
+output_limit = 262144
+connection = "opencode-zen"
+model = "opencode-zen/kimi-k2.5-free"
+metadata_model = "opencode/kimi-k2.5-free"
+remote_model = "kimi-k2.5-free"
+recommended = true
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 200000
+output_limit = 32000
+connection = "opencode-zen"
+model = "opencode-zen/big-pickle"
+metadata_model = "opencode/big-pickle"
+remote_model = "big-pickle"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 200000
+output_limit = 8192
+connection = "opencode-zen"
+model = "opencode-zen/claude-3-5-haiku"
+metadata_model = "opencode/claude-3-5-haiku"
+remote_model = "claude-3-5-haiku"
+pricing = { input_micros_per_million = 800000, output_micros_per_million = 4000000, cache_read_micros_per_million = 80000, cache_write_micros_per_million = 1000000 }
+reasoning_options = []
+
+[[targets]]
+context_window = 1000000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/claude-fable-5"
+metadata_model = "opencode/claude-fable-5"
+remote_model = "claude-fable-5"
+pricing = { input_micros_per_million = 10000000, output_micros_per_million = 50000000, cache_read_micros_per_million = 1000000, cache_write_micros_per_million = 12500000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+context_window = 200000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/claude-haiku-4-5"
+metadata_model = "opencode/claude-haiku-4-5"
+remote_model = "claude-haiku-4-5"
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 5000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+max = 63999
+
+[[targets]]
+context_window = 200000
+output_limit = 32000
+connection = "opencode-zen"
+model = "opencode-zen/claude-opus-4-1"
+metadata_model = "opencode/claude-opus-4-1"
+remote_model = "claude-opus-4-1"
+pricing = { input_micros_per_million = 15000000, output_micros_per_million = 75000000, cache_read_micros_per_million = 1500000, cache_write_micros_per_million = 18750000 }
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+max = 31999
+
+[[targets]]
+context_window = 200000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/claude-opus-4-5"
+metadata_model = "opencode/claude-opus-4-5"
+remote_model = "claude-opus-4-5"
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 25000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+max = 63999
+
+[[targets]]
+context_window = 1000000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/claude-opus-4-6"
+metadata_model = "opencode/claude-opus-4-6"
+remote_model = "claude-opus-4-6"
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 25000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "max"]
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+max = 127999
+
+[[targets]]
+context_window = 1000000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/claude-opus-4-7"
+metadata_model = "opencode/claude-opus-4-7"
+remote_model = "claude-opus-4-7"
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 25000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+context_window = 1000000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/claude-opus-4-8"
+metadata_model = "opencode/claude-opus-4-8"
+remote_model = "claude-opus-4-8"
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 25000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+context_window = 1000000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/claude-sonnet-4"
+metadata_model = "opencode/claude-sonnet-4"
+remote_model = "claude-sonnet-4"
+pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000, cache_write_micros_per_million = 3750000 }
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+max = 63999
+
+[[targets]]
+context_window = 1000000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/claude-sonnet-4-5"
+metadata_model = "opencode/claude-sonnet-4-5"
+remote_model = "claude-sonnet-4-5"
+pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000, cache_write_micros_per_million = 3750000 }
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+max = 63999
+
+[[targets]]
+context_window = 1000000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/claude-sonnet-4-6"
+metadata_model = "opencode/claude-sonnet-4-6"
+remote_model = "claude-sonnet-4-6"
+pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000, cache_write_micros_per_million = 3750000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "max"]
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+max = 63999
+
+[[targets]]
+context_window = 1000000
+output_limit = 384000
+connection = "opencode-zen"
+model = "opencode-zen/deepseek-v4-flash"
+metadata_model = "opencode/deepseek-v4-flash"
+remote_model = "deepseek-v4-flash"
+pricing = { input_micros_per_million = 140000, output_micros_per_million = 280000, cache_read_micros_per_million = 28000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["high", "max"]
+
+[[targets]]
+context_window = 1000000
+output_limit = 384000
+connection = "opencode-zen"
+model = "opencode-zen/deepseek-v4-pro"
+metadata_model = "opencode/deepseek-v4-pro"
+remote_model = "deepseek-v4-pro"
+pricing = { input_micros_per_million = 1740000, output_micros_per_million = 3840000, cache_read_micros_per_million = 145000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["high", "max"]
+
+[[targets]]
+context_window = 1048576
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/gemini-3-flash"
+metadata_model = "opencode/gemini-3-flash"
+remote_model = "gemini-3-flash"
+pricing = { input_micros_per_million = 500000, output_micros_per_million = 3000000, cache_read_micros_per_million = 50000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["minimal", "low", "medium", "high"]
+
+[[targets]]
+context_window = 1048576
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/gemini-3-pro"
+metadata_model = "opencode/gemini-3-pro"
+remote_model = "gemini-3-pro"
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high"]
+
+[[targets]]
+context_window = 1048576
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/gemini-3.1-pro"
+metadata_model = "opencode/gemini-3.1-pro"
+remote_model = "gemini-3.1-pro"
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+context_window = 1048576
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/gemini-3.5-flash"
+metadata_model = "opencode/gemini-3.5-flash"
+remote_model = "gemini-3.5-flash"
+pricing = { input_micros_per_million = 1500000, output_micros_per_million = 9000000, cache_read_micros_per_million = 150000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["minimal", "low", "medium", "high"]
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/glm-4.6"
+metadata_model = "opencode/glm-4.6"
+remote_model = "glm-4.6"
+reasoning_codec = "zai-thinking"
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2200000, cache_read_micros_per_million = 100000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/glm-4.7"
+metadata_model = "opencode/glm-4.7"
+remote_model = "glm-4.7"
+reasoning_codec = "zai-thinking"
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2200000, cache_read_micros_per_million = 100000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/glm-4.7-free"
+metadata_model = "opencode/glm-4.7-free"
+remote_model = "glm-4.7-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/glm-5"
+metadata_model = "opencode/glm-5"
+remote_model = "glm-5"
+reasoning_codec = "zai-thinking"
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 3200000, cache_read_micros_per_million = 200000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/glm-5-free"
+metadata_model = "opencode/glm-5-free"
+remote_model = "glm-5-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/glm-5.1"
+metadata_model = "opencode/glm-5.1"
+remote_model = "glm-5.1"
+reasoning_codec = "zai-thinking"
+pricing = { input_micros_per_million = 1400000, output_micros_per_million = 4400000, cache_read_micros_per_million = 260000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5"
+metadata_model = "opencode/gpt-5"
+remote_model = "gpt-5"
+pricing = { input_micros_per_million = 1070000, output_micros_per_million = 8500000, cache_read_micros_per_million = 107000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["minimal", "low", "medium", "high"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5-nano"
+metadata_model = "opencode/gpt-5-nano"
+remote_model = "gpt-5-nano"
+pricing = { input_micros_per_million = 50000, output_micros_per_million = 400000, cache_read_micros_per_million = 5000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["minimal", "low", "medium", "high"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.1"
+metadata_model = "opencode/gpt-5.1"
+remote_model = "gpt-5.1"
+pricing = { input_micros_per_million = 1070000, output_micros_per_million = 8500000, cache_read_micros_per_million = 107000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.1-codex-mini"
+metadata_model = "opencode/gpt-5.1-codex-mini"
+remote_model = "gpt-5.1-codex-mini"
+pricing = { input_micros_per_million = 250000, output_micros_per_million = 2000000, cache_read_micros_per_million = 25000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.2"
+metadata_model = "opencode/gpt-5.2"
+remote_model = "gpt-5.2"
+pricing = { input_micros_per_million = 1750000, output_micros_per_million = 14000000, cache_read_micros_per_million = 175000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.2-codex"
+metadata_model = "opencode/gpt-5.2-codex"
+remote_model = "gpt-5.2-codex"
+pricing = { input_micros_per_million = 1750000, output_micros_per_million = 14000000, cache_read_micros_per_million = 175000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.3-codex"
+metadata_model = "opencode/gpt-5.3-codex"
+remote_model = "gpt-5.3-codex"
+pricing = { input_micros_per_million = 1750000, output_micros_per_million = 14000000, cache_read_micros_per_million = 175000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 128000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.3-codex-spark"
+metadata_model = "opencode/gpt-5.3-codex-spark"
+remote_model = "gpt-5.3-codex-spark"
+pricing = { input_micros_per_million = 1750000, output_micros_per_million = 14000000, cache_read_micros_per_million = 175000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 1050000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.4"
+metadata_model = "opencode/gpt-5.4"
+remote_model = "gpt-5.4"
+pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.4-mini"
+metadata_model = "opencode/gpt-5.4-mini"
+remote_model = "gpt-5.4-mini"
+pricing = { input_micros_per_million = 750000, output_micros_per_million = 4500000, cache_read_micros_per_million = 75000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 400000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.4-nano"
+metadata_model = "opencode/gpt-5.4-nano"
+remote_model = "gpt-5.4-nano"
+pricing = { input_micros_per_million = 200000, output_micros_per_million = 1250000, cache_read_micros_per_million = 20000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 1050000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.4-pro"
+metadata_model = "opencode/gpt-5.4-pro"
+remote_model = "gpt-5.4-pro"
+pricing = { input_micros_per_million = 30000000, output_micros_per_million = 180000000, cache_read_micros_per_million = 30000000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 1050000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.5"
+metadata_model = "opencode/gpt-5.5"
+remote_model = "gpt-5.5"
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 1050000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.5-pro"
+metadata_model = "opencode/gpt-5.5-pro"
+remote_model = "gpt-5.5-pro"
+pricing = { input_micros_per_million = 30000000, output_micros_per_million = 180000000, cache_read_micros_per_million = 30000000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 256000
+output_limit = 256000
+connection = "opencode-zen"
+model = "opencode-zen/grok-build-0.1"
+metadata_model = "opencode/grok-build-0.1"
+remote_model = "grok-build-0.1"
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 2000000, cache_read_micros_per_million = 200000 }
+reasoning_options = []
+
+[[targets]]
+context_window = 256000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/hy3-preview-free"
+metadata_model = "opencode/hy3-preview-free"
+remote_model = "hy3-preview-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 262144
+output_limit = 262144
+connection = "opencode-zen"
+model = "opencode-zen/kimi-k2"
+metadata_model = "opencode/kimi-k2"
+remote_model = "kimi-k2"
+pricing = { input_micros_per_million = 400000, output_micros_per_million = 2500000, cache_read_micros_per_million = 400000 }
+reasoning_options = []
+
+[[targets]]
+context_window = 262144
+output_limit = 262144
+connection = "opencode-zen"
+model = "opencode-zen/kimi-k2-thinking"
+metadata_model = "opencode/kimi-k2-thinking"
+remote_model = "kimi-k2-thinking"
+pricing = { input_micros_per_million = 400000, output_micros_per_million = 2500000, cache_read_micros_per_million = 400000 }
+reasoning_options = []
+
+[[targets]]
+context_window = 262144
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/kimi-k2.5"
+metadata_model = "opencode/kimi-k2.5"
+remote_model = "kimi-k2.5"
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 3000000, cache_read_micros_per_million = 80000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 262144
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/kimi-k2.6"
+metadata_model = "opencode/kimi-k2.6"
+remote_model = "kimi-k2.6"
+pricing = { input_micros_per_million = 950000, output_micros_per_million = 4000000, cache_read_micros_per_million = 160000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 262100
+output_limit = 32800
+connection = "opencode-zen"
+model = "opencode-zen/ling-2.6-flash-free"
+metadata_model = "opencode/ling-2.6-flash-free"
+remote_model = "ling-2.6-flash-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 262144
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/mimo-v2-flash-free"
+metadata_model = "opencode/mimo-v2-flash-free"
+remote_model = "mimo-v2-flash-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 262144
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/mimo-v2-omni-free"
+metadata_model = "opencode/mimo-v2-omni-free"
+remote_model = "mimo-v2-omni-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 1048576
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/mimo-v2-pro-free"
+metadata_model = "opencode/mimo-v2-pro-free"
+remote_model = "mimo-v2-pro-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 200000
+output_limit = 32000
+connection = "opencode-zen"
+model = "opencode-zen/mimo-v2.5-free"
+metadata_model = "opencode/mimo-v2.5-free"
+remote_model = "mimo-v2.5-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/minimax-m2.1"
+metadata_model = "opencode/minimax-m2.1"
+remote_model = "minimax-m2.1"
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 100000 }
+reasoning_options = []
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/minimax-m2.1-free"
+metadata_model = "opencode/minimax-m2.1-free"
+remote_model = "minimax-m2.1-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/minimax-m2.5"
+metadata_model = "opencode/minimax-m2.5"
+remote_model = "minimax-m2.5"
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 60000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/minimax-m2.5-free"
+metadata_model = "opencode/minimax-m2.5-free"
+remote_model = "minimax-m2.5-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 204800
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/minimax-m2.7"
+metadata_model = "opencode/minimax-m2.7"
+remote_model = "minimax-m2.7"
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 60000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 204800
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/nemotron-3-super-free"
+metadata_model = "opencode/nemotron-3-super-free"
+remote_model = "nemotron-3-super-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 1000000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/nemotron-3-ultra-free"
+metadata_model = "opencode/nemotron-3-ultra-free"
+remote_model = "nemotron-3-ultra-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 256000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/north-mini-code-free"
+metadata_model = "opencode/north-mini-code-free"
+remote_model = "north-mini-code-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["high"]
+
+[[targets]]
+context_window = 262144
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/qwen3.5-plus"
+metadata_model = "opencode/qwen3.5-plus"
+remote_model = "qwen3.5-plus"
+token_counter = "qwen3"
+pricing = { input_micros_per_million = 200000, output_micros_per_million = 1200000, cache_read_micros_per_million = 20000, cache_write_micros_per_million = 250000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+max = 81920
+
+[[targets]]
+context_window = 262144
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/qwen3.6-plus"
+metadata_model = "opencode/qwen3.6-plus"
+remote_model = "qwen3.6-plus"
+token_counter = "qwen3"
+pricing = { input_micros_per_million = 500000, output_micros_per_million = 3000000, cache_read_micros_per_million = 50000, cache_write_micros_per_million = 625000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+max = 81920
+
+[[targets]]
+context_window = 262144
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/qwen3.6-plus-free"
+metadata_model = "opencode/qwen3.6-plus-free"
+remote_model = "qwen3.6-plus-free"
+token_counter = "qwen3"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+max = 81920
+
+[[targets]]
+context_window = 262000
+output_limit = 66000
+connection = "opencode-zen"
+model = "opencode-zen/ring-2.6-1t-free"
+metadata_model = "opencode/ring-2.6-1t-free"
+remote_model = "ring-2.6-1t-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+context_window = 131072
+output_limit = 131072
+connection = "opencode-zen"
+model = "opencode-zen/trinity-large-preview-free"
+metadata_model = "opencode/trinity-large-preview-free"
+remote_model = "trinity-large-preview-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0 }
+reasoning_options = []
+
+# ---------------------------------------------------------------------------
+# Added from the live Zen /models listing (previously served but unmapped).
+# Values from the models.dev `opencode` provider block.
+# ---------------------------------------------------------------------------
+
+[[targets]]
+context_window = 1000000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/claude-sonnet-5"
+metadata_model = "opencode/claude-sonnet-5"
+remote_model = "claude-sonnet-5"
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 10000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+context_window = 1000000
+connection = "opencode-zen"
+model = "opencode-zen/glm-5.2"
+metadata_model = "opencode/glm-5.2"
+remote_model = "glm-5.2"
+token_counter = "tiktoken"
+# GLM 5.2 rejects `thinking` + `reasoning_effort` together ("cannot specify
+# both"); this codec sends only `reasoning_effort` for effort levels.
+reasoning_codec = "zai-reasoning-effort"
+recommended_effort = "off"
+discouraged_efforts = ["default", "high", "xhigh", "max"]
+# Same rumination containment as the Go-lane glm-5.2 target: bounded turns end
+# in a clean finish_reason=length instead of a 71k-token thinking marathon
+# (session 262), so keep 12k instead of the model's 131k ceiling.
+pinned = true
+output_limit = 12000
+pricing = { input_micros_per_million = 1400000, output_micros_per_million = 4400000, cache_read_micros_per_million = 260000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+context_window = 1050000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.6-sol"
+metadata_model = "opencode/gpt-5.6-sol"
+remote_model = "gpt-5.6-sol"
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 1050000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.6-terra"
+metadata_model = "opencode/gpt-5.6-terra"
+remote_model = "gpt-5.6-terra"
+pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000, cache_write_micros_per_million = 3125000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 1050000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/gpt-5.6-luna"
+metadata_model = "opencode/gpt-5.6-luna"
+remote_model = "gpt-5.6-luna"
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+context_window = 500000
+output_limit = 500000
+connection = "opencode-zen"
+model = "opencode-zen/grok-4.5"
+metadata_model = "opencode/grok-4.5"
+remote_model = "grok-4.5"
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 500000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 190000
+output_limit = 64000
+connection = "opencode-zen"
+model = "opencode-zen/hy3-free"
+metadata_model = "opencode/hy3-free"
+remote_model = "hy3-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+context_window = 262144
+output_limit = 262144
+connection = "opencode-zen"
+model = "opencode-zen/kimi-k2.7-code"
+metadata_model = "opencode/kimi-k2.7-code"
+remote_model = "kimi-k2.7-code"
+pricing = { input_micros_per_million = 950000, output_micros_per_million = 4000000, cache_read_micros_per_million = 190000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+# Zen serves M3 at a 512K window (models.dev `opencode` row), matching the
+# base price tier; no pin needed because the metadata row agrees.
+context_window = 512000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/minimax-m3"
+metadata_model = "opencode/minimax-m3"
+remote_model = "minimax-m3"
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 60000 }
+
+[[targets.reasoning_options]]
+type = "toggle"

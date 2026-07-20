@@ -1,0 +1,27 @@
+pub(crate) mod accessibility;
+pub(crate) mod agent_composer;
+pub mod app;
+pub mod completion;
+pub mod event;
+pub(crate) mod image_paste;
+pub mod keymap;
+pub mod layout;
+pub(crate) mod local_model_wizard;
+pub(crate) mod mcp;
+pub(crate) mod memory_manager;
+pub mod mouse;
+pub mod path_search;
+pub(crate) mod pickers;
+pub(crate) mod provider_manager;
+pub mod run;
+pub(crate) mod runtime_actions;
+pub(crate) mod settings;
+pub(crate) mod skill_manager;
+pub mod task;
+#[cfg(test)]
+pub(crate) mod test_utils;
+pub(crate) mod text_bounds;
+pub mod theme;
+pub(crate) mod transcript;
+pub mod view;
+pub mod widgets;

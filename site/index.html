@@ -1,0 +1,1746 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bonsai — grow code with care</title>
+  <meta name="description" content="Bonsai is a provider-independent terminal coding agent that plans, edits, runs, verifies, remembers, coordinates, and recovers—with autonomy you control.">
+  <meta name="theme-color" content="#080d09">
+  <meta property="og:title" content="Bonsai — grow code with care">
+  <meta property="og:description" content="A capable, careful terminal coding agent. Nineteen connections, one Rust binary, autonomy you control.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' shape-rendering='crispEdges'%3E%3Cpath fill='%2321301e' d='M4 4h24v24H4z'/%3E%3Cpath fill='%23a8d66d' d='M8 7h6v4H8zm10-2h6v6h-6zm-6 7h10v5H12z'/%3E%3Cpath fill='%23835d3c' d='M14 16h4v8h-4z'/%3E%3Cpath fill='%23d7a75f' d='M9 23h14v3H9z'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --ink: #eef2df;
+      --muted: #aab59a;
+      --dim: #687666;
+      --bg: #070b08;
+      --bg-2: #0a100b;
+      --panel: #0d160f;
+      --panel-2: #121d14;
+      --panel-3: #17251a;
+      --line: #27372a;
+      --line-hi: #3d543d;
+      --leaf: #91c966;
+      --leaf-hi: #d0ed8d;
+      --leaf-deep: #416b42;
+      --amber: #e0b665;
+      --amber-hi: #ffe09a;
+      --bark: #9b6c48;
+      --bark-deep: #513828;
+      --blue: #7fb8bd;
+      --red: #db806e;
+      --violet: #a98fd1;
+      --shadow: #020403;
+      --mono: "SFMono-Regular", "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+      --max: 1180px;
+      --pixel: polygon(0 8px, 8px 8px, 8px 0, calc(100% - 8px) 0, calc(100% - 8px) 8px, 100% 8px, 100% calc(100% - 8px), calc(100% - 8px) calc(100% - 8px), calc(100% - 8px) 100%, 8px 100%, 8px calc(100% - 8px), 0 calc(100% - 8px));
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 82% 3%, rgba(65, 107, 66, .18), transparent 34rem),
+        var(--bg);
+      font-family: var(--mono);
+      line-height: 1.65;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    ::selection { background: var(--leaf-deep); color: var(--leaf-hi); }
+    a { color: inherit; text-decoration: none; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    code, pre { font-family: var(--mono); }
+    img, canvas { display: block; }
+
+    .skip {
+      position: fixed;
+      left: 12px;
+      top: -100px;
+      z-index: 200;
+      padding: 8px 12px;
+      color: var(--bg);
+      background: var(--leaf-hi);
+    }
+    .skip:focus { top: 12px; }
+
+    .shell {
+      width: min(calc(100% - 40px), var(--max));
+      margin-inline: auto;
+    }
+
+    .pixel-frame {
+      clip-path: var(--pixel);
+      background: var(--panel);
+      border: 0;
+      box-shadow:
+        inset 0 0 0 1px var(--line),
+        4px 4px 0 var(--shadow);
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 18px;
+      color: var(--leaf);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 12px;
+      height: 6px;
+      background: var(--leaf);
+    }
+
+    .section-head {
+      max-width: 780px;
+      margin-bottom: 36px;
+    }
+    .section-head h2 {
+      margin: 0;
+      max-width: 760px;
+      font-size: clamp(30px, 4.2vw, 54px);
+      line-height: 1.06;
+      letter-spacing: -.055em;
+      text-wrap: balance;
+    }
+    .section-head p:last-child {
+      max-width: 720px;
+      margin: 20px 0 0;
+      color: var(--muted);
+      font-size: clamp(15px, 1.7vw, 18px);
+    }
+
+    .site-nav {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      border-bottom: 1px solid rgba(61, 84, 61, .55);
+      background: rgba(7, 11, 8, .88);
+      backdrop-filter: blur(10px);
+    }
+    .nav-inner {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 22px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
+      font-weight: 900;
+      letter-spacing: -.04em;
+    }
+    .brand-mark {
+      position: relative;
+      width: 27px;
+      height: 27px;
+      background:
+        linear-gradient(var(--leaf-hi), var(--leaf-hi)) 5px 4px / 7px 7px no-repeat,
+        linear-gradient(var(--leaf), var(--leaf)) 14px 2px / 8px 9px no-repeat,
+        linear-gradient(var(--leaf-deep), var(--leaf-deep)) 9px 9px / 12px 8px no-repeat,
+        linear-gradient(var(--bark), var(--bark)) 12px 15px / 4px 7px no-repeat,
+        linear-gradient(var(--amber), var(--amber)) 7px 21px / 14px 4px no-repeat;
+      image-rendering: pixelated;
+    }
+    .brand-name { font-size: 18px; }
+    .release-tag {
+      padding: 2px 6px;
+      border: 1px solid var(--line-hi);
+      color: var(--amber);
+      font-size: 9px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .nav-links a:hover,
+    .nav-links a:focus-visible { color: var(--leaf-hi); }
+    .nav-github {
+      padding: 8px 12px;
+      color: var(--ink) !important;
+      background: var(--panel-2);
+      box-shadow: inset 0 0 0 1px var(--line-hi);
+    }
+
+    .hero {
+      position: relative;
+      min-height: 730px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(440px, .95fr);
+      align-items: center;
+      gap: 24px;
+      padding-top: 66px;
+      padding-bottom: 74px;
+    }
+    .hero-copy { position: relative; z-index: 4; }
+    .hero h1 {
+      margin: 0;
+      max-width: 720px;
+      font-size: clamp(52px, 7.5vw, 98px);
+      line-height: .91;
+      letter-spacing: -.075em;
+      text-wrap: balance;
+      text-shadow: 3px 3px 0 #111b13;
+    }
+    .hero h1 span {
+      display: block;
+      color: var(--leaf-hi);
+    }
+    .hero-lede {
+      max-width: 700px;
+      margin: 28px 0 0;
+      color: var(--muted);
+      font-size: clamp(16px, 1.7vw, 20px);
+      line-height: 1.72;
+    }
+    .hero-lede strong { color: var(--ink); font-weight: 700; }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 13px;
+      margin-top: 32px;
+    }
+    .button {
+      position: relative;
+      display: inline-flex;
+      min-height: 46px;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      padding: 10px 18px;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
+    }
+    .button:hover { transform: translateY(-1px); }
+    .button:active { transform: translateY(1px); }
+    .button:focus-visible { outline: 2px solid var(--leaf-hi); outline-offset: 3px; }
+    .button.primary {
+      border-color: var(--leaf-hi);
+      color: #0a100b;
+      background: var(--leaf-hi);
+    }
+    .button.secondary {
+      border-color: var(--line-hi);
+      background: var(--panel-2);
+    }
+
+    .hero-install {
+      display: flex;
+      max-width: 675px;
+      margin-top: 24px;
+      overflow: hidden;
+      border: 1px solid var(--line-hi);
+      border-radius: 2px;
+      background: #050806;
+    }
+    .hero-install code {
+      min-width: 0;
+      flex: 1;
+      padding: 13px 15px;
+      overflow: hidden;
+      color: var(--leaf);
+      font-size: 11px;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .hero-install code::before { content: "$ "; color: var(--dim); }
+    .copy {
+      min-width: 68px;
+      border: 0;
+      border-left: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .copy:hover { color: var(--leaf-hi); background: var(--panel-3); }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      margin-top: 21px;
+      color: var(--dim);
+      font-size: 10px;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .hero-meta span::before { content: "■"; margin-right: 7px; color: var(--leaf-deep); }
+
+    .hero-stage {
+      position: relative;
+      min-height: 700px;
+      align-self: stretch;
+      isolation: isolate;
+    }
+    #pixel-garden {
+      position: absolute;
+      inset: -58px -170px -36px -120px;
+      z-index: -1;
+      width: calc(100% + 290px);
+      height: calc(100% + 94px);
+      image-rendering: pixelated;
+      opacity: 1;
+    }
+    .tree-controls {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      z-index: 3;
+      border: 0;
+      padding: 6px 8px;
+      color: var(--dim);
+      background: transparent;
+      cursor: pointer;
+      font-size: 9px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      opacity: .72;
+    }
+    .tree-controls:hover,
+    .tree-controls:focus-visible { color: var(--leaf-hi); opacity: 1; }
+
+    .dev-notice {
+      border-top: 1px solid var(--line);
+      background: rgba(34, 28, 14, .5);
+    }
+    .dev-notice .shell {
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+      padding-top: 12px;
+      padding-bottom: 12px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .dev-notice .dev-badge {
+      flex: none;
+      color: var(--amber-hi);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      font-size: 11px;
+    }
+    .dev-notice p { margin: 0; color: var(--amber); }
+    .signal-strip {
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: rgba(13, 22, 15, .42);
+    }
+    .signals {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+    }
+    .signal {
+      min-height: 82px;
+      padding: 17px 20px;
+      border-left: 1px solid var(--line);
+    }
+    .signal:last-child { border-right: 1px solid var(--line); }
+    .signal strong {
+      display: block;
+      color: var(--leaf-hi);
+      font-size: 19px;
+      letter-spacing: -.04em;
+    }
+    .signal span { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+
+    section.content {
+      padding-top: 88px;
+      padding-bottom: 88px;
+    }
+
+    /* The product demo follows Bonsai's real forest TUI: pane borders,
+       transcript blocks, mode accents, input composer, and status row. */
+    .tab {
+      border: 0;
+      padding: 7px 10px;
+      color: var(--dim);
+      background: transparent;
+      cursor: pointer;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .tab[aria-selected="true"] { color: #081009; background: var(--leaf); }
+    .tab:hover:not([aria-selected="true"]) { color: var(--ink); background: var(--panel-3); }
+
+    .demo-tabs {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .dtab {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 7px 16px;
+      color: var(--muted);
+      background: var(--panel);
+      cursor: pointer;
+      font-size: 12px;
+      transition: color .15s, border-color .15s, background .15s;
+    }
+    .dtab:hover { color: var(--ink); }
+    .dtab[aria-selected="true"] {
+      border-color: var(--leaf);
+      color: #081009;
+      background: var(--leaf);
+    }
+    .dtab.plan[aria-selected="true"] {
+      border-color: #dcbc77;
+      color: #171006;
+      background: #dcbc77;
+    }
+
+    .tui {
+      max-width: 1240px;
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid #2a3326;
+      border-radius: 10px;
+      padding: 10px 12px 8px;
+      color: var(--ink);
+      background: #080d09;
+      box-shadow: 0 24px 64px -32px #000d, 4px 4px 0 var(--shadow);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+    .tui-panel { display: none; }
+    .tui-panel.active { display: block; }
+    .tui-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 14px;
+      padding: 2px 6px 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .tui-top .tt-brand { color: var(--leaf-hi); font-weight: 600; }
+    .tui-top .tt-dim { color: var(--dim); }
+    .tui-top .spacer { flex: 1; }
+    .tui-top .ctxpill {
+      border-radius: 3px;
+      padding: 0 7px;
+      color: var(--ink);
+      background: var(--leaf-deep);
+    }
+    .tui-main {
+      display: grid;
+      grid-template-columns: 1fr 290px;
+      gap: 10px;
+    }
+    .pane {
+      position: relative;
+      min-width: 0;
+      border: 1px solid #485442;
+      border-radius: 4px;
+      padding: 14px 14px 12px;
+    }
+    .pane.active { border-color: var(--leaf); }
+    .pane-title {
+      position: absolute;
+      top: -9px;
+      left: 10px;
+      max-width: calc(100% - 20px);
+      overflow: hidden;
+      padding: 0 7px;
+      color: var(--muted);
+      background: #080d09;
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pane.active > .pane-title { color: var(--leaf-hi); }
+    .chat-scroll { overflow-x: auto; }
+    .chat-scroll .ln { margin-bottom: 14px; }
+    .chat-scroll .ln:last-child { margin-bottom: 0; }
+    .msg-user { color: var(--leaf-hi); font-weight: 600; }
+    .think {
+      border-left: 3px solid #8e9a7c;
+      border-radius: 0 3px 3px 0;
+      padding: 6px 11px;
+      color: var(--ink);
+      background: #2e281b;
+      font-weight: 600;
+    }
+    .think-h { color: var(--amber); font-weight: 600; }
+    .tool {
+      border-left: 3px solid #52703f;
+      border-radius: 0 3px 3px 0;
+      padding: 6px 11px;
+      background: #1b2b20;
+    }
+    .tool-h { color: var(--ink); }
+    .tool-h .spin { color: #80bc82; }
+    .tool-l { padding-left: 12px; color: var(--muted); }
+    .tool-l .tn { color: #80bc82; font-weight: 600; }
+    .tool-l.bad {
+      margin: 2px -11px 2px -14px;
+      border-left: 3px solid #ec8c7b;
+      padding-left: 23px;
+      color: var(--muted);
+      background: #3b1f1a;
+    }
+    .tool-l.bad .tn,
+    .err { color: #ec8c7b; }
+    .final { color: var(--ink); }
+    .ok { color: #80ac84; }
+    .path { color: var(--blue); }
+    .cmd { color: var(--amber); }
+    .add { color: #98cc91; }
+    .del { color: #ec9680; }
+    .dim { color: var(--dim); }
+    .pane-todo .todo-l { margin-bottom: 7px; color: var(--muted); }
+    .pane-todo .todo-l.done { color: var(--dim); }
+    .pane-todo .todo-l.done .ok { color: #80ac84; }
+    .pane-todo .todo-l.now { color: var(--ink); }
+    .pane-todo .todo-l.now .arr { color: var(--amber); }
+    .pane-input { margin-top: 10px; }
+    .pane-input .placeholder { color: var(--dim); }
+    .prompt { color: var(--leaf-hi); }
+    .tui-status {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px 18px;
+      padding: 9px 6px 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .tui-status .st-dot { color: #80bc82; }
+    .tui-status .st-mode { color: var(--blue); font-weight: 600; }
+    .tui-status .st-auto { color: var(--amber); }
+    .tui-status .st-sandbox { color: #80ac84; }
+    .tui-status .st-keys { color: var(--dim); }
+    .tui-status .st-keys b { color: var(--muted); font-weight: 600; }
+
+    #tui-plan .tui-main { grid-template-columns: 340px 1fr; }
+    .pane.active-plan { border-color: #dcbc77; }
+    .pane.active-plan > .pane-title { color: #dcbc77; }
+    .plan-sec { margin-bottom: 14px; }
+    .plan-sec:last-child { margin-bottom: 0; }
+    .plan-h {
+      margin-bottom: 3px;
+      border-left: 3px solid #dcbc77;
+      padding-left: 9px;
+      color: #dcbc77;
+      font-weight: 600;
+    }
+    .plan-b { padding-left: 12px; color: var(--muted); }
+    .plan-b li { margin: 3px 0 3px 16px; }
+    .msg-agent {
+      border-left: 3px solid #8e9a7c;
+      border-radius: 0 3px 3px 0;
+      padding: 4px 11px;
+      color: var(--ink);
+      background: #1b1f19;
+    }
+    .msg-agent .agent-h { color: var(--leaf); }
+    .cursor {
+      display: inline-block;
+      vertical-align: -2px;
+      background: var(--leaf-hi);
+      animation: blink 1.05s steps(1) infinite;
+    }
+    .tui .cursor { width: 8px; height: 15px; }
+    .term-caption {
+      margin: 16px 0 0;
+      color: var(--dim);
+      font-size: 11px;
+      text-align: center;
+    }
+    .term-caption em { color: var(--leaf); font-style: normal; }
+
+    @media (max-width: 860px) {
+      .tui-main,
+      #tui-plan .tui-main { grid-template-columns: 1fr; }
+      .pane-todo,
+      #tui-plan .pane-chat { display: none; }
+      .tui-top .tt-stats { display: none; }
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 10px;
+    }
+    .feature {
+      position: relative;
+      min-height: 238px;
+      padding: 23px;
+      grid-column: span 4;
+      overflow: hidden;
+      background: var(--panel);
+      box-shadow: inset 0 0 0 1px var(--line);
+      transition: transform .16s ease, background .16s ease, box-shadow .16s ease;
+    }
+    .feature:nth-child(1),
+    .feature:nth-child(6) { grid-column: span 8; }
+    .feature:hover {
+      z-index: 2;
+      transform: translateY(-2px);
+      background: var(--panel-2);
+      box-shadow: inset 0 0 0 1px var(--line-hi);
+    }
+    .branch-no {
+      display: inline-block;
+      margin-bottom: 21px;
+      color: var(--leaf);
+      font-size: 10px;
+      letter-spacing: .1em;
+    }
+    .feature h3 { margin: 0; font-size: 19px; letter-spacing: -.03em; }
+    .feature p { margin: 12px 0 20px; color: var(--muted); font-size: 12px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tags span {
+      padding: 4px 7px;
+      color: var(--dim);
+      background: #080d09;
+      box-shadow: inset 0 0 0 1px var(--line);
+      font-size: 8px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .feature-icon {
+      position: absolute;
+      right: 19px;
+      top: 20px;
+      color: var(--line-hi);
+      font-size: 22px;
+      letter-spacing: -4px;
+      opacity: .72;
+    }
+
+    .autonomy-wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(330px, .8fr);
+      gap: 18px;
+    }
+    .ladder {
+      padding: 30px;
+      background: var(--panel);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .rung {
+      display: grid;
+      grid-template-columns: 130px 1fr auto;
+      align-items: center;
+      gap: 16px;
+      padding: 16px 0;
+      border-bottom: 1px dashed var(--line);
+    }
+    .rung:last-child { border-bottom: 0; }
+    .rung-name { color: var(--ink); font-size: 11px; font-weight: 800; }
+    .rung-bar { height: 8px; background: #060907; }
+    .rung-bar i { display: block; height: 100%; background: var(--leaf-deep); }
+    .rung:nth-child(2) .rung-bar i { background: #5e8950; }
+    .rung:nth-child(3) .rung-bar i { background: var(--leaf); }
+    .rung:nth-child(4) .rung-bar i { background: var(--amber); }
+    .rung:nth-child(5) .rung-bar i { background: var(--red); }
+    .rung-note { min-width: 94px; text-align: right; color: var(--dim); font-size: 9px; }
+    .separation {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .principle {
+      min-height: 135px;
+      padding: 21px;
+      background: var(--panel);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .principle strong { display: block; margin-bottom: 8px; color: var(--amber); font-size: 12px; }
+    .principle p { margin: 0; color: var(--muted); font-size: 11px; }
+
+    .context-map {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      padding: 1px;
+      background: var(--line);
+    }
+    .context-cell {
+      min-height: 245px;
+      padding: 24px;
+      background: var(--panel);
+    }
+    .context-cell .glyph { min-height: 50px; color: var(--leaf); font-size: 24px; }
+    .context-cell h3 { margin: 0 0 10px; font-size: 14px; }
+    .context-cell p { margin: 0; color: var(--muted); font-size: 11px; }
+    .context-cell code { color: var(--amber); font-size: 10px; }
+
+    .grove {
+      display: grid;
+      grid-template-columns: minmax(360px, .9fr) minmax(0, 1.1fr);
+      gap: 38px;
+      align-items: center;
+    }
+    .peer-map {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-rows: repeat(3, minmax(92px, 1fr));
+      align-items: center;
+      gap: 12px;
+      min-height: 420px;
+      padding: 22px;
+      background: var(--panel);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .peer-links {
+      position: absolute;
+      inset: 22px;
+      z-index: 0;
+      width: calc(100% - 44px);
+      height: calc(100% - 44px);
+      pointer-events: none;
+      overflow: visible;
+    }
+    .peer-links line {
+      stroke: var(--line-hi);
+      stroke-width: 2;
+      stroke-dasharray: 7 8;
+      vector-effect: non-scaling-stroke;
+    }
+    .node {
+      position: relative;
+      z-index: 1;
+      width: min(100%, 160px);
+      justify-self: center;
+      padding: 12px;
+      color: var(--muted);
+      background: #09100b;
+      box-shadow: inset 0 0 0 1px var(--line-hi), 3px 3px 0 var(--shadow);
+      font-size: 9px;
+    }
+    .node strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 10px; }
+    .node .live { color: var(--leaf); }
+    .node.main { grid-column: 2; grid-row: 2; box-shadow: inset 0 0 0 2px var(--leaf-deep), 3px 3px 0 var(--shadow); }
+    .node.peer-a { grid-column: 3; grid-row: 1; }
+    .node.peer-b { grid-column: 3; grid-row: 3; }
+    .node.sub-a { grid-column: 1; grid-row: 1; }
+    .node.sub-b { grid-column: 1; grid-row: 3; }
+    .grove-copy h2 { margin: 0; font-size: clamp(31px, 4vw, 52px); line-height: 1.06; letter-spacing: -.05em; }
+    .grove-copy > p { color: var(--muted); font-size: 15px; }
+    .bullet-list { display: grid; gap: 10px; margin-top: 24px; }
+    .bullet {
+      display: grid;
+      grid-template-columns: 20px 1fr;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .bullet span:first-child { color: var(--leaf); }
+    .bullet strong { color: var(--ink); }
+
+    .example-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .example-code {
+      display: none;
+      position: relative;
+      min-height: 390px;
+      padding: 28px;
+      overflow-x: auto;
+      color: var(--muted);
+      background: #050806;
+      box-shadow: inset 0 0 0 1px var(--line-hi), 4px 4px 0 var(--shadow);
+      font-size: 12px;
+      line-height: 1.75;
+      white-space: pre;
+    }
+    .example-code.active { display: block; }
+    .example-code .prompt { color: var(--dim); }
+    .example-code .cmd { color: var(--leaf-hi); }
+    .example-code .flag { color: var(--amber); }
+    .example-code .str { color: var(--blue); }
+    .example-code .key { color: var(--violet); }
+    .example-code .comment { color: var(--dim); }
+    .example-code .good { color: var(--leaf); }
+    .example-code .warn { color: var(--amber); }
+    .example-code .copy { position: absolute; top: 10px; right: 10px; min-height: 31px; border: 1px solid var(--line); }
+
+    .provider-band {
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .provider-inner { padding-top: 55px; padding-bottom: 55px; }
+    .provider-title { margin: 0 0 22px; color: var(--dim); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+    .providers { display: flex; flex-wrap: wrap; gap: 10px; }
+    .provider {
+      padding: 10px 13px;
+      color: var(--muted);
+      background: #090f0a;
+      box-shadow: inset 0 0 0 1px var(--line);
+      font-size: 10px;
+    }
+    .provider.custom { color: var(--leaf); }
+
+    .install-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+      align-items: start;
+      gap: 32px;
+      padding: 42px;
+      background: var(--panel);
+      box-shadow: inset 0 0 0 1px var(--line-hi), 5px 5px 0 var(--shadow);
+    }
+    .install-card h2 {
+      margin: 0 0 16px;
+      font-size: clamp(34px, 4vw, 56px);
+      line-height: 1;
+      letter-spacing: -.06em;
+      text-wrap: balance;
+    }
+    .install-card p { margin: 0; color: var(--muted); font-size: 13px; }
+    .install-options { margin-top: 27px; display: grid; gap: 10px; }
+    .install-option {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      background: #050806;
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .install-option code {
+      min-width: 0;
+      flex: 1;
+      padding: 13px 15px;
+      overflow: hidden;
+      color: var(--leaf);
+      font-size: 10px;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .install-option .copy {
+      align-self: stretch;
+      display: grid;
+      place-items: center;
+    }
+    .install-aside {
+      padding: 21px;
+      background: #09100b;
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .install-aside strong { display: block; margin-bottom: 13px; color: var(--amber); font-size: 11px; }
+    .install-aside div { padding: 8px 0; border-bottom: 1px dashed var(--line); color: var(--muted); font-size: 10px; }
+    .install-aside div:last-child { border-bottom: 0; }
+
+    footer {
+      padding: 48px 0 58px;
+      color: var(--dim);
+      font-size: 10px;
+    }
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      gap: 25px;
+      border-top: 1px solid var(--line);
+      padding-top: 28px;
+    }
+    .footer-tag { color: var(--muted); }
+    .footer-tag strong { color: var(--leaf-hi); }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(10px);
+      transition: opacity .55s ease, transform .55s ease;
+    }
+    .reveal.visible { opacity: 1; transform: none; }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    @media (max-width: 1000px) {
+      .hero { grid-template-columns: 1fr; min-height: auto; }
+      .hero-copy { max-width: 820px; }
+      .hero-stage { min-height: 650px; }
+      #pixel-garden {
+        inset: -46px -80px -22px;
+        width: calc(100% + 160px);
+        height: calc(100% + 68px);
+      }
+      .feature { grid-column: span 6; }
+      .feature:nth-child(1), .feature:nth-child(6) { grid-column: span 6; }
+      .context-map { grid-template-columns: repeat(2, 1fr); }
+      .grove { grid-template-columns: 1fr; }
+      .peer-map { max-width: 650px; width: 100%; }
+    }
+
+    @media (max-width: 800px) {
+      .install-card { grid-template-columns: 1fr; gap: 24px; }
+    }
+
+    @media (max-width: 760px) {
+      .shell { width: min(calc(100% - 28px), var(--max)); }
+      .nav-links a:not(.nav-github) { display: none; }
+      .hero { padding-top: 58px; padding-bottom: 66px; }
+      .hero h1 { font-size: clamp(50px, 16vw, 74px); }
+      .hero-stage { min-height: 580px; }
+      .tree-controls { display: none; }
+      .signals { grid-template-columns: repeat(2, 1fr); }
+      .signal:nth-child(2) { border-right: 1px solid var(--line); }
+      .signal:nth-child(n+3) { border-top: 1px solid var(--line); }
+      section.content { padding-top: 76px; padding-bottom: 76px; }
+      .feature { grid-column: 1 / -1 !important; min-height: auto; }
+      .autonomy-wrap,
+      .separation { grid-template-columns: 1fr; }
+      .rung { grid-template-columns: 92px 1fr; }
+      .rung-note { grid-column: 2; text-align: left; }
+      .context-map { grid-template-columns: 1fr; }
+      .grove { gap: 26px; }
+      .peer-map { min-height: 390px; overflow: hidden; }
+      .install-card { grid-template-columns: 1fr; padding: 28px 22px; }
+      .footer-inner { flex-direction: column; }
+    }
+
+    @media (max-width: 480px) {
+      .hero-install { display: none; }
+      .hero-stage { min-height: 500px; }
+      #pixel-garden {
+        inset: -28px -28px -10px;
+        width: calc(100% + 56px);
+        height: calc(100% + 38px);
+      }
+      .signal { padding: 18px 15px; }
+      .signal strong { font-size: 20px; }
+      .tui { padding: 8px; font-size: 10px; }
+      .tui-top,
+      .tui-status { gap: 7px; font-size: 9px; }
+      .pane { padding: 13px 10px 10px; }
+      .pane-title { font-size: 10px; }
+      .feature { padding: 22px 19px; }
+      .ladder { padding: 22px 18px; }
+      .peer-map { display: none; }
+      .example-code { padding: 22px 15px; font-size: 10px; }
+      .install-option .copy { min-width: 55px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+      .reveal { opacity: 1; transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="site-nav">
+    <div class="shell nav-inner">
+      <a class="brand" href="#top" aria-label="Bonsai home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">bonsai</span>
+        <span class="release-tag">pre-1.0</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#workflow">Workflow</a>
+        <a href="#features">Features</a>
+        <a href="#safety">Safety</a>
+        <a href="#examples">Examples</a>
+        <a href="#install">Install</a>
+        <a class="nav-github" href="https://github.com/strozynskiw/bonsai" target="_blank" rel="noopener">GitHub ↗</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="shell hero" id="top">
+      <div class="hero-copy">
+        <p class="eyebrow">provider-independent terminal agent</p>
+        <h1>Grow code.<span>With care.</span></h1>
+        <p class="hero-lede">
+          Bonsai is a local-first coding agent that can <strong>inspect, plan, edit, run,
+          diagnose, verify, review, remember, and coordinate</strong>. Switch models without
+          losing the conversation, and choose how much runs without asking.
+        </p>
+
+        <div class="hero-actions">
+          <a class="button primary" href="#install">Install bonsai ↓</a>
+          <a class="button secondary" href="#workflow">See it work →</a>
+        </div>
+
+        <div class="hero-install">
+          <code>cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked</code>
+          <button class="copy" data-copy="cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked" type="button">copy</button>
+        </div>
+
+        <div class="hero-meta" aria-label="Platform summary">
+          <span>one Rust binary</span>
+          <span>macOS + Linux</span>
+          <span>23 connections</span>
+          <span>18 themes</span>
+        </div>
+      </div>
+
+      <div class="hero-stage">
+        <canvas id="pixel-garden" role="img" aria-label="Pixel bonsai growing in a clay pot">Pixel bonsai in a clay pot.</canvas>
+        <button class="tree-controls" id="regrow" type="button">[ grow again ]</button>
+      </div>
+    </section>
+
+    <aside class="dev-notice" aria-label="Development status">
+      <div class="shell">
+        <span class="dev-badge">⚠ heavy development</span>
+        <p>Bonsai is pre-1.0 and under heavy development. Commands, config, storage, and behavior are all subject to change without notice — use it at your own risk and keep backups of anything you care about.</p>
+      </div>
+    </aside>
+
+    <section class="signal-strip" aria-label="Product facts">
+      <div class="shell signals">
+        <div class="signal"><strong>5 levels</strong><span>one autonomy ladder</span></div>
+        <div class="signal"><strong>3 phases</strong><span>plan · code · review</span></div>
+        <div class="signal"><strong>2 surfaces</strong><span>interactive TUI + headless/CI</span></div>
+        <div class="signal"><strong>1 session</strong><span>switch models without starting over</span></div>
+      </div>
+    </section>
+
+    <section class="shell content" id="workflow">
+      <div class="section-head reveal">
+        <p class="eyebrow">one continuous workflow</p>
+        <h2>Think carefully. Act decisively. Prove the result.</h2>
+        <p>Plan, implement, verify, and review in one resumable conversation.</p>
+      </div>
+
+      <div class="reveal">
+        <div class="demo-tabs" role="tablist" aria-label="Agent mode">
+          <button class="dtab active" id="tui-tab-coding" type="button" role="tab" aria-selected="true" aria-controls="tui-coding" data-tui="tui-coding">● coding</button>
+          <button class="dtab plan" id="tui-tab-plan" type="button" role="tab" aria-selected="false" aria-controls="tui-plan" data-tui="tui-plan" tabindex="-1">◆ plan</button>
+        </div>
+
+        <div class="tui tui-panel active" id="tui-coding" role="tabpanel" aria-labelledby="tui-tab-coding">
+          <div class="tui-top">
+            <span class="tt-brand">✦ bonsai</span>
+            <span class="tt-dim">#12 active</span>
+            <span>⌂ your-project</span>
+            <span>⎇ master</span>
+            <span class="tt-dim">⏱ 4s</span>
+            <span class="spacer"></span>
+            <span class="ctxpill tt-stats">ctx 18%</span>
+            <span class="tt-dim tt-stats">· cost $0.42 · cache 96% · ↑2m ↓14.1k</span>
+          </div>
+          <div class="tui-main">
+            <div class="pane pane-chat">
+              <span class="pane-title">Chat · make the retry test deterministic</span>
+              <div class="chat-scroll" id="term">
+                <div class="ln msg-user">› make the retry backoff test deterministic</div>
+                <div class="ln think">
+                  <div class="think-h">✦ thinking</div>
+                  <div>Tracing the flaky assertion to wall-clock sleeps</div>
+                  <div>Planning a Clock trait with a test double</div>
+                </div>
+                <div class="ln tool">
+                  <div class="tool-h"><span class="spin">⟳</span> Inspect · 2 tools</div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">read</span> <span class="path">src/net/retry.rs</span></div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">grep</span> <span class="cmd">"thread::sleep"</span> <span class="dim">· 2 matches</span></div>
+                </div>
+                <div class="ln tool">
+                  <div class="tool-h"><span class="spin">⟳</span> Edit · 3 tools · <span class="ok">2 ok</span> / <span class="err">1 failed</span> · edited 2 files · <span class="add">+24</span> <span class="del">−9</span> · 4.1s</div>
+                  <div class="tool-l bad">• <span class="err">✗</span> <span class="tn">edit</span> <span class="path">src/net/retry.rs</span> <span class="dim">· stale region</span> <span class="err">→ Error: text not found after read</span></div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">edit</span> <span class="path">src/net/retry.rs</span> <span class="add">+11</span> <span class="del">−5</span></div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">edit</span> <span class="path">src/net/retry_test.rs</span> <span class="add">+13</span> <span class="del">−4</span></div>
+                </div>
+                <div class="ln tool">
+                  <div class="tool-h"><span class="spin">⟳</span> Test · 1 tool · 12.4s</div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">bash</span> <span class="cmd">cargo test retry::</span> <span class="dim">· <span class="ok">14 passed</span>, 0 failed</span></div>
+                </div>
+                <div class="ln final"><span class="ok">✓</span> The test raced the wall clock. Backoff now takes a Clock; tests drive a MockClock — no sleeps, fully deterministic.</div>
+              </div>
+            </div>
+            <div class="pane pane-todo">
+              <span class="pane-title">TODO</span>
+              <div class="todo-l done"><span class="ok">✓</span> Find the sleep-based race in the retry test</div>
+              <div class="todo-l done"><span class="ok">✓</span> Inject a Clock trait, add a MockClock</div>
+              <div class="todo-l done"><span class="ok">✓</span> Rewrite backoff assertions on mock time</div>
+              <div class="todo-l done"><span class="ok">✓</span> Run the full retry suite</div>
+            </div>
+          </div>
+          <div class="pane active pane-input">
+            <span class="pane-title">Input</span>
+            <span class="prompt">›</span> <span class="cursor"></span> <span class="placeholder">Ask the agent to inspect, edit, test, or explain…</span>
+          </div>
+          <div class="tui-status">
+            <span><span class="st-dot">●</span> <span class="st-mode">Coding</span> · gpt-5.6-sol <span class="dim">(high)</span> · <span class="st-auto">balanced</span> · <span class="st-sandbox">sandbox on</span></span>
+            <span class="st-keys"><b>Tab</b> focus · <b>Shift+Tab</b> cycle</span>
+          </div>
+        </div>
+
+        <div class="tui tui-panel" id="tui-plan" role="tabpanel" aria-labelledby="tui-tab-plan" hidden>
+          <div class="tui-top">
+            <span class="tt-brand">✦ bonsai</span>
+            <span class="tt-dim">#13 active</span>
+            <span>⌂ your-project</span>
+            <span>⎇ feat/compact-composer</span>
+            <span class="tt-dim">⏱ 3m 18s</span>
+            <span class="spacer"></span>
+            <span class="ctxpill tt-stats">ctx 6%</span>
+            <span class="tt-dim tt-stats">· cost $2.67 · cache 15% · ↑597.7k ↓3.2k</span>
+          </div>
+          <div class="tui-main">
+            <div class="pane pane-chat">
+              <span class="pane-title">Chat</span>
+              <div class="chat-scroll">
+                <div class="ln tool">
+                  <div class="tool-h"><span class="spin">⟳</span> Inspect · 1 tool</div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">read</span> <span class="path">src/tui/widgets/input.rs</span></div>
+                </div>
+                <div class="ln think">
+                  <div class="think-h">✦ thinking</div>
+                  <div>Measuring composer rows against the wrap model</div>
+                </div>
+                <div class="ln tool">
+                  <div class="tool-h"><span class="spin">⟳</span> Plan · 3 tools</div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">plan_add_task</span> <span class="dim">Fix composer height</span></div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">plan_add_task</span> <span class="dim">Add visual-row navigation</span></div>
+                  <div class="tool-l">• <span class="ok">✓</span> <span class="tn">plan_add_task</span> <span class="dim">Cover compact behavior</span></div>
+                </div>
+                <div class="ln think">
+                  <div class="think-h">✦ thinking</div>
+                  <div>Planning task tests and validation</div>
+                </div>
+                <div class="ln msg-agent">
+                  <div class="agent-h">● bonsai</div>
+                  <div>Plan ready on the canvas. Review it, then use <span class="cmd">/save</span> to keep it, <span class="cmd">/start</span> to hand it to the coding agent, or <span class="cmd">/discard</span> to remove it.</div>
+                </div>
+              </div>
+            </div>
+            <div class="pane active-plan pane-plan">
+              <span class="pane-title">Plan · Compact single-row composer</span>
+              <div class="plan-sec">
+                <div class="plan-h">Goal</div>
+                <div class="plan-b">A fixed four-row composer: border, one visible input row, status row, border. Multiline drafts keep soft wrapping; the transcript gains two rows on normal terminals.</div>
+              </div>
+              <div class="plan-sec">
+                <div class="plan-h">Approach</div>
+                <ul class="plan-b">
+                  <li>Make <span class="cmd">layout.rs::split</span> allocate four rows whenever the composer is visible.</li>
+                  <li>Add width-aware cursor movement over rendered visual rows—hard newlines, soft wraps, Unicode widths—reusing the wrapping model from <span class="path">src/tui/widgets/input.rs</span>.</li>
+                  <li>Preserve completion precedence; at the first or last visual row, movement is a no-op.</li>
+                </ul>
+              </div>
+              <div class="plan-sec">
+                <div class="plan-h">Validation</div>
+                <div class="plan-b">Inline tests for fixed height, cursor-follow viewport, and Up/Down across soft wraps, short rows, and wide Unicode. Run fmt, clippy, and the focused suite.</div>
+              </div>
+            </div>
+          </div>
+          <div class="pane active pane-input">
+            <span class="pane-title">Input</span>
+            <span class="prompt">›</span> <span class="cursor"></span> <span class="placeholder">Describe the task—the planner drafts it on the canvas…</span>
+          </div>
+          <div class="tui-status">
+            <span><span class="st-dot">●</span> <span class="st-auto">Planning</span> · gpt-5.6-sol <span class="dim">(high)</span> · <span class="st-auto">balanced</span> · <span class="st-sandbox">sandbox on</span></span>
+            <span class="st-keys"><b>/copy</b> row · <b>Esc</b> clear</span>
+          </div>
+        </div>
+
+        <p class="term-caption">The actual interface in <em>forest</em>, the default of 18 themes—switch coding and plan mode without losing the conversation.</p>
+      </div>
+    </section>
+
+    <section class="shell content" id="features">
+      <div class="section-head reveal">
+        <p class="eyebrow">the full workshop</p>
+        <h2>More than chat with a shell attached.</h2>
+        <p>Bonsai combines the engineering loop with the controls and evidence needed for longer, more autonomous runs.</p>
+      </div>
+
+      <div class="feature-grid">
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">▟▙</span>
+          <span class="branch-no">BRANCH 01</span>
+          <h3>Inspect → edit → run → verify</h3>
+          <p>Read, grep, glob, Rust symbols, rust-analyzer navigation, atomic patches, shell commands, Git inspection, web fetch, image input for compatible models, background jobs, and todos—batched when their access paths do not conflict.</p>
+          <div class="tags"><span>atomic edits</span><span>LSP</span><span>background tasks</span><span>verification</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">◇◆</span>
+          <span class="branch-no">BRANCH 02</span>
+          <h3>Plan, code, review</h3>
+          <p>Research in read-only plan mode, hand the canvas to coding with <code>/start</code>, then inspect pending changes in a read-only review pass. The conversation stays intact.</p>
+          <div class="tags"><span>plan canvas</span><span>self-review</span><span>/test</span><span>/commit</span><span>/pr</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">↔↕</span>
+          <span class="branch-no">BRANCH 03</span>
+          <h3>Switch models, keep the session</h3>
+          <p>Switch connections, models, and reasoning effort mid-conversation—including local OpenAI-compatible endpoints. Bind model-and-effort combinations to one-letter shortcuts. Metadata, pricing, context limits, and capabilities come from models.dev.</p>
+          <div class="tags"><span>23 connections</span><span>3 transports</span><span>reasoning</span><span>prompt cache</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">▣▤</span>
+          <span class="branch-no">BRANCH 04</span>
+          <h3>Context that knows how to prune</h3>
+          <p>Cache-aware compaction, exact tokenizers where available, <code>/ctx</code> diagnostics, the SMOL profile, read-result reuse, and task episodes with untrusted recall framing.</p>
+          <div class="tags"><span>SMOL</span><span>compaction</span><span>episodes</span><span>recall</span><span>cache analytics</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">⌘⌁</span>
+          <span class="branch-no">BRANCH 05</span>
+          <h3>Memory and sessions that persist</h3>
+          <p>User preferences follow you; project facts can ship with the repository. Hybrid retrieval combines BM25 and embeddings to recall relevant entries on demand. Sessions, plans, todos, usage, and context resume from SQLite.</p>
+          <div class="tags"><span>BM25 + embeddings</span><span>/remember</span><span>resume</span><span>search</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">♜♟</span>
+          <span class="branch-no">BRANCH 06</span>
+          <h3>Agents and peers, without the chaos</h3>
+          <p>Delegate exploration and review to scoped read-only subagents. Coordinate separate Bonsai sessions with messages, changed-file visibility, advisory work claims, wait relationships, and wake-on-finish.</p>
+          <div class="tags"><span>5 concurrent subagents</span><span>peers</span><span>claims</span><span>read isolation</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">⚙+</span>
+          <span class="branch-no">BRANCH 07</span>
+          <h3>Extensible with plain files</h3>
+          <p>Layer project and global config. Add MCP over stdio or Streamable HTTP, lifecycle hooks, skills, custom agents, providers, and themes under explicit trust and effect boundaries.</p>
+          <div class="tags"><span>MCP</span><span>hooks</span><span>skills</span><span>custom agents</span><span>themes</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">[]</span>
+          <span class="branch-no">BRANCH 08</span>
+          <h3>Headless and CI-native</h3>
+          <p>Text, JSON, or streaming JSON events; documented exit codes; turn, time, output, tool, and session budgets; observed-state completion reports; and recovery worktrees for autonomous mutations.</p>
+          <div class="tags"><span>stream-json</span><span>budgets</span><span>recovery</span><span>eval harness</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">◐◑</span>
+          <span class="branch-no">BRANCH 09</span>
+          <h3>A terminal you can live in</h3>
+          <p>Keyboard and mouse input, queued steering, selection and copy, diff cards, live task views, model and provider pickers, Serenity transcript mode, truecolor/256-color adaptation, and 18 built-in themes.</p>
+          <div class="tags"><span>18 themes</span><span>serenity</span><span>diffs</span><span>usage dashboard</span></div>
+        </article>
+
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">✓!</span>
+          <span class="branch-no">BRANCH 10</span>
+          <h3>Honest about what happened</h3>
+          <p>Usage, cost, retries, cache reads, verification freshness, file changes, authorization decisions, caveats, and budget exhaustion come from durable evidence—not the model’s recollection.</p>
+          <div class="tags"><span>typed outcomes</span><span>typed effects</span><span>/perf</span><span>/usage</span></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="shell content" id="safety">
+      <div class="section-head reveal">
+        <p class="eyebrow">autonomy without ambiguity</p>
+        <h2>Choose how far it can grow.</h2>
+        <p>Autonomy decides what may run without asking. The sandbox decides what a child process can physically touch. They are separate controls.</p>
+      </div>
+
+      <div class="autonomy-wrap">
+        <div class="ladder reveal" aria-label="Autonomy levels">
+          <div class="rung"><span class="rung-name">ask</span><span class="rung-bar"><i style="width:8%"></i></span><span class="rung-note">no effects auto-run</span></div>
+          <div class="rung"><span class="rung-name">conservative</span><span class="rung-bar"><i style="width:28%"></i></span><span class="rung-note">reads auto-run</span></div>
+          <div class="rung"><span class="rung-name">balanced</span><span class="rung-bar"><i style="width:58%"></i></span><span class="rung-note">daily dev loop</span></div>
+          <div class="rung"><span class="rung-name">auto-accept</span><span class="rung-bar"><i style="width:82%"></i></span><span class="rung-note">high risk allowed</span></div>
+          <div class="rung"><span class="rung-name">yolo</span><span class="rung-bar"><i style="width:100%"></i></span><span class="rung-note">autonomy guards off</span></div>
+        </div>
+        <div class="separation">
+          <div class="principle reveal"><strong>▣ OS-level sandbox</strong><p>macOS Seatbelt or Linux Bubblewrap confines writes to approved roots and denies network by default. Yolo does not silently disable it.</p></div>
+          <div class="principle reveal"><strong>◇ Permission memory</strong><p>Allow once, for the session, or for the project. Rules cannot re-enable the hard-deny floor.</p></div>
+          <div class="principle reveal"><strong>◎ Workspace trust</strong><p>Project-supplied config, hooks, MCP servers, skills, agents, and steering files remain inert until the repository is trusted.</p></div>
+          <div class="principle reveal"><strong>! Untrusted stays data</strong><p>Web, MCP, recalled history, files, and background output are framed so content cannot promote itself to instructions.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell content" id="context">
+      <div class="section-head reveal">
+        <p class="eyebrow">context lifecycle</p>
+        <h2>Long sessions should get wiser, not heavier.</h2>
+        <p>Bonsai measures each request, preserves cache-friendly prefixes, and prunes or reuses bulky results. Task episodes keep archived bytes available for recall.</p>
+      </div>
+      <div class="context-map reveal">
+        <article class="context-cell"><div class="glyph">▓▒░</div><h3>Cache-aware compaction</h3><p>Stable prefixes stay stable. Superseded reads and bulky tool output are reclaimed before a larger context rewrite is needed.</p></article>
+        <article class="context-cell"><div class="glyph">smol</div><h3>SMOL profile</h3><p>A deliberately compact prompt and tool surface for smaller or local models. Toggle it with <code>/smol</code>.</p></article>
+        <article class="context-cell"><div class="glyph">#01</div><h3>Task episodes</h3><p>Finished task spans archive as whole units — one compact card replaces the span when that actually saves context — instead of splitting message groups.</p></article>
+        <article class="context-cell"><div class="glyph">↶?</div><h3>Recall on demand</h3><p>The model can search or page archived bytes back in through an untrusted frame. Repeated live recalls collapse to pointers.</p></article>
+      </div>
+    </section>
+
+    <section class="shell content" id="collaboration">
+      <div class="grove">
+        <div class="peer-map reveal" aria-label="Bonsai peer and subagent topology">
+          <svg class="peer-links" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+            <line x1="50" y1="50" x2="16.67" y2="16.67"></line>
+            <line x1="50" y1="50" x2="83.33" y2="16.67"></line>
+            <line x1="50" y1="50" x2="16.67" y2="83.33"></line>
+            <line x1="50" y1="50" x2="83.33" y2="83.33"></line>
+          </svg>
+          <div class="node main"><strong>#42 · this session</strong><span class="live">● working</span><br>src/agent/*</div>
+          <div class="node peer-a"><strong>#39 · migration</strong><span class="live">● working</span><br>claim: full test suite</div>
+          <div class="node peer-b"><strong>#44 · docs</strong>○ idle<br>changed: README.md</div>
+          <div class="node sub-a"><strong>explore agent</strong><span class="live">● running</span><br>provider registry</div>
+          <div class="node sub-b"><strong>review agent</strong>✓ done<br>1 finding</div>
+        </div>
+        <div class="grove-copy reveal">
+          <p class="eyebrow">a coordinated grove</p>
+          <h2>Parallel work that knows about itself.</h2>
+          <p>Use subagents for focused, read-only work inside a turn. Use peers to coordinate separate Bonsai sessions in the same repository.</p>
+          <div class="bullet-list">
+            <div class="bullet"><span>01</span><span><strong>Subagents stay lean.</strong> They return conclusions, not their entire internal transcript.</span></div>
+            <div class="bullet"><span>02</span><span><strong>Peers expose changed files.</strong> See which files a peer changed before your assumptions go stale.</span></div>
+            <div class="bullet"><span>03</span><span><strong>Claims reduce duplicate work.</strong> Advertise the full test suite or another expensive shared task.</span></div>
+            <div class="bullet"><span>04</span><span><strong>Wake when ready.</strong> Park a turn until a working peer finishes, then resume automatically.</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell content" id="examples">
+      <div class="section-head reveal">
+        <p class="eyebrow">use it your way</p>
+        <h2>Interactive when you want it. Scriptable when you need it.</h2>
+        <p>The TUI and headless mode share the same agent, persistence, permissions, budgets, and verification semantics.</p>
+      </div>
+
+      <div class="example-tabs reveal" role="tablist" aria-label="Usage examples">
+        <button class="tab" role="tab" aria-selected="true" aria-controls="example-interactive" id="example-tab-interactive" data-example="example-interactive">interactive</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="example-headless" id="example-tab-headless" data-example="example-headless" tabindex="-1">headless + recovery</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="example-scripting" id="example-tab-scripting" data-example="example-scripting" tabindex="-1">scripting &amp; ci</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="example-resume" id="example-tab-resume" data-example="example-resume" tabindex="-1">resume anywhere</button>
+      </div>
+
+      <pre class="example-code active reveal" id="example-interactive" role="tabpanel" aria-labelledby="example-tab-interactive"><button class="copy" type="button" data-copy="bonsai">copy</button><span class="prompt">$</span> <span class="cmd">bonsai</span>
+
+<span class="prompt">›</span> <span class="cmd">/autonomy balanced</span>      <span class="comment"># routine dev loop runs without asking</span>
+<span class="prompt">›</span> <span class="cmd">/sandbox on</span>             <span class="comment"># OS-level command confinement</span>
+<span class="prompt">›</span> <span class="cmd">/model 3</span>                <span class="comment"># switch model mid-conversation</span>
+<span class="prompt">›</span> fix the flaky retry test, then review your diff
+
+<span class="comment"># the agent inspects, edits, and self-reviews in the live transcript</span>
+
+<span class="prompt">›</span> <span class="cmd">/test</span>                   <span class="comment"># run the configured test verification profile</span>
+<span class="prompt">›</span> <span class="cmd">/commit</span>                 <span class="comment"># commit the reviewed diff</span></pre>
+
+      <pre class="example-code reveal" id="example-headless" role="tabpanel" aria-labelledby="example-tab-headless" hidden><button class="copy" type="button" data-copy="bonsai -p &quot;upgrade sqlx, run tests, and summarize changes&quot; --autonomy balanced --isolation auto --max-turns 30 --max-tool-seconds 300 --output-format stream-json">copy</button><span class="prompt">$</span> <span class="cmd">bonsai -p</span> <span class="str">"upgrade sqlx, run tests, and summarize changes"</span> \
+    <span class="flag">--autonomy balanced</span> <span class="flag">--isolation auto</span> \
+    <span class="flag">--max-turns 30</span> <span class="flag">--max-tool-seconds 300</span> \
+    <span class="flag">--output-format stream-json</span>
+
+<span class="good">{"type":"tool_finished","id":"call_7","result":"14 tests passed","status":"succeeded"}</span>
+<span class="good">{"type":"status","text":"Recovery 1783857600123-4821-0-a1b2c3d4 ready. Inspect with: bonsai recovery inspect 1783857600123-4821-0-a1b2c3d4"}</span>
+
+<span class="comment"># mutating runs land in an isolated git worktree — the source checkout
+# is never changed automatically. Inspect, then merge, keep, or discard.</span>
+<span class="prompt">$</span> <span class="cmd">bonsai recovery inspect</span> 1783857600123-4821-0-a1b2c3d4
+<span class="prompt">$</span> <span class="cmd">bonsai recovery merge</span> 1783857600123-4821-0-a1b2c3d4</pre>
+
+      <pre class="example-code reveal" id="example-scripting" role="tabpanel" aria-labelledby="example-tab-scripting" hidden><button class="copy" type="button" data-copy="echo &quot;summarize the diff on this branch&quot; | bonsai -p --output-format json">copy</button><span class="comment"># pipe a prompt from stdin, get machine-readable output</span>
+<span class="prompt">$</span> <span class="cmd">echo</span> <span class="str">"summarize the diff on this branch"</span> | <span class="cmd">bonsai -p</span> <span class="flag">--output-format json</span>
+
+<span class="comment"># set defaults through the environment</span>
+<span class="prompt">$</span> <span class="key">BONSAI_AUTONOMY</span>=balanced <span class="key">BONSAI_PROVIDER</span>=opencode <span class="cmd">bonsai -p</span> <span class="str">'run `git status` via bash'</span>
+
+<span class="comment"># exit codes a script can branch on</span>
+<span class="good">0</span> completed   <span class="warn">1</span> tool/provider/runtime failure   <span class="warn">2</span> CLI usage
+<span class="warn">3</span> auth/config   <span class="warn">124</span> timeout   <span class="warn">130</span> SIGINT   <span class="warn">143</span> SIGTERM</pre>
+
+      <pre class="example-code reveal" id="example-resume" role="tabpanel" aria-labelledby="example-tab-resume" hidden><button class="copy" type="button" data-copy="bonsai -c">copy</button><span class="comment"># every session persists locally — pick up where you left off</span>
+<span class="prompt">$</span> <span class="cmd">bonsai -c</span>                <span class="comment"># resume the most recent session for this project</span>
+<span class="prompt">$</span> <span class="cmd">bonsai -c 52</span>             <span class="comment"># resume a specific session by id</span>
+
+<span class="comment"># resume headlessly: same session, one more turn, then exit</span>
+<span class="prompt">$</span> <span class="cmd">bonsai -c -p</span> <span class="str">"What did we decide about the retry backoff?"</span>
+
+<span class="comment"># on exit, bonsai prints the session id and the exact
+# command to bring it back</span></pre>
+    </section>
+
+    <section class="provider-band">
+      <div class="shell provider-inner">
+        <p class="provider-title">catalog-driven connections · switch connections or models without restarting the conversation</p>
+        <div class="providers">
+          <span class="provider">OpenCode Go</span>
+          <span class="provider">OpenCode Zen</span>
+          <span class="provider">OpenAI API</span>
+          <span class="provider">Codex</span>
+          <span class="provider">Anthropic API</span>
+          <span class="provider">MiniMax API</span>
+          <span class="provider">MiniMax Coding Plan</span>
+          <span class="provider">Z.AI API</span>
+          <span class="provider">Z.AI Coding Plan</span>
+          <span class="provider">Moonshot AI API</span>
+          <span class="provider">Kimi Coding Plan</span>
+          <span class="provider">MiMo API</span>
+          <span class="provider">MiMo Coding Plan</span>
+          <span class="provider">DeepSeek API</span>
+          <span class="provider">Qwen Cloud API</span>
+          <span class="provider">Qwen Cloud Token Plan</span>
+          <span class="provider">OpenRouter</span>
+          <span class="provider custom">OpenAI-compatible</span>
+          <span class="provider custom">Anthropic-compatible</span>
+          <span class="provider custom">+ custom connections</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell content" id="install">
+      <div class="install-card reveal">
+        <div>
+          <p class="eyebrow">ready to grow</p>
+          <h2>One binary.<br>The whole workshop.</h2>
+          <p>Install with Cargo straight from GitHub (needs a stable <a href="https://rustup.rs">Rust toolchain</a>; the binary lands in <code>~/.cargo/bin</code>). The first command installs the latest release; the second tracks <code>master</code>. To update, rerun with the new tag — or add <code>--force</code> to refresh a <code>master</code> build. Prebuilt binaries are planned for a later release.</p>
+          <div class="install-options">
+            <div class="install-option"><code>cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked</code><button class="copy" type="button" data-copy="cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked">copy</button></div>
+            <div class="install-option"><code>cargo install --git https://github.com/strozynskiw/bonsai.git --locked bonsai</code><button class="copy" type="button" data-copy="cargo install --git https://github.com/strozynskiw/bonsai.git --locked bonsai">copy</button></div>
+          </div>
+        </div>
+        <aside class="install-aside">
+          <strong>SHIP TARGETS (later)</strong>
+          <div>macOS · Apple Silicon</div>
+          <div>macOS · Intel</div>
+          <div>Linux · x86_64</div>
+          <div>Linux · arm64</div>
+          <div>builds with stable Rust</div>
+          <div>installs to ~/.cargo/bin</div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell footer-inner">
+      <span class="footer-tag"><strong>bonsai</strong> · grow code with care.</span>
+      <span>local-first · provider-independent · built in Rust</span>
+      <a href="https://github.com/strozynskiw/bonsai" target="_blank" rel="noopener">github ↗</a>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const value = button.getAttribute("data-copy") || "";
+          try {
+            await navigator.clipboard.writeText(value);
+            const before = button.textContent;
+            button.textContent = "copied";
+            window.setTimeout(() => { button.textContent = before; }, 1300);
+          } catch {
+            button.textContent = "select";
+          }
+        });
+      });
+
+      function setupTabs(selector, panelSelector, dataName) {
+        const tabs = Array.from(document.querySelectorAll(selector));
+        const panels = Array.from(document.querySelectorAll(panelSelector));
+
+        function activate(tab) {
+          const target = tab.getAttribute(dataName);
+          tabs.forEach((item) => {
+            const selected = item === tab;
+            item.setAttribute("aria-selected", String(selected));
+            item.tabIndex = selected ? 0 : -1;
+            item.classList.toggle("active", selected);
+          });
+          panels.forEach((panel) => {
+            const selected = panel.id === target;
+            panel.classList.toggle("active", selected);
+            panel.hidden = !selected;
+          });
+        }
+
+        tabs.forEach((tab, index) => {
+          tab.addEventListener("click", () => activate(tab));
+          tab.addEventListener("keydown", (event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const delta = event.key === "ArrowRight" ? 1 : -1;
+            const next = tabs[(index + delta + tabs.length) % tabs.length];
+            activate(next);
+            next.focus();
+          });
+        });
+
+        const selected = tabs.find((tab) => tab.getAttribute("aria-selected") === "true") || tabs[0];
+        if (selected) activate(selected);
+      }
+
+      setupTabs("[data-tui]", ".tui-panel", "data-tui");
+      setupTabs("[data-example]", ".example-code", "data-example");
+
+      if ("IntersectionObserver" in window && !reducedMotion) {
+        const observer = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add("visible");
+              observer.unobserve(entry.target);
+            }
+          });
+        }, { threshold: .09 });
+        document.querySelectorAll(".reveal").forEach((item) => observer.observe(item));
+      } else {
+        document.querySelectorAll(".reveal").forEach((item) => item.classList.add("visible"));
+      }
+
+      const canvas = document.getElementById("pixel-garden");
+      const ctx = canvas.getContext("2d");
+      const palette = {
+        leaf: ["#294b31", "#416b42", "#669957", "#91c966", "#d0ed8d"],
+        bark: ["#513828", "#725039", "#9b6c48"],
+        pot: ["#5e3e2c", "#83583b", "#c28a52"]
+      };
+      let seed = Math.floor(Math.random() * 0xffffffff);
+      let geometry = null;
+      let startTime = performance.now();
+      let raf = 0;
+
+      function randomFactory(initial) {
+        let state = initial >>> 0;
+        return () => {
+          state += 0x6D2B79F5;
+          let value = state;
+          value = Math.imul(value ^ value >>> 15, value | 1);
+          value ^= value + Math.imul(value ^ value >>> 7, value | 61);
+          return ((value ^ value >>> 14) >>> 0) / 4294967296;
+        };
+      }
+
+      function resizeCanvas() {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.max(1, Math.round(rect.width * dpr));
+        canvas.height = Math.max(1, Math.round(rect.height * dpr));
+        canvas.style.width = rect.width + "px";
+        canvas.style.height = rect.height + "px";
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        geometry = buildTree(rect.width, rect.height, seed);
+      }
+
+      function buildTree(width, height, treeSeed) {
+        const rng = randomFactory(treeSeed);
+        const unit = Math.max(5, Math.min(10, Math.round(Math.min(width / 64, height / 58))));
+        const branches = [];
+        const leaves = [];
+        const snap = (value) => Math.round(value / unit) * unit;
+        const root = { x: snap(width * .5), y: height - unit * 9 };
+
+        function addPath(knots, startThickness, endThickness, startAt, endAt, accent = false) {
+          const points = [];
+          for (let segment = 0; segment < knots.length - 1; segment += 1) {
+            const p0 = knots[Math.max(0, segment - 1)];
+            const p1 = knots[segment];
+            const p2 = knots[segment + 1];
+            const p3 = knots[Math.min(knots.length - 1, segment + 2)];
+            const distance = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            const steps = Math.max(3, Math.round(distance / unit * 1.5));
+
+            for (let step = segment === 0 ? 0 : 1; step <= steps; step += 1) {
+              const t = step / steps;
+              const t2 = t * t;
+              const t3 = t2 * t;
+              const point = {
+                x: snap(.5 * (2 * p1.x + (-p0.x + p2.x) * t
+                  + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2
+                  + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)),
+                y: snap(.5 * (2 * p1.y + (-p0.y + p2.y) * t
+                  + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2
+                  + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3))
+              };
+              const previous = points[points.length - 1];
+              if (!previous || previous.x !== point.x || previous.y !== point.y) points.push(point);
+            }
+          }
+
+          const branch = { points, startThickness, endThickness, startAt, endAt, accent };
+          branches.push(branch);
+          return branch;
+        }
+
+        function addLeafPad(center, startAt, radiusX, radiusY) {
+          const lobes = [
+            { x: -radiusX * .56, y: .25, rx: radiusX * .56, ry: radiusY * .78 },
+            { x: 0, y: -.38, rx: radiusX * .72, ry: radiusY },
+            { x: radiusX * .58, y: .18, rx: radiusX * .54, ry: radiusY * .76 }
+          ];
+
+          lobes.forEach((lobe, lobeIndex) => {
+            const columns = Math.ceil(lobe.rx * (.97 + rng() * .06));
+            const rows = Math.ceil(lobe.ry * (.97 + rng() * .06));
+            for (let row = -rows; row <= rows; row += 1) {
+              for (let column = -columns; column <= columns; column += 1) {
+                const vertical = row < 0 ? row / rows : row / (rows * .58);
+                const distance = (column / columns) ** 2 + vertical ** 2;
+                const edge = 1 + (rng() - .5) * .18;
+                if (distance > edge || (distance > .72 && rng() < .1)) continue;
+
+                const tone = rng() + (row < 0 ? .2 : -.1);
+                const colorIndex = tone > .92 ? 4 : tone > .66 ? 3 : tone > .38 ? 2 : tone > .14 ? 1 : 0;
+                leaves.push({
+                  x: center.x + (lobe.x + column) * unit,
+                  y: center.y + (lobe.y + row) * unit,
+                  size: distance < .36 && rng() > .97 ? 2 : 1,
+                  color: palette.leaf[colorIndex],
+                  startAt: startAt + lobeIndex * .012 + Math.max(0, distance) * .025 + rng() * .018
+                });
+              }
+            }
+          });
+        }
+
+        // Informal-upright bonsai: one S-curved trunk and a few asymmetric pads.
+        const at = (x, y) => ({ x: snap(root.x + x * unit), y: snap(root.y - y * unit) });
+        addPath([
+          at(0, 0), at(-2.4, 6), at(2.2, 13), at(-1.3, 20),
+          at(3.1, 27), at(.2, 34), at(3.5, 41)
+        ], 6, 2, .05, .46);
+
+        // Exposed roots anchor the trunk into the shallow pot.
+        addPath([at(0, .5), at(-3.5, 1.4), at(-8, .2)], 4, 1, .03, .14);
+        addPath([at(.5, .3), at(4, 1.2), at(8.5, .1)], 4, 1, .04, .15);
+        addPath([
+          at(-.8, 1), at(-2.6, 7), at(1.1, 13), at(-2.2, 20),
+          at(2, 27), at(-.8, 34), at(2.7, 40)
+        ], 1.2, 1, .09, .47, true);
+
+        const pad = (x, y, startAt, radiusX, radiusY) => {
+          addLeafPad(
+            at(x + (rng() - .5) * .8, y + (rng() - .5) * .4),
+            startAt,
+            radiusX * (.96 + rng() * .08),
+            radiusY * (.96 + rng() * .08)
+          );
+        };
+
+        // Alternating pads overlap inward while preserving deliberate negative space.
+        addPath([at(1.7, 11), at(-5, 12), at(-13, 14), at(-20, 14.5)], 3.5, 1, .28, .43);
+        pad(-14.5, 16, .41, 9.8, 3.5);
+
+        addPath([at(-1.4, 20), at(5.5, 20.5), at(12, 22.5), at(18, 23)], 3, 1, .4, .55);
+        pad(12.5, 25, .53, 9.4, 3.5);
+
+        addPath([at(3, 27), at(-3, 27.5), at(-9, 29.5), at(-15, 30)], 2.7, 1, .52, .66);
+        pad(-10.5, 32, .64, 8.3, 3.2);
+
+        addPath([at(.4, 34), at(5, 34.5), at(9, 36), at(13, 37)], 2.3, 1, .63, .76);
+        pad(8.5, 39, .74, 7.4, 3.1);
+
+        addPath([at(3.5, 41), at(1.5, 43), at(2.4, 45)], 2, 1, .72, .83);
+        pad(1.5, 45.5, .81, 8.2, 4.2);
+
+        return { width, height, unit, root, branches, leaves };
+      }
+
+      function drawPixel(x, y, size, color, unit) {
+        ctx.fillStyle = color;
+        const extent = unit * size;
+        ctx.fillRect(Math.round(x - extent / 2), Math.round(y - extent / 2), extent, extent);
+      }
+
+      function drawTree(progress) {
+        if (!geometry) return;
+        const { width, height, unit, root, branches, leaves } = geometry;
+        ctx.clearRect(0, 0, width, height);
+
+        if (progress > .01) {
+          ctx.fillStyle = palette.leaf[0];
+          ctx.fillRect(root.x - unit * 9, root.y - unit, unit * 18, unit * 2);
+          ctx.fillStyle = palette.pot[0];
+          ctx.fillRect(root.x - unit * 12, root.y + unit, unit * 24, unit);
+          ctx.fillStyle = palette.pot[2];
+          ctx.fillRect(root.x - unit * 13, root.y + unit * 2, unit * 26, unit * 2);
+          ctx.fillStyle = palette.pot[1];
+          ctx.fillRect(root.x - unit * 11, root.y + unit * 4, unit * 22, unit * 4);
+          ctx.fillStyle = palette.pot[0];
+          ctx.fillRect(root.x - unit * 10, root.y + unit * 8, unit * 20, unit);
+          ctx.fillRect(root.x - unit * 8, root.y + unit * 9, unit * 4, unit);
+          ctx.fillRect(root.x + unit * 4, root.y + unit * 9, unit * 4, unit);
+        }
+
+        branches.forEach((branch) => {
+          const visible = Math.max(0, Math.min(1, (progress - branch.startAt) / (branch.endAt - branch.startAt)));
+          const count = Math.max(0, Math.ceil(branch.points.length * visible));
+          branch.points.slice(0, count).forEach((point, index) => {
+            const branchProgress = index / Math.max(1, branch.points.length - 1);
+            const thickness = branch.startThickness
+              + (branch.endThickness - branch.startThickness) * branchProgress;
+            const colorIndex = Math.min(palette.bark.length - 1, Math.floor(branchProgress * palette.bark.length));
+            const color = branch.accent ? palette.bark[2] : palette.bark[colorIndex];
+            drawPixel(point.x, point.y, Math.max(1, Math.round(thickness)), color, unit);
+          });
+        });
+
+        leaves.forEach((leaf) => {
+          if (progress >= leaf.startAt) {
+            drawPixel(leaf.x, leaf.y, leaf.size, leaf.color, unit);
+          }
+        });
+      }
+
+      function animate(now) {
+        const duration = reducedMotion ? 1 : 2400;
+        const progress = Math.min(1, (now - startTime) / duration);
+        drawTree(progress);
+        if (progress < 1) {
+          raf = window.requestAnimationFrame(animate);
+        }
+      }
+
+      function regrow() {
+        seed = Math.floor(Math.random() * 0xffffffff);
+        geometry = buildTree(canvas.getBoundingClientRect().width, canvas.getBoundingClientRect().height, seed);
+        startTime = performance.now();
+        window.cancelAnimationFrame(raf);
+        raf = window.requestAnimationFrame(animate);
+      }
+
+      document.getElementById("regrow").addEventListener("click", regrow);
+
+      let resizeTimer = 0;
+      window.addEventListener("resize", () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+          resizeCanvas();
+          drawTree(1);
+        }, 120);
+      });
+
+      resizeCanvas();
+      window.requestAnimationFrame(animate);
+    })();
+  </script>
+</body>
+</html>

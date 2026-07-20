@@ -1,0 +1,116 @@
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M3"
+metadata_model = "minimax-coding-plan/MiniMax-M3"
+remote_model = "MiniMax-M3"
+recommended = true
+default = true
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M2.5"
+metadata_model = "minimax-coding-plan/MiniMax-M2.5"
+remote_model = "MiniMax-M2.5"
+roles = ["cheap"]
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M2.5-highspeed"
+metadata_model = "minimax-coding-plan/MiniMax-M2.5-highspeed"
+remote_model = "MiniMax-M2.5-highspeed"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M2.7"
+metadata_model = "minimax-coding-plan/MiniMax-M2.7"
+remote_model = "MiniMax-M2.7"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M2"
+metadata_model = "minimax-coding-plan/MiniMax-M2"
+remote_model = "MiniMax-M2"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 196608
+output_limit = 128000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M2.7-highspeed"
+metadata_model = "minimax-coding-plan/MiniMax-M2.7-highspeed"
+remote_model = "MiniMax-M2.7-highspeed"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M2.1"
+metadata_model = "minimax-coding-plan/MiniMax-M2.1"
+remote_model = "MiniMax-M2.1"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0 }
+reasoning_options = []
+
+[[targets]]
+connection = "minimax-coding-plan"
+model = "minimax-coding-plan/MiniMax-M2.1-highspeed"
+# models.dev has no plan-specific M2.1-highspeed row; the base M2.1 row
+# supplies capabilities while the subscription price remains zero.
+metadata_model = "minimax-coding-plan/MiniMax-M2.1"
+remote_model = "MiniMax-M2.1-highspeed"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+pinned = true
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0 }
+reasoning_options = []

@@ -1,0 +1,234 @@
+name: RC soak qualification
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      record:
+        description: Active record path (blank discovers the only active record)
+        required: false
+        default: ""
+        type: string
+      require_qualified:
+        description: Fail the dispatch while the valid soak is still pending
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  qualify:
+    name: Validate immutable RC evidence
+    runs-on: self-hosted
+    env:
+      BONSAI_RELEASE_PUBLIC_KEY: ${{ vars.BONSAI_RELEASE_PUBLIC_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      REQUESTED_RECORD: ${{ inputs.record || '' }}
+      REQUIRE_QUALIFIED: ${{ inputs.require_qualified || false }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select active record
+        id: record
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+
+          requested = os.environ.get("REQUESTED_RECORD", "")
+          pattern = re.compile(
+              r"release/soak/active/rc-v(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-rc\."
+              r"(?:0|[1-9][0-9]*)\.json"
+          )
+          if requested:
+              candidates = [Path(requested)]
+          else:
+              active = Path("release/soak/active")
+              candidates = sorted(active.glob("rc-v*.json")) if active.is_dir() else []
+          if not candidates:
+              record = ""
+          elif len(candidates) != 1:
+              raise SystemExit("expected at most one active RC soak record")
+          else:
+              record = candidates[0].as_posix()
+              if pattern.fullmatch(record) is None or not candidates[0].is_file():
+                  raise SystemExit("active record path is invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"path={record}\n")
+          PY
+
+      - name: No active soak
+        if: steps.record.outputs.path == ''
+        run: |
+          if [ "$REQUIRE_QUALIFIED" = "true" ]; then
+            echo "Qualification was required, but no active RC soak record exists."
+            exit 1
+          fi
+          echo "No active RC soak record; nothing to qualify."
+
+      - name: Read immutable release identity
+        if: steps.record.outputs.path != ''
+        id: release
+        env:
+          RECORD: ${{ steps.record.outputs.path }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          def unique(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise SystemExit(f"record repeats JSON key {key!r}")
+                  result[key] = value
+              return result
+
+          with open(os.environ["RECORD"], "r", encoding="utf-8") as source:
+              record = json.load(source, object_pairs_hook=unique)
+          tag = record.get("release", {}).get("tag", "")
+          commit = record.get("release", {}).get("peeled_commit", "")
+          tag_pattern = re.compile(
+              r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+              r"(?:0|[1-9][0-9]*)-rc\.(?:0|[1-9][0-9]*)"
+          )
+          if tag_pattern.fullmatch(tag) is None:
+              raise SystemExit("record release tag is not a strict semver RC tag")
+          if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit) is None:
+              raise SystemExit("record peeled commit is invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"tag={tag}\n")
+              output.write(f"commit={commit}\n")
+          PY
+
+      - name: Download exact prerelease evidence
+        if: steps.record.outputs.path != ''
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir -p target/soak/assets
+          gh release download "$TAG" \
+            --dir target/soak/assets \
+            --pattern release-manifest.json \
+            --pattern release-manifest.json.sig \
+            --pattern '*.performance.json' \
+            --pattern '*.tar.gz'
+          published_at="$(gh release view "$TAG" --json publishedAt --jq .publishedAt)"
+          test -n "$published_at"
+          printf '%s\n' "$published_at" > target/soak/release-published-at.txt
+
+      - name: Materialize release verification key
+        if: steps.record.outputs.path != ''
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          encoded = os.environ.get("BONSAI_RELEASE_PUBLIC_KEY", "")
+          try:
+              raw = base64.b64decode(encoded, validate=True)
+          except ValueError as error:
+              raise SystemExit(f"BONSAI_RELEASE_PUBLIC_KEY is not strict base64: {error}")
+          if len(raw) != 32:
+              raise SystemExit("BONSAI_RELEASE_PUBLIC_KEY must decode to 32 bytes")
+          der = bytes.fromhex("302a300506032b6570032100") + raw
+          body = base64.b64encode(der).decode("ascii")
+          lines = [body[index:index + 64] for index in range(0, len(body), 64)]
+          pem = "-----BEGIN PUBLIC KEY-----\n" + "\n".join(lines) + "\n-----END PUBLIC KEY-----\n"
+          Path("target/soak/release-public-key.pem").write_text(pem, encoding="ascii")
+          PY
+
+      - name: Verify artifact provenance
+        if: steps.record.outputs.path != ''
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          PEELED_COMMIT: ${{ steps.release.outputs.commit }}
+        shell: bash
+        run: |
+          assets=(
+            target/soak/assets/release-manifest.json
+            target/soak/assets/release-manifest.json.sig
+          )
+          targets=(
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+          )
+          for target in "${targets[@]}"; do
+            assets+=("target/soak/assets/bonsai-${TAG}-${target}.tar.gz")
+            assets+=("target/soak/assets/bonsai-${TAG}-${target}.performance.json")
+          done
+          for asset in "${assets[@]}"; do
+            test -f "$asset"
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$TAG" \
+              --source-digest "$PEELED_COMMIT" \
+          done
+
+      - name: Validate soak record
+        if: steps.record.outputs.path != ''
+        id: validate
+        env:
+          RECORD: ${{ steps.record.outputs.path }}
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          targets=(
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+          )
+          arguments=(
+            --record "$RECORD"
+            --manifest target/soak/assets/release-manifest.json
+            --manifest-signature target/soak/assets/release-manifest.json.sig
+            --release-public-key target/soak/release-public-key.pem
+            --release-published-at "$(<target/soak/release-published-at.txt)"
+          )
+          for target in "${targets[@]}"; do
+            arguments+=(--archive "$target=target/soak/assets/bonsai-${TAG}-${target}.tar.gz")
+            arguments+=(--performance-report "$target=target/soak/assets/bonsai-${TAG}-${target}.performance.json")
+          done
+          set +e
+          python3 scripts/check-rc-soak.py "${arguments[@]}" > target/soak/status.json
+          validator_exit=$?
+          set -e
+          cat target/soak/status.json
+          status="$(python3 -c 'import json; print(json.load(open("target/soak/status.json"))["status"])')"
+          {
+            echo "### RC soak qualification"
+            echo
+            echo "- Status: \`$status\`"
+            echo "- Validator exit: \`$validator_exit\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$validator_exit" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$validator_exit" -eq 2 ] && [ "$REQUIRE_QUALIFIED" != "true" ]; then
+            exit 0
+          fi
+          exit "$validator_exit"
+
+      - name: Upload qualification status
+        if: always() && steps.record.outputs.path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-soak-status
+          path: target/soak/status.json
+          if-no-files-found: warn
+          retention-days: 30

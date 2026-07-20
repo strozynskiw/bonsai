@@ -1,0 +1,133 @@
+# Default gpt-5.5: a 200K working window keeps per-turn prompts small and fast
+# and compacts earlier. The full 1M window is offered as the separate
+# `openai/gpt-5.5-1m` target below for sessions that need it.
+[[targets]]
+connection = "codex"
+model = "openai/gpt-5.5"
+remote_model = "gpt-5.5"
+recommended = true
+default = true
+endpoint_path = "responses"
+token_counter = "tiktoken"
+# Deliberate working-window cap (models.dev reports the full 1050000).
+pinned = true
+context_window = 200000
+output_limit = 128000
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+# Same wire model (`gpt-5.5`) exposed with its full 1M context window. Larger,
+# slower per-turn prompts; maximizes cache reuse for long sessions.
+[[targets]]
+connection = "codex"
+model = "openai/gpt-5.5-1m"
+# The 1m alias is bonsai-invented; point metadata at the real models.dev row
+# so pricing/features backfill instead of silently missing.
+metadata_model = "openai/gpt-5.5"
+remote_model = "gpt-5.5"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+context_window = 1050000
+output_limit = 128000
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-5.4"
+remote_model = "gpt-5.4"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+context_window = 1050000
+output_limit = 128000
+pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-5.4-mini"
+remote_model = "gpt-5.4-mini"
+roles = ["cheap"]
+endpoint_path = "responses"
+token_counter = "tiktoken"
+context_window = 400000
+output_limit = 128000
+pricing = { input_micros_per_million = 750000, output_micros_per_million = 4500000, cache_read_micros_per_million = 75000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+# gpt-5.6 previews served by the Codex backend (sol/terra/luna). Values from
+# models.dev `openai` rows; the live /models refresh overlays reasoning levels.
+[[targets]]
+connection = "codex"
+model = "openai/gpt-5.6-sol"
+remote_model = "gpt-5.6-sol"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+context_window = 1050000
+output_limit = 128000
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-5.6-terra"
+remote_model = "gpt-5.6-terra"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+context_window = 1050000
+output_limit = 128000
+pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000, cache_write_micros_per_million = 3125000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-5.6-luna"
+remote_model = "gpt-5.6-luna"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+context_window = 1050000
+output_limit = 128000
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh"]

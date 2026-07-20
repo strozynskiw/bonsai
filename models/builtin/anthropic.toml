@@ -1,0 +1,125 @@
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-sonnet-4-5"
+remote_model = "claude-sonnet-4-5"
+recommended = true
+default = true
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+# models.dev reports 1M, but that window is gated behind the
+# `context-1m-2025-08-07` beta header, which bonsai does not send — requests
+# past 200K would 400. Native window stays authoritative here.
+pinned = true
+context_window = 200000
+output_limit = 64000
+pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000, cache_write_micros_per_million = 3750000 }
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-opus-4-1"
+remote_model = "claude-opus-4-1"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 200000
+output_limit = 32000
+pricing = { input_micros_per_million = 15000000, output_micros_per_million = 75000000, cache_read_micros_per_million = 1500000, cache_write_micros_per_million = 18750000 }
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-haiku-4-5"
+remote_model = "claude-haiku-4-5"
+roles = ["cheap"]
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 200000
+output_limit = 64000
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 5000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
+
+[[targets.reasoning_options]]
+type = "budget_tokens"
+min = 1024
+
+# ---------------------------------------------------------------------------
+# Adaptive-thinking generation (claude-sonnet-4-6 and newer). These models
+# REJECT `{"type": "enabled", "budget_tokens": N}` with HTTP 400 — the
+# `anthropic-adaptive` codec sends `{"type": "adaptive"}` and puts depth in
+# `output_config.effort`. Deliberate, don't "simplify" them onto the
+# budget_tokens pattern above. Pricing is intentionally omitted: models.dev
+# backfills it, which tracks promo pricing (e.g. sonnet-5 intro rates) without
+# a binary update. Windows are native 1M — no beta header required.
+# ---------------------------------------------------------------------------
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-sonnet-5"
+remote_model = "claude-sonnet-5"
+recommended = true
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-sonnet-4-6"
+remote_model = "claude-sonnet-4-6"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+
+[[targets.reasoning_options]]
+type = "effort"
+# xhigh arrived with opus-4-7; sonnet-4-6 tops out at max.
+values = ["none", "low", "medium", "high", "max"]
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-opus-4-8"
+remote_model = "claude-opus-4-8"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-fable-5"
+remote_model = "claude-fable-5"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+
+[[targets.reasoning_options]]
+type = "effort"
+# No "none": thinking is always on for fable-5 and an explicit
+# `{"type": "disabled"}` returns HTTP 400, so Off must not be offered.
+values = ["low", "medium", "high", "xhigh", "max"]

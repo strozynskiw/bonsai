@@ -1,0 +1,80 @@
+# Mistral AI La Plateforme (https://api.mistral.ai/v1), OpenAI Chat Completions
+# wire. Auth is a plain `Authorization: Bearer <MISTRAL_API_KEY>`.
+#
+# Reasoning: Mistral's reasoning line is the Magistral family, toggled by a
+# top-level `prompt_mode: "reasoning"` and returning structured thinking/text
+# content parts. Bonsai has no codec for that wire shape, so the Magistral models
+# are intentionally NOT shipped here — the targets below are the direct-answer
+# coding/general models, exposed without reasoning options. Add Magistral once a
+# `prompt_mode` codec + structured-content parsing exist.
+#
+# Caching: Mistral caches on an explicit `prompt_cache_key` and reports read hits
+# in usage.prompt_tokens_details.cached_tokens at ~10% of input price — exactly
+# what bonsai's openai-chat transport sends when prompt_cache is on. Left at the
+# default (TransportDefault) cache policy; consider "rolling-history" once warm
+# cache reuse is verified live.
+#
+# `*-latest` aliases are the served, auto-updating handles. Windows come from
+# models.dev; the official pricing page is authoritative for prices (it and
+# models.dev disagreed on Mistral Medium's output price — the page's value is
+# used). All pinned.
+#
+# not-shipped: devstral-latest — models.dev's `devstral-latest`/`devstral-2512`
+#   rows are spec-and-price identical to the shipped `devstral-medium-latest`
+#   (262K/262K, $0.4/$2, Dec-2025 releases): an alias of the same engine, not a
+#   distinct model. Revisit if a live /models listing shows them diverging.
+# not-shipped: devstral-2512 — see devstral-latest above.
+# not-shipped: codestral-latest — FIM/completion model (4K output ceiling), not
+#   useful for agent turns.
+# (The Magistral family is excluded for the codec reason in the Reasoning note
+# above; magistral-medium-latest / magistral-small flag as informational gaps
+# until a `prompt_mode` codec exists.)
+
+[[targets]]
+connection = "mistral"
+model = "mistral/devstral-medium-latest"
+remote_model = "devstral-medium-latest"
+recommended = true
+default = true
+token_counter = "tiktoken"
+pinned = true
+context_window = 262144
+# Advertised max output is very large; capped to the reference-agent clamp as the
+# rumination/output-containment lever, same as the other connections.
+output_limit = 32000
+pricing = { input_micros_per_million = 400000, output_micros_per_million = 2000000, cache_read_micros_per_million = 40000 }
+
+[[targets]]
+connection = "mistral"
+model = "mistral/mistral-medium-latest"
+remote_model = "mistral-medium-latest"
+recommended = true
+token_counter = "tiktoken"
+pinned = true
+context_window = 262144
+output_limit = 32000
+pricing = { input_micros_per_million = 1500000, output_micros_per_million = 7500000, cache_read_micros_per_million = 150000 }
+
+[[targets]]
+connection = "mistral"
+model = "mistral/mistral-large-latest"
+remote_model = "mistral-large-latest"
+token_counter = "tiktoken"
+pinned = true
+context_window = 262144
+output_limit = 32000
+pricing = { input_micros_per_million = 500000, output_micros_per_million = 1500000, cache_read_micros_per_million = 50000 }
+
+[[targets]]
+connection = "mistral"
+model = "mistral/devstral-small-latest"
+remote_model = "devstral-small-latest"
+# models.dev carries only dated Devstral Small snapshots, not the `-latest`
+# alias; map metadata to the current one for backfill (specs match).
+metadata_model = "mistral/devstral-small-2507"
+roles = ["cheap"]
+token_counter = "tiktoken"
+pinned = true
+context_window = 128000
+output_limit = 32000
+pricing = { input_micros_per_million = 100000, output_micros_per_million = 300000, cache_read_micros_per_million = 10000 }

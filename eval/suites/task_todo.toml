@@ -1,0 +1,31 @@
+id = "task_todo"
+seed = 271
+
+[budgets]
+max_logical_turns = 45
+max_provider_attempts = 50
+max_duration_ms = 900000
+max_prompt_tokens = 1500000
+max_completion_tokens = 150000
+max_uncached_prompt_tokens = 450000
+max_cost_micros = 2000000
+max_completion_tokens_per_turn = 32000
+max_missing_usage_turns = 0
+min_post_warmup_cache_percent = 65
+cache_warmup_turns = 5
+max_reads_per_unchanged_path = 2
+
+[[tasks]]
+id = "tasklog_cli"
+fixture = "fixtures/task_todo"
+prompt = "Read task_todo.md, implement the complete tasklog CLI in this worktree, and run sh check_task_todo.sh before finishing."
+
+[[tasks.graders]]
+type = "test-pass"
+command = "sh check_task_todo.sh"
+timeout_secs = 180
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["tasklog"]
+not_contains = ["could not", "unable to", "did not finish"]

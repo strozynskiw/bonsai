@@ -1,0 +1,2791 @@
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::model_role::LegacyModelRole;
+use crate::provider::{
+    ModelPricing, ParameterPreview, ProviderMetadata, ReasoningCodec, ReasoningOption,
+    ReasoningSelection, TokenCounterKind,
+};
+
+mod availability;
+mod ids;
+mod io;
+mod local;
+mod models_dev;
+mod spec;
+mod transaction;
+
+pub(crate) use ids::*;
+pub(crate) use io::*;
+pub(crate) use local::*;
+pub(crate) use models_dev::*;
+pub(crate) use spec::*;
+
+const MODELS_DEV_CACHE_FILE: &str = "models-dev.json";
+const LIVE_MODELS_CACHE_DIR: &str = "live-models";
+pub(crate) const MODELS_DEV_URL_ENV: &str = "BONSAI_MODELS_DEV_URL";
+pub(crate) const MODELS_DEV_PATH_ENV: &str = "BONSAI_MODELS_DEV_PATH";
+pub(crate) const DISABLE_MODELS_FETCH_ENV: &str = "BONSAI_DISABLE_MODELS_FETCH";
+pub(crate) const MODELS_DEV_TTL_ENV: &str = "BONSAI_MODELS_DEV_TTL_SECS";
+pub(crate) const DEFAULT_MODELS_DEV_URL: &str = "https://models.dev/api.json";
+
+const BUILTIN_CONNECTIONS: TomlSource<'static> = TomlSource {
+    name: "models/builtin/connections.toml",
+    content: include_str!("../../models/builtin/connections.toml"),
+};
+const EXAMPLE_PROVIDER_FILE: &str = "example-local.toml";
+const EXAMPLE_MODEL_FILE: &str = "example-local.toml";
+const EXAMPLE_PROVIDER_TOML: &str = r#"# Example custom connector.
+# Set enabled = true and edit ids, URLs, env vars, and display names.
+
+[[connections]]
+id = "local-example"
+enabled = false
+display_name = "Local Example"
+auth = "optional-api-key"
+transport = "openai-chat"
+default_base_url = "http://localhost:11434/v1"
+api_key_env = "LOCAL_EXAMPLE_API_KEY"
+model_env = "LOCAL_EXAMPLE_MODEL"
+base_url_env = "LOCAL_EXAMPLE_BASE_URL"
+default_endpoint_path = "chat/completions"
+default_token_counter = "heuristic"
+# Send prompt-cache hints (`prompt_cache_key` on openai-chat,
+# `cache_control` breakpoints on anthropic-messages). Local backends that
+# cache prefixes benefit; others ignore the hint.
+prompt_cache = true
+"#;
+const EXAMPLE_MODEL_TOML: &str = r#"# Example local/private model.
+# Set enabled = true after enabling the matching connector.
+
+[[targets]]
+connection = "local-example"
+enabled = false
+model = "example-small"
+remote_model = "example-small"
+default = true
+# Match the serving context size (llama.cpp --ctx-size / Ollama num_ctx),
+# not the model card maximum — this drives compaction budgets.
+context_window = 32768
+output_limit = 4096
+token_counter = "heuristic"
+features = ["tool-call"]
+"#;
+const BUILTIN_TARGETS: &[TomlSource<'static>] = &[
+    TomlSource {
+        name: "models/builtin/anthropic.toml",
+        content: include_str!("../../models/builtin/anthropic.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/codex.toml",
+        content: include_str!("../../models/builtin/codex.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/kimi-coding-plan.toml",
+        content: include_str!("../../models/builtin/kimi-coding-plan.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/minimax.toml",
+        content: include_str!("../../models/builtin/minimax.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/minimax-coding-plan.toml",
+        content: include_str!("../../models/builtin/minimax-coding-plan.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/mimo.toml",
+        content: include_str!("../../models/builtin/mimo.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/mimo-coding-plan.toml",
+        content: include_str!("../../models/builtin/mimo-coding-plan.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/moonshotai.toml",
+        content: include_str!("../../models/builtin/moonshotai.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/openrouter.toml",
+        content: include_str!("../../models/builtin/openrouter.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/openai.toml",
+        content: include_str!("../../models/builtin/openai.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/opencode.toml",
+        content: include_str!("../../models/builtin/opencode.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/opencode-zen.toml",
+        content: include_str!("../../models/builtin/opencode-zen.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/zai.toml",
+        content: include_str!("../../models/builtin/zai.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/zai-coding-plan.toml",
+        content: include_str!("../../models/builtin/zai-coding-plan.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/deepseek.toml",
+        content: include_str!("../../models/builtin/deepseek.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/qwencloud.toml",
+        content: include_str!("../../models/builtin/qwencloud.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/qwencloud-token-plan.toml",
+        content: include_str!("../../models/builtin/qwencloud-token-plan.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/gemini.toml",
+        content: include_str!("../../models/builtin/gemini.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/xai.toml",
+        content: include_str!("../../models/builtin/xai.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/mistral.toml",
+        content: include_str!("../../models/builtin/mistral.toml"),
+    },
+    TomlSource {
+        name: "models/builtin/tencent.toml",
+        content: include_str!("../../models/builtin/tencent.toml"),
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TomlSource<'a> {
+    name: &'a str,
+    content: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SourceKind {
+    BuiltIn,
+    User,
+    Project,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CatalogError {
+    #[error("failed to parse {source_name}: {source}")]
+    Toml {
+        source_name: String,
+        source: toml::de::Error,
+    },
+    #[error("failed to serialize catalog file `{source_name}`: {source}")]
+    TomlSerialize {
+        source_name: String,
+        source: toml::ser::Error,
+    },
+    #[error("failed to parse Models.dev catalog `{source_name}`: {source}")]
+    ModelsDevJson {
+        source_name: String,
+        source: serde_json::Error,
+    },
+    #[error("failed to serialize live model availability `{connection_id}`: {source}")]
+    LiveAvailabilitySerialize {
+        connection_id: ConnectionId,
+        source: serde_json::Error,
+    },
+    #[error("failed to fetch Models.dev catalog `{url}`: {source}")]
+    ModelsDevFetch { url: String, source: reqwest::Error },
+    #[error("Models.dev catalog `{url}` returned HTTP {status}")]
+    ModelsDevHttpStatus { url: String, status: u16 },
+    #[error(
+        "Models.dev catalog `{source_name}` provider `{provider_id}` has invalid model id `{model_id}`: {source}"
+    )]
+    InvalidModelsDevModelId {
+        source_name: String,
+        provider_id: String,
+        model_id: String,
+        source: ModelIdError,
+    },
+    #[error("failed to read catalog directory `{path}`: {source}")]
+    ReadDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to read catalog file `{path}`: {source}")]
+    ReadFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to create catalog directory `{path}`: {source}")]
+    CreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to write catalog file `{path}`: {source}")]
+    WriteFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to replace catalog file `{path}` with `{temp_path}`: {source}")]
+    RenameFile {
+        path: PathBuf,
+        temp_path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to lock local catalog `{path}`: {source}")]
+    CatalogLock {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("local catalog recovery journal `{path}` is invalid: {message}")]
+    InvalidLocalCatalogJournal { path: PathBuf, message: String },
+    #[error("local catalog entry is invalid: {message}")]
+    InvalidLocalCatalogInput { message: String },
+    #[error("local catalog file already exists: `{path}`")]
+    LocalCatalogFileExists { path: PathBuf },
+    #[error("provider `{connection_id}` has no user catalog file to remove")]
+    NotUserManagedConnection { connection_id: ConnectionId },
+    #[error(
+        "catalog file `{path}` defines entries beyond `{connection_id}`; edit the file manually"
+    )]
+    SharedCatalogFile {
+        path: PathBuf,
+        connection_id: ConnectionId,
+    },
+    #[error("catalog file `{source_name}` connection `{id}` is missing required field `{field}`")]
+    MissingConnectionField {
+        source_name: String,
+        id: ConnectionId,
+        field: &'static str,
+    },
+    #[error("duplicate connection id `{id}`")]
+    DuplicateConnection { id: ConnectionId },
+    #[error("duplicate target `{connection_id}:{model_id}`")]
+    DuplicateTarget {
+        connection_id: ConnectionId,
+        model_id: ModelId,
+    },
+    #[error("target `{connection_id}:{model_id}` references unknown connection")]
+    UnknownTargetConnection {
+        connection_id: ConnectionId,
+        model_id: ModelId,
+    },
+    #[error("connection `{connection_id}` has multiple default targets: `{first}` and `{second}`")]
+    DuplicateDefaultTarget {
+        connection_id: ConnectionId,
+        first: ModelId,
+        second: ModelId,
+    },
+    #[error("unknown connection `{id}`")]
+    UnknownConnection { id: ConnectionId },
+    #[error("unknown target `{connection_id}:{model_id}`")]
+    UnknownTarget {
+        connection_id: ConnectionId,
+        model_id: ModelId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ModelFeature {
+    ToolCall,
+    Reasoning,
+    StructuredOutput,
+    Temperature,
+    Attachment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogSpec {
+    pub connections: Vec<ConnectionSpec>,
+    pub targets: Vec<TargetSpec>,
+    pub models_dev: ModelsDevCatalog,
+    pub connection_sources: HashMap<ConnectionId, SourceKind>,
+}
+
+impl CatalogSpec {
+    fn new(
+        connections: Vec<ConnectionSpec>,
+        targets: Vec<TargetSpec>,
+    ) -> Result<Self, CatalogError> {
+        validate_catalog(&connections, &targets)?;
+        Ok(Self {
+            connections,
+            targets,
+            models_dev: ModelsDevCatalog::default(),
+            connection_sources: HashMap::new(),
+        })
+    }
+
+    fn with_models_dev(mut self, models_dev: ModelsDevCatalog) -> Self {
+        self.models_dev = models_dev;
+        self
+    }
+}
+
+#[derive(Debug, Default)]
+struct CatalogBuilder {
+    connections: HashMap<ConnectionId, (ConnectionSpec, SourceKind)>,
+    connection_order: Vec<ConnectionId>,
+    targets: HashMap<(ConnectionId, ModelId), (TargetSpec, SourceKind)>,
+    target_order: Vec<(ConnectionId, ModelId)>,
+}
+
+impl CatalogBuilder {
+    fn add_connection_patch(
+        &mut self,
+        source_name: &str,
+        source: SourceKind,
+        patch: ConnectionSpecPatch,
+    ) -> Result<(), CatalogError> {
+        let id = patch.id.clone();
+        match self.connections.get_mut(&id) {
+            Some((connection, existing_source)) if source > *existing_source => {
+                connection.apply_patch(patch);
+                *existing_source = source;
+                Ok(())
+            }
+            Some((_connection, _existing_source)) => Err(CatalogError::DuplicateConnection { id }),
+            None => {
+                let connection = patch.into_complete(source_name)?;
+                self.connection_order.push(id.clone());
+                self.connections.insert(id, (connection, source));
+                Ok(())
+            }
+        }
+    }
+
+    fn add_target_patch(
+        &mut self,
+        source: SourceKind,
+        patch: TargetSpecPatch,
+    ) -> Result<(), CatalogError> {
+        let key = (patch.connection.clone(), patch.model.clone());
+        match self.targets.get_mut(&key) {
+            Some((target, existing_source)) if source > *existing_source => {
+                target.apply_patch(patch);
+                *existing_source = source;
+                Ok(())
+            }
+            Some((_target, _existing_source)) => Err(CatalogError::DuplicateTarget {
+                connection_id: key.0,
+                model_id: key.1,
+            }),
+            None => {
+                self.target_order.push(key.clone());
+                self.targets.insert(key, (patch.into_complete(), source));
+                Ok(())
+            }
+        }
+    }
+
+    fn finish(self) -> Result<CatalogSpec, CatalogError> {
+        let connection_sources = self
+            .connections
+            .iter()
+            .map(|(id, (_connection, source))| (id.clone(), *source))
+            .collect();
+        let connections = self
+            .connection_order
+            .iter()
+            .filter_map(|id| {
+                self.connections
+                    .get(id)
+                    .map(|(connection, _source)| connection.clone())
+            })
+            .collect::<Vec<_>>();
+        let targets = self
+            .target_order
+            .iter()
+            .filter_map(|key| {
+                self.targets
+                    .get(key)
+                    .map(|(target, _source)| target.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut spec = CatalogSpec::new(connections, targets)?;
+        spec.connection_sources = connection_sources;
+        Ok(spec)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ModelCatalog {
+    models_dev: RwLock<ModelsDevCatalog>,
+    models_dev_refresh_notice: RwLock<Option<String>>,
+    connections: HashMap<ConnectionId, ConnectionSpec>,
+    connection_sources: HashMap<ConnectionId, SourceKind>,
+    connection_order: Vec<ConnectionId>,
+    targets: HashMap<(ConnectionId, ModelId), TargetSpec>,
+    target_order: Vec<(ConnectionId, ModelId)>,
+    live_models_dir: Option<PathBuf>,
+    catalog_home_dir: Option<PathBuf>,
+    trusted_project_root: Option<PathBuf>,
+    live_availability: RwLock<HashMap<ConnectionId, LiveModelAvailability>>,
+}
+
+impl ModelCatalog {
+    pub(crate) fn from_spec(spec: CatalogSpec) -> Self {
+        Self::from_spec_with_live_availability(spec, None, None, None, HashMap::new())
+    }
+
+    fn from_spec_with_live_availability(
+        spec: CatalogSpec,
+        live_models_dir: Option<PathBuf>,
+        catalog_home_dir: Option<PathBuf>,
+        trusted_project_root: Option<PathBuf>,
+        live_availability: HashMap<ConnectionId, LiveModelAvailability>,
+    ) -> Self {
+        let CatalogSpec {
+            connections,
+            targets: catalog_targets,
+            models_dev,
+            connection_sources,
+        } = spec;
+        let connection_order = connections
+            .iter()
+            .filter(|connection| connection.enabled)
+            .map(|connection| connection.id.clone())
+            .collect::<Vec<_>>();
+        let connections = connections
+            .into_iter()
+            .filter(|connection| connection.enabled)
+            .map(|connection| (connection.id.clone(), connection))
+            .collect::<HashMap<_, _>>();
+        let mut targets = HashMap::new();
+        let mut target_order = Vec::new();
+        for target in catalog_targets
+            .into_iter()
+            .filter(|target| target.enabled && connections.contains_key(&target.connection))
+        {
+            let key = (target.connection.clone(), target.model.clone());
+            target_order.push(key.clone());
+            targets.insert(key, target);
+        }
+        log_models_dev_drift(&targets, &models_dev);
+
+        Self {
+            models_dev: RwLock::new(models_dev),
+            models_dev_refresh_notice: RwLock::new(None),
+            connections,
+            connection_sources,
+            connection_order,
+            targets,
+            target_order,
+            live_models_dir,
+            catalog_home_dir,
+            trusted_project_root,
+            live_availability: RwLock::new(live_availability),
+        }
+    }
+
+    pub(crate) fn load_builtin() -> Result<Self, CatalogError> {
+        load_builtin_catalog().map(Self::from_spec)
+    }
+
+    pub(crate) fn connections(&self) -> Vec<&ConnectionSpec> {
+        self.connection_order
+            .iter()
+            .filter_map(|id| self.connections.get(id))
+            .collect()
+    }
+
+    /// Project root whose catalog files were admitted after workspace trust.
+    pub(crate) fn trusted_project_root(&self) -> Option<&Path> {
+        self.trusted_project_root.as_deref()
+    }
+
+    pub(crate) fn connection(&self, connection_id: &ConnectionId) -> Option<&ConnectionSpec> {
+        self.connections.get(connection_id)
+    }
+
+    pub(crate) fn connection_source(&self, connection_id: &ConnectionId) -> SourceKind {
+        self.connection_sources
+            .get(connection_id)
+            .copied()
+            .unwrap_or(SourceKind::BuiltIn)
+    }
+
+    /// The connection's enabled targets in catalog order. Used to prefill the
+    /// local-model wizard when editing an existing provider.
+    pub(crate) fn targets_for_connection(&self, connection_id: &ConnectionId) -> Vec<&TargetSpec> {
+        self.target_order
+            .iter()
+            .filter(|(target_connection_id, _model_id)| target_connection_id == connection_id)
+            .filter_map(|key| self.targets.get(key))
+            .collect()
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        connection_id: &ConnectionId,
+        model_id: &ModelId,
+    ) -> Result<ResolvedModel, CatalogError> {
+        let connection =
+            self.connections
+                .get(connection_id)
+                .ok_or_else(|| CatalogError::UnknownConnection {
+                    id: connection_id.clone(),
+                })?;
+        let target = self
+            .targets
+            .get(&(connection_id.clone(), model_id.clone()))
+            .ok_or_else(|| CatalogError::UnknownTarget {
+                connection_id: connection_id.clone(),
+                model_id: model_id.clone(),
+            })?;
+        let models_dev_id = target.metadata_model.as_ref().unwrap_or(model_id);
+        let models_dev = self.models_dev_read().model(models_dev_id).cloned();
+
+        Ok(resolve_target(connection, target, models_dev.as_ref()))
+    }
+
+    pub(crate) fn resolve_connection_model(
+        &self,
+        connection_id: &ConnectionId,
+        model: &str,
+    ) -> Option<ResolvedModel> {
+        if let Ok(model_id) = model.parse::<ModelId>()
+            && let Ok(resolved) = self.resolve(connection_id, &model_id)
+        {
+            return Some(resolved);
+        }
+
+        self.target_order
+            .iter()
+            .filter(|(target_connection_id, _model_id)| target_connection_id == connection_id)
+            .filter_map(|(target_connection_id, model_id)| {
+                self.targets
+                    .get(&(target_connection_id.clone(), model_id.clone()))
+                    .map(|target| (target_connection_id, model_id, target))
+            })
+            .find_map(|(target_connection_id, model_id, target)| {
+                let target_model = target.model.model();
+                let remote_model = target.remote_model.as_deref().unwrap_or(target_model);
+                (target_model == model || remote_model == model)
+                    .then(|| self.resolve(target_connection_id, model_id).ok())
+                    .flatten()
+            })
+            .or_else(|| self.resolve_connection_display_name(connection_id, model))
+    }
+
+    pub(crate) fn resolve_connection_display_name(
+        &self,
+        connection_id: &ConnectionId,
+        display_name: &str,
+    ) -> Option<ResolvedModel> {
+        self.target_order
+            .iter()
+            .filter(|(target_connection_id, _model_id)| target_connection_id == connection_id)
+            .filter_map(|(target_connection_id, model_id)| {
+                self.resolve(target_connection_id, model_id).ok()
+            })
+            .find(|resolved| resolved.display_name.eq_ignore_ascii_case(display_name))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn list_resolved_models(&self) -> Result<Vec<ResolvedModel>, CatalogError> {
+        self.target_order
+            .iter()
+            .map(|(connection_id, model_id)| self.resolve(connection_id, model_id))
+            .collect()
+    }
+
+    pub(crate) fn available_models_for_connection(
+        &self,
+        connection_id: &ConnectionId,
+        fallback_models: Vec<String>,
+    ) -> Vec<String> {
+        if !self.connections.contains_key(connection_id) {
+            return Vec::new();
+        }
+
+        let live_models = self
+            .live_availability_read()
+            .get(connection_id)
+            .map(LiveModelAvailability::remote_model_ids)
+            .unwrap_or_default();
+        if !live_models.is_empty() {
+            return live_models;
+        }
+
+        let target_models = self
+            .target_order
+            .iter()
+            .filter(|(target_connection_id, _model_id)| target_connection_id == connection_id)
+            .filter_map(|(target_connection_id, model_id)| {
+                self.targets
+                    .get(&(target_connection_id.clone(), model_id.clone()))
+                    .map(|target| {
+                        target
+                            .remote_model
+                            .as_deref()
+                            .unwrap_or_else(|| target.model.model())
+                            .to_string()
+                    })
+            })
+            .collect::<Vec<_>>();
+        if target_models.is_empty() {
+            fallback_models
+        } else {
+            dedup_preserving_order(target_models)
+        }
+    }
+
+    pub(crate) fn target_remote_models_for_connection(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Vec<String> {
+        if !self.connections.contains_key(connection_id) {
+            return Vec::new();
+        }
+
+        self.target_order
+            .iter()
+            .filter(|(target_connection_id, _model_id)| target_connection_id == connection_id)
+            .filter_map(|(target_connection_id, model_id)| {
+                self.targets
+                    .get(&(target_connection_id.clone(), model_id.clone()))
+                    .map(|target| {
+                        target
+                            .remote_model
+                            .as_deref()
+                            .unwrap_or_else(|| target.model.model())
+                            .to_string()
+                    })
+            })
+            .collect()
+    }
+
+    fn live_availability_read(
+        &self,
+    ) -> RwLockReadGuard<'_, HashMap<ConnectionId, LiveModelAvailability>> {
+        match self.live_availability.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn models_dev_read(&self) -> RwLockReadGuard<'_, ModelsDevCatalog> {
+        match self.models_dev.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub(crate) fn replace_models_dev_metadata(&self, models_dev: ModelsDevCatalog) {
+        log_models_dev_drift(&self.targets, &models_dev);
+        match self.models_dev.write() {
+            Ok(mut guard) => *guard = models_dev,
+            Err(poisoned) => *poisoned.into_inner() = models_dev,
+        }
+        self.set_models_dev_refresh_notice(None);
+    }
+
+    /// Refresh shared Models.dev metadata when this catalog came from a Bonsai
+    /// home directory. In-memory and built-in-only catalogs have no cache path
+    /// and return `Ok(None)` without touching the network.
+    pub(crate) async fn refresh_models_dev_metadata(&self) -> Result<Option<usize>, CatalogError> {
+        let Some(home_dir) = self.catalog_home_dir.as_deref() else {
+            return Ok(None);
+        };
+        match refresh_models_dev_cache_from_home(home_dir).await {
+            Ok(models_dev) => {
+                let model_count = models_dev.len();
+                self.replace_models_dev_metadata(models_dev);
+                Ok(Some(model_count))
+            }
+            Err(error) => {
+                self.record_models_dev_refresh_failure(&error);
+                Err(error)
+            }
+        }
+    }
+
+    /// Record a bounded, secret-free explanation for the cached-metadata
+    /// fallback. The detailed error remains in tracing logs.
+    pub(crate) fn record_models_dev_refresh_failure(&self, error: &CatalogError) {
+        let reason = match error {
+            CatalogError::ModelsDevFetch { .. } => "network request failed".to_string(),
+            CatalogError::ModelsDevHttpStatus { status, .. } => {
+                format!("server returned HTTP {status}")
+            }
+            CatalogError::ModelsDevJson { .. } | CatalogError::InvalidModelsDevModelId { .. } => {
+                "downloaded metadata was invalid".to_string()
+            }
+            CatalogError::ReadFile { .. } => "cached metadata could not be read".to_string(),
+            _ => "metadata cache could not be updated".to_string(),
+        };
+        self.set_models_dev_refresh_notice(Some(format!(
+            "Models.dev refresh failed ({reason}); using cached model metadata. Check network access and BONSAI_MODELS_DEV_* settings, then run /refresh."
+        )));
+    }
+
+    pub(crate) fn models_dev_refresh_notice(&self) -> Option<String> {
+        match self.models_dev_refresh_notice.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Whether this catalog has a Bonsai home directory (and thus a
+    /// models.dev cache that can be refreshed). In-memory/built-in-only
+    /// catalogs return `false`; their `refresh_models_dev_metadata` is a
+    /// no-op `Ok(None)`.
+    pub(crate) fn has_catalog_home_dir(&self) -> bool {
+        self.catalog_home_dir.is_some()
+    }
+
+    fn set_models_dev_refresh_notice(&self, notice: Option<String>) {
+        match self.models_dev_refresh_notice.write() {
+            Ok(mut guard) => *guard = notice,
+            Err(poisoned) => *poisoned.into_inner() = notice,
+        }
+    }
+
+    fn live_availability_write(
+        &self,
+    ) -> RwLockWriteGuard<'_, HashMap<ConnectionId, LiveModelAvailability>> {
+        match self.live_availability.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+const LIVE_MODEL_CACHE_SCHEMA_VERSION: u8 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct LiveModelAvailability {
+    #[serde(default)]
+    pub(crate) schema_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at_unix_secs: Option<u64>,
+    #[serde(default)]
+    pub models: Vec<AvailableModel>,
+}
+
+impl Default for LiveModelAvailability {
+    fn default() -> Self {
+        Self {
+            schema_version: LIVE_MODEL_CACHE_SCHEMA_VERSION,
+            fetched_at_unix_secs: None,
+            models: Vec::new(),
+        }
+    }
+}
+
+impl LiveModelAvailability {
+    pub(crate) fn from_remote_ids(models: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            schema_version: LIVE_MODEL_CACHE_SCHEMA_VERSION,
+            fetched_at_unix_secs: None,
+            models: dedup_preserving_order(models.into_iter().collect())
+                .into_iter()
+                .map(AvailableModel::remote)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn with_fallback_context_window(mut self, context_window: Option<u32>) -> Self {
+        let Some(context_window) = context_window.filter(|value| *value > 0) else {
+            return self;
+        };
+        for model in &mut self.models {
+            if model.context_window.is_none() {
+                model.context_window = Some(context_window);
+            }
+        }
+        self
+    }
+
+    pub(crate) fn remote_model_ids(&self) -> Vec<String> {
+        dedup_preserving_order(
+            self.models
+                .iter()
+                .map(|model| model.remote_model_id.to_string())
+                .collect(),
+        )
+    }
+
+    fn mark_refreshed(&mut self) {
+        self.fetched_at_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs());
+    }
+
+    fn is_fresh(&self, ttl: Duration) -> bool {
+        if self.schema_version != LIVE_MODEL_CACHE_SCHEMA_VERSION
+            || ttl.is_zero()
+            || self.models.is_empty()
+        {
+            return false;
+        }
+        let Some(fetched_at) = self.fetched_at_unix_secs else {
+            return false;
+        };
+        let Some(now) = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+        else {
+            return false;
+        };
+        now.saturating_sub(fetched_at) <= ttl.as_secs()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct AvailableModel {
+    pub remote_model_id: Box<str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<ModelId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// Human-readable name reported by the server (LM Studio native API);
+    /// `None` when the listing only carries ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<Box<str>>,
+    /// Capabilities reported by the server (tool use, vision, reasoning).
+    /// Empty means "unreported", not "unsupported" — merge accordingly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<ModelFeature>,
+    /// Exact reasoning choices advertised by the provider. Empty means the
+    /// endpoint did not report them, so static catalog metadata remains active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_reasoning: Vec<ReasoningSelection>,
+    /// Provider-recommended effort when the user has no saved model override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_reasoning: Option<ReasoningSelection>,
+    /// Codex backend routing contract for models that use Responses Lite.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_responses_lite: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl AvailableModel {
+    pub(crate) fn remote(remote_model_id: impl Into<String>) -> Self {
+        Self::with_metadata(remote_model_id, None, None, Vec::new())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remote_with_context_window(
+        remote_model_id: impl Into<String>,
+        context_window: Option<u32>,
+    ) -> Self {
+        Self::with_metadata(remote_model_id, context_window, None, Vec::new())
+    }
+
+    pub(crate) fn with_metadata(
+        remote_model_id: impl Into<String>,
+        context_window: Option<u32>,
+        display_name: Option<String>,
+        features: Vec<ModelFeature>,
+    ) -> Self {
+        Self {
+            remote_model_id: remote_model_id.into().into_boxed_str(),
+            model_id: None,
+            context_window,
+            display_name: display_name.map(String::into_boxed_str),
+            features,
+            supported_reasoning: Vec::new(),
+            recommended_reasoning: None,
+            use_responses_lite: false,
+        }
+    }
+
+    pub(crate) fn with_reasoning(
+        mut self,
+        supported: Vec<ReasoningSelection>,
+        recommended: Option<ReasoningSelection>,
+    ) -> Self {
+        self.supported_reasoning = dedup_reasoning(supported);
+        self.recommended_reasoning = recommended.filter(|selection| {
+            *selection == ReasoningSelection::Default
+                || self.supported_reasoning.contains(selection)
+        });
+        self
+    }
+
+    pub(crate) fn normalize_reasoning(
+        &self,
+        selection: ReasoningSelection,
+    ) -> Option<ReasoningSelection> {
+        (!self.supported_reasoning.is_empty()).then(|| {
+            if selection == ReasoningSelection::Default
+                || self.supported_reasoning.contains(&selection)
+            {
+                selection
+            } else {
+                ReasoningSelection::Default
+            }
+        })
+    }
+}
+
+pub(crate) fn available_model_ids_for_provider(
+    catalog: Option<&ModelCatalog>,
+    provider_id: &str,
+    metadata: &ProviderMetadata,
+    configured_model: &str,
+) -> Vec<String> {
+    let fallback_models = fallback_model_ids(metadata, configured_model);
+    match catalog {
+        Some(catalog) => match provider_id.parse::<ConnectionId>() {
+            Ok(connection_id) => {
+                catalog.available_models_for_connection(&connection_id, fallback_models)
+            }
+            Err(_err) => fallback_models,
+        },
+        None => fallback_models,
+    }
+}
+
+pub(crate) fn connection_id_for_provider_id(provider_id: &str) -> Option<ConnectionId> {
+    provider_id.parse().ok()
+}
+
+fn fallback_model_ids(metadata: &ProviderMetadata, configured_model: &str) -> Vec<String> {
+    if metadata.seed_models.is_empty() && !configured_model.trim().is_empty() {
+        vec![configured_model.to_string()]
+    } else {
+        metadata.seed_model_list()
+    }
+}
+
+fn dedup_preserving_order(models: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    models
+        .into_iter()
+        .filter(|model| seen.insert(model.clone()))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModel {
+    pub connection_id: ConnectionId,
+    pub model_id: ModelId,
+    pub remote_model_id: Box<str>,
+    pub default_base_url: Box<str>,
+    pub display_name: Box<str>,
+    pub transport: TransportProtocol,
+    pub prompt_cache_policy: PromptCachePolicy,
+    pub reasoning_codec: ReasoningCodec,
+    pub endpoint_path: Option<Box<str>>,
+    pub context_window: Option<u32>,
+    pub output_limit: Option<u32>,
+    pub token_counter: Option<TokenCounterKind>,
+    pub pricing: Option<ModelPricing>,
+    pub reasoning_options: Vec<ReasoningOption>,
+    pub parameter_preview: Vec<ParameterPreview>,
+    pub features: Vec<ModelFeature>,
+    pub recommended: bool,
+    pub recommended_effort: Option<ReasoningSelection>,
+    pub discouraged_efforts: Vec<ReasoningSelection>,
+    pub roles: Vec<LegacyModelRole>,
+    pub source: ModelSource,
+}
+
+impl ResolvedModel {
+    pub(crate) fn run_target(
+        &self,
+        base_url: Box<str>,
+        reasoning: ReasoningSelection,
+    ) -> RunTarget {
+        let reasoning = self.normalize_reasoning(reasoning);
+        let reasoning_escalation = reasoning.next_higher_supported(&self.reasoning_selections());
+        RunTarget {
+            connection_id: self.connection_id.clone(),
+            model_id: self.model_id.clone(),
+            remote_model_id: self.remote_model_id.clone(),
+            base_url,
+            transport: self.transport,
+            prompt_cache_policy: self.prompt_cache_policy,
+            reasoning_codec: self.reasoning_codec,
+            endpoint_path: self.endpoint_path.clone(),
+            context_window: self.context_window,
+            output_limit: self.output_limit,
+            reasoning,
+            reasoning_escalation,
+            use_responses_lite: false,
+        }
+    }
+
+    pub(crate) fn reasoning_selections(&self) -> Vec<ReasoningSelection> {
+        reasoning_selections_from_options(&self.reasoning_options)
+    }
+
+    pub(crate) fn supports_reasoning(&self, reasoning: ReasoningSelection) -> bool {
+        reasoning == ReasoningSelection::Default || self.reasoning_selections().contains(&reasoning)
+    }
+
+    pub(crate) fn normalize_reasoning(
+        &self,
+        reasoning: crate::provider::ReasoningSelection,
+    ) -> crate::provider::ReasoningSelection {
+        if self.supports_reasoning(reasoning) {
+            reasoning
+        } else {
+            crate::provider::ReasoningSelection::default()
+        }
+    }
+
+    pub(crate) fn parameter_preview_label(&self) -> String {
+        if self.parameter_preview.is_empty() {
+            "default parameters".to_string()
+        } else {
+            self.parameter_preview
+                .iter()
+                .map(|preview| preview.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
+/// Warn once per catalog load about every explicit TOML value that disagrees
+/// with the models.dev row it shadows. TOML precedence is unchanged — this is
+/// the visibility mechanism that keeps hand-maintained values from drifting
+/// silently. Targets marked `pinned = true` (deliberate divergences: working
+/// windows, price-tier caps, beta-gated limits) are skipped.
+fn log_models_dev_drift(
+    targets: &HashMap<(ConnectionId, ModelId), TargetSpec>,
+    models_dev: &ModelsDevCatalog,
+) {
+    for target in targets.values() {
+        let metadata_id = target.metadata_model.as_ref().unwrap_or(&target.model);
+        let Some(models_dev_model) = models_dev.model(metadata_id) else {
+            continue;
+        };
+        let mismatches = models_dev_drift_lines(target, models_dev_model);
+        if !mismatches.is_empty() {
+            tracing::warn!(
+                target = %target.model,
+                models_dev = %metadata_id,
+                drift = %mismatches.join("; "),
+                "catalog target drifts from models.dev; update the value or mark it `pinned = true` if deliberate"
+            );
+        }
+    }
+}
+
+/// The per-field drift descriptions for one target; empty when the target is
+/// pinned, silent on a field, or in agreement.
+fn models_dev_drift_lines(target: &TargetSpec, models_dev_model: &ModelsDevModel) -> Vec<String> {
+    if target.pinned {
+        return Vec::new();
+    }
+    let mut mismatches = Vec::new();
+    if let (Some(toml), Some(live)) = (target.context_window, models_dev_model.context_window)
+        && toml != live
+    {
+        mismatches.push(format!("context_window {toml} vs models.dev {live}"));
+    }
+    if let (Some(toml), Some(live)) = (target.output_limit, models_dev_model.output_limit)
+        && toml != live
+    {
+        mismatches.push(format!("output_limit {toml} vs models.dev {live}"));
+    }
+    if let (Some(toml), Some(live)) = (target.pricing, models_dev_model.pricing)
+        && toml != live
+    {
+        mismatches.push("pricing differs from models.dev".to_string());
+    }
+    mismatches
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ModelSource {
+    BuiltIn,
+}
+
+fn resolve_target(
+    connection: &ConnectionSpec,
+    target: &TargetSpec,
+    models_dev: Option<&ModelsDevModel>,
+) -> ResolvedModel {
+    let remote_model_id = target
+        .remote_model
+        .clone()
+        .unwrap_or_else(|| target.model.model().into());
+    let output_limit = target
+        .output_limit
+        .or_else(|| models_dev.and_then(|model| model.output_limit))
+        .or(target.max_tokens);
+    let transport = target.transport.unwrap_or(connection.transport);
+    let prompt_cache_policy = target
+        .prompt_cache_policy
+        .unwrap_or(connection.prompt_cache_policy);
+    let reasoning_codec = target
+        .reasoning_codec
+        .or(connection.reasoning_codec)
+        .unwrap_or_else(|| ReasoningCodec::default_for_transport(transport));
+    let parameter_preview = target
+        .max_tokens
+        .or(output_limit)
+        .map(ParameterPreview::MaxTokens)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let features = if target.features.is_empty() {
+        models_dev.map(ModelsDevModel::features).unwrap_or_default()
+    } else {
+        target.features.clone()
+    };
+    let reasoning_options = target
+        .reasoning_options
+        .as_deref()
+        .map(|options| reasoning_options_for_transport(options, transport))
+        .unwrap_or_else(|| {
+            models_dev
+                .map(|model| model.reasoning_options_for_transport(transport))
+                .unwrap_or_default()
+        });
+
+    ResolvedModel {
+        connection_id: connection.id.clone(),
+        model_id: target.model.clone(),
+        remote_model_id,
+        default_base_url: connection.default_base_url.clone(),
+        display_name: target
+            .display_name
+            .clone()
+            .or_else(|| models_dev.map(|model| model.display_name.clone()))
+            .unwrap_or_else(|| target.model.model().into()),
+        transport,
+        prompt_cache_policy,
+        reasoning_codec,
+        endpoint_path: target
+            .endpoint_path
+            .clone()
+            .or_else(|| connection.default_endpoint_path.clone()),
+        context_window: target
+            .context_window
+            .or_else(|| models_dev.and_then(|model| model.context_window)),
+        output_limit,
+        token_counter: target.token_counter.or(connection.default_token_counter),
+        pricing: target
+            .pricing
+            .or_else(|| models_dev.and_then(|model| model.pricing)),
+        reasoning_options,
+        parameter_preview,
+        features,
+        recommended: target.recommended,
+        recommended_effort: target.recommended_effort,
+        discouraged_efforts: target.discouraged_efforts.clone(),
+        roles: target.roles.clone(),
+        source: ModelSource::BuiltIn,
+    }
+}
+
+fn validate_catalog(
+    connections: &[ConnectionSpec],
+    targets: &[TargetSpec],
+) -> Result<(), CatalogError> {
+    let mut connection_ids = HashSet::new();
+    for connection in connections {
+        if !connection_ids.insert(connection.id.clone()) {
+            return Err(CatalogError::DuplicateConnection {
+                id: connection.id.clone(),
+            });
+        }
+    }
+
+    let mut target_keys = HashSet::new();
+    let mut defaults_by_connection: HashMap<ConnectionId, ModelId> = HashMap::new();
+    for target in targets {
+        if !connection_ids.contains(&target.connection) {
+            return Err(CatalogError::UnknownTargetConnection {
+                connection_id: target.connection.clone(),
+                model_id: target.model.clone(),
+            });
+        }
+
+        let key = (target.connection.clone(), target.model.clone());
+        if !target_keys.insert(key) {
+            return Err(CatalogError::DuplicateTarget {
+                connection_id: target.connection.clone(),
+                model_id: target.model.clone(),
+            });
+        }
+
+        if target.enabled
+            && target.is_default
+            && let Some(first) =
+                defaults_by_connection.insert(target.connection.clone(), target.model.clone())
+        {
+            return Err(CatalogError::DuplicateDefaultTarget {
+                connection_id: target.connection.clone(),
+                first,
+                second: target.model.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ReasoningEffort;
+    fn source(name: &'static str, content: &'static str) -> TomlSource<'static> {
+        TomlSource { name, content }
+    }
+
+    fn connection_id(value: &str) -> ConnectionId {
+        value.parse().unwrap()
+    }
+
+    fn model_id(value: &str) -> ModelId {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn builtin_toml_parses_and_preserves_explicit_empty_reasoning() {
+        let catalog = load_builtin_catalog().unwrap();
+
+        assert_eq!(catalog.connections.len(), 23);
+        assert_eq!(catalog.targets.len(), 181);
+        assert!(
+            catalog
+                .connections
+                .iter()
+                .any(|connection| connection.id == connection_id("openai-compatible"))
+        );
+        assert!(
+            catalog
+                .connections
+                .iter()
+                .any(|connection| connection.id == connection_id("anthropic-compatible"))
+        );
+
+        let opencode_zen = catalog
+            .connections
+            .iter()
+            .find(|connection| connection.id.as_str() == "opencode-zen")
+            .unwrap();
+        assert_eq!(opencode_zen.display_name.as_ref(), "OpenCode Zen");
+        assert_eq!(
+            opencode_zen.default_base_url.as_ref(),
+            "https://opencode.ai/zen/v1"
+        );
+        assert_eq!(
+            opencode_zen.default_model.as_ref().map(ModelId::as_str),
+            Some("opencode-zen/grok-code")
+        );
+
+        let opencode_zen_default = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "opencode-zen/grok-code")
+            .unwrap();
+        assert_eq!(
+            opencode_zen_default
+                .metadata_model
+                .as_ref()
+                .map(ModelId::as_str),
+            Some("opencode/grok-code")
+        );
+        assert!(opencode_zen_default.is_default);
+
+        let glm = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "opencode/glm-5.2")
+            .unwrap();
+        assert_eq!(glm.recommended_effort, Some(ReasoningSelection::Off));
+        assert_eq!(
+            glm.discouraged_efforts,
+            vec![
+                ReasoningSelection::Default,
+                ReasoningSelection::High,
+                ReasoningSelection::XHigh,
+                ReasoningSelection::Max,
+            ]
+        );
+
+        let openrouter = catalog
+            .connections
+            .iter()
+            .find(|connection| connection.id.as_str() == "openrouter")
+            .unwrap();
+        assert_eq!(openrouter.display_name.as_ref(), "OpenRouter");
+        assert_eq!(
+            openrouter.default_base_url.as_ref(),
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            openrouter.default_model.as_ref().map(ModelId::as_str),
+            Some("openrouter/gpt-5.2")
+        );
+
+        let openrouter_default = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "openrouter/gpt-5.2")
+            .unwrap();
+        assert_eq!(
+            openrouter_default
+                .metadata_model
+                .as_ref()
+                .map(ModelId::as_str),
+            Some("openai/gpt-5.2")
+        );
+        assert_eq!(
+            openrouter_default.remote_model.as_deref(),
+            Some("openai/gpt-5.2")
+        );
+        assert!(openrouter_default.is_default);
+
+        let openrouter_haiku = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "openrouter/claude-haiku-4.5")
+            .unwrap();
+        assert_eq!(
+            openrouter_haiku.prompt_cache_policy,
+            Some(PromptCachePolicy::OpenRouterAnthropic)
+        );
+
+        let openai = catalog
+            .connections
+            .iter()
+            .find(|connection| connection.id.as_str() == "openai")
+            .unwrap();
+        assert_eq!(openai.display_name.as_ref(), "OpenAI API");
+        assert_eq!(
+            openai.default_base_url.as_ref(),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(openai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(
+            openai.default_model.as_ref().map(ModelId::as_str),
+            Some("openai/gpt-5.6")
+        );
+        assert_eq!(
+            openai.reasoning_codec,
+            Some(ReasoningCodec::OpenAiChatCompletions)
+        );
+        assert!(openai.prompt_cache);
+
+        let openai_default = catalog
+            .targets
+            .iter()
+            .find(|target| {
+                target.connection.as_str() == "openai" && target.model.as_str() == "openai/gpt-5.6"
+            })
+            .unwrap();
+        assert!(openai_default.is_default);
+        assert!(openai_default.recommended);
+        assert_eq!(openai_default.context_window, Some(200_000));
+
+        let hosted_connections = [
+            (
+                "minimax",
+                "MiniMax API",
+                "https://api.minimax.io/anthropic",
+                "MINIMAX_API_KEY",
+                "minimax/MiniMax-M3",
+            ),
+            (
+                "zai",
+                "Z.AI API",
+                "https://api.z.ai/api/paas/v4",
+                "ZAI_API_KEY",
+                "zai/glm-5.2",
+            ),
+            (
+                "zai-coding-plan",
+                "Z.AI Coding Plan",
+                "https://api.z.ai/api/coding/paas/v4",
+                "ZAI_CODING_PLAN_API_KEY",
+                "zai-coding-plan/glm-5.2",
+            ),
+            (
+                "moonshotai",
+                "Moonshot AI API",
+                "https://api.moonshot.ai/v1",
+                "MOONSHOT_API_KEY",
+                "moonshotai/kimi-k2.7-code",
+            ),
+            (
+                "kimi-coding-plan",
+                "Kimi Coding Plan",
+                "https://api.kimi.com/coding/v1",
+                "KIMI_CODING_PLAN_API_KEY",
+                "kimi-coding-plan/kimi-for-coding",
+            ),
+        ];
+        for (id, display_name, base_url, api_key_env, default_model) in hosted_connections {
+            let connection = catalog
+                .connections
+                .iter()
+                .find(|connection| connection.id.as_str() == id)
+                .unwrap_or_else(|| panic!("missing builtin connection {id}"));
+            assert_eq!(connection.display_name.as_ref(), display_name);
+            assert_eq!(connection.default_base_url.as_ref(), base_url);
+            assert_eq!(connection.api_key_env.as_deref(), Some(api_key_env));
+            assert_eq!(
+                connection.default_model.as_ref().map(ModelId::as_str),
+                Some(default_model)
+            );
+        }
+
+        let minimax_api = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "minimax/MiniMax-M3")
+            .unwrap();
+        let minimax_plan = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "minimax-coding-plan/MiniMax-M3")
+            .unwrap();
+        assert_eq!(minimax_api.context_window, Some(512_000));
+        assert_eq!(minimax_plan.context_window, Some(1_000_000));
+        assert_eq!(
+            minimax_api
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(300_000)
+        );
+        assert_eq!(
+            minimax_plan
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(0)
+        );
+
+        let zai_api = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "zai/glm-5.2")
+            .unwrap();
+        let zai_plan = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "zai-coding-plan/glm-5.2")
+            .unwrap();
+        assert_eq!(
+            zai_api
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(1_400_000)
+        );
+        assert_eq!(
+            zai_plan.metadata_model.as_ref().map(ModelId::as_str),
+            Some("zai-coding-plan/glm-5.2")
+        );
+        assert_eq!(
+            zai_plan
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(0)
+        );
+
+        let moonshot_api = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "moonshotai/kimi-k2.7-code")
+            .unwrap();
+        let kimi_plan = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "kimi-coding-plan/kimi-for-coding")
+            .unwrap();
+        assert_eq!(
+            moonshot_api
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(950_000)
+        );
+        assert_eq!(
+            kimi_plan
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(0)
+        );
+        assert_eq!(
+            openai_default.recommended_effort,
+            Some(ReasoningSelection::Medium)
+        );
+
+        let anthropic = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "anthropic/claude-sonnet-4-5")
+            .unwrap();
+        let expected_anthropic_budget = vec![ReasoningOption::BudgetTokens {
+            min: Some(1024),
+            max: None,
+            default: 4096,
+        }];
+        assert_eq!(
+            anthropic.reasoning_options.as_ref().unwrap(),
+            &expected_anthropic_budget
+        );
+        assert_eq!(anthropic.max_tokens, Some(16_000));
+
+        let anthropic_opus = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "anthropic/claude-opus-4-1")
+            .unwrap();
+        assert_eq!(
+            anthropic_opus.reasoning_options.as_ref().unwrap(),
+            &expected_anthropic_budget
+        );
+
+        let codex = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "openai/gpt-5.5")
+            .unwrap();
+        assert_eq!(
+            codex.reasoning_options.as_ref().unwrap(),
+            &vec![
+                ReasoningOption::Toggle,
+                ReasoningOption::Effort(vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                ]),
+            ]
+        );
+        assert_eq!(
+            codex.pricing,
+            Some(ModelPricing::new(5_000_000, 30_000_000).with_cache_rates(Some(500_000), None))
+        );
+    }
+
+    #[test]
+    fn home_loader_creates_disabled_local_examples_without_registering_them() {
+        let home = tempfile::TempDir::new().unwrap();
+        let catalog = load_catalog_from_home(home.path()).unwrap();
+
+        let provider_example = home.path().join("providers/example-local.toml");
+        let model_example = home.path().join("models/example-local.toml");
+        assert!(provider_example.exists());
+        assert!(model_example.exists());
+        assert!(
+            std::fs::read_to_string(&provider_example)
+                .unwrap()
+                .contains("enabled = false")
+        );
+        assert!(
+            std::fs::read_to_string(&model_example)
+                .unwrap()
+                .contains("context_window = 32768")
+        );
+
+        assert!(
+            catalog
+                .connections()
+                .iter()
+                .all(|connection| connection.id.as_str() != "local-example")
+        );
+        assert!(
+            catalog
+                .resolve(
+                    &connection_id("local-example"),
+                    &model_id("local-example/example-small")
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn trusted_project_catalog_overrides_user_catalog() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join("providers")).unwrap();
+        std::fs::create_dir_all(home.path().join("models")).unwrap();
+        std::fs::create_dir_all(project.path().join(".bonsai/providers")).unwrap();
+        std::fs::create_dir_all(project.path().join(".bonsai/models")).unwrap();
+        std::fs::write(
+            home.path().join("providers/openai.toml"),
+            r#"[[connections]]
+id = "openai"
+default_base_url = "https://user.example/v1"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join("models/openai.toml"),
+            r#"[[targets]]
+connection = "openai"
+model = "openai/gpt-5.6"
+context_window = 111000
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".bonsai/providers/openai.toml"),
+            r#"[[connections]]
+id = "openai"
+default_base_url = "https://project.example/v1"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".bonsai/models/openai.toml"),
+            r#"[[targets]]
+connection = "openai"
+model = "openai/gpt-5.6"
+context_window = 222000
+"#,
+        )
+        .unwrap();
+
+        let catalog =
+            load_catalog_from_home_and_project(home.path(), Some(project.path())).unwrap();
+        let resolved = catalog
+            .resolve(&connection_id("openai"), &model_id("openai/gpt-5.6"))
+            .unwrap();
+
+        assert_eq!(
+            resolved.default_base_url.as_ref(),
+            "https://project.example/v1"
+        );
+        assert_eq!(resolved.context_window, Some(222_000));
+        assert_eq!(catalog.trusted_project_root(), Some(project.path()));
+    }
+
+    #[test]
+    fn restricted_catalog_loader_keeps_project_files_inert() {
+        let home = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".bonsai/providers")).unwrap();
+        std::fs::write(
+            project.path().join(".bonsai/providers/project-only.toml"),
+            r#"[[connections]]
+id = "project-only"
+display_name = "Project Only"
+auth = "optional-api-key"
+transport = "openai-chat"
+default_base_url = "http://localhost:11434/v1"
+"#,
+        )
+        .unwrap();
+
+        let catalog = load_catalog_from_home_and_project(home.path(), None).unwrap();
+
+        assert!(catalog.connection(&connection_id("project-only")).is_none());
+        assert_eq!(catalog.trusted_project_root(), None);
+    }
+
+    #[test]
+    fn live_availability_cache_roundtrips_and_records_canonical_mapping() {
+        let home = tempfile::TempDir::new().unwrap();
+        let catalog = load_catalog_from_home(home.path()).unwrap();
+        let opencode = connection_id("opencode");
+
+        catalog
+            .write_live_availability(
+                &opencode,
+                LiveModelAvailability::from_remote_ids([
+                    "qwen3.7-max".to_string(),
+                    "unknown-live".to_string(),
+                ]),
+            )
+            .unwrap();
+
+        let path = home.path().join("cache/live-models/opencode.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value["models"][0]["remote_model_id"], "qwen3.7-max");
+        assert_eq!(value["models"][0]["model_id"], "opencode/qwen3.7-max");
+        assert_eq!(value["models"][1]["remote_model_id"], "unknown-live");
+        assert!(value["models"][1].get("model_id").is_none());
+
+        let reloaded = load_catalog_from_home(home.path()).unwrap();
+        assert_eq!(
+            reloaded.available_models_for_connection(&opencode, Vec::new()),
+            vec!["qwen3.7-max".to_string(), "unknown-live".to_string()]
+        );
+    }
+
+    #[test]
+    fn live_availability_cache_json_round_trips_across_formats() {
+        // Pre-metadata cache files carry only remote_model_id (+ optional
+        // model_id/context_window); they must keep deserializing unchanged.
+        let legacy: LiveModelAvailability = serde_json::from_str(
+            r#"{"models": [{"remote_model_id": "old-entry", "context_window": 4096}]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.models[0].remote_model_id.as_ref(), "old-entry");
+        assert_eq!(legacy.models[0].display_name, None);
+        assert!(legacy.models[0].features.is_empty());
+        assert!(legacy.models[0].supported_reasoning.is_empty());
+        assert_eq!(legacy.models[0].recommended_reasoning, None);
+        assert!(!legacy.models[0].use_responses_lite);
+
+        let enriched = LiveModelAvailability {
+            models: vec![{
+                let mut model = AvailableModel::with_metadata(
+                    "new-entry",
+                    Some(131_072),
+                    Some("New Entry".to_string()),
+                    vec![ModelFeature::ToolCall],
+                )
+                .with_reasoning(
+                    vec![ReasoningSelection::Low, ReasoningSelection::Ultra],
+                    Some(ReasoningSelection::Ultra),
+                );
+                model.use_responses_lite = true;
+                model
+            }],
+            ..LiveModelAvailability::default()
+        };
+        let json = serde_json::to_string(&enriched).unwrap();
+        let reloaded: LiveModelAvailability = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded, enriched);
+    }
+
+    #[test]
+    fn live_availability_fallback_context_fills_only_missing_models() {
+        let availability = LiveModelAvailability {
+            models: vec![
+                AvailableModel::remote_with_context_window("api-sized", Some(65_536)),
+                AvailableModel::remote("fallback-sized"),
+            ],
+            ..LiveModelAvailability::default()
+        }
+        .with_fallback_context_window(Some(32_768));
+
+        assert_eq!(availability.models[0].context_window, Some(65_536));
+        assert_eq!(availability.models[1].context_window, Some(32_768));
+    }
+
+    #[test]
+    fn with_reasoning_dedups_and_filters_unsupported_recommendation() {
+        let model = AvailableModel::remote("m").with_reasoning(
+            vec![
+                ReasoningSelection::Low,
+                ReasoningSelection::Low,
+                ReasoningSelection::High,
+            ],
+            Some(ReasoningSelection::Max),
+        );
+        assert_eq!(
+            model.supported_reasoning,
+            vec![ReasoningSelection::Low, ReasoningSelection::High]
+        );
+        // Max is not in the supported set, so the recommendation is dropped.
+        assert_eq!(model.recommended_reasoning, None);
+
+        let model = AvailableModel::remote("m").with_reasoning(
+            vec![ReasoningSelection::Low],
+            Some(ReasoningSelection::Default),
+        );
+        assert_eq!(
+            model.recommended_reasoning,
+            Some(ReasoningSelection::Default)
+        );
+    }
+
+    #[test]
+    fn normalize_reasoning_defers_to_static_metadata_without_live_list() {
+        let unreported = AvailableModel::remote("m");
+        assert_eq!(
+            unreported.normalize_reasoning(ReasoningSelection::XHigh),
+            None
+        );
+
+        let reported =
+            AvailableModel::remote("m").with_reasoning(vec![ReasoningSelection::Low], None);
+        assert_eq!(
+            reported.normalize_reasoning(ReasoningSelection::Low),
+            Some(ReasoningSelection::Low)
+        );
+        assert_eq!(
+            reported.normalize_reasoning(ReasoningSelection::XHigh),
+            Some(ReasoningSelection::Default)
+        );
+    }
+
+    #[test]
+    fn target_reasoning_efforts_accept_ultra() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openai-compatible"
+                    display_name = "OpenAI Compatible"
+                    auth = "optional-api-key"
+                    transport = "openai-chat"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "openai-compatible"
+                    model = "openai/apex"
+
+                    [[targets.reasoning_options]]
+                    type = "effort"
+                    values = ["high", "ultra"]
+                "#,
+            )],
+        )
+        .unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+        let resolved = catalog
+            .resolve(
+                &connection_id("openai-compatible"),
+                &model_id("openai/apex"),
+            )
+            .unwrap();
+        assert!(
+            resolved
+                .reasoning_selections()
+                .contains(&ReasoningSelection::Ultra)
+        );
+    }
+
+    #[test]
+    fn models_dev_drift_lines_flag_mismatches_and_respect_pinned() {
+        let models_dev = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "openai": {
+                "models": {
+                  "gpt-5": {
+                    "id": "gpt-5",
+                    "limit": { "context": 400000, "output": 128000 },
+                    "cost": { "input": 1.25, "output": 10 }
+                  }
+                }
+              }
+            }
+            "#,
+        )
+        .unwrap();
+        let models_dev_model = models_dev.model(&model_id("openai/gpt-5")).unwrap();
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openai-compatible"
+                    display_name = "OpenAI Compatible"
+                    auth = "optional-api-key"
+                    transport = "openai-chat"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "openai-compatible"
+                    model = "openai/gpt-5"
+                    context_window = 200000
+                    output_limit = 128000
+                    pricing = { input_micros_per_million = 1250000, output_micros_per_million = 10000000 }
+
+                    [[targets]]
+                    connection = "openai-compatible"
+                    model = "openai/pinned-gpt-5"
+                    metadata_model = "openai/gpt-5"
+                    pinned = true
+                    context_window = 200000
+                "#,
+            )],
+        )
+        .unwrap();
+
+        let drifting = spec
+            .targets
+            .iter()
+            .find(|target| target.model.model() == "gpt-5")
+            .unwrap();
+        let lines = models_dev_drift_lines(drifting, models_dev_model);
+        // Context drifts; output and pricing agree.
+        assert_eq!(lines, vec!["context_window 200000 vs models.dev 400000"]);
+
+        let pinned = spec
+            .targets
+            .iter()
+            .find(|target| target.model.model() == "pinned-gpt-5")
+            .unwrap();
+        assert!(models_dev_drift_lines(pinned, models_dev_model).is_empty());
+    }
+
+    #[test]
+    fn models_dev_refresh_notice_is_actionable_and_clears_on_success() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        catalog.record_models_dev_refresh_failure(&CatalogError::ModelsDevHttpStatus {
+            url: "https://models.example/catalog.json".to_string(),
+            status: 503,
+        });
+
+        let notice = catalog
+            .models_dev_refresh_notice()
+            .expect("refresh failure should be visible");
+        assert!(notice.contains("HTTP 503"));
+        assert!(notice.contains("using cached model metadata"));
+        assert!(notice.contains("/refresh"));
+        assert!(!notice.contains("models.example"));
+
+        catalog.replace_models_dev_metadata(ModelsDevCatalog::default());
+        assert!(catalog.models_dev_refresh_notice().is_none());
+    }
+
+    #[test]
+    fn builtin_resolver_resolves_exact_targets() {
+        struct EquivalenceCase {
+            connection_id: &'static str,
+            model_id: &'static str,
+            remote_model: &'static str,
+        }
+
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 181);
+
+        let cases = [
+            EquivalenceCase {
+                connection_id: "anthropic",
+                model_id: "anthropic/claude-sonnet-4-5",
+                remote_model: "claude-sonnet-4-5",
+            },
+            EquivalenceCase {
+                connection_id: "anthropic",
+                model_id: "anthropic/claude-opus-4-1",
+                remote_model: "claude-opus-4-1",
+            },
+            EquivalenceCase {
+                connection_id: "anthropic",
+                model_id: "anthropic/claude-haiku-4-5",
+                remote_model: "claude-haiku-4-5",
+            },
+            EquivalenceCase {
+                connection_id: "codex",
+                model_id: "openai/gpt-5.5",
+                remote_model: "gpt-5.5",
+            },
+            EquivalenceCase {
+                connection_id: "codex",
+                model_id: "openai/gpt-5.5-1m",
+                remote_model: "gpt-5.5",
+            },
+            EquivalenceCase {
+                connection_id: "codex",
+                model_id: "openai/gpt-5.4",
+                remote_model: "gpt-5.4",
+            },
+            EquivalenceCase {
+                connection_id: "codex",
+                model_id: "openai/gpt-5.4-mini",
+                remote_model: "gpt-5.4-mini",
+            },
+            EquivalenceCase {
+                connection_id: "minimax-coding-plan",
+                model_id: "minimax-coding-plan/MiniMax-M3",
+                remote_model: "MiniMax-M3",
+            },
+            EquivalenceCase {
+                connection_id: "minimax-coding-plan",
+                model_id: "minimax-coding-plan/MiniMax-M2.5",
+                remote_model: "MiniMax-M2.5",
+            },
+            EquivalenceCase {
+                connection_id: "minimax-coding-plan",
+                model_id: "minimax-coding-plan/MiniMax-M2.5-highspeed",
+                remote_model: "MiniMax-M2.5-highspeed",
+            },
+            EquivalenceCase {
+                connection_id: "minimax-coding-plan",
+                model_id: "minimax-coding-plan/MiniMax-M2.7",
+                remote_model: "MiniMax-M2.7",
+            },
+            EquivalenceCase {
+                connection_id: "minimax-coding-plan",
+                model_id: "minimax-coding-plan/MiniMax-M2",
+                remote_model: "MiniMax-M2",
+            },
+            EquivalenceCase {
+                connection_id: "minimax-coding-plan",
+                model_id: "minimax-coding-plan/MiniMax-M2.7-highspeed",
+                remote_model: "MiniMax-M2.7-highspeed",
+            },
+            EquivalenceCase {
+                connection_id: "minimax-coding-plan",
+                model_id: "minimax-coding-plan/MiniMax-M2.1",
+                remote_model: "MiniMax-M2.1",
+            },
+            EquivalenceCase {
+                connection_id: "minimax",
+                model_id: "minimax/MiniMax-M3",
+                remote_model: "MiniMax-M3",
+            },
+            EquivalenceCase {
+                connection_id: "zai",
+                model_id: "zai/glm-5.2",
+                remote_model: "glm-5.2",
+            },
+            EquivalenceCase {
+                connection_id: "zai-coding-plan",
+                model_id: "zai-coding-plan/glm-5.2",
+                remote_model: "glm-5.2",
+            },
+            EquivalenceCase {
+                connection_id: "moonshotai",
+                model_id: "moonshotai/kimi-k2.7-code",
+                remote_model: "kimi-k2.7-code",
+            },
+            EquivalenceCase {
+                connection_id: "kimi-coding-plan",
+                model_id: "kimi-coding-plan/kimi-for-coding",
+                remote_model: "kimi-for-coding",
+            },
+            EquivalenceCase {
+                connection_id: "openrouter",
+                model_id: "openrouter/gpt-5.2",
+                remote_model: "openai/gpt-5.2",
+            },
+            EquivalenceCase {
+                connection_id: "opencode",
+                model_id: "opencode/qwen3.7-max",
+                remote_model: "qwen3.7-max",
+            },
+            EquivalenceCase {
+                connection_id: "opencode",
+                model_id: "opencode/glm-5.2",
+                remote_model: "glm-5.2",
+            },
+            EquivalenceCase {
+                connection_id: "opencode",
+                model_id: "opencode/minimax-m3",
+                remote_model: "minimax-m3",
+            },
+            EquivalenceCase {
+                connection_id: "opencode",
+                model_id: "opencode/deepseek-v4-flash",
+                remote_model: "deepseek-v4-flash",
+            },
+        ];
+
+        for case in cases {
+            let resolved = catalog
+                .resolve(&connection_id(case.connection_id), &model_id(case.model_id))
+                .unwrap();
+            let label = format!("{}:{}", case.connection_id, case.model_id);
+
+            assert_eq!(
+                resolved.remote_model_id.as_ref(),
+                case.remote_model,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_applies_connection_defaults_and_remote_model_fallback() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "local-openai"
+                    display_name = "Local OpenAI"
+                    auth = "optional-api-key"
+                    transport = "openai-chat"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "tiktoken"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "local-openai"
+                    model = "local/qwen3-coder"
+                "#,
+            )],
+        )
+        .unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+
+        let resolved = catalog
+            .resolve(
+                &connection_id("local-openai"),
+                &model_id("local/qwen3-coder"),
+            )
+            .unwrap();
+
+        assert_eq!(resolved.remote_model_id.as_ref(), "qwen3-coder");
+        assert_eq!(resolved.transport, TransportProtocol::OpenAiChat);
+        assert_eq!(resolved.reasoning_codec, ReasoningCodec::OpenAiCompatible);
+        assert_eq!(resolved.endpoint_path.as_deref(), Some("chat/completions"));
+        assert_eq!(resolved.context_window, None);
+        assert_eq!(resolved.token_counter, Some(TokenCounterKind::Tiktoken));
+        assert!(resolved.reasoning_options.is_empty());
+        assert_eq!(resolved.source, ModelSource::BuiltIn);
+    }
+
+    #[test]
+    fn builtin_catalog_resolves_qwen3_token_counters() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+
+        let opencode = catalog
+            .resolve(
+                &connection_id("opencode"),
+                &model_id("opencode/qwen3.7-max"),
+            )
+            .unwrap();
+        assert_eq!(opencode.token_counter, Some(TokenCounterKind::Qwen3));
+        assert_eq!(
+            opencode.prompt_cache_policy,
+            PromptCachePolicy::RollingHistory,
+            "IMPORTANT: OpenCode tool loops require volatile state after cached history"
+        );
+
+        let glm = catalog
+            .resolve(&connection_id("opencode"), &model_id("opencode/glm-5.2"))
+            .unwrap();
+        assert_eq!(glm.prompt_cache_policy, PromptCachePolicy::RollingHistory);
+        assert_eq!(glm.reasoning_codec, ReasoningCodec::ZaiReasoningEffort);
+        assert_eq!(glm.output_limit, Some(12_000));
+        assert_eq!(glm.recommended_effort, Some(ReasoningSelection::Off));
+        assert!(
+            glm.discouraged_efforts
+                .contains(&ReasoningSelection::Default)
+        );
+        assert!(glm.discouraged_efforts.contains(&ReasoningSelection::Max));
+        assert_eq!(
+            glm.reasoning_options,
+            vec![
+                ReasoningOption::Toggle,
+                ReasoningOption::Effort(vec![
+                    ReasoningEffort::Minimal,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                    ReasoningEffort::Max,
+                ]),
+            ]
+        );
+
+        let zen = catalog
+            .resolve(
+                &connection_id("opencode-zen"),
+                &model_id("opencode-zen/qwen3-coder"),
+            )
+            .unwrap();
+        assert_eq!(zen.token_counter, Some(TokenCounterKind::Qwen3));
+    }
+
+    #[test]
+    fn bare_target_model_name_is_display_alias_for_remote_model() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openai-compatible"
+                    display_name = "OpenAI Compatible"
+                    auth = "optional-api-key"
+                    transport = "openai-chat"
+                    default_base_url = "http://localhost:1234/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "heuristic"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "openai-compatible"
+                    model = "Qwen"
+                    remote_model = "qwen/qwen3.6-35b-a3b"
+                    context_window = 131072
+                "#,
+            )],
+        )
+        .unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection_id = connection_id("openai-compatible");
+
+        let resolved = catalog
+            .resolve(&connection_id, &model_id("openai-compatible/Qwen"))
+            .unwrap();
+
+        assert_eq!(resolved.model_id.as_str(), "openai-compatible/Qwen");
+        assert_eq!(resolved.display_name.as_ref(), "Qwen");
+        assert_eq!(resolved.remote_model_id.as_ref(), "qwen/qwen3.6-35b-a3b");
+        assert_eq!(resolved.context_window, Some(131_072));
+        assert_eq!(
+            catalog.available_models_for_connection(&connection_id, Vec::new()),
+            vec!["qwen/qwen3.6-35b-a3b".to_string()]
+        );
+        assert_eq!(
+            catalog
+                .resolve_connection_model(&connection_id, "Qwen")
+                .map(|model| model.remote_model_id.to_string())
+                .as_deref(),
+            Some("qwen/qwen3.6-35b-a3b")
+        );
+    }
+
+    #[test]
+    fn resolver_reports_missing_connection_or_target() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+
+        let missing_connection =
+            catalog.resolve(&connection_id("missing"), &model_id("openai/gpt"));
+        assert!(matches!(
+            missing_connection,
+            Err(CatalogError::UnknownConnection { id }) if id.as_str() == "missing"
+        ));
+
+        let missing_target =
+            catalog.resolve(&connection_id("codex"), &model_id("openai/not-configured"));
+        assert!(matches!(
+            missing_target,
+            Err(CatalogError::UnknownTarget {
+                connection_id,
+                model_id,
+            }) if connection_id.as_str() == "codex" && model_id.as_str() == "openai/not-configured"
+        ));
+    }
+
+    #[test]
+    fn resolver_maps_connection_model_pairs_to_catalog_targets() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let opencode_id = connection_id("opencode");
+        let minimax_id = connection_id("minimax-coding-plan");
+        let openrouter_id = connection_id("openrouter");
+        let codex_id = connection_id("codex");
+
+        let opencode = catalog
+            .resolve_connection_model(&opencode_id, "qwen3.7-max")
+            .unwrap();
+        assert_eq!(opencode.connection_id.as_str(), "opencode");
+        assert_eq!(opencode.model_id.as_str(), "opencode/qwen3.7-max");
+        assert_eq!(opencode.remote_model_id.as_ref(), "qwen3.7-max");
+
+        let minimax = catalog
+            .resolve_connection_model(&minimax_id, "MiniMax-M3")
+            .unwrap();
+        assert_eq!(minimax.connection_id.as_str(), "minimax-coding-plan");
+        assert_eq!(minimax.model_id.as_str(), "minimax-coding-plan/MiniMax-M3");
+
+        let openrouter = catalog
+            .resolve_connection_model(&openrouter_id, "openai/gpt-5.2")
+            .unwrap();
+        assert_eq!(openrouter.connection_id.as_str(), "openrouter");
+        assert_eq!(openrouter.model_id.as_str(), "openrouter/gpt-5.2");
+        assert_eq!(openrouter.remote_model_id.as_ref(), "openai/gpt-5.2");
+
+        let openrouter_haiku = catalog
+            .resolve_connection_model(&openrouter_id, "anthropic/claude-haiku-4.5")
+            .unwrap();
+        assert_eq!(
+            openrouter_haiku.model_id.as_str(),
+            "openrouter/claude-haiku-4.5"
+        );
+        assert_eq!(
+            openrouter_haiku.prompt_cache_policy,
+            PromptCachePolicy::OpenRouterAnthropic
+        );
+
+        let codex = catalog
+            .resolve_connection_model(&codex_id, "openai/gpt-5.5")
+            .unwrap();
+        assert_eq!(codex.connection_id.as_str(), "codex");
+        assert_eq!(codex.model_id.as_str(), "openai/gpt-5.5");
+    }
+
+    #[test]
+    fn prompt_cache_policy_matrix_preserves_provider_boundaries() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let cases = [
+            ("opencode", "qwen3.7-max", PromptCachePolicy::RollingHistory),
+            (
+                "opencode",
+                "deepseek-v4-pro",
+                PromptCachePolicy::RollingHistory,
+            ),
+            ("opencode", "glm-5.2", PromptCachePolicy::RollingHistory),
+            (
+                "openrouter",
+                "anthropic/claude-haiku-4.5",
+                PromptCachePolicy::OpenRouterAnthropic,
+            ),
+            (
+                "openrouter",
+                "openai/gpt-5.2",
+                PromptCachePolicy::TransportDefault,
+            ),
+            (
+                "anthropic",
+                "claude-haiku-4-5",
+                PromptCachePolicy::TransportDefault,
+            ),
+            (
+                "minimax-coding-plan",
+                "MiniMax-M3",
+                PromptCachePolicy::TransportDefault,
+            ),
+            (
+                "openai",
+                "openai/gpt-5.6",
+                PromptCachePolicy::TransportDefault,
+            ),
+            (
+                "codex",
+                "openai/gpt-5.6-sol",
+                PromptCachePolicy::TransportDefault,
+            ),
+        ];
+
+        for (connection, model, expected) in cases {
+            let resolved = catalog
+                .resolve_connection_model(&connection_id(connection), model)
+                .unwrap_or_else(|| panic!("{connection}/{model} must resolve"));
+            assert_eq!(
+                resolved.prompt_cache_policy, expected,
+                "IMPORTANT: cache policy drifted for {connection}/{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_exposes_200k_default_and_1m_variant_of_gpt_5_5() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let codex_id = connection_id("codex");
+
+        let default = catalog
+            .resolve_connection_model(&codex_id, "openai/gpt-5.5")
+            .unwrap();
+        assert_eq!(default.context_window, Some(200_000));
+        assert_eq!(default.remote_model_id.as_ref(), "gpt-5.5");
+
+        let one_million = catalog
+            .resolve_connection_model(&codex_id, "openai/gpt-5.5-1m")
+            .unwrap();
+        assert_eq!(one_million.context_window, Some(1_050_000));
+        // Both variants hit the same wire model; only the working window differs.
+        assert_eq!(one_million.remote_model_id.as_ref(), "gpt-5.5");
+    }
+
+    #[test]
+    fn user_dirs_add_connection_and_model_in_filename_order() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let provider_dir = temp.path().join("providers");
+        let model_dir = temp.path().join("models");
+        std::fs::create_dir_all(&provider_dir).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            provider_dir.join("z-local.toml"),
+            r#"
+                [[connections]]
+                id = "local-openai"
+                display_name = "Local OpenAI"
+                auth = "optional-api-key"
+                transport = "openai-chat"
+                default_base_url = "http://localhost:11434/v1"
+                default_endpoint_path = "chat/completions"
+                default_token_counter = "tiktoken"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            model_dir.join("b-target.toml"),
+            r#"
+                [[targets]]
+                connection = "local-openai"
+                model = "local/qwen3-coder"
+                remote_model = "qwen3-coder"
+                context_window = 262144
+                features = ["tool-call", "reasoning"]
+
+                [[targets.reasoning_options]]
+                type = "toggle"
+            "#,
+        )
+        .unwrap();
+
+        let spec = load_catalog_with_user_dirs(&provider_dir, &model_dir).unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+        let resolved = catalog
+            .resolve(
+                &connection_id("local-openai"),
+                &model_id("local/qwen3-coder"),
+            )
+            .unwrap();
+
+        assert_eq!(resolved.remote_model_id.as_ref(), "qwen3-coder");
+        assert_eq!(resolved.context_window, Some(262_144));
+        assert_eq!(
+            resolved.reasoning_selections(),
+            vec![
+                ReasoningSelection::Default,
+                ReasoningSelection::Off,
+                ReasoningSelection::On
+            ]
+        );
+        assert_eq!(
+            resolved.features,
+            vec![ModelFeature::ToolCall, ModelFeature::Reasoning]
+        );
+        assert_eq!(
+            catalog
+                .list_resolved_models()
+                .unwrap()
+                .last()
+                .map(|model| model.model_id.as_str().to_string())
+                .as_deref(),
+            Some("local/qwen3-coder")
+        );
+    }
+
+    #[test]
+    fn user_target_patch_overrides_only_declared_fields() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let provider_dir = temp.path().join("providers");
+        let model_dir = temp.path().join("models");
+        std::fs::create_dir_all(&provider_dir).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            model_dir.join("override.toml"),
+            r#"
+                [[targets]]
+                connection = "codex"
+                model = "openai/gpt-5.5"
+                reasoning_options = []
+                context_window = 256000
+            "#,
+        )
+        .unwrap();
+
+        let models_dev = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "openai": {
+                "models": {
+                  "gpt-5.5": {
+                    "id": "gpt-5.5",
+                    "name": "GPT-5.5",
+                    "limit": { "context": 1050000, "output": 128000 },
+                    "cost": { "input": 5, "output": 30 }
+                  }
+                }
+              }
+            }
+            "#,
+        )
+        .unwrap();
+        let spec = load_catalog_with_user_dirs(&provider_dir, &model_dir)
+            .unwrap()
+            .with_models_dev(models_dev);
+        let catalog = ModelCatalog::from_spec(spec);
+        let resolved = catalog
+            .resolve(&connection_id("codex"), &model_id("openai/gpt-5.5"))
+            .unwrap();
+
+        assert_eq!(resolved.context_window, Some(256_000));
+        assert!(resolved.reasoning_options.is_empty());
+        assert_eq!(
+            resolved.pricing,
+            Some(ModelPricing::new(5_000_000, 30_000_000).with_cache_rates(Some(500_000), None)),
+            "omitted pricing should be inherited"
+        );
+    }
+
+    #[test]
+    fn user_connection_patch_overrides_only_declared_fields() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let provider_dir = temp.path().join("providers");
+        let model_dir = temp.path().join("models");
+        std::fs::create_dir_all(&provider_dir).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            provider_dir.join("codex.toml"),
+            r#"
+                [[connections]]
+                id = "codex"
+                display_name = "Codex Work"
+                default_base_url = "https://example.test/codex"
+            "#,
+        )
+        .unwrap();
+
+        let spec = load_catalog_with_user_dirs(&provider_dir, &model_dir).unwrap();
+        let codex = spec
+            .connections
+            .iter()
+            .find(|connection| connection.id.as_str() == "codex")
+            .unwrap();
+
+        assert_eq!(codex.display_name.as_ref(), "Codex Work");
+        assert_eq!(
+            codex.default_base_url.as_ref(),
+            "https://example.test/codex"
+        );
+        assert_eq!(codex.auth, ConnectionAuth::CodexCache);
+        assert_eq!(codex.transport, TransportProtocol::CodexResponses);
+    }
+
+    #[test]
+    fn duplicate_user_target_overrides_are_rejected() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let provider_dir = temp.path().join("providers");
+        let model_dir = temp.path().join("models");
+        std::fs::create_dir_all(&provider_dir).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        for file in ["a.toml", "b.toml"] {
+            std::fs::write(
+                model_dir.join(file),
+                r#"
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-5.5"
+                "#,
+            )
+            .unwrap();
+        }
+
+        let result = load_catalog_with_user_dirs(&provider_dir, &model_dir);
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::DuplicateTarget {
+                connection_id,
+                model_id,
+            }) if connection_id.as_str() == "codex" && model_id.as_str() == "openai/gpt-5.5"
+        ));
+    }
+
+    #[test]
+    fn resolver_fills_missing_metadata_from_models_dev_cache() {
+        let models_dev = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "openai": {
+                "models": {
+                  "gpt-5": {
+                    "id": "gpt-5",
+                    "name": "GPT-5",
+                    "reasoning": true,
+                    "tool_call": true,
+                    "limit": { "context": 400000, "output": 128000 },
+                    "cost": { "input": 1.25, "output": 10 }
+                  }
+                }
+              }
+            }
+            "#,
+        )
+        .unwrap();
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openai-compatible"
+                    display_name = "OpenAI Compatible"
+                    auth = "optional-api-key"
+                    transport = "openai-chat"
+                    default_endpoint_path = "chat/completions"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "openai-compatible"
+                    model = "openai/gpt-5"
+                "#,
+            )],
+        )
+        .unwrap()
+        .with_models_dev(models_dev);
+        let catalog = ModelCatalog::from_spec(spec);
+
+        let resolved = catalog
+            .resolve(
+                &connection_id("openai-compatible"),
+                &model_id("openai/gpt-5"),
+            )
+            .unwrap();
+
+        assert_eq!(resolved.display_name.as_ref(), "GPT-5");
+        assert_eq!(resolved.context_window, Some(400_000));
+        assert_eq!(resolved.output_limit, Some(128_000));
+        assert_eq!(
+            resolved.pricing,
+            Some(ModelPricing::new(1_250_000, 10_000_000))
+        );
+        assert_eq!(
+            resolved.features,
+            vec![ModelFeature::ToolCall, ModelFeature::Reasoning]
+        );
+    }
+
+    #[test]
+    fn duplicate_connection_ids_fail_validation() {
+        let result = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "codex"
+                    display_name = "Codex"
+                    auth = "codex-cache"
+                    transport = "codex-responses"
+
+                    [[connections]]
+                    id = "codex"
+                    display_name = "Other Codex"
+                    auth = "codex-cache"
+                    transport = "codex-responses"
+                "#,
+            )],
+            &[],
+        );
+
+        assert!(
+            matches!(result, Err(CatalogError::DuplicateConnection { id }) if id.as_str() == "codex")
+        );
+    }
+
+    #[test]
+    fn duplicate_target_keys_fail_validation() {
+        let result = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "codex"
+                    display_name = "Codex"
+                    auth = "codex-cache"
+                    transport = "codex-responses"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-5.5"
+
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-5.5"
+                "#,
+            )],
+        );
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::DuplicateTarget {
+                connection_id,
+                model_id,
+            }) if connection_id.as_str() == "codex" && model_id.as_str() == "openai/gpt-5.5"
+        ));
+    }
+
+    #[test]
+    fn multiple_default_targets_for_same_connection_fail_validation() {
+        let result = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "codex"
+                    display_name = "Codex"
+                    auth = "codex-cache"
+                    transport = "codex-responses"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-5.5"
+                    default = true
+
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-5.4"
+                    default = true
+                "#,
+            )],
+        );
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::DuplicateDefaultTarget { connection_id, .. })
+                if connection_id.as_str() == "codex"
+        ));
+    }
+
+    #[test]
+    fn target_referencing_unknown_connection_fails_validation() {
+        let result = load_catalog_sources(
+            &[],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-5.5"
+                "#,
+            )],
+        );
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::UnknownTargetConnection { connection_id, .. })
+                if connection_id.as_str() == "codex"
+        ));
+    }
+
+    #[test]
+    fn unknown_reasoning_are_rejected_instead_of_normalized() {
+        let result = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "codex"
+                    display_name = "Codex"
+                    auth = "codex-cache"
+                    transport = "codex-responses"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-5.5"
+
+                    [[targets.reasoning_options]]
+                    type = "effort"
+                    values = ["surprise"]
+                "#,
+            )],
+        );
+
+        assert!(matches!(result, Err(CatalogError::Toml { .. })));
+    }
+}

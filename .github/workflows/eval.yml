@@ -1,0 +1,64 @@
+name: Eval
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mock:
+    runs-on: self-hosted
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run mock eval suite
+        run: cargo run --locked -- eval --mode mock --json --out target/eval
+      - name: Publish mock eval summary
+        if: always()
+        run: |
+          summary="$(find target/eval -name summary.md -print -quit)"
+          if [ -n "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No mock eval summary generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bonsai-eval-mock
+          path: target/eval
+
+  live:
+    runs-on: self-hosted
+    continue-on-error: true
+    if: vars.BONSAI_EVAL_LIVE == '1'
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run live eval suite
+        env:
+          BONSAI_PROVIDER: ${{ vars.BONSAI_EVAL_PROVIDER }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: cargo run --locked -- eval --mode live --json --out target/eval-live
+      - name: Publish live eval summary
+        if: always()
+        run: |
+          summary="$(find target/eval-live -name summary.md -print -quit)"
+          if [ -n "$summary" ]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No live eval summary generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload live eval report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bonsai-eval-live
+          path: target/eval-live

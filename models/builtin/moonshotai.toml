@@ -1,0 +1,48 @@
+[[targets]]
+connection = "moonshotai"
+model = "moonshotai/kimi-k2.7-code"
+remote_model = "kimi-k2.7-code"
+recommended = true
+default = true
+token_counter = "tiktoken"
+context_window = 262144
+output_limit = 262144
+pricing = { input_micros_per_million = 950000, output_micros_per_million = 4000000, cache_read_micros_per_million = 190000 }
+reasoning_options = []
+
+[[targets]]
+connection = "moonshotai"
+model = "moonshotai/kimi-k2.7-code-highspeed"
+remote_model = "kimi-k2.7-code-highspeed"
+token_counter = "tiktoken"
+context_window = 262144
+output_limit = 262144
+pricing = { input_micros_per_million = 1900000, output_micros_per_million = 8000000, cache_read_micros_per_million = 380000 }
+reasoning_options = []
+
+[[targets]]
+connection = "moonshotai"
+model = "moonshotai/kimi-k2.6"
+remote_model = "kimi-k2.6"
+token_counter = "tiktoken"
+reasoning_codec = "kimi-thinking"
+context_window = 262144
+output_limit = 262144
+pricing = { input_micros_per_million = 950000, output_micros_per_million = 4000000, cache_read_micros_per_million = 160000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "moonshotai"
+model = "moonshotai/kimi-k2.5"
+remote_model = "kimi-k2.5"
+roles = ["cheap"]
+token_counter = "tiktoken"
+reasoning_codec = "kimi-thinking"
+context_window = 262144
+output_limit = 262144
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 3000000, cache_read_micros_per_million = 100000 }
+
+[[targets.reasoning_options]]
+type = "toggle"

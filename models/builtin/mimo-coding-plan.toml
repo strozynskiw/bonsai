@@ -1,0 +1,44 @@
+# Xiaomi MiMo subscription "Token Plan" (tp-... keys). Same model catalog as the
+# pay-as-you-go API but served from the token-plan host at a flat subscription
+# price, so per-token pricing is zero — mirroring the other *-coding-plan
+# targets. metadata_model maps to the metered `xiaomi` rows for window/feature
+# metadata; pricing stays pinned at zero because the flat plan deliberately
+# diverges from those metered rates. Reasoning is left off pending live
+# verification of MiMo's OpenAI-wire thinking param.
+
+[[targets]]
+connection = "mimo-coding-plan"
+model = "mimo-coding-plan/mimo-v2.5-pro"
+remote_model = "mimo-v2.5-pro"
+metadata_model = "xiaomi/mimo-v2.5-pro"
+# Flat-subscription plan: zero per-token pricing diverges from the metered
+# xiaomi row by design.
+pinned = true
+recommended = true
+default = true
+endpoint_path = "chat/completions"
+token_counter = "heuristic"
+max_tokens = 16000
+context_window = 1048576
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []
+
+# The base mimo-v2.5 shares the pro model's specs; on the subscription plan it
+# is served at the same flat (zero per-token) price.
+[[targets]]
+connection = "mimo-coding-plan"
+model = "mimo-coding-plan/mimo-v2.5"
+remote_model = "mimo-v2.5"
+metadata_model = "xiaomi/mimo-v2.5"
+# Flat-subscription plan: zero per-token pricing diverges from the metered
+# xiaomi row by design.
+pinned = true
+roles = ["cheap"]
+endpoint_path = "chat/completions"
+token_counter = "heuristic"
+max_tokens = 16000
+context_window = 1048576
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+reasoning_options = []

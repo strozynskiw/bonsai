@@ -1,0 +1,96 @@
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M3"
+remote_model = "MiniMax-M3"
+recommended = true
+default = true
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+# MiniMax M3 charges the higher long-context tier above 512K. Bonsai's
+# pricing model is flat, so keep the pay-as-you-go working window below it.
+pinned = true
+context_window = 512000
+output_limit = 128000
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 60000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M2.5"
+remote_model = "MiniMax-M2.5"
+roles = ["cheap"]
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 30000, cache_write_micros_per_million = 375000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M2.5-highspeed"
+remote_model = "MiniMax-M2.5-highspeed"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2400000, cache_read_micros_per_million = 60000, cache_write_micros_per_million = 375000 }
+reasoning_options = []
+
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M2.7"
+remote_model = "MiniMax-M2.7"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 60000, cache_write_micros_per_million = 375000 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M2"
+remote_model = "MiniMax-M2"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 196608
+output_limit = 128000
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000 }
+reasoning_options = []
+
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M2.7-highspeed"
+remote_model = "MiniMax-M2.7-highspeed"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2400000, cache_read_micros_per_million = 60000, cache_write_micros_per_million = 375000 }
+reasoning_options = []
+
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M2.1"
+remote_model = "MiniMax-M2.1"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+max_tokens = 16000
+context_window = 204800
+output_limit = 131072
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000 }
+reasoning_options = []

@@ -1,0 +1,1935 @@
+{
+  "fixture_version": 1,
+  "captured_at": "2026-07-10",
+  "source": "sanitized live-run capture; no prompts, file bodies, or raw results",
+  "session": {
+    "provider_id": "opencode",
+    "model": "deepseek-v4-pro",
+    "status": "completed",
+    "prompt_tokens": 1112621,
+    "completion_tokens": 40334,
+    "cache_read_tokens": 953984,
+    "cache_creation_tokens": 0,
+    "cache_measured_tokens": 1112621,
+    "cost_micros": -1
+  },
+  "baseline": {
+    "reads": {
+      "attempts": 31,
+      "succeeded": 31,
+      "distinct_paths": 11,
+      "result_chars": 96071,
+      "reuse_marked": 12,
+      "reuse_marked_result_chars": 31968
+    },
+    "usage": {
+      "turns": 48,
+      "zero_cache_turns": 3,
+      "gc_rewrite_turns": 0
+    }
+  },
+  "tool_events": [
+    {
+      "seq": 0,
+      "name": "agent",
+      "status": "succeeded",
+      "args_chars": 339,
+      "args_digest": "5302a188fdca50623a811419a0fd15abfd1823b02fc0cb549741c99754678b14",
+      "result_chars": 4113,
+      "result_digest": "c6c61ed5c6d1820eb4d5220513581ae88f8ace1275779e993535b5fb9016cb25"
+    },
+    {
+      "seq": 1,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 36,
+      "args_digest": "b8adb9dcd31112c7da0253dd589c2c73c3048b5378968bb68e2f371093cc8050",
+      "result_chars": 1997,
+      "result_digest": "b225a13ebbde960486d62b16ad185c4c04590f7621ffe522fdf1bf813b194f11"
+    },
+    {
+      "seq": 2,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 42,
+      "args_digest": "d407240d2cac6c1ad36eefa92271721c9c24f334f0bdccccdb5032faa19e78c2",
+      "result_chars": 4344,
+      "result_digest": "87962b747975d363d4dcc1d624971c19d16212b3b1dd9d0e2801ca2fca2d5265"
+    },
+    {
+      "seq": 3,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 34,
+      "args_digest": "8e179bbe1bcea357a2ae1d85ae28790f2a8d3e010cdd435bf37bccca0721ef0a",
+      "result_chars": 4132,
+      "result_digest": "54abcc955f2c463cded9bde3d0cfb637d12b5d259357c2c0a8b77984144fe365"
+    },
+    {
+      "seq": 4,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 40,
+      "args_digest": "26a3e06746fa1bc6bd611e349e60657b2fc58eeab2752032a611f5c75e4c717f",
+      "result_chars": 4318,
+      "result_digest": "edfec2c4bea380047e84aacde952acc1352f2e5786010f8e78ea2131280af57f"
+    },
+    {
+      "seq": 5,
+      "name": "plan_set_title",
+      "status": "failed",
+      "args_chars": 109,
+      "args_digest": "13adba607b86892036cbc38d31d98998a6e9b976f313a5bd136c7bcc1941aea5",
+      "result_chars": 54,
+      "result_digest": "276d962117e909afe5e74660d080159c68c12a5d217c3f66f2d4df9418e1a10a"
+    },
+    {
+      "seq": 6,
+      "name": "plan_set_title",
+      "status": "succeeded",
+      "args_chars": 60,
+      "args_digest": "dca7ce0d65615e40686a97413e7674b03b8d8e8179cdfa776a59fc15cc99e748",
+      "result_chars": 77,
+      "result_digest": "04a393cabfc796cae9db55d40d6f09cfde6ac82b30319115f3ece59168691bec"
+    },
+    {
+      "seq": 7,
+      "name": "plan_set_section",
+      "status": "succeeded",
+      "args_chars": 285,
+      "args_digest": "7fa174c7fb95c466bb2ead36a3aca925ca53585036c6839dca9a8400b6f56db1",
+      "result_chars": 58,
+      "result_digest": "e096cd03a3b4504e4d78104960272fe4ddee351886f6e28cc8f93b42ad257188"
+    },
+    {
+      "seq": 8,
+      "name": "plan_set_section",
+      "status": "succeeded",
+      "args_chars": 532,
+      "args_digest": "4ad8f0a582083ecf7f80aa77ce96edd62925d81e77b9bb85408700b2cee98231",
+      "result_chars": 62,
+      "result_digest": "f5d7583b091e0d5ca7c0c80c00fe4f6372b9a49def5e86f35157f70fd39419c4"
+    },
+    {
+      "seq": 9,
+      "name": "plan_set_section",
+      "status": "succeeded",
+      "args_chars": 1102,
+      "args_digest": "5f0cb127c36c6580b9cd7cbba1c29b34ff112355bd4b2e5612d680dfe628af03",
+      "result_chars": 87,
+      "result_digest": "20ad06eb1a43f40fe813e3ecedc5f5d98494e0e37a79419cfb62a0ff1e76561f"
+    },
+    {
+      "seq": 10,
+      "name": "plan_set_section",
+      "status": "succeeded",
+      "args_chars": 1405,
+      "args_digest": "5a05a3e2b2a823c8106dc98bfa23caec82341c9c4dd2502d817caa2d53748788",
+      "result_chars": 86,
+      "result_digest": "491e83fcb10b12182ad4110e769b4956e553fc2eee3b46e5004a14f3bbb2d887"
+    },
+    {
+      "seq": 11,
+      "name": "plan_set_section",
+      "status": "succeeded",
+      "args_chars": 1407,
+      "args_digest": "fa1998784233d6c8ae4bc63a40b17b64a7e3401a929c98bbbcab115223e537bc",
+      "result_chars": 80,
+      "result_digest": "44e567f5d98b79e9be9a5a7356f1d081e6ec5605cbd2019e9d578c1fd736ee23"
+    },
+    {
+      "seq": 12,
+      "name": "plan_add_task",
+      "status": "succeeded",
+      "args_chars": 49,
+      "args_digest": "33a068f4141fa66294b86927d84706edb4dcebf2cb52e10ab1f0722e246ab4e8",
+      "result_chars": 38,
+      "result_digest": "bb07d2187fb54b9c18a62ca32843d1a389cc059e3abe73171b45443d17919044"
+    },
+    {
+      "seq": 13,
+      "name": "plan_add_task",
+      "status": "succeeded",
+      "args_chars": 53,
+      "args_digest": "b8d7131cbc9a892f109ead3742ab8ce297303a5ad80ea99dd6eb8002ea2564be",
+      "result_chars": 38,
+      "result_digest": "79ffa995fcd60b7330d7e420419f1c5a026824e2e35073f614e348ba0c21424f"
+    },
+    {
+      "seq": 14,
+      "name": "plan_add_task",
+      "status": "succeeded",
+      "args_chars": 57,
+      "args_digest": "44ca2a52917204f146c95d5007a308b2426362098082137868a453ded187175f",
+      "result_chars": 38,
+      "result_digest": "5ed4eab7eee1e958e5a3028aa06d8cb3541f329346e8d785b9d899822753768b"
+    },
+    {
+      "seq": 15,
+      "name": "plan_add_task",
+      "status": "succeeded",
+      "args_chars": 61,
+      "args_digest": "d331bfe3ec69b91136c5a2acecc96d0776ce9c730f4f603cfbf26fcec8984667",
+      "result_chars": 38,
+      "result_digest": "dec85dfe552f015149057ffd68f21035be0ec9ddcbda48457a7a71dec87235c4"
+    },
+    {
+      "seq": 16,
+      "name": "plan_add_task",
+      "status": "succeeded",
+      "args_chars": 49,
+      "args_digest": "f0658ce0c58f034b13367e1e9f5eb5db20e1cd15c5a39b874130ee2da82e85ed",
+      "result_chars": 38,
+      "result_digest": "d601c18960413675b3b6b7753293eac31b516ae7155485e545b18809001673e2"
+    },
+    {
+      "seq": 17,
+      "name": "plan_add_task",
+      "status": "succeeded",
+      "args_chars": 53,
+      "args_digest": "9994b71c70e5c744540bb4392c29c38474f3a2e63041ad44f57132047826ba13",
+      "result_chars": 38,
+      "result_digest": "3ab3094c65030a2a47c79ca259ae8e0e62483b9c235e1de8e4f8499e8dd07f20"
+    },
+    {
+      "seq": 18,
+      "name": "todowrite",
+      "status": "succeeded",
+      "args_chars": 613,
+      "args_digest": "dec92d2300805abb7816983b627ffc1ef6bf0d39443574dcf99a594f0b9e1c66",
+      "result_chars": 210,
+      "result_digest": "23eb39a8bbe0c4e0a3a5266c5b9b2b2a8d99893393eaba8dfd832bf0022d45b7"
+    },
+    {
+      "seq": 19,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 40,
+      "args_digest": "52156cdd015cec33b9e1818ef08cfb46da765ac379e6fdcc80ef63ba4b8c0bc3",
+      "result_chars": 129,
+      "result_digest": "a92f7126e2e043d847bbe8ed989038bf89d50e8d25d754677e094e0354d2623d"
+    },
+    {
+      "seq": 20,
+      "name": "glob",
+      "status": "succeeded",
+      "args_chars": 31,
+      "args_digest": "7562adc94e88502ccffb5b22db1e3d7b953616e886ac7b8033ee59ab1c9f342e",
+      "result_chars": 59,
+      "result_digest": "c85d1b42b74e5fc3116aec61f9d90fcf63bd8069bbd33b151d8bee475edb9899"
+    },
+    {
+      "seq": 21,
+      "name": "glob",
+      "status": "succeeded",
+      "args_chars": 37,
+      "args_digest": "e2555aea11019a2f5534b62f9f15d55f4aadc5994e58c02b3b2e3f8ed4e7763b",
+      "result_chars": 71,
+      "result_digest": "05bc0f0c559d58c39af8ad34394692c8581d045a1b10b9f5dd287cf46532699c"
+    },
+    {
+      "seq": 22,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 35,
+      "args_digest": "718cf7c72471a065bcb89f5bdbd0fa494053ce0d4c706ff461fc33adc5d774a2",
+      "result_chars": 1997,
+      "result_digest": "b225a13ebbde960486d62b16ad185c4c04590f7621ffe522fdf1bf813b194f11"
+    },
+    {
+      "seq": 23,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 41,
+      "args_digest": "8130d82e091bcd801bb7723737f3998638e59056f6fbb615d3ed435d04c37381",
+      "result_chars": 4344,
+      "result_digest": "87962b747975d363d4dcc1d624971c19d16212b3b1dd9d0e2801ca2fca2d5265"
+    },
+    {
+      "seq": 24,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 33,
+      "args_digest": "b228111b864480428f748cdbf0ef891352c198ee678b90673aec58ee132acad1",
+      "result_chars": 4132,
+      "result_digest": "54abcc955f2c463cded9bde3d0cfb637d12b5d259357c2c0a8b77984144fe365"
+    },
+    {
+      "seq": 25,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 39,
+      "args_digest": "ddf9e2527d6c171cadf5ad2d0a2ff28633c7e930f04b259bfd0c3550083b2c5e",
+      "result_chars": 4318,
+      "result_digest": "edfec2c4bea380047e84aacde952acc1352f2e5786010f8e78ea2131280af57f"
+    },
+    {
+      "seq": 26,
+      "name": "todowrite",
+      "status": "succeeded",
+      "args_chars": 613,
+      "args_digest": "dec92d2300805abb7816983b627ffc1ef6bf0d39443574dcf99a594f0b9e1c66",
+      "result_chars": 210,
+      "result_digest": "23eb39a8bbe0c4e0a3a5266c5b9b2b2a8d99893393eaba8dfd832bf0022d45b7"
+    },
+    {
+      "seq": 27,
+      "name": "bash",
+      "status": "succeeded",
+      "args_chars": 54,
+      "args_digest": "e57ed6f16f48007815b1535d3ffece8aac852b5a237e3327ecd02458bd3c25b3",
+      "result_chars": 258,
+      "result_digest": "62b52e2ff90bdcffc91f6ba73a4671c8a654a801db32276561cd9a4b157aa5ce"
+    },
+    {
+      "seq": 28,
+      "name": "write",
+      "status": "succeeded",
+      "args_chars": 3751,
+      "args_digest": "82df5a91d774e1cc29edb6a018f705e7ff9f2d6ab5668ea87b7ad5202edac082",
+      "result_chars": 254,
+      "result_digest": "630e35696594d99c8742d8ccc6ff7b34d67ab4cb8889700fb9bae642ee7cb6bc"
+    },
+    {
+      "seq": 29,
+      "name": "write",
+      "status": "succeeded",
+      "args_chars": 9004,
+      "args_digest": "4b3a34766ea0d121846139df51075d29112c3b0ee4403db295e88a7e2d44f64b",
+      "result_chars": 260,
+      "result_digest": "5012185e4d9a5d2b59a0be4fe833ef74da95f04ddb8e13513eeb504da84d54e7"
+    },
+    {
+      "seq": 30,
+      "name": "todowrite",
+      "status": "succeeded",
+      "args_chars": 617,
+      "args_digest": "58d5f15f9f6db5cf4572bbd12aeb8cabcbf2eeebb27a999093dbf7b79ba104b7",
+      "result_chars": 370,
+      "result_digest": "2124f91ca19d02a8fe4bd82c1f169c888f1ce1cf3e2c1c1c2b35650b6bfeb0fa"
+    },
+    {
+      "seq": 31,
+      "name": "write",
+      "status": "succeeded",
+      "args_chars": 3144,
+      "args_digest": "15c2915f24c9e34f9a8e89ddc6f5d93a2e88976fe252821dd2bed600e1348ac8",
+      "result_chars": 261,
+      "result_digest": "2d13bf275c509ca1382e396a8b730cf87ff658bac52dcab20f4fe1587d7dedc5"
+    },
+    {
+      "seq": 32,
+      "name": "write",
+      "status": "succeeded",
+      "args_chars": 6249,
+      "args_digest": "7cce0bd2440526be72adad6c650fcd8a9681712860cd8813c5987b67d76d4d8a",
+      "result_chars": 268,
+      "result_digest": "38590d4ab5b139cf4cae6be8bd643e2dd052f70ebc2ec161ca9034e95261b990"
+    },
+    {
+      "seq": 33,
+      "name": "write",
+      "status": "succeeded",
+      "args_chars": 4699,
+      "args_digest": "bdc99d7272f90af21602741fa4a5bc51e2ab008b7b5be05b1970f10afb3cf544",
+      "result_chars": 254,
+      "result_digest": "7e75fbf10ef2b1f2f1b1114837d162751259c2c43f67cf2f6896f827e5c3c8e4"
+    },
+    {
+      "seq": 34,
+      "name": "write",
+      "status": "succeeded",
+      "args_chars": 7831,
+      "args_digest": "e361955dafcfc6b929dcebe0adffa4acf174e108b000f254ae8fcd1984c2d3e0",
+      "result_chars": 260,
+      "result_digest": "2efe7b44e81008b04bb5046df984b21fe79bbc0668cdbdaecbe78a8cb6821952"
+    },
+    {
+      "seq": 35,
+      "name": "bash",
+      "status": "succeeded",
+      "args_chars": 112,
+      "args_digest": "1e5a1f1a1628a5f54167c677264ec5fa841fed9de3f87f80153b2b0b9d0c875c",
+      "result_chars": 316,
+      "result_digest": "9d169c0069e7a4c56df98ef957e5baddf524e765e8462c02404f414207588f31"
+    },
+    {
+      "seq": 36,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 31,
+      "args_digest": "6fcd8fa8cc4dd4b8d40521dc1a547d8890d5f1885742ad28aa65efd2da04d61d",
+      "result_chars": 4133,
+      "result_digest": "a0e51934762a7eea562600883d25e56729409b80275058b69d396d8898dc3934"
+    },
+    {
+      "seq": 37,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 39,
+      "args_digest": "4567e8c6f6e774ff82b1a6892ca4e43b4bb688b045fbcee5f8e69c71e332c8b1",
+      "result_chars": 3422,
+      "result_digest": "e6c6909d89a32bd0749cfa186c87ba8324507dca77a80258392b5d4a8fbe599a"
+    },
+    {
+      "seq": 38,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 31,
+      "args_digest": "2392db75d222bec922a6c0f8ff857ab84984d31a2f377ceb2456ccdfd0a69d91",
+      "result_chars": 4152,
+      "result_digest": "209e717f39220332dba98aa3665c785e8e1c39124d5cfdfdeef62e4e78b554a1"
+    },
+    {
+      "seq": 39,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 59,
+      "args_digest": "3bb704394589ac4a76da2416614da2fba4ee06a8c2946f43248b30847e967809",
+      "result_chars": 1782,
+      "result_digest": "d6018a8a726f4e60a60cc47d364d816e4fe14e167ffee4010f769bb269542081"
+    },
+    {
+      "seq": 40,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 67,
+      "args_digest": "6890b343309926a01fd2316d00bafb7ae0356e8584d1317761392cc99373b5ff",
+      "result_chars": 1830,
+      "result_digest": "cecc9d3683ab85b94c600c8af20645e8af00c10bf08d1ff9b536ce5b284c2956"
+    },
+    {
+      "seq": 41,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 59,
+      "args_digest": "1d3b7d5223a7f0d499c95300cbf3c021566b5e85cc8e1620059ee685376eb98f",
+      "result_chars": 1798,
+      "result_digest": "8dcd556dfb77f4758681268b4c14764043d0e59e0a5596a8158523bc9739658f"
+    },
+    {
+      "seq": 42,
+      "name": "bash",
+      "status": "succeeded",
+      "args_chars": 197,
+      "args_digest": "13f3cb0a09638cc43118733f415ee6183f34f93e40f728ba9e84576e2f98e36e",
+      "result_chars": 410,
+      "result_digest": "fcca13fb73a44a4f1d903d7e7c58462bc53eeca3406c906e1e84365e9a39474f"
+    },
+    {
+      "seq": 43,
+      "name": "todowrite",
+      "status": "succeeded",
+      "args_chars": 586,
+      "args_digest": "27166934d4a2318cc9d4271475c8582763131408f150252bf548457a7bd42805",
+      "result_chars": 375,
+      "result_digest": "22734e769b0507b68080eb24721a81d0496d8df94035462f6c30a9f517b8b18b"
+    },
+    {
+      "seq": 44,
+      "name": "agent",
+      "status": "succeeded",
+      "args_chars": 88,
+      "args_digest": "9a81b5e68d3939c1b3c311e2060375813ea9b6502f15a07f3563c9ba4fa1bbb2",
+      "result_chars": 3714,
+      "result_digest": "dfe9826c77722c6f3644239e91cb20e978b56288c140a71104ff76239bc289cb"
+    },
+    {
+      "seq": 45,
+      "name": "todowrite",
+      "status": "succeeded",
+      "args_chars": 723,
+      "args_digest": "14f44ab1ca7f8bf2a3e8e61b8a267e4021678a617097425f93aabcff031ea293",
+      "result_chars": 473,
+      "result_digest": "563a5ade477cb6beec20f578ba67bbc46d372bb5481b3c84d56d49b7ca30642b"
+    },
+    {
+      "seq": 46,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 37,
+      "args_digest": "12d726b43c3b1b4d016fe487433e3ca04cef24f63473a4b80678af7deb575834",
+      "result_chars": 4319,
+      "result_digest": "d958695f13ed2106483b908084faaa53a1cf05e949e284646bbbf3330bb7290a"
+    },
+    {
+      "seq": 47,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 37,
+      "args_digest": "08d52ed53d349fc877b67f8bc079bfad045889dfb1832e86e8473af90b39e79f",
+      "result_chars": 4313,
+      "result_digest": "8bb3bcbf3fc83046526f56d008f2efdcd18f59333ac6eadcc8af0d6650de3467"
+    },
+    {
+      "seq": 48,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 45,
+      "args_digest": "e3b9c425d79dd6b28465f41793b48f7ad4828f91de0e4493729ef19cfc46bec1",
+      "result_chars": 4330,
+      "result_digest": "a3d886dfb31d2e5835252b7ec42f159df7853f5484eace7210870b0d69595e43"
+    },
+    {
+      "seq": 49,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 31,
+      "args_digest": "6fcd8fa8cc4dd4b8d40521dc1a547d8890d5f1885742ad28aa65efd2da04d61d",
+      "result_chars": 4410,
+      "result_digest": "2c03952d3be32e0fbc98bbb3e20e46fbfabbefbdfa72a55d34f9ff2a1946f4bf"
+    },
+    {
+      "seq": 50,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 910,
+      "args_digest": "c977dbd06da5a2e97d1a567e988a2b01c7b8bf83a20735b572cf9ceb8b516e0b",
+      "result_chars": 790,
+      "result_digest": "f6345089699bebb40debac5f9104546bf6fa8231cfabe06383687947844d164d"
+    },
+    {
+      "seq": 51,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 495,
+      "args_digest": "386bd549e475b74489ddbcaec87cac9d2bf8fb12b5c3560e9d41c415abf46584",
+      "result_chars": 531,
+      "result_digest": "da375e1bdf8bb1ef6e038a2a6b35d54fca9b21a5adc6f6a36d87b47673d65a5f"
+    },
+    {
+      "seq": 52,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 1683,
+      "args_digest": "5f2710acd2f52db1d6c6064f7b1dbf2e3699461c009df0277f407b374b591ac2",
+      "result_chars": 1187,
+      "result_digest": "8b680ca7ee6ce80b4a1366cf11d068ba11e120d091f69484a610f4596e45a564"
+    },
+    {
+      "seq": 53,
+      "name": "edit",
+      "status": "failed",
+      "args_chars": 901,
+      "args_digest": "ba1aae7d724b187aa4765458f8f148bc888b08c96ddd3ad15c6908ed7f5b4d3a",
+      "result_chars": 301,
+      "result_digest": "7a660ba77019cea85508b1e591621c518cdccfc5a4d466afea83809bd90e2a2c"
+    },
+    {
+      "seq": 54,
+      "name": "edit",
+      "status": "failed",
+      "args_chars": 118,
+      "args_digest": "4536da32841b91b48937293887ee615c93bde5244df1ac42a116a2b9bc64278d",
+      "result_chars": 251,
+      "result_digest": "87a3bf9cf53a8d845efc131b88352d1b49e17a8fbd3c7aff0201e297f944d073"
+    },
+    {
+      "seq": 55,
+      "name": "edit",
+      "status": "failed",
+      "args_chars": 110,
+      "args_digest": "235184e1d309e72b40b4fe5b090da72719f514258b4e8445c1d2a71b93b85b26",
+      "result_chars": 243,
+      "result_digest": "fb9f92824d398a59c809f6c91cbfe81e2002299c22f876f6c94c80b4511d7d04"
+    },
+    {
+      "seq": 56,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 137,
+      "args_digest": "f32be35ade437a86d7df2dcbd634a615e50e530dacb5e2c3ea59628d54aba156",
+      "result_chars": 585,
+      "result_digest": "042682935d8d1bb4d5b1a7c53a1690648676567464bf485a8e029653de6ef1eb"
+    },
+    {
+      "seq": 57,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 61,
+      "args_digest": "cc915bb6a9ee1402ae4c730f44d74951fb9877bdbb30006e8f0e05d0d19748d9",
+      "result_chars": 2140,
+      "result_digest": "1bae4c5c66f9bf14162c24e1500fdf95a123b10cec82e530d3f28b20d7890585"
+    },
+    {
+      "seq": 58,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 69,
+      "args_digest": "85cd9572e934b7baa0d9af45c587101a4c93da5289d5d952582f8e85280d63c9",
+      "result_chars": 907,
+      "result_digest": "e0cd3c1bc141a90aacbe50bf09ed9b51035c9f8f18197704cc25ee75d157d08b"
+    },
+    {
+      "seq": 59,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 61,
+      "args_digest": "4ce54798c9a553d76883ad6f058f87c54c537d9640a72bd4fb19ed1822f45df3",
+      "result_chars": 874,
+      "result_digest": "a154ec90e54bd2723a5afa7cc98254e5bdbd011fe9174cedaddfae21931c0ee4"
+    },
+    {
+      "seq": 60,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 61,
+      "args_digest": "1bac671af454d671ec2f2ecc0a4beb0e23f8d4e3318d958fd700e2c485aece93",
+      "result_chars": 976,
+      "result_digest": "708c1af0eaa32a81320e88c33ecc728fdd86874a5ba0b460e4a1454a8ec66987"
+    },
+    {
+      "seq": 61,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 69,
+      "args_digest": "1920f4136e03d0694834a71d04a6d255fef47ea47904bfb6312b892b1f274566",
+      "result_chars": 1169,
+      "result_digest": "a09e2a69237ccfb1825bf7345e65cec79df2206a28c453f7ff44c8fa7932f6f3"
+    },
+    {
+      "seq": 62,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 61,
+      "args_digest": "cfc875c7ee8af5496fa7895cbdc91f55d8767987c730a5d24c82a67f9fee4ded",
+      "result_chars": 875,
+      "result_digest": "06e6990b70f4a2b3ecf42cd2b0ea6ec4ab94a5cc84379c4ced44cfd01f40e53c"
+    },
+    {
+      "seq": 63,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 69,
+      "args_digest": "e6695ada8e0cd93cebf8f59c836aa5871453fbb9259e220c1b19c1c49ac4d06d",
+      "result_chars": 737,
+      "result_digest": "6c6743c406b7ef47495d1aac5487dab40d65788ed965588294e6fdf89af510f9"
+    },
+    {
+      "seq": 64,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 69,
+      "args_digest": "10e4b88d92bda7a089111050cc6153defb1af022ebdcd8f5a3151f35291d97e3",
+      "result_chars": 1231,
+      "result_digest": "f5dc643b6fc07f180b9c8b4193e57edc412ae7bd3713d90632f0e8eb20ac14b2"
+    },
+    {
+      "seq": 65,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 61,
+      "args_digest": "76f046d81514729e770436fc3b900354d790af9e04e0fe8704101caa4f419150",
+      "result_chars": 723,
+      "result_digest": "a5dbc4ed1cf8412d5ef7821dfa09fa603453700509f8f61d6db48bae4bba4a88"
+    },
+    {
+      "seq": 66,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 37,
+      "args_digest": "12d726b43c3b1b4d016fe487433e3ca04cef24f63473a4b80678af7deb575834",
+      "result_chars": 10530,
+      "result_digest": "99ecbf073c7adb4de514dcf0eed947fb2106f655ee4deb210e05aec81e77ee35"
+    },
+    {
+      "seq": 67,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 45,
+      "args_digest": "e3b9c425d79dd6b28465f41793b48f7ad4828f91de0e4493729ef19cfc46bec1",
+      "result_chars": 7396,
+      "result_digest": "8305e8df065b657833e4442e0c38aa1a0373c99b5781e5f3871c24b4fe8818f5"
+    },
+    {
+      "seq": 68,
+      "name": "read",
+      "status": "succeeded",
+      "args_chars": 37,
+      "args_digest": "08d52ed53d349fc877b67f8bc079bfad045889dfb1832e86e8473af90b39e79f",
+      "result_chars": 4313,
+      "result_digest": "c5af81c67f3ee84bae64692bc88359f35260bc398df4d763754c3a3b54314081"
+    },
+    {
+      "seq": 69,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 279,
+      "args_digest": "b6c5305c0627004d255abd8c09766b3df3f2004737f5cb46a0a3f3765b040df1",
+      "result_chars": 703,
+      "result_digest": "f528f2f5a4854ebe9cb1174edeec168d6ce961d8eebbbf5cf6f2f57ca3399126"
+    },
+    {
+      "seq": 70,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 161,
+      "args_digest": "f3679691335d6bfeaceec30825c47f6d63823caef500608c6b161893b0c5e3b8",
+      "result_chars": 308,
+      "result_digest": "41d9a918f3dde336225aba593e92a5d6628308125b0c720062de9676f3eafc58"
+    },
+    {
+      "seq": 71,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 848,
+      "args_digest": "dbcf3c15a888cb6a2fce17ae55031d632b9e40c780aaa815400bfdc1a3b2be89",
+      "result_chars": 1072,
+      "result_digest": "52b390747e2fa8a1c809af5db1a967169806ecb35319cc5fad804a58e6d7c220"
+    },
+    {
+      "seq": 72,
+      "name": "edit",
+      "status": "succeeded",
+      "args_chars": 136,
+      "args_digest": "dd1fe4ec326759c07bed301808113f2790a93b59f4074a7b7880f4a14f5d8d9d",
+      "result_chars": 309,
+      "result_digest": "afed734ce068388d6fe9accdd9ccb719422a9b9ab91c82a00f6399b1bf3db267"
+    },
+    {
+      "seq": 73,
+      "name": "bash",
+      "status": "succeeded",
+      "args_chars": 197,
+      "args_digest": "13f3cb0a09638cc43118733f415ee6183f34f93e40f728ba9e84576e2f98e36e",
+      "result_chars": 411,
+      "result_digest": "37f624668c6062b44490f3c358ed69d276a0cd28a478921dabc234f15d3f4a54"
+    },
+    {
+      "seq": 74,
+      "name": "todowrite",
+      "status": "succeeded",
+      "args_chars": 696,
+      "args_digest": "07484acb83a3aaebaa58ebfa99d68a8b03aac1f073c0c437de712c05a27670df",
+      "result_chars": 482,
+      "result_digest": "217d84fdf10ba27ec03a3743100126a31e7a9f1b9d7c156bd405d6aeab65ac58"
+    }
+  ],
+  "reads": [
+    {
+      "seq": 1,
+      "name": "read",
+      "path": "task_small/task_small.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 1997,
+      "result_digest": "b225a13ebbde960486d62b16ad185c4c04590f7621ffe522fdf1bf813b194f11",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 2,
+      "name": "read",
+      "path": "task_small/check_task_small.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4344,
+      "result_digest": "87962b747975d363d4dcc1d624971c19d16212b3b1dd9d0e2801ca2fca2d5265",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 3,
+      "name": "read",
+      "path": "task_todo/task_todo.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4132,
+      "result_digest": "54abcc955f2c463cded9bde3d0cfb637d12b5d259357c2c0a8b77984144fe365",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 4,
+      "name": "read",
+      "path": "task_todo/check_task_todo.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4318,
+      "result_digest": "edfec2c4bea380047e84aacde952acc1352f2e5786010f8e78ea2131280af57f",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 19,
+      "name": "read",
+      "path": "/Users/wojtek/code/ModelTest",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 129,
+      "result_digest": "a92f7126e2e043d847bbe8ed989038bf89d50e8d25d754677e094e0354d2623d",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 22,
+      "name": "read",
+      "path": "task_small/task_small.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 1997,
+      "result_digest": "b225a13ebbde960486d62b16ad185c4c04590f7621ffe522fdf1bf813b194f11",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 23,
+      "name": "read",
+      "path": "task_small/check_task_small.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4344,
+      "result_digest": "87962b747975d363d4dcc1d624971c19d16212b3b1dd9d0e2801ca2fca2d5265",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 24,
+      "name": "read",
+      "path": "task_todo/task_todo.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4132,
+      "result_digest": "54abcc955f2c463cded9bde3d0cfb637d12b5d259357c2c0a8b77984144fe365",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 25,
+      "name": "read",
+      "path": "task_todo/check_task_todo.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4318,
+      "result_digest": "edfec2c4bea380047e84aacde952acc1352f2e5786010f8e78ea2131280af57f",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 36,
+      "name": "read",
+      "path": "task_gol/task_gol.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4133,
+      "result_digest": "a0e51934762a7eea562600883d25e56729409b80275058b69d396d8898dc3934",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 37,
+      "name": "read",
+      "path": "task_fractal/task_fractal.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 3422,
+      "result_digest": "e6c6909d89a32bd0749cfa186c87ba8324507dca77a80258392b5d4a8fbe599a",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 38,
+      "name": "read",
+      "path": "task_ray/task_ray.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4152,
+      "result_digest": "209e717f39220332dba98aa3665c785e8e1c39124d5cfdfdeef62e4e78b554a1",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 39,
+      "name": "read",
+      "path": "task_gol/check_task_gol.sh",
+      "offset": 1,
+      "requested_limit": 80,
+      "status": "succeeded",
+      "result_chars": 1782,
+      "result_digest": "d6018a8a726f4e60a60cc47d364d816e4fe14e167ffee4010f769bb269542081",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 40,
+      "name": "read",
+      "path": "task_fractal/check_task_fractal.sh",
+      "offset": 1,
+      "requested_limit": 80,
+      "status": "succeeded",
+      "result_chars": 1830,
+      "result_digest": "cecc9d3683ab85b94c600c8af20645e8af00c10bf08d1ff9b536ce5b284c2956",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 41,
+      "name": "read",
+      "path": "task_ray/check_task_ray.sh",
+      "offset": 1,
+      "requested_limit": 80,
+      "status": "succeeded",
+      "result_chars": 1798,
+      "result_digest": "8dcd556dfb77f4758681268b4c14764043d0e59e0a5596a8158523bc9739658f",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 46,
+      "name": "read",
+      "path": "task_gol/check_task_gol.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4319,
+      "result_digest": "d958695f13ed2106483b908084faaa53a1cf05e949e284646bbbf3330bb7290a",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 47,
+      "name": "read",
+      "path": "task_ray/check_task_ray.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4313,
+      "result_digest": "8bb3bcbf3fc83046526f56d008f2efdcd18f59333ac6eadcc8af0d6650de3467",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 48,
+      "name": "read",
+      "path": "task_fractal/check_task_fractal.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4330,
+      "result_digest": "a3d886dfb31d2e5835252b7ec42f159df7853f5484eace7210870b0d69595e43",
+      "reuse_marked": 0
+    },
+    {
+      "seq": 49,
+      "name": "read",
+      "path": "task_gol/task_gol.md",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4410,
+      "result_digest": "2c03952d3be32e0fbc98bbb3e20e46fbfabbefbdfa72a55d34f9ff2a1946f4bf",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 57,
+      "name": "read",
+      "path": "task_gol/check_task_gol.sh",
+      "offset": 230,
+      "requested_limit": 40,
+      "status": "succeeded",
+      "result_chars": 2140,
+      "result_digest": "1bae4c5c66f9bf14162c24e1500fdf95a123b10cec82e530d3f28b20d7890585",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 58,
+      "name": "read",
+      "path": "task_fractal/check_task_fractal.sh",
+      "offset": 105,
+      "requested_limit": 15,
+      "status": "succeeded",
+      "result_chars": 907,
+      "result_digest": "e0cd3c1bc141a90aacbe50bf09ed9b51035c9f8f18197704cc25ee75d157d08b",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 59,
+      "name": "read",
+      "path": "task_ray/check_task_ray.sh",
+      "offset": 105,
+      "requested_limit": 15,
+      "status": "succeeded",
+      "result_chars": 874,
+      "result_digest": "a154ec90e54bd2723a5afa7cc98254e5bdbd011fe9174cedaddfae21931c0ee4",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 60,
+      "name": "read",
+      "path": "task_gol/check_task_gol.sh",
+      "offset": 233,
+      "requested_limit": 12,
+      "status": "succeeded",
+      "result_chars": 976,
+      "result_digest": "708c1af0eaa32a81320e88c33ecc728fdd86874a5ba0b460e4a1454a8ec66987",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 61,
+      "name": "read",
+      "path": "task_fractal/check_task_fractal.sh",
+      "offset": 168,
+      "requested_limit": 12,
+      "status": "succeeded",
+      "result_chars": 1169,
+      "result_digest": "a09e2a69237ccfb1825bf7345e65cec79df2206a28c453f7ff44c8fa7932f6f3",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 62,
+      "name": "read",
+      "path": "task_gol/check_task_gol.sh",
+      "offset": 233,
+      "requested_limit": 10,
+      "status": "succeeded",
+      "result_chars": 875,
+      "result_digest": "06e6990b70f4a2b3ecf42cd2b0ea6ec4ab94a5cc84379c4ced44cfd01f40e53c",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 63,
+      "name": "read",
+      "path": "task_fractal/check_task_fractal.sh",
+      "offset": 105,
+      "requested_limit": 10,
+      "status": "succeeded",
+      "result_chars": 737,
+      "result_digest": "6c6743c406b7ef47495d1aac5487dab40d65788ed965588294e6fdf89af510f9",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 64,
+      "name": "read",
+      "path": "task_fractal/check_task_fractal.sh",
+      "offset": 168,
+      "requested_limit": 15,
+      "status": "succeeded",
+      "result_chars": 1231,
+      "result_digest": "f5dc643b6fc07f180b9c8b4193e57edc412ae7bd3713d90632f0e8eb20ac14b2",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 65,
+      "name": "read",
+      "path": "task_ray/check_task_ray.sh",
+      "offset": 105,
+      "requested_limit": 10,
+      "status": "succeeded",
+      "result_chars": 723,
+      "result_digest": "a5dbc4ed1cf8412d5ef7821dfa09fa603453700509f8f61d6db48bae4bba4a88",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 66,
+      "name": "read",
+      "path": "task_gol/check_task_gol.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 10530,
+      "result_digest": "99ecbf073c7adb4de514dcf0eed947fb2106f655ee4deb210e05aec81e77ee35",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 67,
+      "name": "read",
+      "path": "task_fractal/check_task_fractal.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 7396,
+      "result_digest": "8305e8df065b657833e4442e0c38aa1a0373c99b5781e5f3871c24b4fe8818f5",
+      "reuse_marked": 1
+    },
+    {
+      "seq": 68,
+      "name": "read",
+      "path": "task_ray/check_task_ray.sh",
+      "offset": null,
+      "requested_limit": null,
+      "status": "succeeded",
+      "result_chars": 4313,
+      "result_digest": "c5af81c67f3ee84bae64692bc88359f35260bc398df4d763754c3a3b54314081",
+      "reuse_marked": 0
+    }
+  ],
+  "mutations": [
+    {
+      "seq": 28,
+      "name": "write",
+      "path": "task_gol/task_gol.md",
+      "status": "succeeded",
+      "result_chars": 254,
+      "result_digest": "630e35696594d99c8742d8ccc6ff7b34d67ab4cb8889700fb9bae642ee7cb6bc"
+    },
+    {
+      "seq": 29,
+      "name": "write",
+      "path": "task_gol/check_task_gol.sh",
+      "status": "succeeded",
+      "result_chars": 260,
+      "result_digest": "5012185e4d9a5d2b59a0be4fe833ef74da95f04ddb8e13513eeb504da84d54e7"
+    },
+    {
+      "seq": 31,
+      "name": "write",
+      "path": "task_fractal/task_fractal.md",
+      "status": "succeeded",
+      "result_chars": 261,
+      "result_digest": "2d13bf275c509ca1382e396a8b730cf87ff658bac52dcab20f4fe1587d7dedc5"
+    },
+    {
+      "seq": 32,
+      "name": "write",
+      "path": "task_fractal/check_task_fractal.sh",
+      "status": "succeeded",
+      "result_chars": 268,
+      "result_digest": "38590d4ab5b139cf4cae6be8bd643e2dd052f70ebc2ec161ca9034e95261b990"
+    },
+    {
+      "seq": 33,
+      "name": "write",
+      "path": "task_ray/task_ray.md",
+      "status": "succeeded",
+      "result_chars": 254,
+      "result_digest": "7e75fbf10ef2b1f2f1b1114837d162751259c2c43f67cf2f6896f827e5c3c8e4"
+    },
+    {
+      "seq": 34,
+      "name": "write",
+      "path": "task_ray/check_task_ray.sh",
+      "status": "succeeded",
+      "result_chars": 260,
+      "result_digest": "2efe7b44e81008b04bb5046df984b21fe79bbc0668cdbdaecbe78a8cb6821952"
+    },
+    {
+      "seq": 50,
+      "name": "edit",
+      "path": "task_gol/task_gol.md",
+      "status": "succeeded",
+      "result_chars": 790,
+      "result_digest": "f6345089699bebb40debac5f9104546bf6fa8231cfabe06383687947844d164d"
+    },
+    {
+      "seq": 51,
+      "name": "edit",
+      "path": "task_gol/check_task_gol.sh",
+      "status": "succeeded",
+      "result_chars": 531,
+      "result_digest": "da375e1bdf8bb1ef6e038a2a6b35d54fca9b21a5adc6f6a36d87b47673d65a5f"
+    },
+    {
+      "seq": 52,
+      "name": "edit",
+      "path": "task_ray/check_task_ray.sh",
+      "status": "succeeded",
+      "result_chars": 1187,
+      "result_digest": "8b680ca7ee6ce80b4a1366cf11d068ba11e120d091f69484a610f4596e45a564"
+    },
+    {
+      "seq": 53,
+      "name": "edit",
+      "path": "task_gol/check_task_gol.sh",
+      "status": "failed",
+      "result_chars": 301,
+      "result_digest": "7a660ba77019cea85508b1e591621c518cdccfc5a4d466afea83809bd90e2a2c"
+    },
+    {
+      "seq": 54,
+      "name": "edit",
+      "path": "task_fractal/check_task_fractal.sh",
+      "status": "failed",
+      "result_chars": 251,
+      "result_digest": "87a3bf9cf53a8d845efc131b88352d1b49e17a8fbd3c7aff0201e297f944d073"
+    },
+    {
+      "seq": 55,
+      "name": "edit",
+      "path": "task_ray/check_task_ray.sh",
+      "status": "failed",
+      "result_chars": 243,
+      "result_digest": "fb9f92824d398a59c809f6c91cbfe81e2002299c22f876f6c94c80b4511d7d04"
+    },
+    {
+      "seq": 56,
+      "name": "edit",
+      "path": "task_fractal/check_task_fractal.sh",
+      "status": "succeeded",
+      "result_chars": 585,
+      "result_digest": "042682935d8d1bb4d5b1a7c53a1690648676567464bf485a8e029653de6ef1eb"
+    },
+    {
+      "seq": 69,
+      "name": "edit",
+      "path": "task_fractal/check_task_fractal.sh",
+      "status": "succeeded",
+      "result_chars": 703,
+      "result_digest": "f528f2f5a4854ebe9cb1174edeec168d6ce961d8eebbbf5cf6f2f57ca3399126"
+    },
+    {
+      "seq": 70,
+      "name": "edit",
+      "path": "task_ray/check_task_ray.sh",
+      "status": "succeeded",
+      "result_chars": 308,
+      "result_digest": "41d9a918f3dde336225aba593e92a5d6628308125b0c720062de9676f3eafc58"
+    },
+    {
+      "seq": 71,
+      "name": "edit",
+      "path": "task_gol/check_task_gol.sh",
+      "status": "succeeded",
+      "result_chars": 1072,
+      "result_digest": "52b390747e2fa8a1c809af5db1a967169806ecb35319cc5fad804a58e6d7c220"
+    },
+    {
+      "seq": 72,
+      "name": "edit",
+      "path": "task_fractal/check_task_fractal.sh",
+      "status": "succeeded",
+      "result_chars": 309,
+      "result_digest": "afed734ce068388d6fe9accdd9ccb719422a9b9ab91c82a00f6399b1bf3db267"
+    }
+  ],
+  "git_inspections": [],
+  "shell_inspections": [
+    {
+      "seq": 27,
+      "command": "mkdir -p task_gol task_fractal task_ray",
+      "status": "succeeded",
+      "result_chars": 258,
+      "result_digest": "62b52e2ff90bdcffc91f6ba73a4671c8a654a801db32276561cd9a4b157aa5ce"
+    },
+    {
+      "seq": 35,
+      "command": "chmod +x task_gol/check_task_gol.sh task_fractal/check_task_fractal.sh task_ray/check_task_ray.sh",
+      "status": "succeeded",
+      "result_chars": 316,
+      "result_digest": "9d169c0069e7a4c56df98ef957e5baddf524e765e8462c02404f414207588f31"
+    },
+    {
+      "seq": 42,
+      "command": "bash -n task_gol/check_task_gol.sh && echo \"gol: ok\" && bash -n task_fractal/check_task_fractal.sh && echo \"fractal: ok\" && bash -n task_ray/check_task_ray.sh && echo \"ray: ok\"",
+      "status": "succeeded",
+      "result_chars": 410,
+      "result_digest": "fcca13fb73a44a4f1d903d7e7c58462bc53eeca3406c906e1e84365e9a39474f"
+    },
+    {
+      "seq": 73,
+      "command": "bash -n task_gol/check_task_gol.sh && echo \"gol: ok\" && bash -n task_fractal/check_task_fractal.sh && echo \"fractal: ok\" && bash -n task_ray/check_task_ray.sh && echo \"ray: ok\"",
+      "status": "succeeded",
+      "result_chars": 411,
+      "result_digest": "37f624668c6062b44490f3c358ed69d276a0cd28a478921dabc234f15d3f4a54"
+    }
+  ],
+  "subagents": [
+    {
+      "seq": 0,
+      "agent": "explore",
+      "detached": 0,
+      "status": "succeeded",
+      "result_chars": 4113,
+      "result_digest": "c6c61ed5c6d1820eb4d5220513581ae88f8ace1275779e993535b5fb9016cb25"
+    },
+    {
+      "seq": 44,
+      "agent": "self-review",
+      "detached": 0,
+      "status": "succeeded",
+      "result_chars": 3714,
+      "result_digest": "dfe9826c77722c6f3644239e91cb20e978b56288c140a71104ff76239bc289cb"
+    }
+  ],
+  "usage_turns": [
+    {
+      "seq": 1,
+      "status": "reported",
+      "prompt_tokens": 7296,
+      "completion_tokens": 191,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 7296,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 0
+    },
+    {
+      "seq": 2,
+      "status": "reported",
+      "prompt_tokens": 4307,
+      "completion_tokens": 49,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 4307,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "2028388618d706ac",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 0
+    },
+    {
+      "seq": 3,
+      "status": "reported",
+      "prompt_tokens": 4537,
+      "completion_tokens": 130,
+      "cache_read_tokens": 4224,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 4537,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "2028388618d706ac",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 93
+    },
+    {
+      "seq": 4,
+      "status": "reported",
+      "prompt_tokens": 4777,
+      "completion_tokens": 186,
+      "cache_read_tokens": 4608,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 4777,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "2028388618d706ac",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 96
+    },
+    {
+      "seq": 5,
+      "status": "reported",
+      "prompt_tokens": 11928,
+      "completion_tokens": 116,
+      "cache_read_tokens": 4864,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 11928,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "2028388618d706ac",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 40
+    },
+    {
+      "seq": 6,
+      "status": "reported",
+      "prompt_tokens": 12136,
+      "completion_tokens": 1162,
+      "cache_read_tokens": 12032,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 12136,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "2028388618d706ac",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 99
+    },
+    {
+      "seq": 7,
+      "status": "reported",
+      "prompt_tokens": 8590,
+      "completion_tokens": 1563,
+      "cache_read_tokens": 7168,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 8590,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 83
+    },
+    {
+      "seq": 8,
+      "status": "reported",
+      "prompt_tokens": 8987,
+      "completion_tokens": 871,
+      "cache_read_tokens": 7168,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 8987,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 79
+    },
+    {
+      "seq": 9,
+      "status": "reported",
+      "prompt_tokens": 9202,
+      "completion_tokens": 239,
+      "cache_read_tokens": 8448,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 9202,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 91
+    },
+    {
+      "seq": 10,
+      "status": "reported",
+      "prompt_tokens": 16327,
+      "completion_tokens": 168,
+      "cache_read_tokens": 9088,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 16327,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 55
+    },
+    {
+      "seq": 11,
+      "status": "reported",
+      "prompt_tokens": 16418,
+      "completion_tokens": 80,
+      "cache_read_tokens": 16256,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 16418,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 99
+    },
+    {
+      "seq": 12,
+      "status": "reported",
+      "prompt_tokens": 16503,
+      "completion_tokens": 261,
+      "cache_read_tokens": 16256,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 16503,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 98
+    },
+    {
+      "seq": 13,
+      "status": "reported",
+      "prompt_tokens": 16654,
+      "completion_tokens": 222,
+      "cache_read_tokens": 16384,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 16654,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 98
+    },
+    {
+      "seq": 14,
+      "status": "reported",
+      "prompt_tokens": 16873,
+      "completion_tokens": 1445,
+      "cache_read_tokens": 16384,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 16873,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 97
+    },
+    {
+      "seq": 15,
+      "status": "reported",
+      "prompt_tokens": 17236,
+      "completion_tokens": 462,
+      "cache_read_tokens": 16768,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 17236,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 97
+    },
+    {
+      "seq": 16,
+      "status": "reported",
+      "prompt_tokens": 17694,
+      "completion_tokens": 400,
+      "cache_read_tokens": 17152,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 17694,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 96
+    },
+    {
+      "seq": 17,
+      "status": "reported",
+      "prompt_tokens": 18104,
+      "completion_tokens": 275,
+      "cache_read_tokens": 17152,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 18104,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 94
+    },
+    {
+      "seq": 18,
+      "status": "reported",
+      "prompt_tokens": 18462,
+      "completion_tokens": 664,
+      "cache_read_tokens": 18048,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 18462,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "91fe59daf6ef09a3",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 97
+    },
+    {
+      "seq": 19,
+      "status": "reported",
+      "prompt_tokens": 9778,
+      "completion_tokens": 275,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 9778,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 0
+    },
+    {
+      "seq": 20,
+      "status": "reported",
+      "prompt_tokens": 10023,
+      "completion_tokens": 152,
+      "cache_read_tokens": 1792,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 10023,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 17
+    },
+    {
+      "seq": 21,
+      "status": "reported",
+      "prompt_tokens": 10256,
+      "completion_tokens": 228,
+      "cache_read_tokens": 9600,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 10256,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 93
+    },
+    {
+      "seq": 22,
+      "status": "reported",
+      "prompt_tokens": 17429,
+      "completion_tokens": 412,
+      "cache_read_tokens": 9856,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 17429,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 56
+    },
+    {
+      "seq": 23,
+      "status": "reported",
+      "prompt_tokens": 17687,
+      "completion_tokens": 106,
+      "cache_read_tokens": 10112,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 17687,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 57
+    },
+    {
+      "seq": 24,
+      "status": "reported",
+      "prompt_tokens": 17840,
+      "completion_tokens": 3929,
+      "cache_read_tokens": 17280,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 17840,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 96
+    },
+    {
+      "seq": 25,
+      "status": "reported",
+      "prompt_tokens": 18260,
+      "completion_tokens": 261,
+      "cache_read_tokens": 17536,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 18260,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 96
+    },
+    {
+      "seq": 26,
+      "status": "reported",
+      "prompt_tokens": 18567,
+      "completion_tokens": 6611,
+      "cache_read_tokens": 18176,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 18567,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 97
+    },
+    {
+      "seq": 27,
+      "status": "reported",
+      "prompt_tokens": 19555,
+      "completion_tokens": 116,
+      "cache_read_tokens": 18176,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 19555,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 92
+    },
+    {
+      "seq": 28,
+      "status": "reported",
+      "prompt_tokens": 19735,
+      "completion_tokens": 196,
+      "cache_read_tokens": 18432,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 19735,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 93
+    },
+    {
+      "seq": 29,
+      "status": "reported",
+      "prompt_tokens": 23661,
+      "completion_tokens": 309,
+      "cache_read_tokens": 19328,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 23661,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 81
+    },
+    {
+      "seq": 30,
+      "status": "reported",
+      "prompt_tokens": 25846,
+      "completion_tokens": 160,
+      "cache_read_tokens": 19456,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 25846,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 75
+    },
+    {
+      "seq": 31,
+      "status": "reported",
+      "prompt_tokens": 26116,
+      "completion_tokens": 245,
+      "cache_read_tokens": 23424,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 26116,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 89
+    },
+    {
+      "seq": 32,
+      "status": "reported",
+      "prompt_tokens": 26420,
+      "completion_tokens": 517,
+      "cache_read_tokens": 25600,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 26420,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 96
+    },
+    {
+      "seq": 33,
+      "status": "reported",
+      "prompt_tokens": 5385,
+      "completion_tokens": 270,
+      "cache_read_tokens": 1792,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 5385,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "2028388618d706ac",
+      "expected_cacheable_percent": 98,
+      "actual_cache_read_percent": 33
+    },
+    {
+      "seq": 34,
+      "status": "reported",
+      "prompt_tokens": 18064,
+      "completion_tokens": 6535,
+      "cache_read_tokens": 5632,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 18064,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "2028388618d706ac",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 31
+    },
+    {
+      "seq": 35,
+      "status": "reported",
+      "prompt_tokens": 27464,
+      "completion_tokens": 452,
+      "cache_read_tokens": 25856,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 27464,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 94
+    },
+    {
+      "seq": 36,
+      "status": "reported",
+      "prompt_tokens": 27810,
+      "completion_tokens": 257,
+      "cache_read_tokens": 26112,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 27810,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 93
+    },
+    {
+      "seq": 37,
+      "status": "reported",
+      "prompt_tokens": 37965,
+      "completion_tokens": 3359,
+      "cache_read_tokens": 27136,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 37965,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 71
+    },
+    {
+      "seq": 38,
+      "status": "reported",
+      "prompt_tokens": 38520,
+      "completion_tokens": 813,
+      "cache_read_tokens": 32768,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 38520,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 85
+    },
+    {
+      "seq": 39,
+      "status": "reported",
+      "prompt_tokens": 38992,
+      "completion_tokens": 769,
+      "cache_read_tokens": 37760,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 38992,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 96
+    },
+    {
+      "seq": 40,
+      "status": "reported",
+      "prompt_tokens": 39954,
+      "completion_tokens": 1167,
+      "cache_read_tokens": 38272,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 39954,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 95
+    },
+    {
+      "seq": 41,
+      "status": "reported",
+      "prompt_tokens": 40986,
+      "completion_tokens": 468,
+      "cache_read_tokens": 38784,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 40986,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 94
+    },
+    {
+      "seq": 42,
+      "status": "reported",
+      "prompt_tokens": 42427,
+      "completion_tokens": 505,
+      "cache_read_tokens": 39680,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 42427,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 93
+    },
+    {
+      "seq": 43,
+      "status": "reported",
+      "prompt_tokens": 43254,
+      "completion_tokens": 640,
+      "cache_read_tokens": 40704,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 43254,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 94
+    },
+    {
+      "seq": 44,
+      "status": "reported",
+      "prompt_tokens": 44673,
+      "completion_tokens": 388,
+      "cache_read_tokens": 42112,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 44673,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 94
+    },
+    {
+      "seq": 45,
+      "status": "reported",
+      "prompt_tokens": 53716,
+      "completion_tokens": 1509,
+      "cache_read_tokens": 43008,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 53716,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 80
+    },
+    {
+      "seq": 46,
+      "status": "reported",
+      "prompt_tokens": 54973,
+      "completion_tokens": 381,
+      "cache_read_tokens": 45440,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 54973,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 82
+    },
+    {
+      "seq": 47,
+      "status": "reported",
+      "prompt_tokens": 55446,
+      "completion_tokens": 289,
+      "cache_read_tokens": 53504,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 55446,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 96
+    },
+    {
+      "seq": 48,
+      "status": "reported",
+      "prompt_tokens": 55788,
+      "completion_tokens": 531,
+      "cache_read_tokens": 54656,
+      "cache_creation_tokens": 0,
+      "cache_measured_tokens": 55788,
+      "rewrite_kind": "none",
+      "rewrite_saved_tokens": null,
+      "prefix_hash": "cb0d490251454b2c",
+      "expected_cacheable_percent": 99,
+      "actual_cache_read_percent": 97
+    }
+  ],
+  "context_role_stats": [
+    {
+      "role": "assistant",
+      "messages": 27,
+      "chars": 1912
+    },
+    {
+      "role": "system",
+      "messages": 1,
+      "chars": 10140
+    },
+    {
+      "role": "tool",
+      "messages": 56,
+      "chars": 113789
+    },
+    {
+      "role": "user",
+      "messages": 2,
+      "chars": 9596
+    }
+  ],
+  "background_context_events": []
+}

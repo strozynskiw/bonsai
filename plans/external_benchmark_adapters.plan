@@ -1,0 +1,190 @@
+# External Benchmark Adapters — SWE-bench Verified and Terminal-Bench
+
+Status: local adapter implementation complete; external qualification pending
+Created: 2026-07-12
+Roadmap: cross-cutting P0 public benchmark qualification
+
+## Goal
+
+Make Bonsai runnable and scoreable by the official SWE-bench Verified and
+Terminal-Bench 2.0 harnesses without importing either benchmark runtime into the Bonsai
+binary. The adapters must preserve the benchmark's canonical task identity and output
+format while recording Bonsai provider/model/effort, usage, cost, latency, cache reuse,
+repair turns, terminal reason, and patch/workspace evidence.
+
+The local adapter implementation is complete. External qualification remains deliberately
+deferred: it must not download datasets, containers, language runtimes, or benchmark images
+on this development machine. Full benchmark execution belongs in an explicitly provisioned
+CI/remote runner with enough disk; this worktree contains only adapter code, schemas,
+deterministic fixtures, and mocked contract tests.
+
+## Current Upstream Boundary
+
+Pinned on 2026-07-12:
+
+- SWE-bench harness: `f7bbbb2ccdf479001d6467c9e34af59e44a840f9`
+- sb-cli prediction contract: `b679692b8b7e274a6c89fd0842f25b02da4b9256`
+- Harbor agent/result API: `2d3f78d55a703df2f76c005d7df44a5ce2d8adf5`
+- Terminal-Bench 2 dataset: `2fd12b88aafdd04a52c298e3940bcb189f9766d6`
+
+- SWE-bench's official harness consumes dataset instances and evaluates prediction patches
+  in Docker-backed instance environments. A prediction identifies the `instance_id` and
+  carries `model_patch` plus `model_name_or_path`.
+- Terminal-Bench's legacy `tb` harness is no longer the forward integration target.
+  Terminal-Bench 2.0 names Harbor as its official harness, and Harbor supports installed
+  agent adapters plus local Docker or remote environment providers.
+- These formats are externally owned and may change. Before implementation, pin tested
+  upstream versions/commits and re-check their official schemas. Do not silently accept an
+  unknown schema version.
+
+## Architecture
+
+### 1. One surface-neutral benchmark run contract
+
+Add an adapter module under `eval/adapters/` that models:
+
+- benchmark name/version, task/instance id, workspace path, and untrusted instruction;
+- Bonsai binary path, provider, model, reasoning effort, autonomy, wall-time and turn caps;
+- process outcome, terminal reason, final assistant output, produced patch, and artifact
+  paths;
+- normalized score/result metadata and the same usage/cost/cache/repair metrics as native
+  eval reports.
+
+The contract launches the existing headless surface in the prepared workspace. It must not
+duplicate the agent loop, provider selection, permissions, persistence, or budget logic.
+Use typed enums for benchmark kind and terminal state, bounded stdout/stderr capture, atomic
+artifact writes, and explicit schema versions.
+
+### 2. SWE-bench Verified prediction adapter
+
+The upstream harness owns checkout, base commit, test patch, image lifecycle, and scoring.
+Bonsai owns only the agent run and prediction extraction:
+
+1. Accept one pre-provisioned instance workspace plus its official problem statement and
+   identity. Never expose the gold patch, test patch, oracle solution, or hidden results to
+   the agent.
+2. Run `bonsai -p` in that workspace with explicit provider/model/effort and budgets.
+3. Build `model_patch` from the final tracked/untracked workspace diff against the supplied
+   base commit. Reject binary/oversized patches with a typed terminal reason instead of
+   emitting ambiguous output.
+4. Write official prediction JSON/JSONL containing `instance_id`, `model_patch`, and a stable
+   `model_name_or_path`; write Bonsai diagnostics to a separate redacted sidecar keyed by the
+   same instance id.
+5. Support deterministic resume/retry without duplicating an already completed prediction.
+
+Do not run or reimplement SWE-bench graders inside Bonsai. An external smoke job later feeds
+the emitted prediction into the pinned official harness and imports its result.
+
+### 3. Harbor agent adapter for Terminal-Bench 2.0
+
+Implement the smallest adapter accepted by the pinned Harbor agent API:
+
+1. Harbor owns environment provisioning, terminal/container lifecycle, task instruction,
+   verifier execution, and reward calculation.
+2. The adapter installs or locates the Bonsai binary, passes the task instruction to the
+   headless surface, maps Harbor's workspace/environment access to Bonsai's cwd and sandbox
+   contract, and streams bounded progress without scraping TUI output.
+3. Map cancellation, timeout, auth/config failure, budget exhaustion, and ordinary agent
+   failure to distinct Harbor terminal states. Always allow Harbor cleanup to run.
+4. Export the Bonsai sidecar metrics and session id without provider secrets, raw auth data,
+   unrestricted environment dumps, or unbounded transcripts.
+5. Keep the adapter thin enough to propose upstream to Harbor later; Bonsai must still retain
+   a pinned compatibility fixture in this repository.
+
+Do not target the legacy Terminal-Bench `tb` API unless an actual required dataset cannot run
+through Harbor. Record such a compatibility exception explicitly rather than maintaining two
+default integrations.
+
+## Safety and Reproducibility
+
+- Treat benchmark instructions, repositories, test output, and harness metadata as untrusted
+  data. They never become system instructions or grant permissions.
+- Require explicit autonomy, network, filesystem roots, provider/model/effort, and all budget
+  values. Benchmark mode must not silently enable YOLO or broaden normal safety policy.
+- The harness environment is the isolation boundary; Bonsai still applies its own permission,
+  effect, sandbox, hook, and credential rules inside it.
+- Capture exact Bonsai version/commit, adapter schema, benchmark dataset/version, harness
+  version, provider/model/effort, seed when available, base commit, and patch digest.
+- Outputs are deterministic in structure and redacted. Retry/resume keys are benchmark +
+  dataset version + instance + Bonsai configuration, not timestamps.
+- Never persist credentials in benchmark artifacts. Environment-backed auth stays a reference;
+  file/keyring credentials follow the user's configured store and are not copied into runners.
+
+## Delivery Phases
+
+Phases A-D are implemented locally without external runtimes. Phase E remains
+deliberately remote-only.
+
+### Phase A — Pin and test the contracts
+
+- Record official upstream versions/commits and supported schemas.
+- Add golden task-input, prediction-output, Harbor event, and result fixtures with no external
+  dependencies.
+- Add parser/serializer validation, unknown-version rejection, redaction tests, and bounded
+  artifact tests.
+
+### Phase B — Common Bonsai launcher
+
+- Add the surface-neutral request/result types and a process launcher around `bonsai -p`.
+- Pass explicit model/effort/autonomy/turn/time budgets and parse structured headless output.
+- Preserve exit code and terminal reason, ensure cancellation kills the process group, and
+  write one atomic redacted sidecar.
+
+### Phase C — SWE-bench Verified
+
+- Add one-instance and batch prediction commands around pre-provisioned workspaces.
+- Extract a safe complete patch including untracked text files and stable metadata.
+- Test passing, empty, binary, oversized, timeout, interrupted, and resumed predictions using
+  tiny local git fixtures.
+
+### Phase D — Terminal-Bench 2.0 through Harbor
+
+- Implement the pinned Harbor agent interface and packaging/installation metadata.
+- Add mocked lifecycle tests for setup, instruction delivery, progress, cancellation, result,
+  cleanup, and sidecar export.
+- Document local Docker and remote Harbor execution as external opt-in workflows; neither runs
+  in normal Bonsai CI or on this machine.
+
+### Phase E — External qualification
+
+- On a disk-capable isolated runner, execute a small pinned canary subset of both benchmarks.
+- Verify official harness scores, patch fidelity, cleanup, artifact redaction, and baseline
+  ingestion.
+- Only after canaries pass, define versioned live baselines by provider/model/effort. Keep
+  expensive full-suite runs scheduled/manual; tagged release CI consumes a reviewed result or
+  bounded canary, not hundreds of surprise image pulls.
+
+## Acceptance Bar
+
+- Golden contract tests run offline with no Docker daemon, dataset download, Python package
+  installation, or network access.
+- An unknown/changed upstream schema fails clearly before launching an agent.
+- SWE-bench predictions validate against the pinned official prediction format and preserve
+  exact instance ids and complete text patches.
+- The Harbor adapter completes a mocked task lifecycle and distinguishes success, verifier
+  failure, cancellation, timeout, budget exhaustion, auth/config failure, and internal error.
+- Full external canaries run in official/pinned environments and their results import into the
+  versioned Bonsai baseline report without manual rewriting.
+- No benchmark artifact contains usable credentials, hidden tests/oracles, unrestricted env
+  data, or unbounded model/tool output.
+- Documentation states disk/network/runtime requirements and never starts or downloads Docker
+  implicitly.
+
+## Explicit Non-goals
+
+- Vendoring SWE-bench, Terminal-Bench, Harbor, datasets, or container images.
+- Building a second container scheduler inside Bonsai.
+- Reimplementing official graders or claiming leaderboard comparability from local mock tests.
+- Automatic leaderboard submission, artifact upload, or external side effects.
+- Making Docker a Bonsai runtime dependency or a normal release-CI prerequisite.
+
+## Upstream References to Re-check When Work Resumes
+
+- SWE-bench official repository and quick-start/harness documentation:
+  `https://github.com/SWE-bench/SWE-bench`
+- SWE-bench remote prediction format:
+  `https://github.com/SWE-bench/sb-cli`
+- Harbor, the official Terminal-Bench 2.0 harness:
+  `https://github.com/harbor-framework/harbor`
+- Terminal-Bench migration notice and legacy task format:
+  `https://github.com/harbor-framework/terminal-bench`

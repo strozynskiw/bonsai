@@ -1,0 +1,111 @@
+[package]
+name = "bonsai"
+version = "0.2.0"
+description = "A TUI coding agent with multiple LLM provider backends."
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/strozynskiw/bonsai"
+publish = false
+edition = "2024"
+
+# Crate lint policy. The warning gate itself lives in CI
+# (`cargo clippy --all-targets --all-features --locked -- -D warnings`) so local
+# iteration is not blocked by transient warnings; this table records the rules
+# that are *stricter* than the defaults and must hold everywhere.
+[lints.rust]
+# No casual unsafe. The only unsafe in this crate is Windows DPAPI FFI and the
+# edition-2024 `std::env::{set_var,remove_var}` calls in tests; each carries a
+# scoped `#[allow(unsafe_code, reason = "...")]`. New unsafe must be waived the
+# same way, which forces a reviewed justification rather than silent compilation.
+unsafe_code = "deny"
+
+[lints.clippy]
+# Debug scaffolding must never reach a commit; `dbg!` is a hard error.
+dbg_macro = "deny"
+
+[dependencies]
+async-openai = { version = "0.41.1", features = ["chat-completion", "model"] }
+reqwest = { version = "0.13.4", features = ["stream", "json", "gzip", "brotli"] }
+http = "1"
+tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal", "net"] }
+tokio-util = "0.7"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+toml = "1.1.2"
+directories = "6.0.0"
+keyring = "4.1.4"
+anyhow = "1.0.104"
+thiserror = "2.0.18"
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+async-trait = "0.1"
+futures = "0.3.33"
+dotenvy = "0.15.7"
+tiktoken-rs = { version = "0.12.0", default-features = false }
+# Pinned to the same minor as model2vec-rs's dependency so the optional
+# memory-embeddings feature doesn't compile a second copy of this heavy crate.
+tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+base64 = "0.22.1"
+blake3 = "1"
+ring = "0.17.14"
+semver = "1.0.27"
+sha2 = "0.11.0"
+glob = "0.3.3"
+# HTML → Markdown for the WebFetch tool (M5.5). html5ever-based, so it tolerates
+# the truncated HTML we may hand it after enforcing the response byte cap.
+htmd = "0.5"
+# Charset decoding for fetched pages (M5.5). Also compiled transitively via
+# reqwest's default `charset` feature; declared directly so WebFetch owns it.
+encoding_rs = "0.8"
+walkdir = "2.5.0"
+ignore = "0.4.30"
+grep-searcher = "0.1.16"
+grep-regex = "0.1.14"
+regex = "1.11.1"
+nix = { version = "0.31.3", features = ["process", "signal", "time", "poll", "fs"] }
+portable-pty = "0.9.0"
+tree-sitter = "0.26.9"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+pulldown-cmark = "0.13.4"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"
+vt100 = "0.16.2"
+arboard = "3.6.1"
+fff-search = "0.10.0"
+strsim = "0.11.1"
+serde_yaml_ng = "0.10.0"
+# Static embeddings for memory retrieval (M4.8). default-features = false is
+# load-bearing: defaults pull the C oniguruma regex backend AND a second HTTP
+# stack (hf-hub/ureq) — we use tokenizers' pure-Rust fancy-regex and download
+# model files ourselves with the in-tree reqwest.
+model2vec-rs = { version = "0.2.1", optional = true, default-features = false, features = ["fancy-regex"] }
+png = "0.18.1"
+# MCP client (M5.2). client + stdio child-process transport + Streamable HTTP
+# over the reqwest we already ship. rmcp has renamed transport features
+# between minor versions — re-verify these exact names at the next bump.
+rmcp = { version = "2.1.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+tempfile = "3.27.0"
+uuid = { version = "1.23.4", features = ["v7"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[features]
+default = ["memory-embeddings"]
+# Hybrid memory retrieval: BM25 + static embeddings. Without this feature (or
+# with BONSAI_MEMORY_EMBEDDINGS=off) recall degrades to BM25-only.
+memory-embeddings = ["dep:model2vec-rs"]
+
+[dev-dependencies]
+wiremock = "0.6.5"
+# Paused-clock control (`start_paused`) for deterministic timeout tests.
+tokio = { version = "1", features = ["test-util"] }
+# In-process fake MCP server for src/mcp/tests.rs (M5.2).
+rmcp = { version = "2.1.0", default-features = false, features = ["server", "transport-io"] }

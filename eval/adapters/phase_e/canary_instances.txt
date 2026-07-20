@@ -1,0 +1,10 @@
+# SWE-bench Verified canary instance ids — one per line, '#' comments ignored.
+#
+# Keep this list TINY. Every id here pulls one multi-GB Docker image during
+# `grade` and spends provider tokens during `run`. Start with a single
+# instance, confirm the full pipeline scores, then widen deliberately.
+#
+# The default below is the same instance used by the adapter's own fixture
+# (eval/fixtures/adapters/swe-request-v1.json), so it is a known-real id in
+# this repo. Swap in your chosen canary subset once the pipeline is proven.
+django__django-11099

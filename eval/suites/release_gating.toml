@@ -1,0 +1,377 @@
+id = "release_gating"
+seed = 103
+
+[budgets]
+max_logical_turns = 12
+max_provider_attempts = 12
+max_duration_ms = 5000
+
+[[tasks]]
+id = "malformed_tool_arguments_recover"
+fixture = "fixtures/tiny_project"
+prompt = "Recover from a malformed tool call, then add a release-gate note to README.md."
+
+[tasks.mock]
+final_response = "Recovered from malformed arguments and updated README.md."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nrelease-gating eval: malformed arguments recovered\n"}'''
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["malformed arguments recovered"]
+
+[[tasks]]
+id = "parallel_nonconflicting_writes"
+fixture = "fixtures/tiny_project"
+prompt = "Create two independent release-gate marker files in one tool turn."
+
+[tasks.mock]
+final_response = "Created both release-gate markers."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+id = "parallel-a"
+name = "write"
+arguments = '''{"path":"release/a.txt","content":"alpha\n"}'''
+[[tasks.mock.tool_turns.calls]]
+id = "parallel-b"
+name = "write"
+arguments = '''{"path":"release/b.txt","content":"beta\n"}'''
+
+[[tasks.graders]]
+type = "file-state"
+path = "release/a.txt"
+contains = ["alpha"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "release/b.txt"
+contains = ["beta"]
+
+[[tasks]]
+id = "permission_denial_has_no_side_effect"
+fixture = "fixtures/tiny_project"
+prompt = "Attempt the scripted destructive command, respect its denial, and stop."
+
+[tasks.mock]
+final_response = "The destructive command was denied; README.md remains intact."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"rm -f README.md"}'
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+exists = true
+contains = ["Tiny Project"]
+
+[[tasks]]
+id = "mid_run_cancellation"
+fixture = "fixtures/tiny_project"
+prompt = "Wait for deterministic cancellation."
+expected_status = "interrupted"
+cancel_after_provider_attempts = 1
+
+[tasks.mock]
+final_response = ""
+wait_for_cancellation = true
+
+[[tasks]]
+id = "resume_after_interruption"
+fixture = "fixtures/tiny_project"
+prompt = "Resume this exact context after deterministic interruption."
+cancel_after_provider_attempts = 1
+resume_after_interruption = true
+
+[tasks.mock]
+final_response = "Resumed the interrupted turn without replaying its prompt."
+wait_for_cancellation = true
+expected_user_message_count = 1
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["Resumed the interrupted turn"]
+
+[[tasks]]
+id = "provider_truncation_recovers"
+fixture = "fixtures/tiny_project"
+prompt = "Recover after the provider truncates an empty response."
+
+[tasks.mock]
+final_response = "Recovered after provider truncation."
+truncated_responses = 1
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["Recovered after provider truncation"]
+
+[[tasks]]
+id = "two_sessions_one_workspace"
+fixture = "fixtures/tiny_project"
+prompt = "Read README.md, pause for the peer, preserve its edit, and record the primary session result separately."
+cancel_after_provider_attempts = 2
+resume_after_interruption = true
+
+[tasks.mock]
+final_response = "Preserved the peer edit and recorded the primary session change."
+expected_user_message_count = 1
+final_request_contains = [
+  "Other bonsai sessions in this project",
+  "README.md",
+  "changed after it was read",
+]
+wait_for_cancellation_after_tool_turns = 1
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"primary session clobber\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"primary-session.txt","content":"primary session completed without overwriting peer work\n"}'''
+
+[tasks.shared_workspace_peer]
+prompt = "Update README.md from the peer session."
+expected_primary_changed_files = ["primary-session.txt"]
+expected_peer_changed_files = ["README.md"]
+
+[tasks.shared_workspace_peer.mock]
+final_response = "Peer session updated README.md."
+[[tasks.shared_workspace_peer.mock.tool_turns]]
+[[tasks.shared_workspace_peer.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.shared_workspace_peer.mock.tool_turns]]
+[[tasks.shared_workspace_peer.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\npeer session edit preserved\n"}'''
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["peer session edit preserved"]
+not_contains = ["primary session clobber"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "primary-session.txt"
+contains = ["without overwriting peer work"]
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["Preserved the peer edit"]
+
+[[tasks]]
+id = "multi_compaction_context_health"
+fixture = "fixtures/tiny_project"
+prompt = "Keep the task intact across repeated context compactions, reject elided content, and finish the README edit."
+mock_context_window_tokens = 48000
+min_compactions = 2
+
+[tasks.budgets]
+max_logical_turns = 20
+max_provider_attempts = 20
+max_duration_ms = 10000
+max_reads_per_unchanged_path = 1
+min_post_warmup_cache_percent = 35
+cache_warmup_turns = 1
+
+[tasks.mock]
+final_response = "Completed the edit after repeated compaction without replaying elided content."
+tool_turn_content_chars = 12000
+simulate_prompt_cache = true
+forbidden_request_substrings = ["messages were omitted to fit the context window"]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-1.txt","content":"phase 1\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-2.txt","content":"phase 2\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-3.txt","content":"phase 3\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-4.txt","content":"phase 4\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-5.txt","content":"phase 5\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-6.txt","content":"phase 6\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-7.txt","content":"phase 7\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-8.txt","content":"phase 8\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-9.txt","content":"phase 9\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"release/phase-10.txt","content":"phase 10\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nrelease-gating eval: context survived repeated compaction\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"<content elided: 16000 chars>"}'''
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["context survived repeated compaction"]
+not_contains = ["content elided"]
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["without replaying elided content"]
+
+[[tasks]]
+id = "episode_eviction_context_health"
+fixture = "fixtures/tiny_project"
+prompt = "Complete topic A end to end and wait for the next request."
+mock_context_window_tokens = 64000
+min_episode_evictions = 1
+max_compactions = 0
+cancel_after_provider_attempts = 5
+resume_after_interruption = true
+resume_prompt = "Now switch to topic B, finish it, and keep the prompt lean by archiving topic A."
+
+[tasks.budgets]
+max_logical_turns = 20
+max_provider_attempts = 20
+max_duration_ms = 10000
+min_post_warmup_cache_percent = 35
+cache_warmup_turns = 1
+
+[tasks.mock]
+final_response = "Topic B is finished; topic A's working context was archived to an episode card."
+tool_turn_content_chars = 12000
+simulate_prompt_cache = true
+wait_for_cancellation_after_tool_turns = 4
+forbidden_request_substrings = ["<content elided:"]
+final_request_contains = ["[Episode archived]"]
+final_request_forbidden_substrings = ["TOPIC_A_BULK"]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "set_session_title"
+arguments = '{"title":"Topic A","episode_action":"new_topic"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"topic-a/part-1.txt","content":"TOPIC_A_BULK part 1\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"topic-a/part-2.txt","content":"TOPIC_A_BULK part 2\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"topic-a/part-3.txt","content":"TOPIC_A_BULK part 3\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "set_session_title"
+arguments = '{"title":"Topic B","episode_action":"new_topic"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"topic-b/result.txt","content":"topic B complete\n"}'''
+
+[[tasks.graders]]
+type = "file-state"
+path = "topic-a/part-3.txt"
+contains = ["TOPIC_A_BULK part 3"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "topic-b/result.txt"
+contains = ["topic B complete"]
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["archived to an episode card"]
+
+[[tasks]]
+id = "episode_recall_roundtrip"
+fixture = "fixtures/tiny_project"
+prompt = "Finish topic A and wait for the next request."
+mock_context_window_tokens = 64000
+min_episode_evictions = 1
+max_compactions = 0
+cancel_after_provider_attempts = 4
+resume_after_interruption = true
+resume_prompt = "Now switch to topic B, recall topic A, and report its archived detail."
+
+[tasks.budgets]
+max_logical_turns = 20
+max_provider_attempts = 20
+max_duration_ms = 10000
+
+[tasks.mock]
+final_response = "Recovered from the archive: the topic A detail is ARCHIVE_NONCE_4711."
+tool_turn_content_chars = 6000
+wait_for_cancellation_after_tool_turns = 3
+forbidden_request_substrings = ["<content elided:"]
+final_request_contains = ["[Episode archived]", "ARCHIVE_NONCE_4711"]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "set_session_title"
+arguments = '{"title":"Topic A","episode_action":"new_topic"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '{"path":"topic-a/detail.txt","content":"the archived detail code is ARCHIVE_NONCE_4711\n"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '{"path":"topic-a/notes.txt","content":"supporting notes for topic A\n"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "set_session_title"
+arguments = '{"title":"Topic B","episode_action":"new_topic"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "recall"
+arguments = '{"episode":1}'
+
+[[tasks.graders]]
+type = "file-state"
+path = "topic-a/detail.txt"
+contains = ["ARCHIVE_NONCE_4711"]
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["ARCHIVE_NONCE_4711"]

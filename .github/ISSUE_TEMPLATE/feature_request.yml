@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest an improvement or new capability for Bonsai
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please check existing issues and the
+        [roadmap](https://github.com/strozynskiw/bonsai/blob/master/ROADMAP.md) first — your idea may already be
+        planned or discussed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that Bonsai currently makes hard or impossible?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to happen. Concrete UX (keybind, slash command, config option) helps.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you use today, or other approaches you considered and why they fall short.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Provider/model specifics, screenshots, links to related issues or prior art in other tools.
