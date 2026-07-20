@@ -162,7 +162,13 @@ jobs:
           path: .
           format: spdx-json
           syft-version: v1.46.0
-          artifact-name: bonsai-sbom
+          # artifact-name, not output-file, determines the filename inside the
+          # uploaded artifact — output-file only names it on the sbom job's
+          # filesystem, which is gone by the time publish downloads it. These
+          # must stay identical, and must match the paths the publish job
+          # attests and uploads, or the SBOM arrives in dist/ under the wrong
+          # name. Keep the bonsai- prefix so the download pattern matches.
+          artifact-name: bonsai-${{ github.ref_name }}.spdx.json
           output-file: bonsai-${{ github.ref_name }}.spdx.json
           upload-artifact: true
           upload-release-assets: false
@@ -226,6 +232,30 @@ jobs:
             -inkey "${public_key}" \
             -in dist/release-manifest.json \
             -sigfile "${signature}"
+      # actions/attest treats subject-path as globs and silently ignores
+      # entries that match nothing, so a missing asset surfaces only in the
+      # single-file sbom-path check further down — after provenance has already
+      # reported success. Assert the whole set up front, with a listing, so a
+      # naming mismatch names itself instead of failing as "SBOM file not
+      # found" three steps later.
+      - name: Verify release assets present
+        run: |
+          ls -la dist
+          missing=0
+          for asset in \
+            "dist/bonsai-${{ github.ref_name }}.spdx.json" \
+            dist/SHA256SUMS \
+            dist/release-manifest.json \
+            dist/release-manifest.json.sig \
+            dist/bonsai.bash \
+            dist/_bonsai \
+            dist/bonsai.fish; do
+            if [ ! -f "$asset" ]; then
+              echo "missing release asset: $asset"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
       - name: Attest release provenance
         if: ${{ github.event.repository.visibility == 'public' }}
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
