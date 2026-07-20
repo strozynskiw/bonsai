@@ -267,16 +267,35 @@ fn planning_prompt_keeps_todos_short_and_context_in_sections() {
 }
 
 #[test]
-fn planning_prompt_requires_execution_ready_detail() {
-    // The user's bar: an agent with clear context must know exactly what to
-    // do and how — the plan carries the research so the executor never
-    // re-derives it (session-84-class stalls came from thin handoffs).
+fn planning_prompt_plans_behavior_not_code() {
+    // The user's bar (aligned with Codex plan mode): decision complete — the
+    // executor inherits no open choices — but the plan describes behavior,
+    // not a code walkthrough: grouped behavior-level changes, minimal file
+    // naming, and only the detail needed for implementation safety.
     let content = system_content(AgentMode::Planning, "");
-    assert!(content.contains("exactly what to change, where, how, and how to prove it worked"));
-    assert!(content.contains("without redoing your research"));
+    assert!(content.contains("decision-complete specification"));
     assert!(content.contains("DECIDED approach"));
-    assert!(content.contains("exact verify commands"));
-    assert!(content.contains("would otherwise have to rediscover"));
+    assert!(content.contains("by subsystem or behavior rather than file-by-file inventories"));
+    assert!(content.contains("behavior-level descriptions over symbol-by-symbol edit lists"));
+    assert!(content.contains("minimum detail needed for implementation safety"));
+    assert!(
+        content.contains(
+            "Do not invent detailed schema, validation, precedence, or wire-format policy"
+        )
+    );
+}
+
+#[test]
+fn planning_prompt_distinguishes_discoverable_facts_from_preferences() {
+    // Codex-style unknown handling: repo truth is explored, never asked;
+    // preferences/tradeoffs are asked early with a recommended default that
+    // becomes a recorded assumption if unanswered.
+    let content = system_content(AgentMode::Planning, "");
+    assert!(content.contains("Discoverable facts"));
+    assert!(content.contains("Preferences and tradeoffs cannot be discovered"));
+    assert!(content.contains("recommended default"));
+    assert!(content.contains("record it as an assumption"));
+    assert!(content.contains("Settle intent before mechanism"));
 }
 
 #[test]
@@ -319,20 +338,20 @@ fn planning_prompt_uses_a_lightweight_spec_interview() {
 }
 
 #[test]
-fn planning_prompt_synthesizes_detail_into_an_implementation_ready_draft() {
+fn planning_prompt_synthesizes_detail_into_a_decision_complete_draft() {
     let content = system_content(AgentMode::Planning, "");
 
     assert!(content.contains("ordinary user messages as valid free-form answers"));
     assert!(content.contains("Synthesize user answers and repository evidence"));
     assert!(content.contains("close consequential gaps before declaring the plan complete"));
-    assert!(content.contains("implementation-ready specification"));
+    assert!(content.contains("decision-complete specification"));
     for requirement in [
         "intended behavior",
         "scope and non-goals",
         "key technical decisions",
-        "concrete change points",
         "edge cases",
         "validation",
+        "explicit assumptions",
     ] {
         assert!(content.contains(requirement), "missing {requirement}");
     }
