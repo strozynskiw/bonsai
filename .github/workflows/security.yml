@@ -21,7 +21,7 @@ permissions:
 jobs:
   rustsec:
     name: RustSec advisory audit
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       checks: write
@@ -36,7 +36,7 @@ jobs:
   dependency-review:
     name: Dependency and license review
     if: ${{ github.event_name == 'pull_request' && github.event.repository.visibility == 'public' }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Review dependency changes

@@ -15,7 +15,7 @@ permissions:
 jobs:
   verify:
     name: Verify release
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Node.js for TypeScript acceptance
@@ -65,11 +65,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runs_on: self-hosted, linux, x64
+          - runs_on: ubuntu-22.04
             runner_class: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             include_completions: true
-          - runs_on: self-hosted, linux, arm64
+          - runs_on: ubuntu-22.04-arm
             runner_class: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             include_completions: false
@@ -151,7 +151,7 @@ jobs:
   sbom:
     name: Generate release SBOM
     needs: verify
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -170,7 +170,7 @@ jobs:
   publish:
     name: Publish release
     needs: [build, sbom]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write

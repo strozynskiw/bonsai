@@ -23,7 +23,7 @@ permissions:
 jobs:
   qualify:
     name: Validate immutable RC evidence
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     env:
       BONSAI_RELEASE_PUBLIC_KEY: ${{ vars.BONSAI_RELEASE_PUBLIC_KEY }}
       GH_TOKEN: ${{ github.token }}

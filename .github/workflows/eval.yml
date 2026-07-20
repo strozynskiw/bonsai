@@ -10,7 +10,7 @@ env:
 
 jobs:
   mock:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     continue-on-error: true
 
     steps:
@@ -34,7 +34,7 @@ jobs:
           path: target/eval
 
   live:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     continue-on-error: true
     if: vars.BONSAI_EVAL_LIVE == '1'
 
