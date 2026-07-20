@@ -989,8 +989,8 @@
         </div>
 
         <div class="hero-install">
-          <code>cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked</code>
-          <button class="copy" data-copy="cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked" type="button">copy</button>
+          <code>curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh</code>
+          <button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh" type="button">copy</button>
         </div>
 
         <div class="hero-meta" aria-label="Platform summary">
@@ -1416,20 +1416,21 @@
         <div>
           <p class="eyebrow">ready to grow</p>
           <h2>One binary.<br>The whole workshop.</h2>
-          <p>Install with Cargo straight from GitHub (needs a stable <a href="https://rustup.rs">Rust toolchain</a>; the binary lands in <code>~/.cargo/bin</code>). The first command installs the latest release; the second tracks <code>master</code>. To update, rerun with the new tag — or add <code>--force</code> to refresh a <code>master</code> build. Prebuilt binaries are planned for a later release.</p>
+          <p>The one-liner installs a prebuilt binary — it detects your platform, verifies the download against the release's Ed25519-signed manifest, and installs to <code>~/.local/bin</code>. Rerun the matching <code>update.sh</code> to update. Prefer building from source? Install with Cargo straight from GitHub (needs a stable <a href="https://rustup.rs">Rust toolchain</a>; the binary lands in <code>~/.cargo/bin</code>) — pin the release tag, or drop it to track <code>master</code>.</p>
           <div class="install-options">
+            <div class="install-option"><code>curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh</code><button class="copy" type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh">copy</button></div>
+            <div class="install-option"><code>curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/update.sh | sh</code><button class="copy" type="button" data-copy="curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/update.sh | sh">copy</button></div>
             <div class="install-option"><code>cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked</code><button class="copy" type="button" data-copy="cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked">copy</button></div>
-            <div class="install-option"><code>cargo install --git https://github.com/strozynskiw/bonsai.git --locked bonsai</code><button class="copy" type="button" data-copy="cargo install --git https://github.com/strozynskiw/bonsai.git --locked bonsai">copy</button></div>
           </div>
         </div>
         <aside class="install-aside">
-          <strong>SHIP TARGETS (later)</strong>
+          <strong>PREBUILT TARGETS</strong>
           <div>macOS · Apple Silicon</div>
           <div>macOS · Intel</div>
           <div>Linux · x86_64</div>
           <div>Linux · arm64</div>
-          <div>builds with stable Rust</div>
-          <div>installs to ~/.cargo/bin</div>
+          <div>signed release manifest</div>
+          <div>installs to ~/.local/bin</div>
         </aside>
       </div>
     </section>

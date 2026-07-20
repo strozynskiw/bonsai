@@ -2,14 +2,30 @@
 
 ## Install
 
-Install with Cargo (requires a recent stable Rust toolchain):
+**From binaries (recommended)** — one line, no Rust toolchain required. The
+installer detects your platform, verifies the download against the release's
+Ed25519-signed manifest, and installs to `~/.local/bin` (override with
+`BONSAI_INSTALL_DIR`; pin a release with `BONSAI_VERSION=v0.2.0`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh
+```
+
+Update a binary install the same way — the companion script installs only when
+a newer release exists:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/update.sh | sh
+```
+
+**From source** — with Cargo (requires a recent stable Rust toolchain):
 
 ```sh
 cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked
 ```
 
 Install the latest development state from `master`, or update an existing
-installation (`--force` reinstalls when the version is unchanged):
+source installation (`--force` reinstalls when the version is unchanged):
 
 ```sh
 cargo install --git https://github.com/strozynskiw/bonsai.git --locked --force bonsai
@@ -17,8 +33,8 @@ cargo install --git https://github.com/strozynskiw/bonsai.git --locked --force b
 
 Bonsai is developed and tested on macOS 13+ (Apple Silicon and Intel) and Ubuntu
 22.04+ (x86-64 and arm64); other glibc distributions are best effort. Windows,
-musl Linux, BSD, and 32-bit systems are not supported. Prebuilt binaries and a
-one-line installer script are planned for a later release.
+musl Linux, BSD, and 32-bit systems are not supported. Prebuilt binaries cover
+macOS (Apple Silicon and Intel) and Linux glibc (x86-64 and arm64).
 
 ### Quick checks
 

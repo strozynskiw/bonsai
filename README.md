@@ -18,12 +18,30 @@ OpenRouter, tool-based execution, and a terminal UI.
 
 ## Install
 
-Bonsai is installed with Cargo, straight from this GitHub repository. You need a
-recent stable Rust toolchain — install one with [rustup](https://rustup.rs) if you
-don't have it. Cargo places the `bonsai` binary in `~/.cargo/bin`, which rustup adds
-to your `PATH` by default.
+### From binaries (recommended)
 
-Install the latest release (recommended):
+One line, no Rust toolchain required:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh
+```
+
+The installer detects your platform, downloads the matching release archive, and
+installs to `~/.local/bin` (override with `BONSAI_INSTALL_DIR`). Every download
+is verified against the release's Ed25519-signed manifest before anything is
+installed — the archive checksum and the extracted binary checksum both have to
+match the signed record. `BONSAI_VERSION=v0.2.0` pins a specific release.
+
+Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux glibc
+(x86-64 and arm64).
+
+### From source
+
+Building needs a recent stable Rust toolchain — install one with
+[rustup](https://rustup.rs) if you don't have it. Cargo places the `bonsai`
+binary in `~/.cargo/bin`, which rustup adds to your `PATH` by default.
+
+Install the latest release:
 
 ```sh
 cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked
@@ -43,19 +61,20 @@ cd bonsai
 cargo install --path . --locked
 ```
 
-Prebuilt binaries and a one-line installer script are planned for a later release.
-
 ### Updating
 
-To update to a newer release, rerun the install command with the new tag — Cargo
-replaces the installed binary when the version differs:
+A binary install updates with the companion script — it compares the installed
+`bonsai --version` against the newest release and delegates to the same
+verified installer only when they differ:
 
 ```sh
-cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0 --locked
+curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/update.sh | sh
 ```
 
-To refresh a `master` build (or reinstall the same version), add `--force`, since
-Cargo otherwise skips versions that are already installed:
+A source install updates by rerunning the install command with the new tag —
+Cargo replaces the installed binary when the version differs. To refresh a
+`master` build (or reinstall the same version), add `--force`, since Cargo
+otherwise skips versions that are already installed:
 
 ```sh
 cargo install --git https://github.com/strozynskiw/bonsai.git --locked --force bonsai
