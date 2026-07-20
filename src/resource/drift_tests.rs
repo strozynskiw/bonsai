@@ -253,7 +253,14 @@ fn target_triples(source: &str) -> BTreeSet<String> {
             !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
         })
         .map(|token| token.trim_start_matches('-'))
-        .filter(|token| token.ends_with("unknown-linux-gnu") || token.ends_with("apple-darwin"))
+        // The leading hyphen is load-bearing: it requires an arch prefix, so a
+        // bare os suffix is not mistaken for a triple. `install.sh` builds its
+        // triple from separate `os_part`/`arch_part` assignments, and without
+        // this those assignments register as phantom `apple-darwin` /
+        // `unknown-linux-gnu` targets that defeat the equality check below.
+        // Matching any arch (rather than an allowlist) keeps a newly added
+        // architecture visible to the drift check instead of silently ignored.
+        .filter(|token| token.ends_with("-unknown-linux-gnu") || token.ends_with("-apple-darwin"))
         .map(str::to_string)
         .collect()
 }
@@ -387,6 +394,10 @@ fn release_platform_claims_match_installer_and_workflow() {
     let installer_targets = target_triples(INSTALLER);
     let workflow_targets = target_triples(RELEASE_WORKFLOW);
 
+    // The installer constructs triples dynamically from os/arch parts, so the
+    // concrete list lives in a comment there purely for this check. Equality is
+    // deliberately bidirectional: an installer target the workflow never builds
+    // means `install.sh` downloads a release asset that was never uploaded.
     assert_eq!(installer_targets.len(), 4);
     assert_eq!(workflow_targets, installer_targets);
     // The README documents supported platforms in prose only: prebuilt binaries
