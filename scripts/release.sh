@@ -4,12 +4,13 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  scripts/release.sh <version> [--no-push] [--skip-checks]
+  scripts/release.sh <version> [--no-push] [--skip-checks] [--tag]
 
 Examples:
   scripts/release.sh 0.2.0-rc.1
   scripts/release.sh v0.2.0-rc.1
   scripts/release.sh 0.2.0-rc.1 --no-push
+  scripts/release.sh 0.2.0-rc.1 --tag --no-push
 
 This script:
   1. updates Cargo.toml, Cargo.lock, and public install references
@@ -17,6 +18,12 @@ This script:
   3. commits the bump as chore(release): prepare <tag>
   4. creates an annotated <tag>
   5. pushes the commit and tag to GitHub unless --no-push is set
+
+--tag only creates the tag: it skips the bump, the checks, and the release
+commit, and tags HEAD. It still requires Cargo.toml and the public install
+references to already be at <version>, so the tag cannot land on a tree that
+disagrees with it. Use this when the bump was committed separately and only
+the tag is missing.
 
 Pushing the tag starts .github/workflows/release.yml, which publishes the
 GitHub release and release assets.
@@ -35,6 +42,7 @@ need() {
 version_arg=""
 push=1
 run_checks=1
+tag_only=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -47,6 +55,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --skip-checks)
       run_checks=0
+      ;;
+    --tag)
+      tag_only=1
       ;;
     -*)
       usage
@@ -122,6 +133,18 @@ PY
 )"
 old_tag="v$old_version"
 
+if [ "$tag_only" -eq 1 ]; then
+  # Tagging a tree that disagrees with the tag would ship a release whose
+  # binaries report a different version than the tag promises, so the same
+  # references the bump would have rewritten are verified instead.
+  [ "$old_version" = "$version" ] ||
+    die "--tag requires Cargo.toml to already be at $version (it is at $old_version)"
+  for public_file in README.md site/index.html install.sh; do
+    grep -q -- "$tag" "$public_file" ||
+      die "--tag requires $public_file to reference $tag"
+  done
+else
+
 [ "$old_version" != "$version" ] || die "Cargo.toml is already at $version"
 
 python3 - "$old_version" "$version" <<'PY'
@@ -159,16 +182,23 @@ PY
 
 cargo update -p bonsai --offline
 
-if [ "$run_checks" -eq 1 ]; then
+fi
+
+# --tag only labels a commit that is already in history, so it rebuilds
+# nothing: the checks belong to the commit that introduced the bump, not to
+# the act of naming it.
+if [ "$run_checks" -eq 1 ] && [ "$tag_only" -eq 0 ]; then
   cargo fmt --all --check
   cargo clippy --locked --all-targets --all-features -- -D warnings
   cargo test --locked
   RUSTFLAGS=-D warnings cargo build --release --locked
 fi
 
-git diff -- Cargo.toml Cargo.lock README.md site/index.html install.sh
-git add Cargo.toml Cargo.lock README.md site/index.html install.sh
-git commit -m "chore(release): prepare $tag"
+if [ "$tag_only" -eq 0 ]; then
+  git diff -- Cargo.toml Cargo.lock README.md site/index.html install.sh
+  git add Cargo.toml Cargo.lock README.md site/index.html install.sh
+  git commit -m "chore(release): prepare $tag"
+fi
 git tag -a "$tag" -m "Release $tag"
 
 if [ "$push" -eq 1 ]; then
