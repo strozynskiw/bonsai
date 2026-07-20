@@ -48,8 +48,7 @@ impl Storage {
         let effects_json = serde_json::to_string(decision.effects)
             .context("Failed to serialize authorization effects")?;
         let mut transaction = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin authorization-decision transaction")?;
         sqlx::query(

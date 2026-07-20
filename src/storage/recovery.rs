@@ -138,8 +138,7 @@ impl Storage {
         session_id: SessionId,
     ) -> Result<bool> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin recovery attachment transaction")?;
         let attached = self

@@ -550,8 +550,7 @@ impl Storage {
         let project_id = self.ensure_project(operation.project_path).await?;
         let now = now_ms();
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin atomic peer send")?;
 
@@ -934,8 +933,7 @@ impl Storage {
         }
         let now = now_ms();
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin file-change upsert")?;
         for path in paths {
@@ -1196,8 +1194,7 @@ impl Storage {
         let project_id = self.ensure_project(operation.project_path).await?;
         let now = now_ms();
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin atomic peer wake registration")?;
 
@@ -1482,8 +1479,7 @@ impl Storage {
     pub async fn fire_wake_subscriptions(&self, target: SessionId) -> Result<Vec<SessionId>> {
         let now = now_ms();
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin wake-subscription firing")?;
 
@@ -1554,8 +1550,7 @@ impl Storage {
     ) -> Result<bool> {
         let now = now_ms();
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin wake-subscription expiry")?;
         let claimed: Option<(i64, i64, String, i64)> = sqlx::query_as(
@@ -1629,8 +1624,7 @@ impl Storage {
     ) -> Result<bool> {
         let now = now_ms();
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin wake-subscription recheck")?;
         let claimed: Option<(i64, i64, String, i64)> = sqlx::query_as(

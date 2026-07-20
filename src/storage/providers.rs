@@ -54,8 +54,7 @@ impl Storage {
         persistence: crate::session::CredentialPersistence,
     ) -> Result<()> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin credential preference transaction")?;
         upsert_preference(&mut tx, "credential_persistence", persistence.as_str()).await?;
@@ -104,8 +103,7 @@ impl Storage {
         persistence: crate::session::CredentialPersistence,
     ) -> Result<()> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin first-run preference transaction")?;
         upsert_preference(&mut tx, "credential_persistence", persistence.as_str()).await?;
@@ -184,8 +182,7 @@ impl Storage {
 
     async fn set_preference(&self, key: &str, value: &str) -> Result<()> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .with_context(|| format!("Failed to begin {key} preference transaction"))?;
         upsert_preference(&mut tx, key, value).await?;
@@ -306,8 +303,7 @@ impl Storage {
         // otherwise a mid-save failure leaves auth state half-written (e.g.
         // settings without matching credentials).
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin session store save transaction")?;
 

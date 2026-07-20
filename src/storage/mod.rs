@@ -434,8 +434,7 @@ impl Storage {
         }
 
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin SQLite write probe")?;
         sqlx::query("CREATE TEMP TABLE bonsai_doctor_probe (value INTEGER NOT NULL)")
@@ -456,6 +455,25 @@ impl Storage {
         Ok(())
     }
 
+    /// Begin a write transaction with `BEGIN IMMEDIATE`.
+    ///
+    /// Deliberate, don't "simplify" back to `pool.begin()`. A plain `BEGIN` is
+    /// *deferred*: the transaction opens as a reader and only tries to take the
+    /// write lock at its first INSERT/UPDATE/DELETE. If another connection wrote
+    /// in that window, the upgrade fails with `SQLITE_BUSY_SNAPSHOT` (code 5)
+    /// — and SQLite deliberately does *not* invoke the busy handler for it,
+    /// because waiting cannot resolve a stale read snapshot. That is why the
+    /// pool's 5s `busy_timeout` never applied and callers saw an instant
+    /// "database is locked" under concurrent writes.
+    ///
+    /// `BEGIN IMMEDIATE` takes the write lock up front, so contention becomes an
+    /// ordinary wait that the busy handler *does* honor.
+    pub(crate) async fn begin_write(
+        &self,
+    ) -> std::result::Result<Transaction<'static, Sqlite>, sqlx::Error> {
+        self.pool.begin_with("BEGIN IMMEDIATE").await
+    }
+
     /// Run `body` inside a fresh transaction, committing on success and
     /// attaching `label` to the begin/commit error context. `body` receives the
     /// open transaction and a single `now` timestamp shared by all its writes;
@@ -470,8 +488,7 @@ impl Storage {
         F: AsyncFnOnce(&mut Transaction<'_, Sqlite>, i64) -> Result<()>,
     {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .with_context(|| format!("Failed to begin {label} transaction"))?;
         body(&mut tx, now_ms()).await?;

@@ -313,8 +313,7 @@ impl Storage {
     ) -> Result<ResumeSessionOutcome> {
         let project_path = canonical_project_path(project_path);
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin session switch transaction")?;
         let now = now_ms();
@@ -497,8 +496,7 @@ impl Storage {
         let now = now_ms();
 
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin interrupted-session promotion")?;
 
@@ -812,8 +810,7 @@ impl Storage {
         usage: &crate::agent::UsageTotals,
     ) -> Result<()> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin usage update transaction")?;
         let now = now_ms();

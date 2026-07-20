@@ -151,8 +151,7 @@ impl Storage {
 
     pub async fn delete_saved_plan(&self, plan_id: SavedPlanId) -> Result<bool> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin saved-plan delete transaction")?;
         let now = now_ms();
@@ -186,8 +185,7 @@ impl Storage {
         execution_session_id: SessionId,
     ) -> Result<bool> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin saved-plan start transaction")?;
         let now = now_ms();

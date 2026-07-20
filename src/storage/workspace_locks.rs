@@ -429,8 +429,7 @@ impl Storage {
         lease_ms: i64,
     ) -> Result<Option<i64>> {
         let mut tx = self
-            .pool
-            .begin()
+            .begin_write()
             .await
             .context("Failed to begin workspace lock transaction")?;
         sqlx::query("DELETE FROM workspace_locks WHERE expires_at_ms < ?")

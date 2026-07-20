@@ -1194,8 +1194,11 @@ mod tests {
         let text = line_text(&line);
 
         assert_eq!(spans_width(&line.spans), 24);
+        // The default right-hand hint is the running build tag (the Tab/Shift+Tab
+        // hints live on the main screen). Derived from the same source as the
+        // implementation so a version bump does not break this test.
         assert!(
-            text.contains("Tab focus"),
+            text.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
             "right hints should stay visible: {text:?}"
         );
         assert!(
@@ -1261,7 +1264,7 @@ mod tests {
             "composer border should end before footer"
         );
         assert!(
-            row(4).contains("Tab focus"),
+            row(4).contains(concat!("v", env!("CARGO_PKG_VERSION"))),
             "footer hints should render below border: {}",
             row(4)
         );
