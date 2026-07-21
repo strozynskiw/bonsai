@@ -44,6 +44,14 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
             let rows = (providers.len().max(1) as u16).saturating_add(7);
             centered_rect_capped(area, MODAL_WIDTH_PICKER, 58, rows)
         }
+        ModalKind::UnauthorizeProviderPicker { providers, .. } => {
+            // Same footprint as the authorize picker.
+            let rows = (providers.len().max(1) as u16).saturating_add(7);
+            centered_rect_capped(area, MODAL_WIDTH_PICKER, 58, rows)
+        }
+        ModalKind::UnauthorizeConfirm { .. } => {
+            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
+        }
         ModalKind::ModelPicker { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 76),
         ModalKind::McpServers { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 76),
         ModalKind::SessionPicker { .. } => centered_rect(area, MODAL_WIDTH_FORM, 60),

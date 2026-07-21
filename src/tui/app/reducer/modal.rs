@@ -629,6 +629,11 @@ fn clamp_open_cursor(kind: &mut ModalKind) {
             providers,
             query,
             cursor,
+        }
+        | ModalKind::UnauthorizeProviderPicker {
+            providers,
+            query,
+            cursor,
         } => {
             let max = crate::tui::pickers::filter_authorize_providers(providers, query)
                 .len()

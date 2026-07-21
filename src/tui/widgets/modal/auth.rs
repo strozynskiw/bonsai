@@ -196,6 +196,55 @@ mod tests {
         assert!(text.contains("protected file"));
         assert!(text.contains("Tab field"));
     }
+
+    #[test]
+    fn unauthorize_picker_renders_title_rows_and_footer() {
+        let area = Rect::new(0, 0, 62, 12);
+        let app = app();
+        let providers = vec![ProviderOption {
+            provider_id: "opencode".to_string(),
+            provider_label: "OpenCode Go".to_string(),
+            authorized: true,
+            current: true,
+            uses_endpoint_auth_form: false,
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test backend should initialize");
+        terminal
+            .draw(|frame| render_unauthorize_provider_picker(frame, area, &app, &providers, "", 0))
+            .expect("unauthorize picker should render");
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Unauthorize Provider"));
+        assert!(text.contains("OpenCode Go"));
+        assert!(text.contains("Enter unauthorize"));
+    }
+
+    #[test]
+    fn unauthorize_picker_shows_empty_state_without_authorized_providers() {
+        let area = Rect::new(0, 0, 62, 10);
+        let app = app();
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test backend should initialize");
+        terminal
+            .draw(|frame| render_unauthorize_provider_picker(frame, area, &app, &[], "", 0))
+            .expect("unauthorize picker should render");
+        let text = rendered_text(&terminal);
+        assert!(text.contains("No authorized providers"));
+    }
+
+    #[test]
+    fn unauthorize_confirm_renders_provider_name_and_hints() {
+        let area = Rect::new(0, 0, 66, 8);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test backend should initialize");
+        terminal
+            .draw(|frame| render_unauthorize_confirm(frame, area, "OpenCode Go"))
+            .expect("unauthorize confirm should render");
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Clear Bonsai auth for OpenCode Go?"));
+        assert!(text.contains("Enter/Y unauthorize"));
+        assert!(text.contains("Esc/N cancel"));
+    }
 }
 
 pub(super) fn render_authorize_provider_picker(
@@ -254,6 +303,92 @@ pub(super) fn render_authorize_provider_picker(
                 .map(|idx| authorize_provider_line(filtered[idx], &columns, idx == cursor))
                 .collect()
         },
+    );
+}
+
+pub(super) fn render_unauthorize_provider_picker(
+    f: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    providers: &[ProviderOption],
+    query: &str,
+    cursor: usize,
+) {
+    let header = vec![Line::from(vec![
+        Span::styled("Search: ", theme::muted()),
+        Span::styled(query.to_string(), theme::body(theme::palette().text)),
+    ])];
+    let footer = vec![footer_hint_line(&[
+        ("Type", "search"),
+        ("Up/Down", "move"),
+        ("Enter", "unauthorize"),
+        ("Esc", "cancel"),
+    ])];
+    let filtered = crate::tui::pickers::filter_authorize_providers(providers, query);
+    render_list_picker(
+        f,
+        area,
+        "Unauthorize Provider",
+        &header,
+        &footer,
+        |body_area| {
+            if filtered.is_empty() {
+                let empty = if providers.is_empty() {
+                    "No authorized providers"
+                } else {
+                    "No matching providers"
+                };
+                return vec![Line::from(Span::styled(empty, theme::dim()))];
+            }
+            let cursor = cursor.min(filtered.len().saturating_sub(1));
+            let columns = authorize_provider_columns_filtered(body_area.width as usize, &filtered);
+            let capacity = picker_body_height(body_area).max(1);
+            // The two provider pickers are mutually exclusive, so they share
+            // the authorize picker's viewport offset cell.
+            let offset = crate::tui::app::reconcile_viewport(
+                app.authorize_provider_offset.get(),
+                cursor,
+                filtered.len(),
+                capacity,
+            );
+            app.authorize_provider_offset.set(offset);
+            (offset..(offset + capacity.min(filtered.len())).min(filtered.len()))
+                .map(|idx| authorize_provider_line(filtered[idx], &columns, idx == cursor))
+                .collect()
+        },
+    );
+}
+
+pub(super) fn render_unauthorize_confirm(f: &mut Frame, area: Rect, display_name: &str) {
+    let panel = theme::frame("Unauthorize Provider", true).style(theme::panel());
+    let inner = panel.inner(area);
+    f.render_widget(panel, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("Clear Bonsai auth for {display_name}?"),
+                theme::body(theme::palette().text),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Stored credentials for this provider will be removed.",
+                theme::dim(),
+            )),
+        ])
+        .style(theme::panel())
+        .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(footer_hint_line(&[
+            ("Enter/Y", "unauthorize"),
+            ("Esc/N", "cancel"),
+        ])),
+        chunks[1],
     );
 }
 

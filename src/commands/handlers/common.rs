@@ -12,7 +12,8 @@ use crate::commands::memory::{
 use crate::commands::parse_command;
 use crate::commands::providers::{
     ModelPickerOutcome, authorization_input_for_provider, authorize_provider_choices,
-    open_model_picker, resolve_model_selection, resolve_provider, unknown_provider_error,
+    open_model_picker, resolve_model_selection, resolve_provider, unauthorize_provider_choices,
+    unknown_provider_error,
 };
 use crate::commands::self_review::{
     SelfReviewCommandRequest, parse_self_review_command, self_review_set_message,
@@ -710,6 +711,13 @@ async fn handle_unauthorize(
     catalog: Option<&ModelCatalog>,
     outcome: &mut CommandOutcome,
 ) -> Result<()> {
+    if arg.is_none_or(|value| value.is_empty()) {
+        outcome.modal = Some(CommandModalRequest::UnauthorizeProviderPicker {
+            providers: unauthorize_provider_choices(registry, session_store),
+        });
+        return Ok(());
+    }
+
     let target_id = arg
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)

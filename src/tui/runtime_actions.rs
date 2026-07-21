@@ -237,6 +237,12 @@ pub(super) async fn handle_runtime_action(
         AppAction::AuthorizeProviderPickerSubmit => {
             submit_authorize_provider_picker(app, tasks, deps);
         }
+        AppAction::UnauthorizeProviderPickerSubmit => {
+            submit_unauthorize_provider_picker(app);
+        }
+        AppAction::UnauthorizeConfirmSubmit => {
+            submit_unauthorize_confirm(app, tasks, deps);
+        }
         AppAction::ReviewScopePickerSubmit => {
             submit_review_scope_picker(app, tasks, deps).await;
         }
@@ -1402,6 +1408,71 @@ fn submit_authorize_provider_picker(
         provider_id: provider.provider_id.clone(),
     };
     let input = format!("/authorize {}", selection.provider_id);
+    app.reduce(AppAction::CloseModal);
+    app.reduce(AppAction::SetTaskState(TaskState::Command));
+    let command_deps =
+        deps.command_task_deps(app.credential_persistence, app.active_persona.builtin());
+    if let Err(err) = tasks.start_command(
+        input,
+        app.transcript.to_vec(),
+        app.command_generation(),
+        command_deps,
+    ) {
+        app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
+    }
+}
+
+fn submit_unauthorize_provider_picker(app: &mut AppState) {
+    let Some(ModalKind::UnauthorizeProviderPicker {
+        providers,
+        query,
+        cursor,
+    }) = app.modal.clone()
+    else {
+        tracing::debug!("UnauthorizeProviderPickerSubmit ignored: no picker modal");
+        return;
+    };
+    if app.task_state.is_busy() {
+        push_command_message(
+            app,
+            CommandOutputKind::Error,
+            "Unauthorize cannot run while the agent is running.",
+        );
+        return;
+    }
+    // `cursor` indexes the filtered view, so resolve the selection the same way.
+    let filtered = crate::tui::pickers::filter_authorize_providers(&providers, &query);
+    let Some(provider) = filtered
+        .get(cursor.min(filtered.len().saturating_sub(1)))
+        .copied()
+    else {
+        app.reduce(AppAction::CloseModal);
+        return;
+    };
+    app.reduce(AppAction::OpenModal(ModalKind::UnauthorizeConfirm {
+        provider_id: provider.provider_id.clone(),
+        display_name: provider.provider_label.clone(),
+    }));
+}
+
+fn submit_unauthorize_confirm(
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    deps: RuntimeActionDeps<'_>,
+) {
+    let Some(ModalKind::UnauthorizeConfirm { provider_id, .. }) = app.modal.clone() else {
+        tracing::debug!("UnauthorizeConfirmSubmit ignored: no confirm modal");
+        return;
+    };
+    if app.task_state.is_busy() {
+        push_command_message(
+            app,
+            CommandOutputKind::Error,
+            "Unauthorize cannot run while the agent is running.",
+        );
+        return;
+    }
+    let input = format!("/unauthorize {provider_id}");
     app.reduce(AppAction::CloseModal);
     app.reduce(AppAction::SetTaskState(TaskState::Command));
     let command_deps =

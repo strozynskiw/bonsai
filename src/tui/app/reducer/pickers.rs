@@ -61,6 +61,41 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // Runtime effect: `tui::runtime_actions` dispatches the selected
             // provider through the normal /authorize path.
         }
+        AppAction::UnauthorizeProviderPickerMove(delta) => {
+            if let Some(ModalKind::UnauthorizeProviderPicker {
+                providers,
+                query,
+                cursor,
+            }) = &mut app.modal
+            {
+                let max = crate::tui::pickers::filter_authorize_providers(providers, query)
+                    .len()
+                    .saturating_sub(1);
+                *cursor = move_index(*cursor, delta, max);
+            }
+        }
+        AppAction::UnauthorizeProviderPickerInputChar(ch) => {
+            if let Some(ModalKind::UnauthorizeProviderPicker { query, cursor, .. }) = &mut app.modal
+            {
+                query.push(ch);
+                *cursor = 0;
+            }
+        }
+        AppAction::UnauthorizeProviderPickerInputBackspace => {
+            if let Some(ModalKind::UnauthorizeProviderPicker { query, cursor, .. }) = &mut app.modal
+            {
+                query.pop();
+                *cursor = 0;
+            }
+        }
+        AppAction::UnauthorizeProviderPickerSubmit => {
+            // Runtime effect: `tui::runtime_actions` opens the confirm modal
+            // for the selected provider.
+        }
+        AppAction::UnauthorizeConfirmSubmit => {
+            // Runtime effect: `tui::runtime_actions` runs the normal
+            // /unauthorize <provider> command path.
+        }
         AppAction::ReviewScopePickerMove(delta) => {
             if let Some(ModalKind::ReviewScopePicker { cursor }) = &mut app.modal {
                 let max = crate::agent::ReviewScope::all().len().saturating_sub(1);

@@ -145,6 +145,38 @@ pub(super) fn map_authorize_provider_picker_key(key: KeyEvent) -> KeyIntent {
     }
 }
 
+pub(super) fn map_unauthorize_provider_picker_key(key: KeyEvent) -> KeyIntent {
+    // Type-to-filter, mirroring the authorize picker: printable keys build the
+    // search query, so Esc (not `q`) is the close key.
+    match key.code {
+        KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
+        KeyCode::Enter => KeyIntent::Action(AppAction::UnauthorizeProviderPickerSubmit),
+        KeyCode::Backspace => KeyIntent::Action(AppAction::UnauthorizeProviderPickerInputBackspace),
+        KeyCode::Up => KeyIntent::Action(AppAction::UnauthorizeProviderPickerMove(-1)),
+        KeyCode::Down => KeyIntent::Action(AppAction::UnauthorizeProviderPickerMove(1)),
+        KeyCode::PageUp => KeyIntent::Action(AppAction::UnauthorizeProviderPickerMove(-8)),
+        KeyCode::PageDown => KeyIntent::Action(AppAction::UnauthorizeProviderPickerMove(8)),
+        KeyCode::Home => KeyIntent::Action(AppAction::UnauthorizeProviderPickerMove(i16::MIN)),
+        KeyCode::End => KeyIntent::Action(AppAction::UnauthorizeProviderPickerMove(i16::MAX)),
+        KeyCode::Char(ch) => KeyIntent::Action(AppAction::UnauthorizeProviderPickerInputChar(ch)),
+        _ => KeyIntent::Noop,
+    }
+}
+
+pub(super) fn map_unauthorize_confirm_key(key: KeyEvent) -> KeyIntent {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            KeyIntent::Action(AppAction::CloseModal)
+        }
+        // q mirrors Esc — close the confirm prompt without unauthorizing.
+        KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyIntent::Action(AppAction::UnauthorizeConfirmSubmit)
+        }
+        _ => KeyIntent::Noop,
+    }
+}
+
 pub(super) fn map_review_scope_picker_key(key: KeyEvent) -> KeyIntent {
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),

@@ -376,7 +376,7 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
     CommandMetadata {
         name: "/unauthorize",
         description: "Remove a provider authorization",
-        usage_hint: Some("provider"),
+        usage_hint: Some("[provider]"),
         surface: both(),
     },
     CommandMetadata {

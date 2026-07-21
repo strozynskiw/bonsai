@@ -722,6 +722,18 @@ pub(in crate::commands) fn authorize_provider_choices(
         .collect()
 }
 
+/// Provider options for `/unauthorize` — only providers that currently hold
+/// stored credentials can be cleared, so the picker hides the rest.
+pub(in crate::commands) fn unauthorize_provider_choices(
+    registry: &ProviderRegistry,
+    session_store: &SessionStore,
+) -> Vec<ProviderOption> {
+    authorize_provider_choices(registry, session_store)
+        .into_iter()
+        .filter(|provider| provider.authorized)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

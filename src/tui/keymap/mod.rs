@@ -50,6 +50,14 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         return map_api_key_prompt_key(key, app);
     }
 
+    if matches!(app.modal, Some(ModalKind::UnauthorizeProviderPicker { .. })) {
+        return map_unauthorize_provider_picker_key(key);
+    }
+
+    if matches!(app.modal, Some(ModalKind::UnauthorizeConfirm { .. })) {
+        return map_unauthorize_confirm_key(key);
+    }
+
     if matches!(app.modal, Some(ModalKind::AuthorizeProviderPicker { .. })) {
         return map_authorize_provider_picker_key(key);
     }
@@ -2284,6 +2292,77 @@ mod tests {
         ));
         let esc = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
         assert!(matches!(esc, KeyIntent::Action(AppAction::CloseModal)));
+    }
+
+    #[test]
+    fn enter_submits_unauthorize_provider_picker() {
+        let mut app = app();
+        app.modal = Some(ModalKind::UnauthorizeProviderPicker {
+            providers: vec![ProviderOption {
+                provider_id: "opencode".to_string(),
+                provider_label: "OpenCode Go".to_string(),
+                authorized: true,
+                current: true,
+                uses_endpoint_auth_form: false,
+            }],
+            query: String::new(),
+            cursor: 0,
+        });
+        app.focus = Focus::Modal;
+
+        let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
+
+        assert!(matches!(
+            enter,
+            KeyIntent::Action(AppAction::UnauthorizeProviderPickerSubmit)
+        ));
+    }
+
+    #[test]
+    fn unauthorize_provider_picker_letters_type_into_filter() {
+        let mut app = app();
+        app.modal = Some(ModalKind::UnauthorizeProviderPicker {
+            providers: Vec::new(),
+            query: String::new(),
+            cursor: 0,
+        });
+        app.focus = Focus::Modal;
+
+        // `q` types into the filter, mirroring the authorize picker.
+        let typed = map_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &app);
+        assert!(matches!(
+            typed,
+            KeyIntent::Action(AppAction::UnauthorizeProviderPickerInputChar('q'))
+        ));
+        let esc = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
+        assert!(matches!(esc, KeyIntent::Action(AppAction::CloseModal)));
+    }
+
+    #[test]
+    fn unauthorize_confirm_keys_submit_or_close() {
+        let mut app = app();
+        app.modal = Some(ModalKind::UnauthorizeConfirm {
+            provider_id: "opencode".to_string(),
+            display_name: "OpenCode Go".to_string(),
+        });
+        app.focus = Focus::Modal;
+
+        for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char('Y')] {
+            let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
+            assert!(matches!(
+                intent,
+                KeyIntent::Action(AppAction::UnauthorizeConfirmSubmit)
+            ));
+        }
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Char('n'),
+            KeyCode::Char('N'),
+            KeyCode::Char('q'),
+        ] {
+            let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
+            assert!(matches!(intent, KeyIntent::Action(AppAction::CloseModal)));
+        }
     }
 
     #[test]

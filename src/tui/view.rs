@@ -557,6 +557,8 @@ pub fn terminal_title(app: &AppState) -> String {
                 | ModalKind::ApiKeyPrompt { .. }
                 | ModalKind::QuestionPrompt { .. }
                 | ModalKind::AuthorizeProviderPicker { .. }
+                | ModalKind::UnauthorizeProviderPicker { .. }
+                | ModalKind::UnauthorizeConfirm { .. }
         )
     });
 

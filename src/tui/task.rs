@@ -899,6 +899,13 @@ impl TaskController {
                                     cursor: 0,
                                 }
                             }
+                            CommandModalRequest::UnauthorizeProviderPicker { providers } => {
+                                ModalKind::UnauthorizeProviderPicker {
+                                    providers,
+                                    query: String::new(),
+                                    cursor: 0,
+                                }
+                            }
                             CommandModalRequest::ApiKeyPrompt { provider_id } => {
                                 let initial_form =
                                     registry.lookup(&provider_id).and_then(|factory| {

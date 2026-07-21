@@ -67,6 +67,21 @@ pub enum ModalKind {
         query: String,
         cursor: usize,
     },
+    /// `/unauthorize` with no argument — pick a provider to unauthorize from a
+    /// type-to-filter list holding only already-authorized providers. Same
+    /// shape and filtered-cursor rule as [`Self::AuthorizeProviderPicker`].
+    UnauthorizeProviderPicker {
+        providers: Vec<ProviderOption>,
+        query: String,
+        cursor: usize,
+    },
+    /// Confirmation step after picking a provider in the unauthorize picker —
+    /// clearing stored credentials is destructive, so Enter/Y here is what
+    /// actually runs `/unauthorize <provider_id>`.
+    UnauthorizeConfirm {
+        provider_id: String,
+        display_name: String,
+    },
     ModelPicker {
         entries: Vec<ModelOption>,
     },
@@ -1163,6 +1178,13 @@ pub enum AppAction {
     /// Delete the last character of the authorize picker's filter.
     AuthorizeProviderPickerInputBackspace,
     AuthorizeProviderPickerSubmit,
+    UnauthorizeProviderPickerMove(i16),
+    /// Append a typed character to the unauthorize picker's filter (resets cursor).
+    UnauthorizeProviderPickerInputChar(char),
+    /// Delete the last character of the unauthorize picker's filter.
+    UnauthorizeProviderPickerInputBackspace,
+    UnauthorizeProviderPickerSubmit,
+    UnauthorizeConfirmSubmit,
     ModelPickerInputChar(char),
     ModelPickerInputBackspace,
     ModelPickerMove(i16),

@@ -156,6 +156,8 @@ pub enum CommandModalRequest {
     ModelPicker,
     /// `/authorize` (no argument) — the provider picker.
     AuthorizeProviderPicker { providers: Vec<ProviderOption> },
+    /// `/unauthorize` (no argument) — pick from already-authorized providers.
+    UnauthorizeProviderPicker { providers: Vec<ProviderOption> },
     /// `/authorize <provider>` for API-key providers — the key entry prompt.
     ApiKeyPrompt { provider_id: String },
     /// `/mcp` — inspect detected MCP servers and discovered tools.

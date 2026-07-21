@@ -146,6 +146,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             query,
             cursor,
         } => render_authorize_provider_picker(f, modal, app, providers, query, *cursor),
+        ModalKind::UnauthorizeProviderPicker {
+            providers,
+            query,
+            cursor,
+        } => render_unauthorize_provider_picker(f, modal, app, providers, query, *cursor),
+        ModalKind::UnauthorizeConfirm { display_name, .. } => {
+            render_unauthorize_confirm(f, modal, display_name)
+        }
         ModalKind::ModelPicker { entries } => render_model_picker(f, modal, app, entries),
         ModalKind::SessionPicker { sessions, cursor } => {
             render_session_picker(f, modal, sessions, *cursor)
