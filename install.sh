@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh
 #
 # Environment:
-#   BONSAI_VERSION      Tag to install (e.g. v0.2.1). Default: newest release.
+#   BONSAI_VERSION      Tag to install (e.g. v0.2.2). Default: newest release.
 #   BONSAI_INSTALL_DIR  Install directory. Default: $HOME/.local/bin
 #   BONSAI_SKIP_SIGNATURE=1
 #                       Install with checksum-only verification when the local
