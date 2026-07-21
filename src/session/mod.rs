@@ -127,6 +127,14 @@ pub struct SessionStore {
     pub providers: HashMap<String, ProviderSession>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) model_shortcuts: BTreeMap<ModelShortcutKey, ModelShortcutBinding>,
+    /// Per-working-mode model selection (keys: `coding` / `planning`), stored
+    /// as `/model` selection strings. `/model` records the choice against the
+    /// active mode, and run dispatch applies the active mode's entry, so each
+    /// mode keeps its own model. Absent entries follow the current session
+    /// model; provider-level switches (authorize, provider manager) clear the
+    /// map so modes re-link to the new provider instead of snapping back.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) mode_models: BTreeMap<String, String>,
     #[serde(default, rename = "model_roles", skip_serializing)]
     legacy_model_roles: BTreeMap<LegacyModelRole, ModelShortcutBinding>,
     /// Selected UI theme name; empty means the default theme.
@@ -161,6 +169,7 @@ impl Default for SessionStore {
             active_model_id: None,
             providers: HashMap::new(),
             model_shortcuts: BTreeMap::new(),
+            mode_models: BTreeMap::new(),
             legacy_model_roles: BTreeMap::new(),
             theme: String::new(),
             legacy: LegacySessionFields::default(),
@@ -181,6 +190,11 @@ impl SessionStore {
 
     pub fn set_current_kind_id(&mut self, id: impl Into<String>) {
         self.current_provider = id.into();
+        // A provider-level switch (authorize, provider manager, removal
+        // fallback) re-links the working modes to the new provider: keeping
+        // per-mode entries would snap the model back to the old provider on
+        // the next mode switch, undoing the user's explicit change.
+        self.mode_models.clear();
         self.sync_active_target_from_current_session();
     }
 
@@ -217,6 +231,42 @@ impl SessionStore {
             .map(ToString::to_string)
             .unwrap_or_else(|| model.to_string());
         self.session_mut(provider_id).model = persisted_model;
+    }
+
+    /// The `/model` selection string recorded for a working mode, if any.
+    pub(crate) fn mode_model(&self, mode_key: &str) -> Option<&str> {
+        self.mode_models.get(mode_key).map(String::as_str)
+    }
+
+    /// The current active target as a `/model` selection string in the
+    /// unambiguous `connection:model` form (`resolve_connection_model`
+    /// resolves it regardless of which provider is current).
+    pub(crate) fn current_model_selection_input(&self) -> String {
+        format!(
+            "{}:{}",
+            self.current_kind_id(),
+            self.current_session().model
+        )
+    }
+
+    /// Record that the active working mode now uses the current active target.
+    /// `previous` is the selection that was active before the switch; a mode
+    /// with no recorded entry is seeded with it, so the first divergence
+    /// leaves the other mode on the model it was actually using instead of
+    /// silently following the new one.
+    pub(crate) fn record_mode_model(&mut self, active_mode_key: &str, previous: Option<String>) {
+        let current = self.current_model_selection_input();
+        if let Some(previous) = previous {
+            for other in crate::agent::AgentMode::MODEL_KEYS {
+                if *other != active_mode_key {
+                    self.mode_models
+                        .entry((*other).to_string())
+                        .or_insert_with(|| previous.clone());
+                }
+            }
+        }
+        self.mode_models
+            .insert(active_mode_key.to_string(), current);
     }
 
     pub fn current_session(&self) -> &ProviderSession {
@@ -392,6 +442,46 @@ mod tests {
             model: model.to_string(),
             reasoning: crate::provider::ReasoningSelection::default(),
         }
+    }
+
+    #[test]
+    fn record_mode_model_seeds_the_other_mode_on_first_divergence() {
+        let mut store = make_store();
+        store.set_active_model_target("codex", None, None, "gpt-5.5");
+        let previous = store.current_model_selection_input();
+        assert_eq!(previous, "codex:gpt-5.5");
+
+        // First divergence in coding: planning is seeded with the model both
+        // modes were using, so it does not silently follow the new one.
+        store.set_active_model_target("opencode", None, None, "qwen3.7-max");
+        store.record_mode_model("coding", Some(previous));
+        assert_eq!(store.mode_model("coding"), Some("opencode:qwen3.7-max"));
+        assert_eq!(store.mode_model("planning"), Some("codex:gpt-5.5"));
+
+        // A later switch in planning updates only planning's entry.
+        let previous = store.current_model_selection_input();
+        store.set_active_model_target("anthropic", None, None, "claude-sonnet-4-5");
+        store.record_mode_model("planning", Some(previous));
+        assert_eq!(
+            store.mode_model("planning"),
+            Some("anthropic:claude-sonnet-4-5")
+        );
+        assert_eq!(store.mode_model("coding"), Some("opencode:qwen3.7-max"));
+    }
+
+    #[test]
+    fn provider_level_switch_relinks_modes() {
+        let mut store = make_store();
+        store.set_active_model_target("codex", None, None, "gpt-5.5");
+        store.record_mode_model("coding", None);
+        assert!(store.mode_model("coding").is_some());
+
+        // Authorize/provider-manager switches go through set_current_kind_id:
+        // stale per-mode entries would snap the model back on the next mode
+        // switch, so the map re-links.
+        store.set_current_kind_id("opencode");
+        assert!(store.mode_model("coding").is_none());
+        assert!(store.mode_model("planning").is_none());
     }
 
     #[test]

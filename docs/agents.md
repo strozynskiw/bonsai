@@ -24,10 +24,16 @@ An agent mode picks the persona, tool registry, and view:
   read-only tools. `/security-review` runs the stricter security-only audit
   of uncommitted changes through the same read-only registry.
 
-Custom agents with `surface: [mode]` join the `Shift+Tab` persona cycle. A
-user-facing agent always runs on the active session model;
-`model`/`fallback_model` assignments apply when the same definition is
-invoked as a subagent.
+The coding and plan modes each keep their **own model selection** — `/model`
+applies to the active mode, and a mode switch brings its model with it (see
+[per-mode models](models.md#per-mode-models)). Review follows whatever model
+is current.
+
+Custom agents with `surface: [mode]` join the `Shift+Tab` persona cycle and
+run on their definition's `model:` when one is set (else the current
+session model). `effort`/`fallback_model` apply when the same definition is
+invoked as a subagent; as a persona, reasoning follows the session's
+remembered setting for the target model.
 
 ## Subagents
 
@@ -104,8 +110,9 @@ Do not modify anything.
 | `description` | yes | one line for `/agents` and the model's Subagents index |
 | `surface` | no | `[subagent]` (default), `[mode]`, or `[mode, subagent]` |
 | `tools` | no | grant scope; omit for the read-only default. Grantable: the read-only core plus `write`, `edit`, `apply_patch`, `bash`, `terminal`, `rename_symbol`, `skill`, `question`, `webfetch`. Unknown names are ignored and reported by `/agents`. |
-| `model` / `effort` | no | model selector when invoked as a subagent — a shortcut letter (follows the live binding) or a full `/model` selector; omit to inherit the parent model |
-| `fallback_model` / `fallback_effort` | no | backup used when the primary is unavailable or fails after normal retries |
+| `model` | no | model selector — a shortcut letter (follows the live binding) or a full `/model` selector. Applies on both surfaces: as a subagent and as a `Shift+Tab` persona. Omit to inherit the parent/session model. |
+| `effort` | no | reasoning-effort override for subagent invocations (persona runs follow the session's remembered reasoning) |
+| `fallback_model` / `fallback_effort` | no | backup used when the primary is unavailable or fails after normal retries (subagent invocations) |
 | `enabled` | no | default true; disabled definitions stay visible but can't run |
 | `view` / `color` | no | presentation for a mode-surface agent |
 | `max_turns` | no | custom-subagent turn cap (1–500) |

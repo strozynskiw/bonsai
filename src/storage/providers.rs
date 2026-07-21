@@ -210,6 +210,7 @@ impl Storage {
         let active_model_id = parse_active_model_id(self.preference("active_model_id").await?)?;
         let model_shortcuts =
             parse_model_shortcuts(self.preference("model_shortcuts_json").await?)?;
+        let mode_models = parse_mode_models(self.preference("mode_models_json").await?)?;
         let theme = self.preference("theme").await?.unwrap_or_default();
 
         let rows = sqlx::query(
@@ -272,6 +273,7 @@ impl Storage {
             Default::default(),
             model_shortcuts,
             theme,
+            mode_models,
         )))
     }
 
@@ -297,6 +299,8 @@ impl Storage {
             .unwrap_or_default();
         let model_shortcuts_json = serde_json::to_string(&store.model_shortcuts)
             .context("Failed to serialize model shortcut bindings")?;
+        let mode_models_json = serde_json::to_string(&store.mode_models)
+            .context("Failed to serialize per-mode model selections")?;
 
         // The whole session-store save is one transaction: preferences and every
         // provider's settings + credentials must persist together or not at all,
@@ -311,6 +315,7 @@ impl Storage {
         upsert_preference(&mut tx, "active_connection_id", &active_connection_id).await?;
         upsert_preference(&mut tx, "active_model_id", &active_model_id).await?;
         upsert_preference(&mut tx, "model_shortcuts_json", &model_shortcuts_json).await?;
+        upsert_preference(&mut tx, "mode_models_json", &mode_models_json).await?;
         upsert_preference(&mut tx, "theme", &store.theme).await?;
 
         for (provider_id, session) in &store.providers {
@@ -507,4 +512,11 @@ fn parse_model_shortcuts(
         return Ok(Default::default());
     };
     serde_json::from_str(&value).context("Failed to parse model_shortcuts_json preference")
+}
+
+fn parse_mode_models(value: Option<String>) -> Result<std::collections::BTreeMap<String, String>> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Default::default());
+    };
+    serde_json::from_str(&value).context("Failed to parse mode_models_json preference")
 }

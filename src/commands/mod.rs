@@ -5,7 +5,6 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, CompactionReport, CompactionRequest, CompactionSummarySource};
-use crate::model_resolution::resolved_model_for_provider_model;
 use crate::provider::ProviderRegistry;
 use crate::session::SessionStore;
 use crate::tui::app::TranscriptItem;
@@ -23,7 +22,7 @@ mod hooks_cmd;
 mod mcp_cmd;
 mod memory;
 mod metadata;
-mod model_switch;
+pub(crate) mod model_switch;
 mod permissions;
 mod providers;
 mod providers_manage;
@@ -63,6 +62,7 @@ pub(crate) use metadata::{
 };
 pub(crate) use model_switch::{
     apply_model_selection, context_window_downgrade_warning, rebuild_agent_provider,
+    record_active_mode_model,
 };
 pub(crate) use permissions::{
     PermissionsCommandRequest, format_permission_rules, parse_permissions_command,
@@ -96,6 +96,10 @@ pub(crate) use yolo::{YoloCommandRequest, parse_yolo_command};
 pub(crate) struct CommandRuntimeContext<'a> {
     pub(crate) catalog: Option<&'a crate::model_catalog::ModelCatalog>,
     pub(crate) storage: Option<&'a crate::storage::Storage>,
+    /// The built-in working mode active when the command was dispatched, so
+    /// `/model` records the selection against that mode's per-mode entry.
+    /// `None` (headless, custom personas) records nothing.
+    pub(crate) active_mode: Option<crate::agent::AgentMode>,
 }
 
 /// Split a slash-command line into the whitespace-delimited argument tokens that

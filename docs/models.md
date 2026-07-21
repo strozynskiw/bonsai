@@ -57,6 +57,31 @@ The default provider is `opencode`. In headless mode, `--model <id>` and
 resumed session pins its stored provider/model/reasoning (see
 [Sessions](sessions.md)).
 
+### Per-mode models
+
+The **coding** and **plan** modes each keep their own model selection —
+`/model` (picker, typed selector, or letter shortcut) applies to whichever
+mode is active when you run it. Plan on a strong reasoner while coding on a
+fast implementer, and `Shift+Tab` flips both the persona and its model. In
+detail:
+
+- The composer meta line always names the active mode's model; while a run
+  is in flight under the old persona it shows the pending switch
+  (`Coding → Planning`) and the model changes when the run ends.
+- Every run applies its persona's model **at dispatch** — queued messages,
+  `/start` hand-offs, and phase advances all start on the target mode's
+  model, never the one that happened to be live.
+- The first time the modes diverge, the other mode keeps the model both
+  were using — switching plan's model never silently drags coding along.
+- Review and the built-in read-only lanes follow the current model; custom
+  personas use the `model:` from their definition
+  ([Agents and modes](agents.md#defining-your-own)).
+- Provider-level switches (`/authorize`, the provider manager) re-link both
+  modes to the new provider — per-mode entries are cleared rather than
+  snapping back to the old provider on the next mode switch.
+- Selections persist with the session store (`mode_models`, stored as
+  `connection:model` selectors) and survive restarts.
+
 ### Reasoning efforts
 
 The effort ladder is `minimal < low < medium < high < xhigh < max < ultra`,

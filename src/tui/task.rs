@@ -72,10 +72,14 @@ pub(crate) struct CommandTaskDeps {
     model_catalog: Arc<ModelCatalog>,
     storage: Option<Storage>,
     credential_persistence: CredentialPersistence,
+    /// The built-in mode active at dispatch, so `/model` in the command task
+    /// records the selection against that mode's per-mode model entry.
+    active_mode: Option<crate::agent::AgentMode>,
 }
 
 impl CommandTaskDeps {
     /// Bind a command task to one coherent runtime snapshot.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         agent: Arc<tokio::sync::Mutex<Agent>>,
         session_store: Arc<tokio::sync::Mutex<SessionStore>>,
@@ -84,6 +88,7 @@ impl CommandTaskDeps {
         model_catalog: Arc<ModelCatalog>,
         storage: Option<Storage>,
         credential_persistence: CredentialPersistence,
+        active_mode: Option<crate::agent::AgentMode>,
     ) -> Self {
         Self {
             agent,
@@ -93,6 +98,7 @@ impl CommandTaskDeps {
             model_catalog,
             storage,
             credential_persistence,
+            active_mode,
         }
     }
 }
@@ -119,11 +125,67 @@ struct CompletionEvidenceBaseline {
     authorization_decision_id: Option<i64>,
 }
 
+/// Everything needed to resolve and apply a persona's model at run dispatch:
+/// the per-mode `/model` entries live in the session store, a custom persona's
+/// `model:` in the agent registry. Registry/catalog handles are replaced on
+/// `/refresh` — the event loop re-installs fresh deps then.
+#[derive(Clone)]
+pub(crate) struct PersonaModelDeps {
+    pub(crate) agent: Arc<tokio::sync::Mutex<Agent>>,
+    pub(crate) session_store: Arc<tokio::sync::Mutex<SessionStore>>,
+    pub(crate) registry: Arc<ProviderRegistry>,
+    pub(crate) model_catalog: Arc<ModelCatalog>,
+    pub(crate) custom_agents: crate::resource::agent::SharedAgentRegistry,
+}
+
+/// Apply the model the persona wants (per-mode entry or custom-agent `model:`)
+/// to the session + agent when it differs from the current target, persisting
+/// the session. Returns the applied selection for UI mirrors; `None` when
+/// nothing changed (no entry, unresolvable, or already current). Lock order:
+/// session_store before agent (the canonical order).
+pub(crate) async fn apply_persona_model(
+    deps: &PersonaModelDeps,
+    persona: &crate::agent::ActivePersona,
+) -> Option<ProviderRunSelection> {
+    let desired = {
+        let session = deps.session_store.lock().await;
+        crate::commands::model_switch::desired_persona_model_input(
+            persona,
+            &session,
+            &deps.custom_agents,
+        )
+    }?;
+    let mut session = deps.session_store.lock().await;
+    let mut agent = deps.agent.lock().await;
+    let (model, reasoning) = crate::commands::model_switch::apply_model_input_if_different(
+        &deps.registry,
+        &mut session,
+        Some(&deps.model_catalog),
+        &mut agent,
+        &desired,
+    )?;
+    let snapshot = session.clone();
+    drop(agent);
+    drop(session);
+    tracing::info!(persona = ?persona, model = %model, "applied persona model");
+    if let Err(err) = snapshot.save_async().await {
+        tracing::warn!(error = %format!("{err:#}"), "failed to persist persona model switch");
+    }
+    Some(ProviderRunSelection {
+        provider: snapshot.provider_label().to_string(),
+        model,
+        reasoning,
+    })
+}
+
 pub struct TaskController {
     active: Option<ActiveTask>,
     sender: mpsc::UnboundedSender<RuntimeEvent>,
     max_run_duration: Option<Duration>,
     session_runtime_budget: Option<SessionRuntimeBudget>,
+    /// When set, every agent-run dispatch first applies the run persona's
+    /// model (see [`apply_persona_model`]); `None` (tests) skips the step.
+    persona_model_deps: Option<PersonaModelDeps>,
 }
 
 /// Per-phase turn budget for plan-implementation runs. Phases are isolated
@@ -139,7 +201,18 @@ impl TaskController {
             sender,
             max_run_duration: None,
             session_runtime_budget: None,
+            persona_model_deps: None,
         }
+    }
+
+    /// Install (or refresh, after `/refresh` swaps registry/catalog) the deps
+    /// used to apply a persona's model at every agent-run dispatch.
+    pub(crate) fn set_persona_model_deps(&mut self, deps: PersonaModelDeps) {
+        self.persona_model_deps = Some(deps);
+    }
+
+    pub(crate) fn persona_model_deps(&self) -> Option<&PersonaModelDeps> {
+        self.persona_model_deps.as_ref()
     }
 
     pub(crate) fn set_max_run_duration(&mut self, duration: Option<Duration>) {
@@ -210,8 +283,20 @@ impl TaskController {
         let sender = self.sender.clone();
         let max_run_duration = self.max_run_duration;
         let session_runtime_budget = self.session_runtime_budget.clone();
+        let persona_model_deps = self.persona_model_deps.clone();
+        let persona_for_model = agent_persona.clone();
         let _ = sender.send(RuntimeEvent::AgentStarted);
         let handle = tokio::spawn(async move {
+            // Every run starts under the model its persona selected: the
+            // per-mode `/model` entry (Coding/Planning) or a custom agent's
+            // `model:`. Applied here — the single choke point for all agent
+            // dispatch paths (submit, queued, retry, implement, phases,
+            // continuations) — before the run future takes the agent lock.
+            if let Some(deps) = &persona_model_deps
+                && let Some(selection) = apply_persona_model(deps, &persona_for_model).await
+            {
+                let _ = sender.send(RuntimeEvent::PersonaModelApplied(Box::new(selection)));
+            }
             let session_timing = match begin_session_timing(session_runtime_budget.as_ref()).await {
                 Ok(timing) => timing,
                 Err(err) => {
@@ -701,6 +786,7 @@ impl TaskController {
             model_catalog,
             storage,
             credential_persistence,
+            active_mode,
         } = deps;
         let sender = self.sender.clone();
         let handle = tokio::spawn(async move {
@@ -725,6 +811,7 @@ impl TaskController {
                     crate::commands::CommandRuntimeContext {
                         catalog: Some(&model_catalog),
                         storage: storage.as_ref(),
+                        active_mode,
                     },
                 )
                 .await?;

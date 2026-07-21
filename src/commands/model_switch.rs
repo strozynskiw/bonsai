@@ -81,6 +81,129 @@ pub(crate) fn apply_model_selection(
     normalized
 }
 
+/// Record an applied `/model` selection against the active working mode's
+/// per-mode entry (no-op without a mode or for Review). `previous` is the
+/// selection string captured before `apply_model_selection` ran.
+pub(crate) fn record_active_mode_model(
+    session_store: &mut SessionStore,
+    active_mode: Option<crate::agent::AgentMode>,
+    previous: String,
+) {
+    if let Some(key) = active_mode.and_then(crate::agent::AgentMode::model_key) {
+        session_store.record_mode_model(key, Some(previous));
+    }
+}
+
+/// The reasoning the session remembers for a resolved selection — the same
+/// derivation the `/model` text command uses when no reasoning is given:
+/// per-model remembered value (canonical id first), else the provider
+/// session's model-appropriate default.
+pub(crate) fn remembered_reasoning_for(
+    registry: &ProviderRegistry,
+    session_store: &SessionStore,
+    catalog: Option<&ModelCatalog>,
+    selection: &ResolvedModelSelection,
+) -> ReasoningSelection {
+    let metadata = registry
+        .lookup(&selection.provider_id)
+        .expect("selection provider must be in registry")
+        .metadata();
+    let resolved = crate::model_resolution::resolved_model_for_provider_model(
+        catalog,
+        &selection.provider_id,
+        &selection.model,
+    );
+    if let Some(resolved) = &resolved {
+        let canonical_model = resolved.model_id.to_string();
+        let session = session_store.session(&selection.provider_id);
+        session
+            .model_reasoning
+            .get(&canonical_model)
+            .or_else(|| session.model_reasoning.get(&selection.model))
+            .copied()
+            .unwrap_or(session.reasoning)
+    } else {
+        session_store
+            .session(&selection.provider_id)
+            .reasoning_for_model(metadata, &selection.model)
+    }
+}
+
+/// Resolve any `/model` input form — a role shortcut (`cheap`/`fast`/`smart`)
+/// or a provider/model selector — with its reasoning: the shortcut's bound
+/// reasoning, else the session's remembered reasoning for the target.
+pub(crate) fn resolve_model_input_with_reasoning(
+    registry: &ProviderRegistry,
+    session_store: &SessionStore,
+    catalog: Option<&ModelCatalog>,
+    input: &str,
+) -> Option<(ResolvedModelSelection, ReasoningSelection)> {
+    if let Ok(key) = input.parse::<crate::model_role::ModelShortcutKey>() {
+        let shortcut =
+            crate::model_role::resolve_model_shortcut(registry, session_store, catalog, key)?;
+        let selection = ResolvedModelSelection::from(&shortcut);
+        let reasoning = shortcut.reasoning;
+        return Some((selection, reasoning));
+    }
+    let selection = crate::commands::providers::resolve_model_selection(
+        registry,
+        session_store,
+        catalog,
+        input,
+    )?;
+    let reasoning = remembered_reasoning_for(registry, session_store, catalog, &selection);
+    Some((selection, reasoning))
+}
+
+/// The `/model` input the given persona wants applied before it runs:
+/// a built-in working mode's recorded per-mode entry, or a custom persona's
+/// `model:` from its definition. `None` means "keep the current model".
+pub(crate) fn desired_persona_model_input(
+    persona: &crate::agent::ActivePersona,
+    session_store: &SessionStore,
+    custom_agents: &crate::resource::agent::SharedAgentRegistry,
+) -> Option<String> {
+    match persona {
+        crate::agent::ActivePersona::Builtin(mode) => mode
+            .model_key()
+            .and_then(|key| session_store.mode_model(key))
+            .map(str::to_string),
+        crate::agent::ActivePersona::Custom(name) => {
+            let registry = crate::resource::agent::snapshot(custom_agents);
+            registry.get(name).and_then(|def| def.model.clone())
+        }
+    }
+}
+
+/// Apply a `/model` input to the session + agent when it differs from the
+/// current active target. Does not save the session — callers persist. Returns
+/// the applied model and normalized reasoning, or `None` when the input was
+/// unresolvable or already current.
+pub(crate) fn apply_model_input_if_different(
+    registry: &ProviderRegistry,
+    session_store: &mut SessionStore,
+    catalog: Option<&ModelCatalog>,
+    agent: &mut Agent,
+    input: &str,
+) -> Option<(String, ReasoningSelection)> {
+    let (selection, reasoning) =
+        resolve_model_input_with_reasoning(registry, session_store, catalog, input)?;
+    let current = session_store.current_session();
+    // The session persists the canonical model id when the catalog knows one,
+    // so compare against both the display form and the canonical id.
+    let model_matches = current.model == selection.model
+        || selection
+            .model_id
+            .as_ref()
+            .is_some_and(|id| current.model == id.to_string());
+    if session_store.current_kind_id() == selection.provider_id && model_matches {
+        return None;
+    }
+    let normalized = apply_model_selection(registry, session_store, catalog, &selection, reasoning);
+    rebuild_agent_provider(agent, registry, session_store, catalog);
+    Some((session_store.current_session().model.clone(), normalized))
+}
+
 pub(crate) fn context_window_downgrade_warning(
     old_tokens: usize,
     new_tokens: usize,

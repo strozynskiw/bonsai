@@ -1309,6 +1309,12 @@ impl AppState {
                     self.maybe_scroll_to_bottom_current();
                 }
             },
+            RuntimeEvent::PersonaModelApplied(selection) => {
+                let selection = *selection;
+                self.provider = selection.provider;
+                self.model = selection.model;
+                self.reasoning = selection.reasoning;
+            }
             RuntimeEvent::LocalModelWizardFetchFinished { request_id, result } => {
                 if let Some(ModalKind::LocalModelWizard { state }) = &mut self.modal {
                     if state.active_fetch_request_id != Some(request_id) {

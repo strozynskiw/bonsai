@@ -37,6 +37,28 @@ bonsai --help
 bonsai completions bash > bonsai.bash   # also: zsh, fish
 ```
 
+### Staying up to date
+
+Installed releases **self-update**: on TUI startup a background task checks
+for a newer signed release (at most one real lookup per 20 hours), verifies
+it through the same Ed25519 manifest → archive → binary hash chain as the
+installer, and atomically stages the new binary. The running process is
+never hot-swapped — the status line shows *"updated to vX — restart to
+apply"*.
+
+- **On demand** — `/update` inside the TUI (checks and installs in the
+  background, reports the outcome in the chat), or `bonsai update` from the
+  CLI (`--check` reports without installing). Both ignore the 20-hour
+  interval but honor every safety gate.
+- **Safety gates** — source/dev builds never self-replace; neither does a
+  binary that no longer hashes to its own signed manifest. Homebrew-managed
+  and non-writable installs degrade to a notice telling you what to run
+  instead.
+- **Config** — `[update]` in `config.toml`: `mode = "auto"` (default) |
+  `"notify"` (surface, don't install) | `"off"`; `pin = "X.Y.Z"` holds a
+  deliberate downgrade — newer releases are surfaced but not installed. See
+  [Configuration](configuration.md#the-schema).
+
 ## First run
 
 Launch `bonsai` inside the project you want to work on. A **resumable

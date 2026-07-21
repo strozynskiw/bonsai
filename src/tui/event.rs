@@ -868,6 +868,11 @@ pub enum RuntimeEvent {
     /// could not install. Rendered as a persistent composer-meta hint; sent at
     /// most once per session.
     UpdateNotice(String),
+    /// A run dispatch applied the persona's own model (per-mode `/model` entry
+    /// or a custom agent's `model:`); update the provider/model/reasoning
+    /// mirrors so the composer meta line names the model actually serving the
+    /// run.
+    PersonaModelApplied(Box<ProviderRunSelection>),
     /// A `/update` background run finished; render the outcome as a transcript
     /// status/error row. `staged_notice` additionally arms the persistent
     /// composer-meta hint (the same surface as the startup check) when a

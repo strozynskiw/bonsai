@@ -367,6 +367,8 @@ impl SessionStore {
         store
     }
 
+    /// Mirrors the persisted column set one-to-one, hence the argument count.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_persistent_parts(
         current_provider: String,
         active_connection_id: Option<ConnectionId>,
@@ -381,6 +383,7 @@ impl SessionStore {
             crate::model_role::ModelShortcutBinding,
         >,
         theme: String,
+        mode_models: std::collections::BTreeMap<String, String>,
     ) -> Self {
         let mut store = Self {
             current_provider,
@@ -388,6 +391,7 @@ impl SessionStore {
             active_model_id,
             providers,
             model_shortcuts,
+            mode_models,
             legacy_model_roles: model_roles,
             theme,
             legacy: LegacySessionFields::default(),
@@ -454,6 +458,7 @@ impl SessionStore {
             active_model_id: None,
             providers,
             model_shortcuts: Default::default(),
+            mode_models: Default::default(),
             legacy_model_roles: Default::default(),
             theme: String::new(),
             legacy: LegacySessionFields::default(),
@@ -883,6 +888,7 @@ mod tests {
             Default::default(),
             Default::default(),
             String::new(),
+            Default::default(),
         );
         storage
             .save_session_store_with_auth_policy(&store, SaveAuthPolicy::PreserveExisting)

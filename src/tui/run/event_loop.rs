@@ -346,6 +346,29 @@ fn should_auto_open_plan_findings(
         && next_finding_count > previous_finding_count
 }
 
+/// Apply the selected persona's model while idle so the composer meta line
+/// shows the model the next run will use. Busy states skip — dispatch applies
+/// the model when the run starts (`TaskController::spawn_agent_task`).
+async fn apply_idle_persona_model(
+    app: &mut AppState,
+    tasks: &TaskController,
+    redraw_requested: &mut bool,
+) {
+    if app.task_state.is_busy() || tasks.is_busy() {
+        return;
+    }
+    let Some(deps) = tasks.persona_model_deps() else {
+        return;
+    };
+    if let Some(selection) = crate::tui::task::apply_persona_model(deps, &app.active_persona).await
+    {
+        app.reduce(AppAction::Runtime(RuntimeEvent::PersonaModelApplied(
+            Box::new(selection),
+        )));
+        *redraw_requested = true;
+    }
+}
+
 fn sync_plan_store_snapshot(
     app: &mut AppState,
     plan: &crate::plan::PlanDoc,
@@ -1700,6 +1723,13 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         active_session_id.clone(),
         run_budget.max_session_active_duration(),
     );
+    tasks.set_persona_model_deps(crate::tui::task::PersonaModelDeps {
+        agent: agent.clone(),
+        session_store: session_store.clone(),
+        registry: registry.clone(),
+        model_catalog: model_catalog.clone(),
+        custom_agents: app.custom_agents.clone(),
+    });
     let termination_requested = install_termination_signal_handler();
     TtyHangupWatch::spawn_watchdog_thread();
     let mut background_events = background_tasks.subscribe();
@@ -1949,6 +1979,8 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             pending_background_wake = Some(Instant::now() + BACKGROUND_AGENT_WAKE_DELAY);
         }
 
+        let registry_before_drain = Arc::as_ptr(&registry);
+        let catalog_before_drain = Arc::as_ptr(&model_catalog);
         frame_needs_redraw |= drain_runtime_events_for_frame(
             &mut runtime_receiver,
             &mut app,
@@ -1973,6 +2005,20 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             },
         )
         .await;
+        // A `/refresh` swapped the registry/catalog handles; re-install them in
+        // the dispatcher's persona-model deps so future runs resolve models
+        // against the fresh catalog.
+        if Arc::as_ptr(&registry) != registry_before_drain
+            || Arc::as_ptr(&model_catalog) != catalog_before_drain
+        {
+            tasks.set_persona_model_deps(crate::tui::task::PersonaModelDeps {
+                agent: agent.clone(),
+                session_store: session_store.clone(),
+                registry: registry.clone(),
+                model_catalog: model_catalog.clone(),
+                custom_agents: app.custom_agents.clone(),
+            });
+        }
         // ToolStarted and SubagentEvent travel over separate channels. Reconcile
         // after every runtime drain so a completion observed on an earlier frame
         // still closes a transcript row that arrives later.
@@ -2930,6 +2976,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                         model_catalog.clone(),
                                         Some(storage.clone()),
                                         app.credential_persistence,
+                                        app.active_persona.builtin(),
                                     );
                                     if let Err(err) = tasks.start_command(
                                         input,
@@ -3105,6 +3152,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             // run, its busy guard makes this a no-op (each dispatch sets its
             // own persona anyway).
             sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
+            apply_idle_persona_model(&mut app, &tasks, &mut redraw_requested).await;
         }
 
         // After all event processing for the frame, a view change (Tab, `1`,
@@ -3125,6 +3173,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         if app.active_persona != last_active_persona {
             last_active_persona = app.active_persona.clone();
             sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
+            // Idle persona switch: apply the new persona's model right away so
+            // the meta line names the model the next run will actually use.
+            // While busy this skips; dispatch applies it when the run starts.
+            apply_idle_persona_model(&mut app, &tasks, &mut redraw_requested).await;
             redraw_requested = true;
         }
     };
@@ -3855,6 +3907,7 @@ async fn start_next_deferred_command_if_idle(
                 deps.model_catalog,
                 deps.storage.cloned(),
                 app.credential_persistence,
+                app.active_persona.builtin(),
             );
             if let Err(err) = tasks.start_command(
                 input,

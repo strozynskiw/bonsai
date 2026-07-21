@@ -1279,6 +1279,7 @@ mod tests {
                 },
             )]),
             String::new(),
+            Default::default(),
         );
 
         // No override -> the parent's current model + budget.
@@ -1604,6 +1605,7 @@ mod tests {
             Default::default(),
             Default::default(),
             String::new(),
+            Default::default(),
         );
 
         let provider = build_provider(&registry, &store, Some(&catalog));
@@ -1679,6 +1681,7 @@ mod tests {
             Default::default(),
             Default::default(),
             String::new(),
+            Default::default(),
         );
         let factory = subagent_provider_factory(
             registry,

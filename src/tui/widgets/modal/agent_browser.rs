@@ -29,7 +29,12 @@ pub(super) fn render_agent_browser(
         visible_picker_rows(rows.len(), cursor, picker_body_height(body_area).max(1))
             .map(|idx| {
                 let row = &rows[idx];
-                let mut tag = format!("({} · {})", row.origin.label(), row.definition_kind.label());
+                let mut tag = format!("({} · {}", row.origin.label(), row.definition_kind.label());
+                if let Some(model) = &row.model {
+                    tag.push_str(" · ");
+                    tag.push_str(crate::tui::pickers::short_model_label(model));
+                }
+                tag.push(')');
                 if !row.enabled {
                     tag.push_str(" disabled");
                 }
@@ -77,6 +82,7 @@ mod tests {
             definition_kind: crate::tui::agent_composer::AgentDefinitionKind::Subagent,
             builtin_id: None,
             enabled: true,
+            model: None,
             source_path: None,
         }];
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))

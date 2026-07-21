@@ -66,10 +66,10 @@ cargo install --path . --locked
 Binary installs keep themselves updated: on startup, bonsai checks GitHub for a
 newer signed release in the background, verifies it against the same
 Ed25519-signed manifest as the installer, and stages it — the update applies on
-the next launch. `bonsai update` runs the same verified install on demand
-(`--check` only reports), and `[update]` in `~/.bonsai/config.toml` tunes the
-behavior (`mode = "auto" | "notify" | "off"`, `pin = "X.Y.Z"` to hold a
-version).
+the next launch. `/update` in the TUI or `bonsai update` from the CLI runs the
+same verified install on demand (`bonsai update --check` only reports), and
+`[update]` in `~/.bonsai/config.toml` tunes the behavior
+(`mode = "auto" | "notify" | "off"`, `pin = "X.Y.Z"` to hold a version).
 
 A source install updates by rerunning the install command with the new tag —
 Cargo replaces the installed binary when the version differs. To refresh a

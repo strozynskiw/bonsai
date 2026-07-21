@@ -16,6 +16,8 @@ completion popup; `Tab` completes names and arguments.
 | `/perf` (alias `/cost`) | — | session performance/usage report | yes |
 | `/usage` | — | cross-project usage dashboard (6 tabs + heatmap) | no |
 | `/doctor` | `[json] [online]` | runtime diagnostics ([Troubleshooting](troubleshooting.md)) | yes |
+| `/bug` | `<description>` | build a local, user-reviewed support bundle | yes |
+| `/update` | — | check for the newest signed release and install it in the background; outcome lands in the chat (CLI: `bonsai update [--check]`) | no |
 
 ## Conversation and session
 
@@ -35,7 +37,7 @@ completion popup; `Tab` completes names and arguments.
 
 | Command | Arguments | Does | Headless |
 | --- | --- | --- | --- |
-| `/model` | `[number \| model \| connection:model \| letter]` | switch model (bare = 3-pane picker) | yes |
+| `/model` | `[number \| model \| connection:model \| letter]` | switch the **active mode's** model (bare = 3-pane picker); coding and plan each keep their own selection ([per-mode models](models.md#per-mode-models)) | yes |
 | `/<letter>` | — | switch to the model+effort bound to that letter ([shortcuts](models.md#model-shortcuts)) | yes |
 | `/authorize` | `[provider]` | authorize a provider (bare = picker; `Ctrl+P` cycles credential store) | yes |
 | `/unauthorize` | `[provider]` | remove an authorization | yes |
@@ -60,6 +62,7 @@ completion popup; `Tab` completes names and arguments.
 | Command | Arguments | Does | Headless |
 | --- | --- | --- | --- |
 | `/start` | — | hand the current plan to the coding agent (also `Alt+I`) | expands to the plan workflow |
+| `/continue` | — | resume phased plan implementation from the next pending phase | no |
 | `/save`, `/discard`, `/new-plan` | — | save / discard / reset the plan canvas | no |
 | `/plans` | — | saved-plans picker | no |
 | `/export` | `<path>` | export the plan to a file | no |
@@ -103,7 +106,8 @@ completion popup; `Tab` completes names and arguments.
 ## Behavior while the agent is running
 
 Invoking a command mid-run classifies it: read-only reports (`/ctx`,
-`/tasks`, …) run immediately; model switches defer until idle; state
+`/tasks`, …) run immediately; lock-free actions (`/update`, `/theme`,
+posture toggles) apply immediately; model switches defer until idle; state
 changes (`/clear`, `/compact`, `/commit`, `/review`, provider mutations)
 open a **busy-command** modal offering queue / open read-only / cancel run /
 dismiss. Plain text typed mid-run queues as the next user message

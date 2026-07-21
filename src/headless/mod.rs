@@ -1519,6 +1519,7 @@ mod tests {
             Default::default(),
             Default::default(),
             String::new(),
+            Default::default(),
         )
     }
 

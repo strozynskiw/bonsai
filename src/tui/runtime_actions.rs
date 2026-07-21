@@ -77,6 +77,7 @@ impl RuntimeActionDeps<'_> {
     fn command_task_deps(
         &self,
         credential_persistence: crate::session::CredentialPersistence,
+        active_mode: Option<crate::agent::AgentMode>,
     ) -> CommandTaskDeps {
         CommandTaskDeps::new(
             self.agent.clone(),
@@ -86,6 +87,7 @@ impl RuntimeActionDeps<'_> {
             self.model_catalog.clone(),
             Some(self.storage.clone()),
             credential_persistence,
+            active_mode,
         )
     }
 
@@ -1402,7 +1404,8 @@ fn submit_authorize_provider_picker(
     let input = format!("/authorize {}", selection.provider_id);
     app.reduce(AppAction::CloseModal);
     app.reduce(AppAction::SetTaskState(TaskState::Command));
-    let command_deps = deps.command_task_deps(app.credential_persistence);
+    let command_deps =
+        deps.command_task_deps(app.credential_persistence, app.active_persona.builtin());
     if let Err(err) = tasks.start_command(
         input,
         app.transcript.to_vec(),

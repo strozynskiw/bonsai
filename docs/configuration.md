@@ -64,6 +64,11 @@ test = ["cargo test --locked"]
 build = ["cargo build --release --locked"]
 after_edit = "off"        # off (default) | ask | on
 
+[update]                  # native self-update; see getting-started.md
+mode = "auto"             # auto (default) | notify | off
+# pin = "0.2.0"           # hold a deliberate downgrade: newer releases are
+                          # surfaced but never auto-installed
+
 [mcp.servers.<name>]      # see docs/mcp.md for the full field reference
 transport = "stdio"       # or "http"
 command = "npx"           # stdio: command/args/env/cwd

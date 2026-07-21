@@ -28,6 +28,13 @@ the sandbox posture. Attachment chips, queued-message hints, and waiting
 peers appear on the same line. The terminal title mirrors state:
 `[!] bonsai · <title>` when a modal needs attention, a spinner while busy.
 
+Switching persona mid-run **never cancels the run** — peeking at the plan
+canvas while the coding agent works is always safe. The status line shows
+the pending switch as `Running → Selected` (e.g. `Coding → Planning`); the
+new persona — and its [per-mode model](models.md#per-mode-models) — applies
+when the run finishes or is interrupted, and the next message you send runs
+under it.
+
 ## Transcript
 
 Item types: user messages, queued user messages, assistant text (markdown
@@ -102,7 +109,7 @@ Keybindings are fixed (no user keymap file). The essentials:
 | `Ctrl+C` | staged: cancel run → arm exit → confirm exit |
 | `Ctrl+Q` | quit |
 | `Tab` | cycle focus: composer → transcript → sidebar/plan |
-| `Shift+Tab` | cycle persona (coding → plan → enabled custom agents) |
+| `Shift+Tab` | cycle persona (coding → plan → enabled custom agents); each mode brings [its own model](models.md#per-mode-models), and switching never cancels a running turn |
 | `1` / `2` (outside composer) | agent / plan view |
 | `Alt+M` | cycle autonomy (never lands on yolo) |
 | `Alt+I` | implement plan (`/start`) |

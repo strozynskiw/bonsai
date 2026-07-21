@@ -146,6 +146,7 @@ async fn handle_command(
         super::CommandRuntimeContext {
             catalog: None,
             storage: None,
+            active_mode: Some(crate::agent::AgentMode::Coding),
         },
     )
     .await
@@ -170,6 +171,7 @@ async fn handle_command_with_model_catalog(
         super::CommandRuntimeContext {
             catalog: Some(catalog),
             storage: None,
+            active_mode: Some(crate::agent::AgentMode::Coding),
         },
     )
     .await
@@ -1988,6 +1990,34 @@ async fn model_numeric_argument_uses_current_provider_model() {
         Some("opencode")
     );
     assert_eq!(store.active_model_id().map(|id| id.as_str()), None);
+}
+
+#[tokio::test]
+async fn model_command_records_selection_against_the_active_mode() {
+    let mut agent = agent();
+    let mut store = session_store();
+    let dir = tempdir().unwrap();
+    let registry = registry();
+    let catalog = catalog_with_live_models("opencode", ["model-one", "model-two"]);
+
+    let previous = store.current_model_selection_input();
+
+    // The test harness dispatches with active_mode = Coding: the switch lands
+    // in coding's entry and planning is seeded with the pre-switch selection.
+    handle_command_with_model_catalog(
+        "/model 2",
+        &mut agent,
+        &mut store,
+        dir.path(),
+        &[],
+        registry,
+        &catalog,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(store.mode_model("coding"), Some("opencode:model-two"));
+    assert_eq!(store.mode_model("planning"), Some(previous.as_str()));
 }
 
 #[tokio::test]

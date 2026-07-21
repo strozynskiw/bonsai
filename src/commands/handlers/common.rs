@@ -526,13 +526,30 @@ pub(crate) async fn handle_command_with_catalog(
             handle_unauthorize(arg, agent, session_store, &registry, catalog, &mut outcome).await?;
         }
         Some("/model") => {
-            handle_model(arg, agent, session_store, &registry, catalog, &mut outcome).await?;
+            handle_model(
+                arg,
+                agent,
+                session_store,
+                &registry,
+                catalog,
+                runtime.active_mode,
+                &mut outcome,
+            )
+            .await?;
         }
         Some(command) if parts.len() == 1 && ModelShortcutKey::from_command(command).is_some() => {
             let key = ModelShortcutKey::from_command(command)
                 .expect("guard ensures command is a valid model shortcut");
-            apply_shortcut_command(key, agent, session_store, &registry, catalog, &mut outcome)
-                .await?;
+            apply_shortcut_command(
+                key,
+                agent,
+                session_store,
+                &registry,
+                catalog,
+                runtime.active_mode,
+                &mut outcome,
+            )
+            .await?;
         }
         Some("/providers") => {
             let messages = crate::commands::providers_manage::providers_command_messages(
@@ -754,6 +771,7 @@ async fn apply_shortcut_command(
     session_store: &mut SessionStore,
     registry: &Arc<ProviderRegistry>,
     catalog: Option<&ModelCatalog>,
+    active_mode: Option<crate::agent::AgentMode>,
     outcome: &mut CommandOutcome,
 ) -> Result<()> {
     let Some(shortcut_selection) = resolve_model_shortcut(registry, session_store, catalog, key)
@@ -768,6 +786,7 @@ async fn apply_shortcut_command(
     let selection = ResolvedModelSelection::from(&shortcut_selection);
     let old_context_window =
         context_window_for_current_model_with_catalog(registry, session_store, catalog) as usize;
+    let previous_selection = session_store.current_model_selection_input();
     apply_model_selection(
         registry,
         session_store,
@@ -775,6 +794,7 @@ async fn apply_shortcut_command(
         &selection,
         shortcut_selection.reasoning,
     );
+    record_active_mode_model(session_store, active_mode, previous_selection);
     let new_context_window =
         context_window_for_current_model_with_catalog(registry, session_store, catalog) as usize;
     session_store.save_async().await?;
@@ -798,6 +818,7 @@ async fn handle_model(
     session_store: &mut SessionStore,
     registry: &Arc<ProviderRegistry>,
     catalog: Option<&ModelCatalog>,
+    active_mode: Option<crate::agent::AgentMode>,
     outcome: &mut CommandOutcome,
 ) -> Result<()> {
     let Some(input) = arg.filter(|value| !value.is_empty()) else {
@@ -812,7 +833,16 @@ async fn handle_model(
     };
 
     if let Ok(key) = input.parse::<ModelShortcutKey>() {
-        return apply_shortcut_command(key, agent, session_store, registry, catalog, outcome).await;
+        return apply_shortcut_command(
+            key,
+            agent,
+            session_store,
+            registry,
+            catalog,
+            active_mode,
+            outcome,
+        )
+        .await;
     }
 
     let Some(selection) = resolve_model_selection(registry, session_store, catalog, input) else {
@@ -826,28 +856,15 @@ async fn handle_model(
     // The `/model` text command carries no reasoning argument, so derive it from
     // prior session state; `apply_model_selection` then normalizes and stores it
     // against the new model.
-    let metadata = registry
-        .lookup(&selection.provider_id)
-        .expect("current provider must be in registry")
-        .metadata();
-    let resolved =
-        resolved_model_for_provider_model(catalog, &selection.provider_id, &selection.model);
-    let requested_reasoning = if let Some(resolved) = &resolved {
-        let canonical_model = resolved.model_id.to_string();
-        let session = session_store.session(&selection.provider_id);
-        session
-            .model_reasoning
-            .get(&canonical_model)
-            .or_else(|| session.model_reasoning.get(&selection.model))
-            .copied()
-            .unwrap_or(session.reasoning)
-    } else {
-        session_store
-            .session(&selection.provider_id)
-            .reasoning_for_model(metadata, &selection.model)
-    };
+    let requested_reasoning = crate::commands::model_switch::remembered_reasoning_for(
+        registry,
+        session_store,
+        catalog,
+        &selection,
+    );
     let old_context_window =
         context_window_for_current_model_with_catalog(registry, session_store, catalog) as usize;
+    let previous_selection = session_store.current_model_selection_input();
     apply_model_selection(
         registry,
         session_store,
@@ -855,6 +872,7 @@ async fn handle_model(
         &selection,
         requested_reasoning,
     );
+    record_active_mode_model(session_store, active_mode, previous_selection);
     let new_context_window =
         context_window_for_current_model_with_catalog(registry, session_store, catalog) as usize;
     session_store.save_async().await?;

@@ -1077,6 +1077,9 @@ pub struct AgentBrowserRow {
     pub(crate) definition_kind: AgentDefinitionKind,
     pub(crate) builtin_id: Option<crate::subagent::BuiltinSubagentId>,
     pub enabled: bool,
+    /// The agent's pinned model (definition `model:` or built-in settings
+    /// `primary_model`), shown in the row tag; `None` follows the session.
+    pub model: Option<String>,
     /// Custom source file, or a legacy pre-DB built-in settings file.
     pub source_path: Option<PathBuf>,
 }
@@ -1114,6 +1117,10 @@ pub(crate) fn browser_rows_with_settings(
                 .map(|settings| settings.enabled)
                 .or_else(|| legacy.map(|def| def.enabled))
                 .unwrap_or(true);
+            let model = builtin_settings
+                .get(&spec.id)
+                .and_then(|settings| settings.primary_model.clone())
+                .or_else(|| legacy.and_then(|def| def.model.clone()));
             AgentBrowserRow {
                 name: spec.name.to_string(),
                 description: spec.description.to_string(),
@@ -1121,6 +1128,7 @@ pub(crate) fn browser_rows_with_settings(
                 definition_kind: AgentDefinitionKind::Subagent,
                 builtin_id: Some(spec.id),
                 enabled,
+                model,
                 source_path: legacy.map(|def| def.source_path.clone()),
             }
         })
@@ -1140,6 +1148,7 @@ pub(crate) fn browser_rows_with_settings(
             definition_kind: AgentDefinitionKind::from_surface(def.surface.as_deref()),
             builtin_id: None,
             enabled: def.enabled,
+            model: def.model.clone(),
             source_path: Some(def.source_path.clone()),
         });
     }

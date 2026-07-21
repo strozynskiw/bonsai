@@ -206,6 +206,20 @@ impl AgentMode {
             Self::Review => "Reviewing",
         }
     }
+
+    /// The working modes that keep their own `/model` selection, with the keys
+    /// used in the session store's `mode_models` map. Review deliberately has
+    /// no key: it follows whatever model is current.
+    pub(crate) const MODEL_KEYS: &'static [&'static str] = &["coding", "planning"];
+
+    /// The `mode_models` key for this mode, when it keeps its own selection.
+    pub(crate) fn model_key(self) -> Option<&'static str> {
+        match self {
+            Self::Coding => Some("coding"),
+            Self::Planning => Some("planning"),
+            Self::Review => None,
+        }
+    }
 }
 
 pub(crate) use persona::{ActivePersona, PersonaView, next_persona};

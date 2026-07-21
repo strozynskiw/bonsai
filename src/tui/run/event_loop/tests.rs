@@ -4993,6 +4993,7 @@ async fn authorize_command_task_opens_provider_picker() {
                 Arc::new(crate::model_catalog::ModelCatalog::load_builtin().unwrap()),
                 None,
                 crate::session::CredentialPersistence::File,
+                Some(crate::agent::AgentMode::Coding),
             ),
         )
         .expect("command should start");
@@ -5048,6 +5049,7 @@ async fn authorize_command_task_opens_key_prompt_without_status_message() {
                 Arc::new(crate::model_catalog::ModelCatalog::load_builtin().unwrap()),
                 None,
                 crate::session::CredentialPersistence::File,
+                Some(crate::agent::AgentMode::Coding),
             ),
         )
         .expect("command should start");
@@ -5098,6 +5100,7 @@ async fn perf_command_task_opens_report_modal_without_status_message() {
                 Arc::new(crate::model_catalog::ModelCatalog::load_builtin().unwrap()),
                 None,
                 crate::session::CredentialPersistence::File,
+                Some(crate::agent::AgentMode::Coding),
             ),
         )
         .expect("command should start");
@@ -7070,6 +7073,63 @@ async fn sync_agent_mode_and_refresh_skips_when_busy() {
     assert_eq!(
         stored.budget_tokens, 120_000,
         "report should be the unchanged pre-existing value"
+    );
+}
+
+#[tokio::test]
+async fn apply_persona_model_switches_to_the_modes_recorded_entry() {
+    let agent = test_agent(Box::new(CompleteProvider));
+    let mut store = authorized_codex_store();
+    // Planning has its own recorded model on another provider; the session is
+    // currently on opencode.
+    store
+        .mode_models
+        .insert("planning".to_string(), "codex:gpt-5.5".to_string());
+    let deps = crate::tui::task::PersonaModelDeps {
+        agent: agent.clone(),
+        session_store: Arc::new(Mutex::new(store)),
+        registry: Arc::new(ProviderRegistry::default_registry()),
+        model_catalog: test_model_catalog(),
+        custom_agents: crate::resource::agent::shared_registry(
+            crate::resource::agent::AgentRegistry::empty(),
+        ),
+    };
+
+    // Modes without an entry (Coding here) and Review keep the current model.
+    let coding = crate::agent::ActivePersona::Builtin(AgentMode::Coding);
+    assert!(
+        crate::tui::task::apply_persona_model(&deps, &coding)
+            .await
+            .is_none(),
+        "no recorded entry should keep the current model"
+    );
+    let review = crate::agent::ActivePersona::Builtin(AgentMode::Review);
+    assert!(
+        crate::tui::task::apply_persona_model(&deps, &review)
+            .await
+            .is_none(),
+        "review follows the current model"
+    );
+
+    // Planning applies its entry: session + agent switch to codex/gpt-5.5.
+    let planning = crate::agent::ActivePersona::Builtin(AgentMode::Planning);
+    let selection = crate::tui::task::apply_persona_model(&deps, &planning)
+        .await
+        .expect("planning's recorded model should apply");
+    // The session persists the canonical model id the catalog resolves.
+    assert_eq!(selection.model, "openai/gpt-5.5");
+    {
+        let session = deps.session_store.lock().await;
+        assert_eq!(session.current_kind_id(), "codex");
+        assert_eq!(session.current_session().model, "openai/gpt-5.5");
+    }
+
+    // Idempotent: a second apply for the same persona is a no-op.
+    assert!(
+        crate::tui::task::apply_persona_model(&deps, &planning)
+            .await
+            .is_none(),
+        "an already-current model should not reapply"
     );
 }
 

@@ -2013,6 +2013,9 @@ pub(in crate::tui) fn switch_model_selection(
     }
     app.reduce(AppAction::SetTaskState(TaskState::Command));
     let generation = app.command_generation();
+    // Captured before the spawn: the picker choice is recorded against the
+    // mode that was active when the user made it.
+    let active_mode = app.active_persona.builtin();
     let ModelSelection {
         provider_id,
         connection_id: selected_connection_id,
@@ -2085,12 +2088,18 @@ pub(in crate::tui) fn switch_model_selection(
                             &session,
                             Some(&model_catalog),
                         ) as usize;
+                    let previous_selection = session.current_model_selection_input();
                     let normalized_reasoning = crate::commands::apply_model_selection(
                         &registry,
                         &mut session,
                         Some(&model_catalog),
                         &model_selection,
                         reasoning,
+                    );
+                    crate::commands::record_active_mode_model(
+                        &mut session,
+                        active_mode,
+                        previous_selection,
                     );
                     let mut messages = Vec::new();
                     if let Some(fallback) = (normalized_reasoning != reasoning).then(|| {
