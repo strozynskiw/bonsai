@@ -191,7 +191,7 @@ if [ "$run_checks" -eq 1 ] && [ "$tag_only" -eq 0 ]; then
   cargo fmt --all --check
   cargo clippy --locked --all-targets --all-features -- -D warnings
   cargo test --locked
-  RUSTFLAGS=-D warnings cargo build --release --locked
+  RUSTFLAGS="-D warnings" cargo build --release --locked
 fi
 
 if [ "$tag_only" -eq 0 ]; then
