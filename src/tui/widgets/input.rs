@@ -518,6 +518,27 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
     let mut left = vec![Span::styled(" ".to_string(), theme::composer_meta())];
     left.extend(view::status_dot_spans(app));
     left.push(Span::styled("  ".to_string(), theme::composer_meta()));
+    // A run keeps its dispatch-time persona even when the user switches
+    // mid-flight (peeking at the plan never cancels work), so surface the
+    // pending switch as `Running → Selected`: the run still executes as
+    // `Running`; `Selected` applies when it finishes or is interrupted.
+    let pending_switch = app
+        .running_persona
+        .as_ref()
+        .filter(|running| **running != app.active_persona);
+    if let Some(running) = pending_switch {
+        let running_accent = app
+            .persona_color_spec_for(running)
+            .and_then(|spec| theme::persona_color(&spec))
+            .unwrap_or_else(|| theme::view_accent(view).0);
+        left.push(Span::styled(
+            AppState::persona_label_for(running),
+            theme::composer_meta()
+                .fg(running_accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        left.push(Span::styled(" → ".to_string(), theme::dim()));
+    }
     left.push(Span::styled(
         agent,
         theme::composer_meta()
@@ -890,6 +911,48 @@ mod tests {
             completion_popover_title(&app, popover_area),
             "Tab to accept",
             "a fully visible list keeps the plain title"
+        );
+    }
+
+    #[test]
+    fn meta_line_shows_pending_persona_switch_mid_run() {
+        // A mid-run persona selection never cancels the run; the meta line
+        // shows `Running → Selected` so the user sees the switch is pending
+        // for the next run, not applied to (or killing) the current one.
+        let mut app = AppState::new(
+            "codex",
+            "test-model".to_string(),
+            "workspace".to_string(),
+            None,
+        );
+        app.running_persona = Some(crate::agent::ActivePersona::Builtin(
+            crate::agent::AgentMode::Review,
+        ));
+        app.active_persona =
+            crate::agent::ActivePersona::Builtin(crate::agent::AgentMode::Planning);
+
+        let text = line_text(&meta_line(&app, 120, false));
+        assert!(
+            text.contains("Review → Planning"),
+            "pending switch should render running → selected: {text}"
+        );
+
+        // Same persona running and selected: plain label, no arrow.
+        app.active_persona = crate::agent::ActivePersona::Builtin(crate::agent::AgentMode::Review);
+        let text = line_text(&meta_line(&app, 120, false));
+        assert!(
+            !text.contains('→'),
+            "no pending switch should render no arrow: {text}"
+        );
+
+        // Idle: plain label as before.
+        app.running_persona = None;
+        app.active_persona =
+            crate::agent::ActivePersona::Builtin(crate::agent::AgentMode::Planning);
+        let text = line_text(&meta_line(&app, 120, false));
+        assert!(
+            !text.contains('→') && text.contains("Planning"),
+            "idle should render the selected persona alone: {text}"
         );
     }
 

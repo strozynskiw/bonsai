@@ -189,6 +189,13 @@ pub struct AppState {
     /// `/review`. Single source of truth — read `active_mode()` for the built-in
     /// mode (custom personas map to a neutral built-in for view/keymap purposes).
     pub active_persona: crate::agent::ActivePersona,
+    /// Mirror of the persona the in-flight run was dispatched with (see
+    /// [`TaskController::active_agent_persona`]), refreshed once per frame by
+    /// the event loop. `None` while idle. When it differs from
+    /// `active_persona`, the composer meta line renders the transition
+    /// (`Running → Selected`) so a mid-run mode switch reads as "next run",
+    /// never as an interruption of the current one.
+    pub(crate) running_persona: Option<crate::agent::ActivePersona>,
     /// Shared custom-agent registry, so the reducer/renderer can resolve a custom
     /// persona's view / color / name live (the composer hot-swaps it).
     pub custom_agents: crate::resource::agent::SharedAgentRegistry,
@@ -506,6 +513,7 @@ impl AppState {
             clipboard: crate::copy::Clipboard::system(),
             view: View::Agent,
             active_persona: crate::agent::ActivePersona::default(),
+            running_persona: None,
             custom_agents: crate::resource::agent::shared_registry(
                 crate::resource::agent::AgentRegistry::empty(),
             ),
@@ -719,10 +727,15 @@ impl AppState {
 
     /// The active persona's display label (custom agent name, else the mode).
     pub(crate) fn persona_label(&self) -> String {
-        match self.active_persona.custom_name() {
+        Self::persona_label_for(&self.active_persona)
+    }
+
+    /// Display label for an arbitrary persona (custom agent name, else the mode).
+    pub(crate) fn persona_label_for(persona: &crate::agent::ActivePersona) -> String {
+        match persona.custom_name() {
             Some(name) => name.to_string(),
             None => {
-                let mode = self.active_mode();
+                let mode = persona.builtin().unwrap_or(AgentMode::Coding);
                 let mut chars = mode.label().chars();
                 match chars.next() {
                     Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -735,11 +748,26 @@ impl AppState {
     /// The active persona's accent color spec (custom agent `color:`, else the
     /// built-in mode's), if any.
     pub(crate) fn persona_color_spec(&self) -> Option<String> {
-        match self.active_persona.custom_name() {
+        self.persona_color_spec_for(&self.active_persona)
+    }
+
+    /// Accent color spec for an arbitrary persona (custom agent `color:`, else
+    /// the built-in mode's), if any.
+    pub(crate) fn persona_color_spec_for(
+        &self,
+        persona: &crate::agent::ActivePersona,
+    ) -> Option<String> {
+        match persona.custom_name() {
             Some(name) => self
                 .custom_agent_field(name, |def| def.color.clone())
                 .flatten(),
-            None => Some(self.active_mode().color_spec().to_string()),
+            None => Some(
+                persona
+                    .builtin()
+                    .unwrap_or(AgentMode::Coding)
+                    .color_spec()
+                    .to_string(),
+            ),
         }
     }
 

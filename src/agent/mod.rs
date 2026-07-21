@@ -875,6 +875,11 @@ impl Agent {
         self.tool_schema_for_registry(&self.tool_registry)
     }
 
+    /// The persona currently applied to the agent (registry + system prompt).
+    pub fn active_persona(&self) -> &ActivePersona {
+        &self.active_persona
+    }
+
     /// The label for the active persona: a custom agent's name, else the mode's.
     fn persona_label(&self) -> &str {
         self.active_persona

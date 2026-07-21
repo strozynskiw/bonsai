@@ -1182,7 +1182,14 @@ pub(in crate::tui::run) async fn sync_agent_mode_and_refresh(
         return;
     }
     let mut guard = agent.lock().await;
-    guard.set_persona(app.active_persona.clone());
+    // Only reapply on a real change: `set_persona` on a same-name custom
+    // persona would re-inject a "switched from X to X" transition message
+    // (built-in same-mode is already a no-op in `set_mode`). This runs both on
+    // persona-change frames and unconditionally after every run finishes, so
+    // it must be idempotent.
+    if guard.active_persona() != &app.active_persona {
+        guard.set_persona(app.active_persona.clone());
+    }
     app.refresh_agent_mirrors(&guard);
     let report = guard.context_report();
     drop(guard);
