@@ -25,7 +25,7 @@ REPO="strozynskiw/bonsai"
 # Base64 of the raw 32-byte Ed25519 public key — the same value published as the
 # repository variable BONSAI_RELEASE_PUBLIC_KEY and validated by the release
 # workflow before it signs anything. Empty until the release keypair exists.
-BONSAI_RELEASE_PUBLIC_KEY=""
+BONSAI_RELEASE_PUBLIC_KEY="6xBgRQclY7/poBF5yo4xsqqcbEl1IxD8qIV3eaGFInI="
 
 INSTALL_DIR="${BONSAI_INSTALL_DIR:-$HOME/.local/bin}"
 TMPDIR_BONSAI=""
