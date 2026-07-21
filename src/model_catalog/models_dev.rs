@@ -76,10 +76,22 @@ impl ModelsDevModel {
         if self.temperature {
             features.push(ModelFeature::Temperature);
         }
-        if self.attachment {
+        // Vision from either signal: models.dev entries are sometimes
+        // internally inconsistent (e.g. `attachment: false` with `image` in
+        // input modalities — kimi-for-coding/k3). A false positive surfaces
+        // as a provider-side error; a false negative silently drops images,
+        // so trust whichever field claims support.
+        if self.attachment || self.accepts_image_input() {
             features.push(ModelFeature::Attachment);
         }
         features
+    }
+
+    fn accepts_image_input(&self) -> bool {
+        self.modalities
+            .input
+            .iter()
+            .any(|modality| modality.as_ref() == "image")
     }
 
     pub(crate) fn reasoning_options_for_transport(
@@ -941,6 +953,43 @@ mod tests {
         assert_eq!(tiny.context_window, None);
         assert_eq!(tiny.pricing, None);
         assert!(tiny.features().is_empty());
+    }
+
+    #[test]
+    fn image_input_modality_grants_attachment_despite_false_flag() {
+        // models.dev entries can be internally inconsistent — e.g.
+        // kimi-for-coding/k3 ships attachment=false alongside an `image`
+        // input modality. The modality must win so images aren't silently
+        // blocked for a vision-capable model.
+        let catalog = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "kimi-for-coding": {
+                "models": {
+                  "k3": {
+                    "id": "k3",
+                    "attachment": false,
+                    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
+                  },
+                  "text-only": {
+                    "id": "text-only",
+                    "attachment": false,
+                    "modalities": { "input": ["text"], "output": ["text"] }
+                  }
+                }
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let k3 = catalog.model(&model_id("kimi-for-coding/k3")).unwrap();
+        assert!(k3.features().contains(&ModelFeature::Attachment));
+        let text_only = catalog
+            .model(&model_id("kimi-for-coding/text-only"))
+            .unwrap();
+        assert!(!text_only.features().contains(&ModelFeature::Attachment));
     }
 
     #[test]
