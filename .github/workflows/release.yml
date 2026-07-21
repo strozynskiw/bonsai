@@ -258,7 +258,7 @@ jobs:
           test "$missing" -eq 0
       - name: Attest release provenance
         if: ${{ github.event.repository.visibility == 'public' }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: |
             dist/*.tar.gz
@@ -273,7 +273,7 @@ jobs:
             dist/bonsai-${{ github.ref_name }}.spdx.json
       - name: Attest release SBOM
         if: ${{ github.event.repository.visibility == 'public' }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: dist/*.tar.gz
           sbom-path: dist/bonsai-${{ github.ref_name }}.spdx.json
