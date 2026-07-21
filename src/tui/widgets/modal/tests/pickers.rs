@@ -1103,7 +1103,7 @@ fn subtask_override_block_is_reachable_at_max_scroll() {
     let buffer = render_subtasks_to_buffer(area, &subtasks, 0, u16::MAX, Some(("explorer", over)));
     let text = buffer_text(&buffer);
     assert!(
-        text.contains("Override (next run):"),
+        text.contains("Override (all explorer runs):"),
         "override line should be reachable at max scroll:\n{text}"
     );
 }

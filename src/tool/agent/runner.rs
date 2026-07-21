@@ -26,8 +26,13 @@ use crate::tool::{ProjectInfoRuntime, ReadTracker, ToolRegistry};
 /// Most subagents allowed to run at once across a turn.
 const MAX_CONCURRENT_SUBAGENTS: usize = 5;
 const SELF_REVIEW_MAX_ITERATIONS: usize = 12;
-const SELF_REVIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(270);
-const SELF_REVIEW_CONCLUDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+const SELF_REVIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
+// Self-review runs the same slow reasoning models through the same "budget
+// exhausted, conclude now" path as the delegation lanes, so a 45s conclude window
+// cut them off mid-synthesis and discarded the review. Match the generous
+// delegation conclude budget (catalog.rs SUBAGENT_CONCLUDE_TIMEOUT), scaled to
+// self-review's tighter 270s wall-clock. Don't shrink this back.
+const SELF_REVIEW_CONCLUDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// Runtime provider and model-budget settings for a nested subagent.
 pub(crate) struct SubagentProviderConfig {

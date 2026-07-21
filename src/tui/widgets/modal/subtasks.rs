@@ -242,8 +242,15 @@ pub(super) fn subtask_detail_lines_full(
         lines.push(Line::from(""));
         push_wrapped_line(
             &mut lines,
+            // The override map is keyed by agent name, so it applies to every
+            // future delegation to this agent — not just the selected row. Say so,
+            // or the per-row UI implies a narrower scope than `m`/`d` actually have.
             Line::from(Span::styled(
-                format!("Override (next run): {}", over.display_label()),
+                format!(
+                    "Override (all {} runs): {}",
+                    sub.agent,
+                    over.display_label()
+                ),
                 theme::label(theme::palette().tool),
             )),
             wrap_width,
