@@ -108,7 +108,14 @@ pub(crate) async fn run_forced_update(
 pub(crate) fn startup_notice(outcome: &UpdateOutcome) -> Option<String> {
     match outcome {
         UpdateOutcome::Staged { version } | UpdateOutcome::AlreadyStaged { version } => {
-            Some(format!("updated to v{version} — restart to apply"))
+            // The corner normally shows the running version tag; a staged
+            // update turns it into the transition (`v0.2.1 → v0.3.0`) so the
+            // user sees both what they're on and what a restart applies —
+            // the same arrow language as the persona pending-switch.
+            Some(match release::current_version() {
+                Ok(current) => format!("v{current} → v{version} — restart to apply"),
+                Err(_) => format!("updated to v{version} — restart to apply"),
+            })
         }
         UpdateOutcome::NotifyOnly { version, reason } => Some(match reason {
             NotifyReason::Notify => format!("update v{version} available — run `bonsai update`"),
@@ -1069,9 +1076,11 @@ mod tests {
         let staged = UpdateOutcome::Staged {
             version: "0.3.0".to_string(),
         };
+        let current = release::current_version().expect("test build has a valid version");
         assert_eq!(
             startup_notice(&staged).unwrap(),
-            "updated to v0.3.0 — restart to apply"
+            format!("v{current} → v0.3.0 — restart to apply"),
+            "a staged update shows the current → new transition in the corner"
         );
         for (reason, needle) in [
             (NotifyReason::Notify, "bonsai update"),

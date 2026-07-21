@@ -367,7 +367,16 @@ fn program_tier(words: &[&str], lower: &str) -> RiskTier {
         return tier;
     }
 
-    let git_sub = (prog == "git").then(|| git_subcommand(effective)).flatten();
+    // Git subcommands get an explicit per-form table (the destructive shapes —
+    // `reset --hard`, force push, `clean -f`, `branch -d`, forced checkout —
+    // were already escalated above and can't reach it). Forms the table does
+    // not recognize fall through and land on the unknown ⇒ destructive
+    // default, never on a loose prefix.
+    if prog == "git"
+        && let Some(tier) = git_tier(git_subcommand(effective), effective)
+    {
+        return tier;
+    }
 
     // Network egress.
     const NETWORK: &[&str] = &[
@@ -379,9 +388,6 @@ fn program_tier(words: &[&str], lower: &str) -> RiskTier {
 
     // High: removal, publishing, and package installs (hard to undo / fetch code).
     if prog == "rm" || prog == "rmdir" {
-        return RiskTier::High;
-    }
-    if git_sub == Some("push") {
         return RiskTier::High;
     }
     if is_install(prog, effective) {
@@ -993,6 +999,121 @@ fn is_destructive_shape(prog: &str, words: &[&str], lower: &str) -> bool {
     false
 }
 
+/// Explicit per-subcommand git tiers. `None` for forms the table does not
+/// recognize — they fall through to the generic unknown ⇒ destructive default
+/// rather than riding a loose prefix into a lower tier. Runs *after*
+/// `is_destructive_shape`, so the forced/hard/deleting spellings of these
+/// subcommands were already escalated and never reach this table.
+///
+/// The tier only governs prompting; an active sandbox still confines the
+/// command (workspace-only writes, network denial) after auto-approval, which
+/// is what makes the low tiers here honest: `add`/`stash`/branch creation
+/// mutate only `.git/` inside the workspace, and the network-touching forms
+/// (`fetch`/`pull`/`push`) hit the sandbox's network wall independently.
+fn git_tier(sub: Option<&str>, words: &[&str]) -> Option<RiskTier> {
+    let sub = sub?;
+    let position = words.iter().position(|word| *word == sub)?;
+    let after = &words[position + 1..];
+    let non_flag_args = after.iter().filter(|word| !word.starts_with('-')).count();
+    let has_any = |flags: &[&str]| after.iter().any(|word| flags.contains(word));
+
+    let tier = match sub {
+        // Pure queries.
+        "status" | "log" | "diff" | "show" | "blame" | "shortlog" | "describe" | "ls-files"
+        | "rev-parse" | "grep" | "reflog" | "cat-file" | "whatchanged" | "cherry"
+        | "count-objects" | "name-rev" | "merge-base" => RiskTier::ReadOnly,
+        // Listing is a query; creation/rename is a local, reversible ref edit.
+        // (`branch -d` was already escalated by `is_destructive_shape`.)
+        "branch" => {
+            if non_flag_args == 0 {
+                RiskTier::ReadOnly
+            } else {
+                RiskTier::Low
+            }
+        }
+        // Tag deletion discards a ref; creation is reversible; bare = listing.
+        "tag" => {
+            if has_any(&["-d", "--delete"]) {
+                RiskTier::Medium
+            } else if non_flag_args == 0 {
+                RiskTier::ReadOnly
+            } else {
+                RiskTier::Low
+            }
+        }
+        // Bare/`-v` lists; every other form mutates remote config.
+        "remote" => {
+            if non_flag_args == 0 {
+                RiskTier::ReadOnly
+            } else {
+                RiskTier::Medium
+            }
+        }
+        // Reading config is a query; writing it changes repo/user behavior.
+        "config" => {
+            if has_any(&["--get", "--get-all", "--get-regexp", "--list", "-l"]) {
+                RiskTier::ReadOnly
+            } else {
+                RiskTier::Medium
+            }
+        }
+        // Index-only and reversible (`git reset`/`restore --staged` undo it).
+        "add" => RiskTier::Low,
+        // Unstaging is index-only; a plain `restore <path>` DISCARDS working
+        // tree edits, so only the `--staged` form is classified here.
+        "restore" => {
+            if has_any(&["--staged", "-S"]) && !has_any(&["--worktree", "-W"]) {
+                RiskTier::Low
+            } else {
+                return None;
+            }
+        }
+        // Bare `git reset` unstages everything (index-only). Other non-hard
+        // forms move HEAD but stay reflog-recoverable. (`--hard` was already
+        // escalated.)
+        "reset" => {
+            if after.is_empty() {
+                RiskTier::Low
+            } else {
+                RiskTier::Medium
+            }
+        }
+        // Saving/applying stashes round-trips; dropping/clearing discards.
+        "stash" => match after.first().copied() {
+            None | Some("push" | "save" | "list" | "show" | "apply" | "pop" | "branch") => {
+                RiskTier::Low
+            }
+            _ => RiskTier::Medium,
+        },
+        // `switch` only changes branches (it never takes paths, unlike
+        // `checkout`); uncommitted edits are carried or the switch refuses.
+        "switch" => RiskTier::Low,
+        // Only branch creation is unambiguous; a plain `checkout <target>`
+        // can be a path form that discards edits — fall through for those.
+        "checkout" => {
+            if has_any(&["-b", "-B"]) {
+                RiskTier::Low
+            } else {
+                return None;
+            }
+        }
+        // Aborting/continuing an in-progress operation restores or advances
+        // known state; starting one rewrites or merges local history.
+        "merge" | "rebase" | "cherry-pick" | "revert" | "am" => {
+            if has_any(&["--abort", "--continue", "--quit", "--skip"]) {
+                RiskTier::Low
+            } else {
+                RiskTier::Medium
+            }
+        }
+        "commit" | "init" | "mv" | "worktree" | "apply" | "fetch" | "pull" => RiskTier::Medium,
+        // Publishing (force variants were already escalated).
+        "push" => RiskTier::High,
+        _ => return None,
+    };
+    Some(tier)
+}
+
 /// A `git push` that rewrites history: `--force`/`-f`, the lease variants, or a
 /// `+`-prefixed refspec.
 fn is_force_push(words: &[&str]) -> bool {
@@ -1399,20 +1520,9 @@ fn is_read_only(prog: &str, lower: &str) -> bool {
     if READ_ONLY_PROGS.contains(&prog) {
         return true;
     }
+    // Git is deliberately absent: `git_tier` classifies every recognized git
+    // form (a prefix like "git branch" would silently bless creation forms).
     const READ_ONLY_PREFIXES: &[&str] = &[
-        "git status",
-        "git log",
-        "git diff",
-        "git show",
-        "git branch",
-        "git tag",
-        "git remote",
-        "git ls-files",
-        "git rev-parse",
-        "git describe",
-        "git blame",
-        "git shortlog",
-        "git config --get",
         "cargo --version",
         "cargo check",
         "cargo tree",
@@ -1539,8 +1649,6 @@ fn is_medium_risk(prog: &str, lower: &str) -> bool {
         "cargo new",
         // Deletes only the build cache; a rebuild restores it.
         "cargo clean",
-        "git commit",
-        "git init",
         "make",
         "docker",
         "docker-compose",
@@ -1584,6 +1692,85 @@ mod tests {
         assert_eq!(tier("rm -rf build/"), RiskTier::Destructive);
         assert_eq!(tier("git push --force origin main"), RiskTier::Destructive);
         assert_eq!(tier("git reset --hard HEAD~3"), RiskTier::Destructive);
+    }
+
+    #[test]
+    fn git_index_and_local_ref_operations_are_low() {
+        // Index-only, reversible: the routine staging loop must not prompt.
+        assert_eq!(tier("git add src/main.rs docs/x.md"), RiskTier::Low);
+        assert_eq!(tier("git add -N src/new.rs"), RiskTier::Low);
+        assert_eq!(tier("git restore --staged src/main.rs"), RiskTier::Low);
+        assert_eq!(tier("git reset"), RiskTier::Low);
+        // Local, reversible ref/stash work.
+        assert_eq!(tier("git stash"), RiskTier::Low);
+        assert_eq!(tier("git stash pop"), RiskTier::Low);
+        assert_eq!(tier("git stash apply stash@{1}"), RiskTier::Low);
+        assert_eq!(tier("git branch feature/x"), RiskTier::Low);
+        assert_eq!(tier("git tag v1.2.3"), RiskTier::Low);
+        assert_eq!(tier("git switch main"), RiskTier::Low);
+        assert_eq!(tier("git switch -c feature/x"), RiskTier::Low);
+        assert_eq!(tier("git checkout -b feature/x"), RiskTier::Low);
+        assert_eq!(tier("git merge --abort"), RiskTier::Low);
+        assert_eq!(tier("git rebase --abort"), RiskTier::Low);
+        assert_eq!(tier("git cherry-pick --continue"), RiskTier::Low);
+        // Wrapper prefixes must not defeat the classification.
+        assert_eq!(tier("env git add src/lib.rs"), RiskTier::Low);
+    }
+
+    #[test]
+    fn git_history_and_config_mutations_are_medium() {
+        assert_eq!(tier("git fetch origin"), RiskTier::Medium);
+        assert_eq!(tier("git pull"), RiskTier::Medium);
+        assert_eq!(tier("git merge main"), RiskTier::Medium);
+        assert_eq!(tier("git rebase main"), RiskTier::Medium);
+        assert_eq!(tier("git revert HEAD"), RiskTier::Medium);
+        assert_eq!(tier("git cherry-pick abc123"), RiskTier::Medium);
+        assert_eq!(tier("git mv old.rs new.rs"), RiskTier::Medium);
+        assert_eq!(tier("git reset --soft HEAD~1"), RiskTier::Medium);
+        assert_eq!(tier("git stash drop stash@{0}"), RiskTier::Medium);
+        assert_eq!(tier("git stash clear"), RiskTier::Medium);
+        assert_eq!(tier("git tag -d v1.2.3"), RiskTier::Medium);
+        assert_eq!(
+            tier("git remote add origin https://x.git"),
+            RiskTier::Medium
+        );
+        assert_eq!(tier("git config user.name someone"), RiskTier::Medium);
+    }
+
+    #[test]
+    fn git_listing_forms_stay_read_only_but_creation_does_not_ride_them() {
+        // Bare/flag-only listing forms are queries.
+        assert_eq!(tier("git branch"), RiskTier::ReadOnly);
+        assert_eq!(tier("git branch -a"), RiskTier::ReadOnly);
+        assert_eq!(tier("git tag"), RiskTier::ReadOnly);
+        assert_eq!(tier("git remote"), RiskTier::ReadOnly);
+        assert_eq!(tier("git remote -v"), RiskTier::ReadOnly);
+        assert_eq!(tier("git config --get user.name"), RiskTier::ReadOnly);
+        assert_eq!(tier("git reflog"), RiskTier::ReadOnly);
+        assert_eq!(tier("git stash list"), RiskTier::Low);
+        // Regression: these used to ride the `git branch`/`git tag`/
+        // `git remote` read-only *prefixes* and ran ungated even at Ask.
+        assert_ne!(tier("git branch feature/x"), RiskTier::ReadOnly);
+        assert_ne!(tier("git tag v9.9.9"), RiskTier::ReadOnly);
+        assert_ne!(
+            tier("git remote add origin https://x.git"),
+            RiskTier::ReadOnly
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_discarding_git_forms_keep_the_gate() {
+        // A plain path checkout/restore discards uncommitted edits — it must
+        // not be blessed by the branch-creation arm.
+        assert_eq!(tier("git checkout main"), RiskTier::Destructive);
+        assert_eq!(tier("git checkout src/main.rs"), RiskTier::Destructive);
+        assert_eq!(tier("git restore src/main.rs"), RiskTier::Destructive);
+        // Destructive shapes still win over the subcommand table.
+        assert_eq!(tier("git branch -d feature/x"), RiskTier::Destructive);
+        assert_eq!(tier("git clean -fd"), RiskTier::Destructive);
+        assert_eq!(tier("git push --force-with-lease"), RiskTier::Destructive);
+        // Unknown git subcommands stay unproven.
+        assert_eq!(tier("git filter-branch --all"), RiskTier::Destructive);
     }
 
     #[test]

@@ -14,11 +14,11 @@ Classification is deliberately concentrated in one auditable file
 
 | Tier | Meaning | Examples |
 | --- | --- | --- |
-| `read-only` | Reversible, no side effects beyond reading | `ls -la`, `git status`, `git diff`, `gh --version` |
-| `low` | Reversible, in-project, low blast radius | `cargo test`, `npm run build` |
-| `medium` | Mutating but recoverable | `cargo build --release`, `make`, `git commit`, `docker` |
+| `read-only` | Reversible, no side effects beyond reading | `ls -la`, `git status`, `git diff`, `git branch` (listing), `gh --version` |
+| `low` | Reversible, in-project, low blast radius | `cargo test`, `npm run build`, `git add <paths>`, `git stash`, branch/tag creation, `git merge --abort` |
+| `medium` | Mutating but recoverable | `cargo build --release`, `make`, `git commit`, `git fetch`/`pull`/`merge`/`rebase`, `docker` |
 | `high` | Hard to undo or wide blast radius | `rm file.txt`, `git push`, `npm install`, `curl https://…`, `gh pr create` |
-| `destructive` | Always-ask floor; catastrophic or irreversible | `rm -rf build/`, `git push --force`, `git reset --hard`, `curl … \| sh` |
+| `destructive` | Always-ask floor; catastrophic or irreversible | `rm -rf build/`, `git push --force`, `git reset --hard`, `git checkout <path>` (discards edits), `curl … \| sh` |
 
 How classification works:
 
@@ -50,6 +50,13 @@ How classification works:
   (`--force`, `--force-with-lease` variants, `+refspec`, bundled `-f`),
   `git reset --hard`, `git clean -f`, branch deletion, fork bombs, `dd`,
   `mkfs*`.
+- **Git subcommands use an explicit per-form table** (`git_tier`), not
+  prefixes: listing forms of `branch`/`tag`/`remote` are read-only while
+  their creation/mutation forms tier as low/medium; a plain
+  `git checkout <target>` or `git restore <path>` (which can discard edits)
+  and unrecognized subcommands stay at the fail-closed default. The tier
+  only governs prompting — an active [sandbox](sandbox.md) still confines
+  the command (workspace-only writes, network denial) after auto-approval.
 - WebFetch to a fresh domain is classified exactly like shell network egress:
   **high**.
 
