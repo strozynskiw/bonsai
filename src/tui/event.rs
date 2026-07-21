@@ -864,6 +864,10 @@ pub enum RuntimeEvent {
     /// when the working copy left a branch (detached HEAD) or the repo went
     /// away. Only emitted on an actual change.
     BranchChanged(Option<String>),
+    /// The startup self-update task staged a new binary or found an update it
+    /// could not install. Rendered as a persistent composer-meta hint; sent at
+    /// most once per session.
+    UpdateNotice(String),
     /// The peer watcher claimed inter-agent messages addressed to this session
     /// (peers P2); render them as blue chat messages. Only emitted non-empty.
     PeerMessagesArrived(Vec<crate::storage::LeasedPeerMessage>),

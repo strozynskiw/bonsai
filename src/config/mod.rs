@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 pub(crate) use schema::HookMatcher;
 pub(crate) use schema::{
     BatchingPolicy, Capability, DeclaredCapabilities, FailureBehavior, HookAction, HookDef,
-    HookEvent, McpServerConfig, McpTransportConfig,
+    HookEvent, McpServerConfig, McpTransportConfig, UpdateMode,
 };
 
 use schema::ConfigFile;
@@ -134,6 +134,7 @@ pub(crate) struct Config {
     pub hooks: HookList,
     pub sandbox: SandboxConfig,
     pub verification: VerificationConfig,
+    pub update: UpdateConfig,
     pub diagnostics: Vec<ConfigDiagnostic>,
     pub layers: ConfigLayers,
 }
@@ -153,6 +154,15 @@ impl Config {
 pub(crate) struct SandboxConfig {
     pub writable_roots: Vec<PathBuf>,
     pub deny_network: Option<bool>,
+}
+
+/// The merged `[update]` view consumed by the self-updater (`src/update.rs`).
+/// `pin` caps how far auto-install may go: a signed release newer than the pin
+/// is surfaced but never installed (the deliberate-downgrade escape hatch).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UpdateConfig {
+    pub mode: UpdateMode,
+    pub pin: Option<semver::Version>,
 }
 
 /// Load and merge every layer. `project_root`/`bonsai_home` are resolved by
@@ -213,7 +223,7 @@ fn load_with_env_override_and_project_trust(
         ConfigFile::default()
     };
 
-    let (mcp_servers, hooks, sandbox, verification) =
+    let (mcp_servers, hooks, sandbox, verification, update) =
         merge::merge(&global_file, &project_file, project_source);
 
     Config {
@@ -221,6 +231,7 @@ fn load_with_env_override_and_project_trust(
         hooks,
         sandbox,
         verification,
+        update,
         diagnostics,
         layers: ConfigLayers {
             project_root: project_root.to_path_buf(),
@@ -264,6 +275,7 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "mcp",
     "hooks",
     "verification",
+    "update",
 ];
 const RESERVED_TOP_LEVEL_KEYS: &[&str] = &["skills", "commands", "providers"];
 
@@ -350,6 +362,7 @@ fn parse_config_file(
     let mcp_servers = parse_mcp_servers(&root, source, path, &mut diagnostics);
     let hooks = parse_hooks(&root, source, path, &mut diagnostics);
     let verification = parse_section_lenient(&root, "verification", source, path, &mut diagnostics);
+    let update = parse_update(&root, source, path, &mut diagnostics);
 
     (
         ConfigFile {
@@ -359,9 +372,34 @@ fn parse_config_file(
             },
             hooks,
             verification,
+            update,
         },
         diagnostics,
     )
+}
+
+/// `[update]` with semver validation of `pin` at parse time, so the merge can
+/// treat a surviving pin as always parseable.
+fn parse_update(
+    root: &toml::Table,
+    source: ConfigSource,
+    path: &Path,
+    diagnostics: &mut Vec<ConfigDiagnostic>,
+) -> schema::UpdateSection {
+    let mut update: schema::UpdateSection =
+        parse_section_lenient(root, "update", source, path, diagnostics);
+    if let Some(pin) = &update.pin
+        && semver::Version::parse(pin).is_err()
+    {
+        diagnostics.push(ConfigDiagnostic {
+            source,
+            path: path.to_path_buf(),
+            scope: "update".to_string(),
+            message: format!("`pin` is not a valid semver version: `{pin}`; ignoring"),
+        });
+        update.pin = None;
+    }
+    update
 }
 
 /// Deserialize `root[key]` into `T`, defaulting (with a diagnostic) on

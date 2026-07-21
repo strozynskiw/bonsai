@@ -49,6 +49,11 @@ pub(crate) enum CliMode {
     Completions {
         shell: CompletionShell,
     },
+    /// `bonsai update [--check]` — run the native self-update now, ignoring
+    /// the startup interval; `--check` reports without installing.
+    Update {
+        check_only: bool,
+    },
     Help,
     Version,
 }
@@ -109,6 +114,19 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
         }
         .ok_or_else(|| anyhow::anyhow!("Usage: bonsai completions bash|zsh|fish"))?;
         return Ok(CliMode::Completions { shell });
+    }
+
+    if args.get(1).is_some_and(|arg| arg == "update") {
+        let update_args = args.get(2..).unwrap_or_default();
+        if matches!(update_args, [flag] if matches!(flag.as_str(), "--help" | "-h")) {
+            return Ok(CliMode::Help);
+        }
+        let check_only = match update_args {
+            [] => false,
+            [flag] if flag == "--check" => true,
+            _ => anyhow::bail!("Usage: bonsai update [--check]"),
+        };
+        return Ok(CliMode::Update { check_only });
     }
 
     if args.get(1).is_some_and(|arg| arg == "doctor") {
@@ -852,6 +870,7 @@ Usage:
   bonsai eval adapter import-harbor --result <path> --out <path> [--json]
   bonsai model-catalog check <models-dev.json>
   bonsai doctor [--json] [--online]
+  bonsai update [--check]
   bonsai bug --description <text> [--include-log]
   bonsai recovery list|inspect <id>|merge <id>|keep <id> [branch]|discard <id>
   bonsai completions bash|zsh|fish
@@ -882,6 +901,13 @@ Release diagnostics:
   `bonsai doctor` runs offline checks for storage, configuration, provider auth,
   sandbox, Git, language tooling, MCP configuration, and terminal support.
   Use `bonsai doctor --json` for the redacted machine-readable support form.
+
+Self-update:
+  Official builds check GitHub for newer signed releases at startup and stage
+  them automatically; a staged update applies on the next launch. `bonsai
+  update` runs the same verified install immediately (`--check` only reports).
+  Configure with `[update]` in config.toml: `mode = \"auto\"|\"notify\"|\"off\"`,
+  optional `pin = \"X.Y.Z\"` to hold a version.
 
 Interactive recovery isolation:
   `bonsai --isolation worktree` runs the TUI in a managed Git worktree while
@@ -1010,6 +1036,26 @@ mod tests {
                 accessibility: Default::default(),
             }
         );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_update() {
+        let args = |rest: &[&str]| {
+            let mut args = vec!["bonsai".to_string(), "update".to_string()];
+            args.extend(rest.iter().map(|arg| arg.to_string()));
+            args
+        };
+        assert_eq!(
+            parse_cli_args(&args(&[])).unwrap(),
+            CliMode::Update { check_only: false }
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["--check"])).unwrap(),
+            CliMode::Update { check_only: true }
+        );
+        assert_eq!(parse_cli_args(&args(&["--help"])).unwrap(), CliMode::Help);
+        assert!(parse_cli_args(&args(&["--force"])).is_err());
+        assert!(parse_cli_args(&args(&["--check", "--check"])).is_err());
     }
 
     #[test]

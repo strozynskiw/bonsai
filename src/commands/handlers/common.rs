@@ -330,6 +330,16 @@ pub(crate) async fn handle_command_with_catalog(
                         } else {
                             (None, None)
                         };
+                    let release_status = match release_status {
+                        Some(status) => Some(
+                            crate::update::refine_release_status(
+                                status,
+                                &agent.config().layers.bonsai_home,
+                            )
+                            .await,
+                        ),
+                        None => None,
+                    };
                     let report = crate::doctor::collect(crate::doctor::DoctorContext {
                         project_root,
                         storage,

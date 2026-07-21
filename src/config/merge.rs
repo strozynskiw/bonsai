@@ -6,9 +6,11 @@
 use std::collections::BTreeMap;
 
 use super::schema::ConfigFile;
-use super::{ConfigSource, HookList, McpServerMap, SandboxConfig, VerificationConfig};
+use super::{
+    ConfigSource, HookList, McpServerMap, SandboxConfig, UpdateConfig, VerificationConfig,
+};
 
-/// Merge the global and project layers into the three sections a [`Config`]
+/// Merge the global and project layers into the sections a [`Config`]
 /// exposes. `project_source` is `Project` normally, or `Env`/`Cli` when
 /// `BONSAI_CONFIG`/`--config` redirected which file was read for that layer —
 /// callers pass it through so provenance stays accurate.
@@ -16,13 +18,39 @@ pub(crate) fn merge(
     global: &ConfigFile,
     project: &ConfigFile,
     project_source: ConfigSource,
-) -> (McpServerMap, HookList, SandboxConfig, VerificationConfig) {
+) -> (
+    McpServerMap,
+    HookList,
+    SandboxConfig,
+    VerificationConfig,
+    UpdateConfig,
+) {
     (
         merge_mcp_servers(global, project, project_source),
         merge_hooks(global, project, project_source),
         merge_sandbox(global, project),
         merge_verification(global, project),
+        merge_update(global, project),
     )
+}
+
+/// Both `[update]` keys are genuine scalars: the higher-precedence layer's
+/// explicit value wins. An invalid `pin` was already dropped (with a
+/// diagnostic) at parse time, so the `.ok()` here never silently loses one.
+fn merge_update(global: &ConfigFile, project: &ConfigFile) -> UpdateConfig {
+    UpdateConfig {
+        mode: project
+            .update
+            .mode
+            .or(global.update.mode)
+            .unwrap_or_default(),
+        pin: project
+            .update
+            .pin
+            .as_deref()
+            .or(global.update.pin.as_deref())
+            .and_then(|pin| semver::Version::parse(pin).ok()),
+    }
 }
 
 fn merge_verification(global: &ConfigFile, project: &ConfigFile) -> VerificationConfig {

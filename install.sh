@@ -68,7 +68,8 @@ fetch() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q "$1" -O "$2"
+    # Mirror the curl posture: HTTPS only, TLS 1.2 floor (GNU wget flags).
+    wget -q --https-only --secure-protocol=TLSv1_2 "$1" -O "$2"
   else
     die "need curl or wget to download releases"
   fi

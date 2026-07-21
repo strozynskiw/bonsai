@@ -45,13 +45,17 @@ const BASH: &str = r#"_bonsai() {
   esac
 
   if (( COMP_CWORD == 1 )); then
-    COMPREPLY=( $(compgen -W "eval model-catalog doctor recovery completions -h --help -V --version -c --continue -p --print --isolation --reduced-motion --screen-reader" -- "$cur") )
+    COMPREPLY=( $(compgen -W "eval model-catalog doctor update recovery completions -h --help -V --version -c --continue -p --print --isolation --reduced-motion --screen-reader" -- "$cur") )
     return
   fi
 
   case "$command" in
     doctor)
       COMPREPLY=( $(compgen -W "--json --online -h --help" -- "$cur") )
+      return
+      ;;
+    update)
+      COMPREPLY=( $(compgen -W "--check -h --help" -- "$cur") )
       return
       ;;
     recovery)
@@ -98,6 +102,7 @@ _bonsai() {
       'eval:run an evaluation suite or adapter'
       'model-catalog:validate a models.dev catalog'
       'doctor:run release diagnostics'
+      'update:install the newest signed release'
       'recovery:manage recovery worktrees'
       'completions:generate a shell completion script'
       '-h:show help'
@@ -111,6 +116,7 @@ _bonsai() {
 
   case "${words[2]}" in
     doctor) _values 'doctor option' --json --online -h --help; return ;;
+    update) _values 'update option' --check -h --help; return ;;
     recovery) _values 'recovery command' list inspect merge keep discard; return ;;
     model-catalog) _values 'model catalog command' check; return ;;
     completions) _values 'shell' bash zsh fish; return ;;
@@ -133,6 +139,7 @@ complete -c bonsai -f
 complete -c bonsai -n __fish_bonsai_needs_command -a eval -d 'Run an evaluation suite or adapter'
 complete -c bonsai -n __fish_bonsai_needs_command -a model-catalog -d 'Validate a models.dev catalog'
 complete -c bonsai -n __fish_bonsai_needs_command -a doctor -d 'Run release diagnostics'
+complete -c bonsai -n __fish_bonsai_needs_command -a update -d 'Install the newest signed release'
 complete -c bonsai -n __fish_bonsai_needs_command -a recovery -d 'Manage recovery worktrees'
 complete -c bonsai -n __fish_bonsai_needs_command -a completions -d 'Generate a shell completion script'
 complete -c bonsai -s h -l help -d 'Show help'
@@ -147,6 +154,7 @@ complete -c bonsai -l screen-reader -d 'Use linear accessible TUI output'
 complete -c bonsai -l effort -xa 'none low medium high xhigh'
 complete -c bonsai -n '__fish_seen_subcommand_from doctor' -l json
 complete -c bonsai -n '__fish_seen_subcommand_from doctor' -l online
+complete -c bonsai -n '__fish_seen_subcommand_from update' -l check
 complete -c bonsai -n '__fish_seen_subcommand_from recovery' -a 'list inspect merge keep discard'
 complete -c bonsai -n '__fish_seen_subcommand_from model-catalog' -a check
 complete -c bonsai -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
@@ -164,7 +172,14 @@ mod tests {
             CompletionShell::Fish,
         ] {
             let script = render(shell);
-            for token in ["eval", "model-catalog", "doctor", "recovery", "completions"] {
+            for token in [
+                "eval",
+                "model-catalog",
+                "doctor",
+                "update",
+                "recovery",
+                "completions",
+            ] {
                 assert!(script.contains(token), "{shell:?} omits {token}");
             }
             for option in [

@@ -322,6 +322,7 @@ pub(crate) async fn collect_standalone(
         );
         let release = crate::release::check();
         let (mcp, release) = tokio::join!(mcp, release);
+        let release = crate::update::refine_release_status(release, &home_dir).await;
         (Some(mcp), Some(release))
     } else {
         (None, None)
@@ -941,7 +942,15 @@ fn release_check(
             format!(
                 "Bonsai {current} matches its signed manifest; signed release {latest} is available."
             ),
-            "Install the newer release through the documented installer or package manager, then rerun `/doctor online`.",
+            "Install the newer release with `bonsai update` or the documented installer, then rerun `/doctor online`.",
+        ),
+        Some(ReleaseStatus::UpdateStaged { version }) => DoctorCheck::warning(
+            "release",
+            "Release",
+            format!(
+                "Signed release {version} is staged on disk; this session still runs the previous build."
+            ),
+            "Restart bonsai to run the staged release, then rerun `/doctor online`.",
         ),
         Some(ReleaseStatus::DevelopmentBuild) => DoctorCheck::warning(
             "release",
@@ -1136,6 +1145,20 @@ mod tests {
         );
         assert_eq!(update.status, DoctorStatus::Warning);
         assert!(update.next_action.is_some());
+
+        let staged = release_check(
+            DoctorNetworkMode::Online,
+            Some(&ReleaseStatus::UpdateStaged {
+                version: "1.0.1".to_string(),
+            }),
+        );
+        assert_eq!(staged.status, DoctorStatus::Warning);
+        assert!(
+            staged
+                .next_action
+                .as_deref()
+                .is_some_and(|action| action.contains("Restart"))
+        );
 
         let invalid = release_check(
             DoctorNetworkMode::Online,

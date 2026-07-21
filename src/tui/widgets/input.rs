@@ -597,9 +597,10 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Esc", " dismiss"),
         ]
     } else {
-        // Trailing version tag keeps the running build visible at a glance.
+        // Trailing version tag keeps the running build visible at a glance; a
+        // self-update notice takes its place for the rest of the session.
         const VERSION_HINT: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-        vec![("", VERSION_HINT)]
+        vec![("", app.update_notice.as_deref().unwrap_or(VERSION_HINT))]
     };
     let mut right = Vec::with_capacity(hints.len() * 2);
     for (key, label) in hints {

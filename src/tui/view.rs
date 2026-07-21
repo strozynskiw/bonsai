@@ -1642,6 +1642,26 @@ mod tests {
     }
 
     #[test]
+    fn composer_meta_line_shows_update_notice_instead_of_version() {
+        let backend = TestBackend::new(130, 40);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut app = AppState::new(
+            "codex",
+            "gpt-5.5".to_string(),
+            "bonsai".to_string(),
+            Some("master".to_string()),
+        );
+        app.update_notice = Some("updated to v9.9.9 — restart to apply".to_string());
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let text = buffer_text(&buffer);
+        assert!(text.contains("updated to v9.9.9"));
+        assert!(!text.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
     fn queued_message_renders_in_transcript_and_composer_footer() {
         let backend = TestBackend::new(130, 40);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");

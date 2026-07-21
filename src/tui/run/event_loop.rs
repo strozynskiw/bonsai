@@ -1433,6 +1433,21 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             }
         });
     }
+    // Native self-update: check for a newer signed release in the background
+    // and surface at most one composer-meta notice. Startup is never blocked
+    // and failures stay silent (debug log only).
+    {
+        let bonsai_home = storage.home_dir().to_path_buf();
+        let update_config = agent.config().update.clone();
+        let update_sender = runtime_sender.clone();
+        tokio::spawn(async move {
+            let outcome = crate::update::run_startup_update(&bonsai_home, &update_config).await;
+            tracing::debug!(?outcome, "startup self-update finished");
+            if let Some(notice) = crate::update::startup_notice(&outcome) {
+                let _ = update_sender.send(RuntimeEvent::UpdateNotice(notice));
+            }
+        });
+    }
     let credential_persistence_preference = storage.credential_persistence().await?;
     let credential_persistence = credential_persistence_preference.unwrap_or_default();
     let first_run_progress = storage.first_run_progress().await?;

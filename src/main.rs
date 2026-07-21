@@ -52,6 +52,7 @@ mod terminal;
 mod todo;
 mod tool;
 mod tui;
+mod update;
 mod util;
 mod verification;
 mod workspace_trust;
@@ -173,6 +174,21 @@ fn main() -> anyhow::Result<()> {
             print!("{}", completions::render(shell));
             Ok(())
         }
+        CliMode::Update { check_only } => {
+            logging::init_headless_tracing();
+            let paths = storage::BonsaiPaths::discover()?;
+            let project_root = std::env::current_dir()?;
+            // Project config stays inert here: update policy is a user-machine
+            // concern and `bonsai update` may run in an untrusted checkout.
+            let config = config::load_without_project_config(&project_root, paths.home_dir());
+            let outcome = block_on_with_shutdown(update::run_forced_update(
+                paths.home_dir(),
+                &config.update,
+                check_only,
+            ))?;
+            report_update_outcome(&outcome);
+            Ok(())
+        }
         CliMode::Help => {
             println!("{}", cli::help_text());
             Ok(())
@@ -180,6 +196,60 @@ fn main() -> anyhow::Result<()> {
         CliMode::Version => {
             println!("bonsai {}", env!("CARGO_PKG_VERSION"));
             Ok(())
+        }
+    }
+}
+
+/// One plain line per outcome; failures exit non-zero so scripts can tell.
+fn report_update_outcome(outcome: &update::UpdateOutcome) {
+    use update::{NotifyReason, UpdateOutcome};
+    match outcome {
+        UpdateOutcome::Staged { version } => {
+            println!("updated to v{version} — restart bonsai to apply");
+        }
+        UpdateOutcome::AlreadyStaged { version } => {
+            println!("update v{version} is already staged — restart bonsai to apply");
+        }
+        UpdateOutcome::AlreadyCurrent => {
+            println!("already up to date (v{})", env!("CARGO_PKG_VERSION"));
+        }
+        UpdateOutcome::DevBuild => {
+            println!("development build — self-update is disabled");
+        }
+        // Forced runs bypass mode/interval, so these two are unreachable in
+        // practice; keep the output self-explanatory if that ever changes.
+        UpdateOutcome::Disabled => {
+            println!("self-update is disabled by `[update] mode = \"off\"` in config.toml");
+        }
+        UpdateOutcome::TooSoon => {
+            println!("update check skipped (checked recently)");
+        }
+        UpdateOutcome::Busy => {
+            println!("another bonsai session is updating; try again shortly");
+        }
+        UpdateOutcome::NotifyOnly { version, reason } => {
+            let hint = match reason {
+                NotifyReason::Notify => "run `bonsai update` to install it",
+                NotifyReason::Homebrew => "install it with `brew upgrade bonsai`",
+                NotifyReason::NotWritable => {
+                    "the install location is not writable; rerun the documented installer"
+                }
+                NotifyReason::SelfHashMismatch => {
+                    "the installed binary does not match its signed manifest; reinstall via install.sh"
+                }
+                NotifyReason::Pinned => "held back by `[update] pin` in config.toml",
+            };
+            println!("signed release v{version} is available — {hint}");
+        }
+        UpdateOutcome::CheckFailed => {
+            eprintln!("update check failed: could not reach GitHub releases");
+            std::process::exit(1);
+        }
+        UpdateOutcome::VerificationFailed => {
+            eprintln!(
+                "update verification failed: fetched release metadata did not match a valid signed manifest"
+            );
+            std::process::exit(1);
         }
     }
 }

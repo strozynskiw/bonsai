@@ -23,6 +23,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RELEASE_LIST_LIMIT: usize = 512 * 1024;
 const MANIFEST_LIMIT: usize = 64 * 1024;
 const SIGNATURE_LIMIT: usize = 512;
+/// Streamed download cap for a release archive (self-update). Archives are
+/// tens of megabytes today; the cap only guards against a runaway body.
+pub(crate) const ARCHIVE_LIMIT: usize = 256 * 1024 * 1024;
 
 /// Compile-time identity carried by this binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,14 +39,25 @@ pub(crate) enum ReleaseIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReleaseStatus {
     DevelopmentBuild,
-    VerifiedCurrent { version: String },
-    UpdateAvailable { current: String, latest: String },
+    VerifiedCurrent {
+        version: String,
+    },
+    UpdateAvailable {
+        current: String,
+        latest: String,
+    },
+    /// A newer verified binary is already staged on disk (self-update); the
+    /// running image predates it. Produced only by
+    /// [`crate::update::refine_release_status`], never by [`check`] itself.
+    UpdateStaged {
+        version: String,
+    },
     LookupFailed,
     VerificationFailed,
 }
 
 #[derive(Debug, Error)]
-enum ReleaseError {
+pub(crate) enum ReleaseError {
     #[error("release lookup failed")]
     Network,
     #[error("release metadata is invalid")]
@@ -55,7 +69,7 @@ enum ReleaseError {
 }
 
 #[derive(Debug, Deserialize)]
-struct GitHubRelease {
+pub(crate) struct GitHubRelease {
     tag_name: String,
     #[serde(default)]
     draft: bool,
@@ -69,30 +83,30 @@ struct GitHubAsset {
 }
 
 #[derive(Debug, Deserialize)]
-struct ReleaseManifest {
+pub(crate) struct ReleaseManifest {
     schema_version: u32,
     repository: String,
     version: String,
     tag: String,
-    assets: Vec<ManifestAsset>,
+    pub(crate) assets: Vec<ManifestAsset>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ManifestAsset {
-    target: String,
-    archive: String,
-    archive_sha256: String,
-    binary_sha256: String,
+pub(crate) struct ManifestAsset {
+    pub(crate) target: String,
+    pub(crate) archive: String,
+    pub(crate) archive_sha256: String,
+    pub(crate) binary_sha256: String,
 }
 
 #[derive(Debug, Clone)]
-struct ReleaseVerifier {
+pub(crate) struct ReleaseVerifier {
     public_key: [u8; 32],
     tag: &'static str,
 }
 
 impl ReleaseVerifier {
-    fn embedded() -> Result<Option<Self>, ReleaseError> {
+    pub(crate) fn embedded() -> Result<Option<Self>, ReleaseError> {
         let public_key = option_env!("BONSAI_RELEASE_PUBLIC_KEY")
             .map(str::trim)
             .filter(|value| !value.is_empty());
@@ -145,14 +159,39 @@ pub(crate) async fn check() -> ReleaseStatus {
 }
 
 async fn check_official(verifier: &ReleaseVerifier) -> Result<ReleaseStatus, ReleaseError> {
-    let current =
-        Version::parse(env!("CARGO_PKG_VERSION")).map_err(|_| ReleaseError::InvalidMetadata)?;
+    let current = current_version()?;
+    let client = release_client()?;
+    verify_current_install(&client, verifier).await?;
+    match find_verified_update(&client, verifier, &current).await? {
+        Some(update) => Ok(ReleaseStatus::UpdateAvailable {
+            current: current.to_string(),
+            latest: update.version.to_string(),
+        }),
+        None => Ok(ReleaseStatus::VerifiedCurrent {
+            version: current.to_string(),
+        }),
+    }
+}
+
+/// The version this binary was compiled as.
+pub(crate) fn current_version() -> Result<Version, ReleaseError> {
+    Version::parse(env!("CARGO_PKG_VERSION")).map_err(|_| ReleaseError::InvalidMetadata)
+}
+
+/// Verify that the running binary matches its own signed release manifest and
+/// return that manifest. `ReleaseError::Executable` means the binary on disk
+/// does not hash to what the manifest recorded (locally rebuilt, tampered, or
+/// already replaced by a staged update).
+pub(crate) async fn verify_current_install(
+    client: &reqwest::Client,
+    verifier: &ReleaseVerifier,
+) -> Result<ReleaseManifest, ReleaseError> {
+    let current = current_version()?;
     if verifier.tag != format!("v{current}") {
         return Err(ReleaseError::InvalidMetadata);
     }
-    let client = release_client()?;
     let current_release: GitHubRelease = fetch_json(
-        &client,
+        client,
         &format!("{RELEASE_BY_TAG_API}/{}", verifier.tag),
         RELEASE_LIST_LIMIT,
     )
@@ -160,12 +199,38 @@ async fn check_official(verifier: &ReleaseVerifier) -> Result<ReleaseStatus, Rel
     if current_release.draft || current_release.tag_name != verifier.tag {
         return Err(ReleaseError::InvalidMetadata);
     }
-    let current_manifest = fetch_verified_manifest(&client, &current_release, verifier).await?;
+    let current_manifest = fetch_verified_manifest(client, &current_release, verifier).await?;
     validate_manifest(&current_manifest, verifier.tag)?;
     verify_installed_binary(&current_manifest).await?;
+    Ok(current_manifest)
+}
 
+/// A release newer than `current` whose manifest passed signature and
+/// consistency verification. The `release` is kept so asset downloads go
+/// through the same repo-pinned URL validation as the manifest itself.
+#[derive(Debug)]
+pub(crate) struct VerifiedUpdate {
+    pub(crate) version: Version,
+    pub(crate) manifest: ReleaseManifest,
+    pub(crate) release: GitHubRelease,
+}
+
+impl VerifiedUpdate {
+    /// Repo-pinned download URL for one of this update's verified assets.
+    pub(crate) fn asset_url(&self, asset_name: &str) -> Result<&str, ReleaseError> {
+        release_asset_url(&self.release, asset_name)
+    }
+}
+
+/// Find the newest signed release newer than `current`, or `None` when the
+/// installed version is already the newest verified one.
+pub(crate) async fn find_verified_update(
+    client: &reqwest::Client,
+    verifier: &ReleaseVerifier,
+    current: &Version,
+) -> Result<Option<VerifiedUpdate>, ReleaseError> {
     let mut releases: Vec<GitHubRelease> =
-        fetch_json(&client, RELEASES_API, RELEASE_LIST_LIMIT).await?;
+        fetch_json(client, RELEASES_API, RELEASE_LIST_LIMIT).await?;
     releases.retain(|release| !release.draft);
     releases.sort_by(|left, right| {
         release_version(right)
@@ -176,10 +241,10 @@ async fn check_official(verifier: &ReleaseVerifier) -> Result<ReleaseStatus, Rel
         let Some(candidate) = release_version(&release) else {
             continue;
         };
-        if candidate <= current {
+        if candidate <= *current {
             continue;
         }
-        let manifest = match fetch_verified_manifest(&client, &release, verifier).await {
+        let manifest = match fetch_verified_manifest(client, &release, verifier).await {
             Ok(manifest) => manifest,
             Err(ReleaseError::Network) => return Err(ReleaseError::Network),
             Err(
@@ -191,18 +256,17 @@ async fn check_official(verifier: &ReleaseVerifier) -> Result<ReleaseStatus, Rel
         if validate_manifest(&manifest, &release.tag_name).is_ok()
             && Version::parse(&manifest.version).ok().as_ref() == Some(&candidate)
         {
-            return Ok(ReleaseStatus::UpdateAvailable {
-                current: current.to_string(),
-                latest: candidate.to_string(),
-            });
+            return Ok(Some(VerifiedUpdate {
+                version: candidate,
+                manifest,
+                release,
+            }));
         }
     }
-    Ok(ReleaseStatus::VerifiedCurrent {
-        version: current.to_string(),
-    })
+    Ok(None)
 }
 
-fn release_client() -> Result<reqwest::Client, ReleaseError> {
+pub(crate) fn release_client() -> Result<reqwest::Client, ReleaseError> {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -284,7 +348,7 @@ fn release_asset_url<'a>(release: &'a GitHubRelease, name: &str) -> Result<&'a s
     Ok(url)
 }
 
-async fn fetch_asset(
+pub(crate) async fn fetch_asset(
     client: &reqwest::Client,
     url: &str,
     limit: usize,
@@ -383,7 +447,7 @@ async fn verify_installed_binary(manifest: &ReleaseManifest) -> Result<(), Relea
     }
 }
 
-async fn sha256_file(path: &Path) -> Result<String, ReleaseError> {
+pub(crate) async fn sha256_file(path: &Path) -> Result<String, ReleaseError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|_| ReleaseError::Executable)?;
@@ -414,7 +478,7 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-fn target_triple() -> Option<&'static str> {
+pub(crate) fn target_triple() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),

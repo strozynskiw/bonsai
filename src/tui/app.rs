@@ -230,6 +230,11 @@ pub struct AppState {
     pub pending_composer_state: Option<Box<crate::tui::agent_composer::AgentComposerState>>,
     pub task_list_status: Option<String>,
     pub shutdown_notice: Option<String>,
+    /// Self-update hint ("updated to vX — restart to apply" / "update vX
+    /// available — …") shown in the composer meta line in place of the
+    /// version tag. Set once by the startup update task; never cleared, and
+    /// never written to the transcript.
+    pub update_notice: Option<String>,
     /// Auto-expiring orientation banner for an actionable session-lifecycle hint
     /// (e.g. "Interrupted session found. Use /resume…"). Ephemeral UI only —
     /// never persisted into the transcript, so resumes don't accumulate notices.
@@ -522,6 +527,7 @@ impl AppState {
             pending_composer_state: None,
             task_list_status: None,
             shutdown_notice: None,
+            update_notice: None,
             session_hint: None,
             plan_selection: None,
             transcript_selection: None,
@@ -1335,6 +1341,9 @@ impl AppState {
             }
             RuntimeEvent::BranchChanged(branch) => {
                 self.branch = branch;
+            }
+            RuntimeEvent::UpdateNotice(notice) => {
+                self.update_notice = Some(notice);
             }
             RuntimeEvent::TaskPanicked(text) => {
                 self.mark_run_finished(Instant::now());

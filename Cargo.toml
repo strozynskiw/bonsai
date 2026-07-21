@@ -52,6 +52,10 @@ ring = "0.17.14"
 semver = "1.0.27"
 sha2 = "0.11.0"
 glob = "0.3.3"
+# Release-archive unpacking for native self-update (src/update.rs). flate2
+# defaults to its pure-Rust backend; no C zlib dependency.
+flate2 = "1"
+tar = "0.4"
 # HTML → Markdown for the WebFetch tool (M5.5). html5ever-based, so it tolerates
 # the truncated HTML we may hand it after enforcing the response byte cap.
 htmd = "0.5"

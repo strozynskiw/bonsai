@@ -77,6 +77,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "mcp",
     "hooks",
     "verification",
+    "update",
 ];
 
 #[test]

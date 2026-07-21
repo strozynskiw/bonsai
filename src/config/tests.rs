@@ -88,6 +88,54 @@ fn malformed_project_layer_is_diagnostic_without_discarding_global_config() {
 }
 
 #[test]
+fn update_defaults_to_auto_with_no_pin() {
+    let layers = Layers::new();
+
+    let config = layers.load();
+
+    assert_eq!(config.update.mode, UpdateMode::Auto);
+    assert_eq!(config.update.pin, None);
+}
+
+#[test]
+fn update_project_layer_overrides_global_scalars() {
+    let layers = Layers::new();
+    layers.write_global("schema_version = 1\n[update]\nmode = \"off\"\npin = \"0.2.0\"\n");
+    layers.write_project("schema_version = 1\n[update]\nmode = \"notify\"\n");
+
+    let config = layers.load();
+
+    assert_eq!(config.update.mode, UpdateMode::Notify);
+    // The pin scalar is independent: only the global layer set one.
+    assert_eq!(config.update.pin, Some(semver::Version::new(0, 2, 0)));
+}
+
+#[test]
+fn update_invalid_values_degrade_to_diagnostics() {
+    let layers = Layers::new();
+    layers.write_global("schema_version = 1\n[update]\nmode = \"sometimes\"\n");
+    layers.write_project("schema_version = 1\n[update]\npin = \"latest\"\n");
+
+    let config = layers.load();
+
+    // Bad mode drops the whole malformed section to defaults; bad pin is
+    // dropped field-wise. Both leave a diagnostic naming the section.
+    assert_eq!(config.update.mode, UpdateMode::Auto);
+    assert_eq!(config.update.pin, None);
+    assert!(config.diagnostics.iter().any(
+        |diagnostic| diagnostic.source == ConfigSource::Global && diagnostic.scope == "update"
+    ));
+    let pin_diagnostic = config
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source == ConfigSource::Project && diagnostic.scope == "update"
+        })
+        .expect("invalid pin should emit a diagnostic");
+    assert!(pin_diagnostic.message.contains("semver"));
+}
+
+#[test]
 fn verification_is_off_without_an_explicit_policy() {
     let layers = Layers::new();
 

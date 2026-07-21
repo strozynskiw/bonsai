@@ -34,6 +34,31 @@ pub(crate) struct ConfigFile {
     pub hooks: Vec<HookDef>,
     #[serde(default)]
     pub verification: VerificationSection,
+    #[serde(default)]
+    pub update: UpdateSection,
+}
+
+/// `[update]` — native self-update policy. `mode` stays `Option` so the merge
+/// can tell an explicit project-layer setting from an omitted one; `pin` is
+/// kept as the raw string here and validated as semver at parse time.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub(crate) struct UpdateSection {
+    #[serde(default)]
+    pub mode: Option<UpdateMode>,
+    #[serde(default)]
+    pub pin: Option<String>,
+}
+
+/// How far the startup self-update may go. `Auto` (the default) silently
+/// stages verified releases; `Notify` only surfaces that one exists; `Off`
+/// disables the startup check entirely (`bonsai update` still works).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UpdateMode {
+    #[default]
+    Auto,
+    Notify,
+    Off,
 }
 
 /// `[verification]` — explicit ordered overrides for detected project checks.

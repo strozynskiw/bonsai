@@ -63,7 +63,15 @@ cargo install --path . --locked
 
 ### Updating
 
-A binary install updates with the companion script — it compares the installed
+Binary installs keep themselves updated: on startup, bonsai checks GitHub for a
+newer signed release in the background, verifies it against the same
+Ed25519-signed manifest as the installer, and stages it — the update applies on
+the next launch. `bonsai update` runs the same verified install on demand
+(`--check` only reports), and `[update]` in `~/.bonsai/config.toml` tunes the
+behavior (`mode = "auto" | "notify" | "off"`, `pin = "X.Y.Z"` to hold a
+version).
+
+The companion script does the same from the shell — it compares the installed
 `bonsai --version` against the newest release and delegates to the same
 verified installer only when they differ:
 

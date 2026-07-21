@@ -15,6 +15,11 @@
 # the download, signature check, and install to install.sh, so the verification
 # chain lives in exactly one place. It prefers the install.sh sitting next to it
 # (git checkout) and otherwise fetches the published one.
+#
+# Trust assumption: the fetched install.sh comes from this repository's master
+# branch over pinned HTTPS and is NOT itself signature-verified — identical to
+# the trust placed in the initial `curl | sh` install. The artifacts it then
+# downloads ARE verified against the Ed25519-signed release manifest.
 
 set -eu
 
@@ -63,14 +68,17 @@ fetch_stdout() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --proto '=https' --tlsv1.2 "$1"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO- "$1"
+    # Mirror the curl posture: HTTPS only, TLS 1.2 floor (GNU wget flags).
+    wget -q --https-only --secure-protocol=TLSv1_2 -O- "$1"
   else
     die "need curl or wget"
   fi
 }
 
+pinned=0
 if [ -n "${BONSAI_VERSION:-}" ]; then
   target="$BONSAI_VERSION"
+  pinned=1
 else
   # Releases are published as prereleases, which /releases/latest omits.
   # sed -E is deliberate: BRE alternation (\|) is a GNU extension that
@@ -109,6 +117,13 @@ if [ -n "$current" ]; then
   log "updating $current -> $target"
 else
   log "installing $target"
+fi
+
+# An explicit BONSAI_VERSION is the deliberate-downgrade path; without a pin the
+# TUI's startup self-update would re-upgrade this install within a day.
+if [ "$pinned" -eq 1 ]; then
+  log "note: bonsai self-updates on startup; to stay on $target set"
+  log "  [update] pin = \"${target#v}\"  (or mode = \"notify\") in ~/.bonsai/config.toml"
 fi
 
 if [ -f "$local_installer" ]; then
