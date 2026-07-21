@@ -71,14 +71,6 @@ the next launch. `bonsai update` runs the same verified install on demand
 behavior (`mode = "auto" | "notify" | "off"`, `pin = "X.Y.Z"` to hold a
 version).
 
-The companion script does the same from the shell — it compares the installed
-`bonsai --version` against the newest release and delegates to the same
-verified installer only when they differ:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/update.sh | sh
-```
-
 A source install updates by rerunning the install command with the new tag —
 Cargo replaces the installed binary when the version differs. To refresh a
 `master` build (or reinstall the same version), add `--force`, since Cargo

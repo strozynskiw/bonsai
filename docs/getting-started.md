@@ -11,13 +11,6 @@ Ed25519-signed manifest, and installs to `~/.local/bin` (override with
 curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh
 ```
 
-Update a binary install the same way — the companion script installs only when
-a newer release exists:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/update.sh | sh
-```
-
 **From source** — with Cargo (requires a recent stable Rust toolchain):
 
 ```sh
