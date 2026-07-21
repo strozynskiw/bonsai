@@ -1104,6 +1104,9 @@ pub enum AppAction {
     SubtaskListTogglePane,
     /// Open the model picker to override the selected `/subagents` agent's model.
     SubtaskOverrideModel,
+    /// Clear the selected `/subagents` agent's model override so its next run
+    /// inherits the default (session) model again.
+    SubtaskClearModelOverride,
     SetShutdownNotice(Option<String>),
     OpenExecutionGroup {
         group_id: u64,

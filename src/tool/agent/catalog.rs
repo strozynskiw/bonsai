@@ -9,15 +9,20 @@ use crate::subagent::{
 };
 use crate::tool::ToolRegistry;
 
-pub(super) const EXPLORE_MAX_ITERATIONS: usize = 12;
-const REVIEW_MAX_ITERATIONS: usize = 12;
-const RESEARCH_MAX_ITERATIONS: usize = 36;
+pub(super) const EXPLORE_MAX_ITERATIONS: usize = 16;
+const REVIEW_MAX_ITERATIONS: usize = 40;
+const RESEARCH_MAX_ITERATIONS: usize = 40;
 pub(super) const CUSTOM_SUBAGENT_DEFAULT_MAX_ITERATIONS: usize = 75;
 const EXPLORE_TIMEOUT: Duration = Duration::from_secs(450);
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(450);
 const RESEARCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CUSTOM_SUBAGENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const SUBAGENT_CONCLUDE_TIMEOUT: Duration = Duration::from_secs(45);
+// The single "budget exhausted, conclude now" turn granted after a subagent hits
+// its iteration/wall-clock limit. Deliberately generous (not 45s): slow reasoning
+// models (e.g. codex gpt-5.6-*) can spend most of a short window thinking and get
+// cut mid-synthesis, discarding all accumulated work as a bare "timed out". 120s
+// gives them room to actually emit the conclusion. Don't shrink this back.
+const SUBAGENT_CONCLUDE_TIMEOUT: Duration = Duration::from_secs(180);
 /// Cap the advertised subagents index (built-ins are always present).
 pub(super) const AGENTS_INDEX_MAX: usize = 50;
 /// Heading + how-to for the cacheable subagents index. Static so the index stays

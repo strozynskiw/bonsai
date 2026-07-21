@@ -7,7 +7,7 @@ fn builtins_and_custom_agents_have_distinct_budgets() {
         Some(SubagentRunLimits {
             max_iterations: EXPLORE_MAX_ITERATIONS,
             timeout: Duration::from_secs(450),
-            conclude_timeout: Duration::from_secs(45),
+            conclude_timeout: Duration::from_secs(180),
         })
     );
     assert_eq!(
@@ -16,11 +16,11 @@ fn builtins_and_custom_agents_have_distinct_budgets() {
     );
     assert_eq!(
         builtin_agent("review").map(|spec| spec.budget.limits().max_iterations),
-        Some(12)
+        Some(40)
     );
     assert_eq!(
         builtin_agent("research").map(|spec| spec.budget.limits().max_iterations),
-        Some(36)
+        Some(40)
     );
     assert_eq!(
         custom_subagent_limits(None).max_iterations,
@@ -112,7 +112,7 @@ fn reserved_builtin_keeps_compiled_limits_and_legacy_model_assignment() {
 
     assert_eq!(resolved.limits.max_iterations, EXPLORE_MAX_ITERATIONS);
     assert_eq!(resolved.limits.timeout, Duration::from_secs(450));
-    assert_eq!(resolved.limits.conclude_timeout, Duration::from_secs(45));
+    assert_eq!(resolved.limits.conclude_timeout, Duration::from_secs(180));
     assert!(resolved.instructions.contains("read-only exploration"));
     assert!(!resolved.instructions.contains("CUSTOM PROMPT"));
     let model = resolved

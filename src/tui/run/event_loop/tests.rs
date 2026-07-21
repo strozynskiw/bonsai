@@ -4451,6 +4451,7 @@ async fn cancel_queued_action_removes_message_from_active_task_queue() {
             .queue_agent_message(QueuedUserMessage {
                 id,
                 display_text: text.to_string(),
+                transcript_text: text.to_string(),
                 input: crate::agent::UserInput::from_text(text),
             })
             .expect("queued message should send to active task");
@@ -4510,6 +4511,7 @@ async fn withdraw_queued_action_cancels_and_restores_most_recent_message() {
             .queue_agent_message(QueuedUserMessage {
                 id,
                 display_text: text.to_string(),
+                transcript_text: text.to_string(),
                 input: crate::agent::UserInput::from_text(text),
             })
             .expect("queued message should send to active task");

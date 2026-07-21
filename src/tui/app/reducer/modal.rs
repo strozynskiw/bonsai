@@ -245,6 +245,16 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *pane = pane.toggled();
             }
         }
+        AppAction::SubtaskClearModelOverride => {
+            // `d` reverts the selected agent to the default (session) model by
+            // dropping its pending override; the next delegation inherits again.
+            if let Some(agent) = app.selected_subtask().map(|sub| sub.agent.clone()) {
+                app.subagent_model_overrides
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&agent);
+            }
+        }
         AppAction::EpisodesMove(delta) => {
             if let Some(ModalKind::Episodes { report, cursor }) = &mut app.modal {
                 let max = report.episodes.len().saturating_sub(1);

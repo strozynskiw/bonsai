@@ -424,8 +424,9 @@ fn push_sep(spans: &mut Vec<Span<'static>>, sep: &'static str) {
 }
 
 /// Compact meta-line summary of the composer's paste chips, e.g.
-/// `· [Text 1] 52L [Image 1] 24KB`, capped so a burst of pastes can't flood the
-/// line. Empty when there are no chips.
+/// `· [Text 1: 52 lines] [Image 1] 24KB`, capped so a burst of pastes can't
+/// flood the line. Empty when there are no chips. Text labels already carry
+/// their line count, so only images append a size detail.
 fn composer_chip_meta_spans(app: &AppState) -> Vec<Span<'static>> {
     use crate::tui::app::ChipPayload;
     const SHOWN: usize = 3;
@@ -441,7 +442,7 @@ fn composer_chip_meta_spans(app: &AppState) -> Vec<Span<'static>> {
             spans.push(Span::styled(" ".to_string(), theme::composer_meta()));
         }
         let detail = match &chip.payload {
-            ChipPayload::Text(text) => format!("{} {}L", chip.label, text.lines().count().max(1)),
+            ChipPayload::Text(_) => chip.label.clone(),
             ChipPayload::Image { byte_len, .. } => {
                 format!("{} {}KB", chip.label, byte_len.div_ceil(1024).max(1))
             }

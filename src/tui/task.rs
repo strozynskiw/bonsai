@@ -147,15 +147,14 @@ pub(crate) async fn apply_persona_model(
     deps: &PersonaModelDeps,
     persona: &crate::agent::ActivePersona,
 ) -> Option<ProviderRunSelection> {
-    let desired = {
-        let session = deps.session_store.lock().await;
-        crate::commands::model_switch::desired_persona_model_input(
-            persona,
-            &session,
-            &deps.custom_agents,
-        )
-    }?;
+    // One session acquisition covers both the desired-input read and the
+    // apply, so the input can't go stale between a read and a re-lock.
     let mut session = deps.session_store.lock().await;
+    let desired = crate::commands::model_switch::desired_persona_model_input(
+        persona,
+        &session,
+        &deps.custom_agents,
+    )?;
     let mut agent = deps.agent.lock().await;
     let (model, reasoning) = crate::commands::model_switch::apply_model_input_if_different(
         &deps.registry,
@@ -164,6 +163,12 @@ pub(crate) async fn apply_persona_model(
         &mut agent,
         &desired,
     )?;
+    // Persist a clone after dropping the locks — the same idiom as
+    // `switch_model_selection`. Safe because callers are serialized: the
+    // dispatch path runs under the TaskController's single-active-task slot
+    // and the idle path is busy-guarded, so nothing mutates the live session
+    // between the clone and the save. Re-check if that invariant ever
+    // relaxes.
     let snapshot = session.clone();
     drop(agent);
     drop(session);

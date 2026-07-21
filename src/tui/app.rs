@@ -2276,6 +2276,32 @@ mod tests {
     }
 
     #[test]
+    fn clearing_a_subtask_model_override_reverts_to_default() {
+        use crate::provider::ReasoningSelection;
+        use crate::subagent::{SubagentModelOverride, SubagentStatus};
+        let mut app = app();
+        app.reduce(AppAction::RefreshSubtaskList {
+            subtasks: vec![subtask_snapshot("sub-1", SubagentStatus::Succeeded)],
+        });
+        app.reduce(AppAction::OpenSubtaskList);
+        // Pin an override for the selected agent ("explore"), then clear it.
+        app.subagent_model_overrides.lock().unwrap().insert(
+            "explore".to_string(),
+            SubagentModelOverride::selector(
+                "codex:openai/gpt-5.6".to_string(),
+                ReasoningSelection::Default,
+            ),
+        );
+
+        app.reduce(AppAction::SubtaskClearModelOverride);
+
+        assert!(
+            app.subagent_model_overrides.lock().unwrap().is_empty(),
+            "clearing should drop the override so the next run inherits the default model"
+        );
+    }
+
+    #[test]
     fn subtask_list_move_returns_focus_to_list_and_resets_detail_scroll() {
         use crate::subagent::SubagentStatus;
         let mut app = app();

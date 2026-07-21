@@ -333,6 +333,7 @@ impl Tool for QueueingTool {
             .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
                 id: 7,
                 display_text: "please also check tests".to_string(),
+                transcript_text: "please also check tests".to_string(),
                 input: crate::agent::UserInput::from_text("please also check tests"),
             }));
         let _ = self
@@ -340,6 +341,7 @@ impl Tool for QueueingTool {
             .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
                 id: 8,
                 display_text: "and update docs".to_string(),
+                transcript_text: "and update docs".to_string(),
                 input: crate::agent::UserInput::from_text("and update docs"),
             }));
         Ok(ToolOutput::Text("queued".to_string()))
@@ -370,6 +372,7 @@ impl Tool for SerializedQueueingTool {
             .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
                 id: 9,
                 display_text: "stop before the next action".to_string(),
+                transcript_text: "stop before the next action".to_string(),
                 input: crate::agent::UserInput::from_text("stop before the next action"),
             }));
         Ok(ToolOutput::Text("queued steering".to_string()))

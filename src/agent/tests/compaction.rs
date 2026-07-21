@@ -737,6 +737,7 @@ async fn queued_message_before_first_request_is_sent_with_initial_prompt() {
         .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
             id: 1,
             display_text: "second instruction".to_string(),
+            transcript_text: "second instruction".to_string(),
             input: crate::agent::UserInput::from_text("second instruction"),
         }))
         .expect("queued message should send before run starts");
@@ -788,6 +789,7 @@ async fn cancelled_queued_message_is_not_sent_to_provider() {
         .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
             id: 1,
             display_text: "remove me".to_string(),
+            transcript_text: "remove me".to_string(),
             input: crate::agent::UserInput::from_text("remove me"),
         }))
         .expect("queued message should send before run starts");
@@ -798,6 +800,7 @@ async fn cancelled_queued_message_is_not_sent_to_provider() {
         .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
             id: 2,
             display_text: "keep me".to_string(),
+            transcript_text: "keep me".to_string(),
             input: crate::agent::UserInput::from_text("keep me"),
         }))
         .expect("second queued message should send before run starts");

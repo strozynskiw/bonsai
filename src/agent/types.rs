@@ -40,12 +40,15 @@ impl UserInput {
 
 /// A user message queued by the composer while a run is in flight, identified
 /// so the UI can later cancel it before it is sent. `display_text` is the
-/// placeholder text shown in the transcript; `input` is the expanded model
-/// payload (chip payloads spliced in, images attached).
+/// compact placeholder shown while queued; `transcript_text` is what the
+/// transcript row becomes once sent (paste chips expanded to their content);
+/// `input` is the expanded model payload (tagged chip payloads, images
+/// attached).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedUserMessage {
     pub id: u64,
     pub display_text: String,
+    pub transcript_text: String,
     pub input: UserInput,
 }
 

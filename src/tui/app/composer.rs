@@ -65,12 +65,15 @@ struct ComposerDraft {
     redo: Vec<ComposerEditState>,
 }
 
-/// What a submit produces: the placeholder text the user saw (for the transcript
-/// and history) and the fully-expanded model input (chip payloads spliced in,
-/// images collected).
+/// What a submit produces: the placeholder text the user saw (slash-command
+/// detection, queued rows, status summaries), the transcript form (text-chip
+/// payloads spliced back in verbatim so the chat shows what was actually
+/// pasted; image chips keep their labels), and the fully-expanded model input
+/// (chip payloads in tags, images collected).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerSubmission {
     pub display_text: String,
+    pub transcript_text: String,
     pub input: UserInput,
 }
 
@@ -756,9 +759,9 @@ impl Composer {
         self.clear_edit_history();
     }
 
-    /// Collapse a long text paste into a `[Text N]` chip. Returns `false`
-    /// (inserting nothing) if the payload exceeds the hard paste limit, so the
-    /// caller can surface a notice rather than silently dropping it.
+    /// Collapse a long text paste into a `[Text N: M lines]` chip. Returns
+    /// `false` (inserting nothing) if the payload exceeds the hard paste limit,
+    /// so the caller can surface a notice rather than silently dropping it.
     pub fn insert_text_chip(&mut self, payload: &str) -> bool {
         let normalized = normalize_paste(payload);
         if text_bounds::grapheme_count(&normalized) > PASTE_HARD_LIMIT {
@@ -766,7 +769,12 @@ impl Composer {
         }
         let before = self.edit_state();
         self.next_text_seq += 1;
-        let label = format!("[Text {}]", self.next_text_seq);
+        let lines = normalized.lines().count().max(1);
+        let label = if lines == 1 {
+            format!("[Text {}: 1 line]", self.next_text_seq)
+        } else {
+            format!("[Text {}: {lines} lines]", self.next_text_seq)
+        };
         self.insert_chip(ComposerChip {
             label,
             payload: ChipPayload::Text(normalized),
@@ -953,11 +961,13 @@ fn expand_submission(text: &str, chips: &[ComposerChip]) -> ComposerSubmission {
     if chips.is_empty() {
         return ComposerSubmission {
             display_text: text.to_string(),
+            transcript_text: text.to_string(),
             input: UserInput::from_text(text),
         };
     }
 
     let mut display_text = String::with_capacity(text.len());
+    let mut transcript_text = String::with_capacity(text.len());
     let mut model_text = String::with_capacity(text.len());
     let mut images = Vec::new();
     let mut chips = chips.iter();
@@ -965,6 +975,7 @@ fn expand_submission(text: &str, chips: &[ComposerChip]) -> ComposerSubmission {
     for ch in text.chars() {
         if ch != CHIP_SENTINEL {
             display_text.push(ch);
+            transcript_text.push(ch);
             model_text.push(ch);
             continue;
         }
@@ -973,6 +984,9 @@ fn expand_submission(text: &str, chips: &[ComposerChip]) -> ComposerSubmission {
         match &chip.payload {
             ChipPayload::Text(payload) => {
                 let n = label_number(&chip.label);
+                // The chat shows the paste itself; only the model gets the
+                // tagged frame (it correlates the tag with follow-up refs).
+                transcript_text.push_str(payload);
                 model_text.push_str(&format!("<pasted-text-{n}>\n{payload}\n</pasted-text-{n}>"));
             }
             ChipPayload::Image {
@@ -981,6 +995,7 @@ fn expand_submission(text: &str, chips: &[ComposerChip]) -> ComposerSubmission {
                 byte_len,
                 ..
             } => {
+                transcript_text.push_str(&chip.label);
                 model_text.push_str(&chip.label);
                 images.push(ImageAttachment {
                     mime: mime.clone(),
@@ -993,6 +1008,7 @@ fn expand_submission(text: &str, chips: &[ComposerChip]) -> ComposerSubmission {
 
     ComposerSubmission {
         display_text,
+        transcript_text,
         input: UserInput {
             text: model_text,
             images,
@@ -1000,14 +1016,15 @@ fn expand_submission(text: &str, chips: &[ComposerChip]) -> ComposerSubmission {
     }
 }
 
-/// Parse the trailing integer from a chip label like `[Text 3]` → `3`.
+/// Parse the chip number from a label — the first run of digits, so both the
+/// bare `[Text 3]` form (older snapshots) and `[Text 3: 56 lines]` yield `3`.
 fn label_number(label: &str) -> u32 {
-    label
-        .trim_end_matches(']')
-        .rsplit(' ')
-        .next()
-        .and_then(|token| token.parse().ok())
-        .unwrap_or(0)
+    let digits: String = label
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().unwrap_or(0)
 }
 
 fn normalize_paste(text: &str) -> String {
@@ -1452,7 +1469,7 @@ mod tests {
         assert_eq!(c.text, super::CHIP_SENTINEL.to_string());
         assert_eq!(c.chips.len(), 1);
         assert_eq!(c.cursor, 1);
-        assert_eq!(c.chips[0].label, "[Text 1]");
+        assert_eq!(c.chips[0].label, "[Text 1: 1 line]");
     }
 
     #[test]
@@ -1495,7 +1512,7 @@ mod tests {
             panic!("expected a text chip");
         };
         assert_eq!(remaining, "second");
-        assert_eq!(c.chips[0].label, "[Text 2]");
+        assert_eq!(c.chips[0].label, "[Text 2: 1 line]");
     }
 
     #[test]
@@ -1513,11 +1530,11 @@ mod tests {
     fn label_numbering_is_monotonic_across_deletes() {
         let mut c = Composer::default();
         c.insert_text_chip("one");
-        assert_eq!(c.chips[0].label, "[Text 1]");
+        assert_eq!(c.chips[0].label, "[Text 1: 1 line]");
         c.backspace(); // delete [Text 1]
-        c.insert_text_chip("two");
+        c.insert_text_chip("two\nlines");
         // No renumbering: the next paste is [Text 2], not [Text 1] again.
-        assert_eq!(c.chips[0].label, "[Text 2]");
+        assert_eq!(c.chips[0].label, "[Text 2: 2 lines]");
     }
 
     #[test]
@@ -1529,7 +1546,9 @@ mod tests {
         c.insert_text_chip("line one\nline two");
 
         let sub = c.submission();
-        assert_eq!(sub.display_text, "hi [Text 1]");
+        assert_eq!(sub.display_text, "hi [Text 1: 2 lines]");
+        // The transcript form carries the paste itself, not the placeholder.
+        assert_eq!(sub.transcript_text, "hi line one\nline two");
         assert_eq!(
             sub.input.text,
             "hi <pasted-text-1>\nline one\nline two\n</pasted-text-1>"
@@ -1548,6 +1567,8 @@ mod tests {
 
         let sub = c.submission();
         assert_eq!(sub.display_text, "see [Image 1]");
+        // Image chips stay collapsed everywhere; only text chips expand.
+        assert_eq!(sub.transcript_text, "see [Image 1]");
         // The model text keeps the label so it can correlate with the part.
         assert_eq!(sub.input.text, "see [Image 1]");
         assert_eq!(sub.input.images.len(), 1);
@@ -1563,6 +1584,7 @@ mod tests {
         }
         let sub = c.submission();
         assert_eq!(sub.display_text, "plain text");
+        assert_eq!(sub.transcript_text, "plain text");
         assert_eq!(sub.input.text, "plain text");
         assert!(sub.input.images.is_empty());
     }
@@ -1697,10 +1719,12 @@ mod tests {
             }],
         };
         c.restore_content(content);
-        // Next paste must not collide with the restored [Text 3].
+        // Next paste must not collide with the restored [Text 3] — the bare
+        // label form (an older snapshot) must parse the same as the current
+        // `[Text N: M lines]` form.
         c.move_to_end();
         c.insert_text_chip("new");
-        assert_eq!(c.chips[1].label, "[Text 4]");
+        assert_eq!(c.chips[1].label, "[Text 4: 1 line]");
     }
 
     #[test]
@@ -1725,8 +1749,8 @@ mod tests {
         c.insert_char('!');
 
         let display = c.display();
-        assert_eq!(display.text, "hi [Text 1]!");
-        assert_eq!(display.chip_ranges, vec![(3, 11)]);
+        assert_eq!(display.text, "hi [Text 1: 1 line]!");
+        assert_eq!(display.chip_ranges, vec![(3, 19)]);
     }
 
     #[test]
@@ -1735,32 +1759,33 @@ mod tests {
         c.insert_char('a');
         c.insert_text_chip("payload"); // buffer index 1
         c.insert_char('b');
-        // Buffer: a <sentinel> b  → display: "a[Text 1]b"
+        // Buffer: a <sentinel> b  → display: "a[Text 1: 1 line]b"
         let display = c.display();
-        assert_eq!(display.text, "a[Text 1]b");
+        assert_eq!(display.text, "a[Text 1: 1 line]b");
         // Buffer 0 ('a') → display 0; buffer 1 (chip start) → display 1;
-        // buffer 2 ('b') → display 9 (after the 8-char label).
+        // buffer 2 ('b') → display 17 (after the 16-char label).
         assert_eq!(display.to_display(0), 0);
         assert_eq!(display.to_display(1), 1);
-        assert_eq!(display.to_display(2), 9);
-        assert_eq!(display.to_display(3), 10);
+        assert_eq!(display.to_display(2), 17);
+        assert_eq!(display.to_display(3), 18);
         // Inverse for non-label positions.
         assert_eq!(display.to_buffer(0), 0);
         assert_eq!(display.to_buffer(1), 1);
-        assert_eq!(display.to_buffer(9), 2);
-        assert_eq!(display.to_buffer(10), 3);
+        assert_eq!(display.to_buffer(17), 2);
+        assert_eq!(display.to_buffer(18), 3);
     }
 
     #[test]
     fn display_click_inside_label_snaps_to_nearer_edge() {
         let mut c = Composer::default();
-        c.insert_text_chip("payload"); // one chip, label "[Text 1]" at display 0..8
+        // One chip, label "[Text 1: 1 line]" at display 0..16.
+        c.insert_text_chip("payload");
         let display = c.display();
         // Left half of the label snaps to the chip start (buffer 0)…
         assert_eq!(display.to_buffer(1), 0);
-        assert_eq!(display.to_buffer(3), 0);
+        assert_eq!(display.to_buffer(7), 0);
         // …right half snaps to the chip end (buffer 1).
-        assert_eq!(display.to_buffer(6), 1);
-        assert_eq!(display.to_buffer(7), 1);
+        assert_eq!(display.to_buffer(12), 1);
+        assert_eq!(display.to_buffer(15), 1);
     }
 }

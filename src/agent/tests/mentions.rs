@@ -208,6 +208,7 @@ async fn queued_messages_expand_mentions_when_sent() {
         .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
             id: 1,
             display_text: "also @queued.txt".to_string(),
+            transcript_text: "also @queued.txt".to_string(),
             input: crate::agent::UserInput::from_text("also @queued.txt"),
         }))
         .expect("queued message should send before run starts");

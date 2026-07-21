@@ -424,7 +424,7 @@ impl Agent {
             // Mid-run steering only moves the episode boundary anchor (and
             // opens a span when none is active); it never closes an episode.
             self.observe_user_turn_for_episodes(&message.input.text);
-            sink.queued_user_message_sent(message.id, &message.display_text);
+            sink.queued_user_message_sent(message.id, &message.transcript_text);
         }
         self.emit_context_updated(sink);
         Ok(true)
@@ -823,7 +823,7 @@ impl Agent {
                     for message in queued {
                         self.self_review.append_request(&message.input.text);
                         self.push_live_user_message(&message.input).await?;
-                        sink.queued_user_message_sent(message.id, &message.display_text);
+                        sink.queued_user_message_sent(message.id, &message.transcript_text);
                     }
                     outcome.reset_loop_guards = true;
                     self.emit_context_updated(sink);

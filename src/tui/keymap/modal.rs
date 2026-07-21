@@ -766,6 +766,10 @@ pub(super) fn map_subtask_list_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         KeyCode::Char('m') | KeyCode::Char('M') => {
             KeyIntent::Action(AppAction::SubtaskOverrideModel)
         }
+        // `d` clears that override — back to the default (inherited) model.
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            KeyIntent::Action(AppAction::SubtaskClearModelOverride)
+        }
         KeyCode::Up => KeyIntent::Action(AppAction::SubtaskListMove(-1)),
         KeyCode::Down => KeyIntent::Action(AppAction::SubtaskListMove(1)),
         KeyCode::PageUp => KeyIntent::Action(AppAction::SubtaskListMove(-8)),

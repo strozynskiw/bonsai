@@ -1306,6 +1306,7 @@ pub(in crate::tui::run) fn queue_running_submit(
     let message = QueuedUserMessage {
         id,
         display_text: display.clone(),
+        transcript_text: submission.transcript_text.trim().to_string(),
         input: submission.input,
     };
     match tasks.queue_agent_message(message) {

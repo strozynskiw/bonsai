@@ -26,6 +26,7 @@ pub(super) fn render_subtask_list(
             ("PgUp/PgDn", "page"),
             ("Tab/Right", "detail"),
             ("m", "model"),
+            ("d", "default"),
             ("Esc", "close"),
         ])
     };

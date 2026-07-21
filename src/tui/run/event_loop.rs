@@ -3014,13 +3014,20 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                     app.reduce(AppAction::SetTaskState(TaskState::Running));
                                     app.mark_run_started(std::time::Instant::now());
                                     app.reduce(AppAction::ScrollBottom);
-                                    app.reduce(AppAction::SubmitInput(input.clone()));
+                                    // The transcript (and recall history) get the
+                                    // paste-expanded text — the chat shows what was
+                                    // pasted, not the `[Text N]` placeholder. The
+                                    // compact `input` keeps labeling the status line.
+                                    let transcript_text =
+                                        submission.transcript_text.trim().to_string();
+                                    app.reduce(AppAction::SubmitInput(transcript_text.clone()));
                                     let phase = app.active_mode().run_status_label();
                                     app.reduce(AppAction::Agent(UiEvent::Thinking(format!(
                                         "{phase}: {}",
                                         summarize_input(&input)
                                     ))));
-                                    maybe_seed_session_title(&mut app, &storage, &input).await;
+                                    maybe_seed_session_title(&mut app, &storage, &transcript_text)
+                                        .await;
                                     sync_agent_self_review_mode(app.self_review_mode, &agent).await;
                                     if let Some(report) = repo_map.apply_before_turn(&agent).await {
                                         app.latest_context_report = Some(report);
@@ -4144,10 +4151,22 @@ async fn start_pending_queued_run_if_idle(
     let mut queued_messages = app
         .queued_inputs
         .iter()
-        .map(|queued| QueuedUserMessage {
-            id: queued.id,
-            display_text: queued.text.clone(),
-            input: queued.content.submission().input,
+        .map(|queued| {
+            let submission = queued.content.submission();
+            // An empty snapshot (defensive: content should always mirror the
+            // queued text) falls back to the display text so the promoted
+            // transcript row never goes blank.
+            let transcript_text = if submission.transcript_text.trim().is_empty() {
+                queued.text.clone()
+            } else {
+                submission.transcript_text
+            };
+            QueuedUserMessage {
+                id: queued.id,
+                display_text: queued.text.clone(),
+                transcript_text,
+                input: submission.input,
+            }
         })
         .collect::<Vec<_>>();
     if !crate::model_resolution::model_supports_vision(
@@ -4184,7 +4203,7 @@ async fn start_pending_queued_run_if_idle(
 
     app.reduce(AppAction::Agent(UiEvent::QueuedUserMessageSent {
         id: queued.id,
-        text: queued.display_text.clone(),
+        text: queued.transcript_text.clone(),
     }));
     app.reduce(AppAction::SetTaskState(TaskState::Running));
     app.mark_run_started(std::time::Instant::now());
