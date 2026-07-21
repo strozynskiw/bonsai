@@ -1373,6 +1373,20 @@ impl AppState {
             RuntimeEvent::UpdateNotice(notice) => {
                 self.update_notice = Some(notice);
             }
+            RuntimeEvent::UpdateCommandFinished {
+                message,
+                kind,
+                staged_notice,
+            } => {
+                if let Some(notice) = staged_notice {
+                    self.update_notice = Some(notice);
+                }
+                self.push_transcript_item(TranscriptItem::CommandOutput {
+                    kind,
+                    text: message,
+                });
+                self.maybe_scroll_to_bottom_current();
+            }
             RuntimeEvent::TaskPanicked(text) => {
                 self.mark_run_finished(Instant::now());
                 self.task_state = TaskState::Idle;

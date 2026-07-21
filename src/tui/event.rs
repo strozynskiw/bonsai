@@ -868,6 +868,15 @@ pub enum RuntimeEvent {
     /// could not install. Rendered as a persistent composer-meta hint; sent at
     /// most once per session.
     UpdateNotice(String),
+    /// A `/update` background run finished; render the outcome as a transcript
+    /// status/error row. `staged_notice` additionally arms the persistent
+    /// composer-meta hint (the same surface as the startup check) when a
+    /// binary was staged or an update exists that could not be installed.
+    UpdateCommandFinished {
+        message: String,
+        kind: CommandOutputKind,
+        staged_notice: Option<String>,
+    },
     /// The peer watcher claimed inter-agent messages addressed to this session
     /// (peers P2); render them as blue chat messages. Only emitted non-empty.
     PeerMessagesArrived(Vec<crate::storage::LeasedPeerMessage>),

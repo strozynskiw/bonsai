@@ -131,6 +131,73 @@ pub(crate) fn startup_notice(outcome: &UpdateOutcome) -> Option<String> {
     }
 }
 
+/// The transcript line for a forced (`/update`) run, with an is-error flag.
+/// Unlike [`startup_notice`], every outcome maps to a message — the user asked
+/// explicitly, so silence is not an option.
+pub(crate) fn forced_outcome_message(outcome: &UpdateOutcome) -> (String, bool) {
+    let current = release::current_version()
+        .map(|version| format!(" (v{version})"))
+        .unwrap_or_default();
+    match outcome {
+        UpdateOutcome::Staged { version } => (
+            format!(
+                "Update: v{version} downloaded, verified, and staged — restart bonsai to apply."
+            ),
+            false,
+        ),
+        UpdateOutcome::AlreadyStaged { version } => (
+            format!("Update: v{version} is already staged — restart bonsai to apply."),
+            false,
+        ),
+        UpdateOutcome::AlreadyCurrent => {
+            (format!("Already on the newest release{current}."), false)
+        }
+        UpdateOutcome::NotifyOnly { version, reason } => (
+            match reason {
+                NotifyReason::Notify => {
+                    format!("Newest release is v{version} — run `bonsai update` to install.")
+                }
+                NotifyReason::Homebrew => format!(
+                    "Newest release is v{version} — this install is managed by Homebrew: `brew upgrade bonsai`."
+                ),
+                NotifyReason::NotWritable => format!(
+                    "Newest release is v{version} — the install location is not writable; rerun the installer."
+                ),
+                NotifyReason::SelfHashMismatch => format!(
+                    "Newest release is v{version} — the running binary does not match its signed release; reinstall via install.sh."
+                ),
+                NotifyReason::Pinned => format!(
+                    "Newest release is v{version} — held back by `update.pin` in config.toml."
+                ),
+            },
+            false,
+        ),
+        UpdateOutcome::DevBuild => (
+            "This is a dev build — self-update only applies to installed releases.".to_string(),
+            false,
+        ),
+        UpdateOutcome::Busy => (
+            "Another bonsai process is updating right now — try again in a moment.".to_string(),
+            false,
+        ),
+        UpdateOutcome::CheckFailed => (
+            "Update check failed — could not reach the release endpoint. Try again later."
+                .to_string(),
+            true,
+        ),
+        UpdateOutcome::VerificationFailed => (
+            "Update verification failed — nothing was installed. If this persists, reinstall via install.sh."
+                .to_string(),
+            true,
+        ),
+        // Forced runs ignore the interval and mode; map these defensively so a
+        // future refactor cannot turn them into a silent no-op.
+        UpdateOutcome::Disabled | UpdateOutcome::TooSoon => {
+            ("Update check skipped.".to_string(), false)
+        }
+    }
+}
+
 /// Upgrade a doctor `VerificationFailed` to `UpdateStaged` when the mismatch
 /// is explained by a self-update that already replaced the on-disk binary:
 /// the failure is real for the running image but resolves on restart.
@@ -1023,5 +1090,65 @@ mod tests {
         }
         assert!(startup_notice(&UpdateOutcome::TooSoon).is_none());
         assert!(startup_notice(&UpdateOutcome::CheckFailed).is_none());
+    }
+
+    #[test]
+    fn forced_outcome_messages_cover_every_outcome() {
+        // `/update` reports every outcome — the user asked explicitly, so no
+        // outcome may map to silence. Errors flag as errors; the staged
+        // variants must say a restart applies the new binary.
+        let cases: &[(UpdateOutcome, &str, bool)] = &[
+            (
+                UpdateOutcome::Staged {
+                    version: "0.3.0".to_string(),
+                },
+                "restart",
+                false,
+            ),
+            (
+                UpdateOutcome::AlreadyStaged {
+                    version: "0.3.0".to_string(),
+                },
+                "restart",
+                false,
+            ),
+            (UpdateOutcome::AlreadyCurrent, "newest release", false),
+            (UpdateOutcome::DevBuild, "dev build", false),
+            (UpdateOutcome::Busy, "Another bonsai process", false),
+            (UpdateOutcome::CheckFailed, "check failed", true),
+            (
+                UpdateOutcome::VerificationFailed,
+                "verification failed",
+                true,
+            ),
+            (UpdateOutcome::Disabled, "skipped", false),
+            (UpdateOutcome::TooSoon, "skipped", false),
+        ];
+        for (outcome, needle, expect_error) in cases {
+            let (message, is_error) = forced_outcome_message(outcome);
+            assert!(
+                message.to_lowercase().contains(&needle.to_lowercase()),
+                "{outcome:?}: {message}"
+            );
+            assert_eq!(is_error, *expect_error, "{outcome:?}: {message}");
+        }
+        for reason in [
+            NotifyReason::Notify,
+            NotifyReason::Homebrew,
+            NotifyReason::NotWritable,
+            NotifyReason::SelfHashMismatch,
+            NotifyReason::Pinned,
+        ] {
+            let outcome = UpdateOutcome::NotifyOnly {
+                version: "0.3.0".to_string(),
+                reason,
+            };
+            let (message, is_error) = forced_outcome_message(&outcome);
+            assert!(
+                message.contains("Newest release is v0.3.0"),
+                "{reason:?}: {message}"
+            );
+            assert!(!is_error, "{reason:?}: {message}");
+        }
     }
 }

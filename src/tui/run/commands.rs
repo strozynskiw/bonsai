@@ -106,6 +106,39 @@ pub(in crate::tui::run) fn idle_slash_command(input: &str) -> Option<IdleSlashCo
     persistence_command(input).map(IdleSlashCommand::Persistence)
 }
 
+/// `/update`: force a signed-release check + install in a detached background
+/// task and report the outcome to the transcript when it finishes. Works in
+/// any task state — the updater never touches the agent or the conversation,
+/// and concurrent bonsai processes serialize on the update file lock.
+pub(in crate::tui::run) fn spawn_update_command(
+    app: &mut AppState,
+    sender: tokio::sync::mpsc::UnboundedSender<RuntimeEvent>,
+    bonsai_home: std::path::PathBuf,
+    config: crate::config::UpdateConfig,
+) {
+    push_command_message(
+        app,
+        CommandOutputKind::Status,
+        "Checking for the newest release…",
+    );
+    tokio::spawn(async move {
+        let outcome = crate::update::run_forced_update(&bonsai_home, &config, false).await;
+        tracing::debug!(?outcome, "/update finished");
+        let (message, is_error) = crate::update::forced_outcome_message(&outcome);
+        let _ = sender.send(RuntimeEvent::UpdateCommandFinished {
+            message,
+            kind: if is_error {
+                CommandOutputKind::Error
+            } else {
+                CommandOutputKind::Status
+            },
+            // Reuse the startup hint mapping so a staged (or install-blocked)
+            // update also arms the persistent "restart to apply" meta line.
+            staged_notice: crate::update::startup_notice(&outcome),
+        });
+    });
+}
+
 pub(in crate::tui) fn open_theme_picker(app: &mut AppState) {
     rescan_themes_and_report(app);
     let original_theme = crate::tui::theme::current_theme_name().to_string();

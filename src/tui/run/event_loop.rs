@@ -1451,10 +1451,12 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     }
     // Native self-update: check for a newer signed release in the background
     // and surface at most one composer-meta notice. Startup is never blocked
-    // and failures stay silent (debug log only).
+    // and failures stay silent (debug log only). The config clone outlives the
+    // block so `/update` reuses it without taking the agent lock.
+    let update_config = agent.config().update.clone();
     {
         let bonsai_home = storage.home_dir().to_path_buf();
-        let update_config = agent.config().update.clone();
+        let update_config = update_config.clone();
         let update_sender = runtime_sender.clone();
         tokio::spawn(async move {
             let outcome = crate::update::run_startup_update(&bonsai_home, &update_config).await;
@@ -2543,6 +2545,21 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                         rows,
                                         cursor: 0,
                                     }));
+                                    continue;
+                                }
+                                // `/update` works in any task state: the forced
+                                // update runs in its own detached background task
+                                // guarded by the update file lock, and never
+                                // touches the agent or the conversation.
+                                if input.trim() == "/update" {
+                                    app.reduce(AppAction::ScrollBottom);
+                                    app.reduce(AppAction::SubmitCommandInput(input.clone()));
+                                    spawn_update_command(
+                                        &mut app,
+                                        tasks.runtime_sender(),
+                                        storage.home_dir().to_path_buf(),
+                                        update_config.clone(),
+                                    );
                                     continue;
                                 }
                                 // `/providers` works in any task state: the provider

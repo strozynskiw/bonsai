@@ -186,6 +186,14 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
         surface: both(),
     },
     CommandMetadata {
+        name: "/update",
+        description: "Check for the newest release and install it in the background",
+        usage_hint: None,
+        surface: tui_only_no_args(
+            "/update is a TUI command — run `bonsai update` from the CLI instead.",
+        ),
+    },
+    CommandMetadata {
         name: "/mcp",
         description: "Inspect, control, and authorize MCP servers",
         usage_hint: Some("tools|enable|disable|reload|auth|callback|revoke <server>"),
@@ -585,6 +593,11 @@ pub(crate) fn busy_behavior_for(input: &str) -> BusyCommandBehavior {
         // to browse mid-run; the actual action (auth / review task) only starts
         // when the user confirms inside the picker.
         "/authorize" | "/review" => BusyCommandBehavior::RunNow,
+        // `/update` runs in its own detached background task guarded by the
+        // update file lock and never touches the agent or the conversation.
+        // Like `/providers`, it is caught by the any-task-state block in
+        // event_loop.rs before either non-idle executor sees it.
+        "/update" => BusyCommandBehavior::RunNow,
         _ => BusyCommandBehavior::Block,
     }
 }
