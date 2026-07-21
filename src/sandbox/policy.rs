@@ -15,7 +15,8 @@ pub(crate) struct SandboxPolicy {
 }
 
 /// Resolve the full writable-root set for a session: the project root, its
-/// private temp dir, the two shared dependency stores that common build tools
+/// private temp dir, the repository's git common dir when it lives elsewhere,
+/// the two shared dependency stores that common build tools
 /// cannot layer read-only, and any
 /// `BONSAI_SANDBOX_WRITABLE_ROOTS` extras — canonicalized and de-duplicated.
 /// Computed once at construction (these don't change for a session), so per-spawn
@@ -24,9 +25,46 @@ pub(crate) fn writable_roots(project_root: &Path, temp_root: &Path) -> Vec<PathB
     let mut roots = Vec::new();
     push_canonical(&mut roots, project_root.to_path_buf());
     push_canonical(&mut roots, temp_root.to_path_buf());
+    if let Some(git_dir) = external_git_common_dir(project_root) {
+        push_canonical_outside(&mut roots, git_dir);
+    }
     extend_canonical(&mut roots, shared_dependency_cache_roots());
     extend_canonical(&mut roots, extra_writable_roots_from_env());
     roots
+}
+
+/// The repository's git *common* directory, resolved so it can be added to the
+/// writable roots when it lives outside them. In a plain checkout `.git` sits
+/// under the project root and the containment check drops it; in a linked
+/// worktree (`--isolation worktree`, `git worktree add`) — or with
+/// `--separate-git-dir`, or a session opened inside a submodule — commits
+/// write to the source repository's git dir, which would otherwise be denied
+/// and push the model toward sandbox escapes for plain `git add`/`commit`.
+/// Widening covers only the repo's own git state, never the source working
+/// tree; hooks and filters keep running confined.
+fn external_git_common_dir(project_root: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["rev-parse", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let path = Path::new(text.trim());
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    // rev-parse prints a relative path (".git") when the common dir is inside
+    // the directory it ran in; anchor it to the project root either way.
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    })
 }
 
 /// Shared dependency stores that remain writable by design. Cargo and Go mix
@@ -94,6 +132,15 @@ fn push_canonical(roots: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
+/// Push `path` (canonicalized) only when no already-collected root contains
+/// it — a `.git` under the project root needs no rule of its own.
+fn push_canonical_outside(roots: &mut Vec<PathBuf>, path: PathBuf) {
+    let canonical = path.canonicalize().unwrap_or(path);
+    if !roots.iter().any(|root| canonical.starts_with(root)) {
+        roots.push(canonical);
+    }
+}
+
 /// De-dup `more` (already canonical) into the accumulating `roots`.
 fn extend_canonical(roots: &mut Vec<PathBuf>, more: Vec<PathBuf>) {
     for root in more {
@@ -126,6 +173,69 @@ mod tests {
                 "toolchain cache {cache:?} missing from writable roots",
             );
         }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.email=test@test",
+                "-c",
+                "user.name=test",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {dir:?}");
+    }
+
+    #[test]
+    fn linked_worktree_gets_the_source_git_dir_as_a_writable_root() {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "--quiet"]);
+        std::fs::write(source.path().join("file"), "x").unwrap();
+        git(source.path(), &["add", "file"]);
+        git(source.path(), &["commit", "--quiet", "-m", "init"]);
+        let worktree = source.path().join("wt");
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                worktree.to_str().unwrap(),
+                "-b",
+                "wt",
+            ],
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let roots = writable_roots(&worktree, temp.path());
+        let common = source.path().join(".git").canonicalize().unwrap();
+        assert!(
+            roots.contains(&common),
+            "worktree session must be able to write the source git dir: {roots:?}"
+        );
+        assert!(roots.contains(&worktree.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn plain_checkout_adds_no_separate_git_root() {
+        let proj = tempfile::tempdir().unwrap();
+        git(proj.path(), &["init", "--quiet"]);
+
+        let temp = tempfile::tempdir().unwrap();
+        let roots = writable_roots(proj.path(), temp.path());
+        let git_dir = proj.path().join(".git").canonicalize().unwrap();
+        // Covered by the project root; a separate rule would be noise.
+        assert!(
+            !roots.contains(&git_dir),
+            "in-tree .git must not become its own root: {roots:?}"
+        );
     }
 
     #[test]
