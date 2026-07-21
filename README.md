@@ -30,7 +30,7 @@ The installer detects your platform, downloads the matching release archive, and
 installs to `~/.local/bin` (override with `BONSAI_INSTALL_DIR`). Every download
 is verified against the release's Ed25519-signed manifest before anything is
 installed — the archive checksum and the extracted binary checksum both have to
-match the signed record. `BONSAI_VERSION=v0.2.0-rc.1` pins a specific release.
+match the signed record. `BONSAI_VERSION=v0.2.0-rc.2` pins a specific release.
 
 Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux glibc
 (x86-64 and arm64).
@@ -44,7 +44,7 @@ binary in `~/.cargo/bin`, which rustup adds to your `PATH` by default.
 Install the latest release:
 
 ```sh
-cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0-rc.1 --locked
+cargo install --git https://github.com/strozynskiw/bonsai.git --tag v0.2.0-rc.2 --locked
 ```
 
 Or install the latest development state from `master`:
