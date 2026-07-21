@@ -436,6 +436,18 @@ impl BackgroundTaskRegistry {
         Some(report)
     }
 
+    /// Whether any background task is still running. The redraw loop calls this
+    /// per drawn frame to keep the active cadence up while background tasks
+    /// animate (spinner/elapsed timers), even when the main agent is idle.
+    pub(crate) async fn has_running(&self) -> bool {
+        self.inner
+            .lock()
+            .await
+            .tasks
+            .values()
+            .any(|record| !record.status.is_finished())
+    }
+
     pub async fn agent_wake_ready(&self) -> bool {
         let inner = self.inner.lock().await;
         let has_running = inner

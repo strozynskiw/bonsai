@@ -1119,18 +1119,12 @@ fn pointer_motion_is_dropped_before_it_can_request_redraw() {
 
 #[test]
 fn redraw_interval_slows_down_idle_frames() {
-    assert_eq!(
-        redraw_interval_for_state(TaskState::Idle),
-        IDLE_REDRAW_INTERVAL
-    );
-    assert_eq!(
-        redraw_interval_for_state(TaskState::Running),
-        ACTIVE_REDRAW_INTERVAL
-    );
-    assert_eq!(
-        redraw_interval_for_state(TaskState::Command),
-        ACTIVE_REDRAW_INTERVAL
-    );
+    // "Active" is now any task in flight — the main agent, a background task, a
+    // detached subagent, or a terminal (see `any_task_active`). At rest the
+    // cadence drops to the 1s idle interval; with any work running it stays at
+    // the 10 FPS active interval so on-screen spinners/timers animate smoothly.
+    assert_eq!(redraw_interval(false), IDLE_REDRAW_INTERVAL);
+    assert_eq!(redraw_interval(true), ACTIVE_REDRAW_INTERVAL);
 }
 
 #[test]
@@ -7079,19 +7073,28 @@ async fn sync_agent_mode_and_refresh_skips_when_busy() {
     );
 }
 
-#[test]
-fn persona_switch_cancels_a_run_using_another_tool_registry() {
-    let planning = crate::agent::ActivePersona::Builtin(AgentMode::Planning);
-    let coding = crate::agent::ActivePersona::Builtin(AgentMode::Coding);
-    let custom_a = crate::agent::ActivePersona::Custom("a".to_string());
-    let custom_b = crate::agent::ActivePersona::Custom("b".to_string());
+#[tokio::test]
+async fn sync_agent_mode_and_refresh_applies_selection_after_run_ends() {
+    // Regression (session 7): a persona selected mid-run — e.g. the findings
+    // auto-open flipping Review → Planning — must never cancel the run; it is
+    // applied by the post-completion sync once the run ends.
+    let mut app = app();
+    let agent = agent_with_distinct_registries();
 
-    assert!(active_run_needs_cancel(Some(&coding), &planning));
-    assert!(!active_run_needs_cancel(Some(&coding), &coding));
-    assert!(active_run_needs_cancel(Some(&custom_a), &planning));
-    assert!(active_run_needs_cancel(Some(&custom_a), &custom_b));
-    assert!(!active_run_needs_cancel(Some(&custom_a), &custom_a));
-    assert!(!active_run_needs_cancel(None, &planning));
+    // Mid-run: selection changes, but the busy guard leaves the agent alone.
+    app.reduce(AppAction::SetTaskState(TaskState::Running));
+    app.view = View::Plan;
+    app.active_persona = crate::agent::ActivePersona::Builtin(AgentMode::Planning);
+    sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
+
+    // Run finished (completed or interrupted): the selection lands.
+    app.reduce(AppAction::SetTaskState(TaskState::Idle));
+    sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
+    assert_eq!(
+        agent.lock().await.active_persona(),
+        &crate::agent::ActivePersona::Builtin(AgentMode::Planning),
+        "selection made mid-run should apply once the run ends"
+    );
 }
 
 use crate::agent::ContextReport;

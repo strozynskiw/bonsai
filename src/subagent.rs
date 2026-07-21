@@ -809,6 +809,17 @@ impl SubagentRegistry {
         !ready_launch_groups(&inner).is_empty()
     }
 
+    /// Whether any detached subagent is still running. Cheap (no snapshot
+    /// clone): the redraw loop calls this per drawn frame to keep the active
+    /// cadence up while background subagents animate, even when the main agent
+    /// is idle.
+    pub(crate) fn has_active_detached(&self) -> bool {
+        self.lock()
+            .subagents
+            .values()
+            .any(|record| record.detached && !record.status.is_finished())
+    }
+
     pub(crate) fn running_status_report(&self) -> Option<String> {
         let subtasks = {
             let inner = self.lock();

@@ -427,6 +427,19 @@ impl TerminalRegistry {
             .collect()
     }
 
+    /// Whether any interactive terminal is still running. The redraw loop calls
+    /// this per drawn frame to keep the active cadence up while a terminal's
+    /// tool card animates (spinner/elapsed timers), even when the main agent is
+    /// idle.
+    pub(crate) async fn has_running(&self) -> bool {
+        self.inner
+            .lock()
+            .await
+            .terminals
+            .values()
+            .any(|record| !record.snapshot.status.is_finished())
+    }
+
     pub(crate) async fn running_status_report(&self) -> Option<String> {
         let running = self
             .list()

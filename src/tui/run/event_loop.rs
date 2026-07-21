@@ -49,13 +49,6 @@ const BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// (one shift later, as before).
 const REPO_MAP_FIRST_TURN_WAIT: Duration = Duration::from_millis(750);
 
-fn active_run_needs_cancel(
-    active_persona: Option<&crate::agent::ActivePersona>,
-    selected_persona: &crate::agent::ActivePersona,
-) -> bool {
-    active_persona.is_some_and(|persona| persona != selected_persona)
-}
-
 /// Wake authority is attached to durable message identities, never to sticky
 /// aggregate booleans. The current durable agent inbox is re-read at decision
 /// time, which removes authority as soon as the exact message is acknowledged.
@@ -287,12 +280,35 @@ fn terminal_event_is_pointer_motion(event: &Event) -> bool {
     )
 }
 
-fn redraw_interval_for_state(task_state: TaskState) -> Duration {
-    if task_state.is_busy() {
+fn redraw_interval(active_work: bool) -> Duration {
+    if active_work {
         ACTIVE_REDRAW_INTERVAL
     } else {
         IDLE_REDRAW_INTERVAL
     }
+}
+
+/// Whether *any* asynchronous work is in flight, so the periodic redraw runs at
+/// the active (10 FPS) cadence rather than the 1s idle one. The main-agent
+/// `task_state` alone is not enough: background tasks, detached subagents, and
+/// interactive terminals keep animating spinners and elapsed timers on screen
+/// while the agent is idle, and at the idle cadence those tick only once a
+/// second (visibly janky). The app-side mirrors of these (`app.background_tasks`
+/// / `app.subtasks`) are refreshed only while their modal is open, so the live
+/// answer has to come from the registries. Called at most once per drawn frame
+/// (≤10×/sec); each registry lock is short-held and uncontended.
+async fn any_task_active(
+    app: &AppState,
+    tasks: &TaskController,
+    subagents: &crate::subagent::SubagentRegistry,
+    background_tasks: &BackgroundTaskRegistry,
+    terminals: &TerminalRegistry,
+) -> bool {
+    app.task_state.is_busy()
+        || tasks.is_busy()
+        || subagents.has_active_detached()
+        || background_tasks.has_running().await
+        || terminals.has_running().await
 }
 
 fn should_draw_frame(redraw_requested: bool, now: Instant, next_redraw_at: Instant) -> bool {
@@ -2118,6 +2134,16 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             std::sync::atomic::Ordering::Relaxed,
         );
 
+        // Mirror the in-flight run's persona for the composer meta line: when
+        // it differs from the selected persona the line renders the pending
+        // switch (`Running → Selected`) instead of silently relabeling a run
+        // that is still executing under its dispatch-time persona.
+        let running_persona = tasks.active_agent_persona().cloned();
+        if app.running_persona != running_persona {
+            app.running_persona = running_persona;
+            redraw_requested = true;
+        }
+
         if frame_needs_redraw {
             redraw_requested = true;
         }
@@ -2128,7 +2154,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             draw_tui_frame(&mut terminal, &mut app)?;
             frame_draw = draw_started.elapsed();
             redraw_requested = false;
-            next_redraw_at = Instant::now() + redraw_interval_for_state(app.task_state);
+            next_redraw_at = Instant::now()
+                + redraw_interval(
+                    any_task_active(&app, &tasks, &subagents, &background_tasks, &terminals).await,
+                );
         }
 
         if matches!(app.task_state, TaskState::Exiting) {
@@ -2223,7 +2252,17 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                     draw_tui_frame(&mut terminal, &mut app)?;
                     let frame_draw = draw_started.elapsed();
                     redraw_requested = false;
-                    next_redraw_at = Instant::now() + redraw_interval_for_state(app.task_state);
+                    next_redraw_at = Instant::now()
+                        + redraw_interval(
+                            any_task_active(
+                                &app,
+                                &tasks,
+                                &subagents,
+                                &background_tasks,
+                                &terminals,
+                            )
+                            .await,
+                        );
                     if frame_draw >= SLOW_FRAME_WARN_THRESHOLD {
                         tracing::warn!(
                             draw_ms = frame_draw.as_millis() as u64,
@@ -3042,22 +3081,32 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                     .await;
                 }
             }
+            // A persona selected while the run was in flight was deliberately
+            // not applied mid-run (the busy guard skipped it). Apply it now
+            // that the run ended — completed, failed, or interrupted alike.
+            // When one of the dispatchers above already started a follow-up
+            // run, its busy guard makes this a no-op (each dispatch sets its
+            // own persona anyway).
+            sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
         }
 
         // After all event processing for the frame, a view change (Tab, `1`,
-        // `2`, mouse, implement_plan, review_changes) means the active agent
-        // mode changed, so the tool-schema count in the persisted context
-        // report is stale. Regenerate it before the next draw. The busy guard
-        // skips this during a run; the run emits a fresh report on completion.
+        // `2`, mouse, implement_plan, review_changes) means the selected agent
+        // persona changed, so the tool-schema count in the persisted context
+        // report is stale. Regenerate it before the next draw.
+        //
+        // A persona change never cancels an in-flight run: the running turn
+        // captured its persona at dispatch and keeps it — the user may just be
+        // peeking at the plan canvas mid-implementation, and the review agent's
+        // first finding auto-opens that canvas under the reviewer's feet
+        // (regression: session 7, the finding's own auto-open cancelled the
+        // review 228µs after it was recorded). While busy this sync is a no-op
+        // (its internal guard); the post-completion sync in the poll_finished
+        // block applies the selection once the run ends, and every dispatch
+        // path sets its persona explicitly, so the next user-sent run always
+        // starts under the newly selected persona.
         if app.active_persona != last_active_persona {
             last_active_persona = app.active_persona.clone();
-            if active_run_needs_cancel(tasks.active_agent_persona(), &app.active_persona) {
-                // A running turn holds the agent lock and therefore cannot swap
-                // registries in place. Stop it before the old persona can execute
-                // more tools; the next dispatch starts with the selected persona.
-                tasks.cancel();
-                app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
-            }
             sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
             redraw_requested = true;
         }
