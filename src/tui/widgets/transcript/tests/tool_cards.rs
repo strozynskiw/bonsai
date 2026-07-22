@@ -787,6 +787,35 @@ fn serenity_active_reasoning_summary_renders_thinking_animation() {
 }
 
 #[test]
+fn active_thinking_indicator_is_separated_from_the_previous_card() {
+    let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
+    app.serenity_mode = true;
+    app.task_state = crate::tui::event::TaskState::Running;
+    app.tick = 12;
+    // A preceding card, then the streaming reasoning indicator.
+    app.transcript.push(TranscriptItem::AssistantMessage {
+        text: "done writing history".to_string(),
+    });
+    app.transcript.push(TranscriptItem::ReasoningSummary {
+        text: "private chain".to_string(),
+    });
+
+    let lines = rendered_text(transcript_lines(&app, 80));
+    let thinking = lines
+        .iter()
+        .position(|line| line.contains("Thinking"))
+        .expect("thinking indicator should render");
+    // The line directly above the indicator is a blank spacer, not the tail of
+    // the previous card — the two items must not sit flush.
+    assert!(thinking > 0, "indicator should not be the first line");
+    assert!(
+        lines[thinking - 1].trim().is_empty(),
+        "expected a blank line before the thinking indicator, got {:?}",
+        lines[thinking - 1]
+    );
+}
+
+#[test]
 fn selected_large_execution_group_expands_nested_rows() {
     let now = std::time::Instant::now();
     let tools = (0..8)

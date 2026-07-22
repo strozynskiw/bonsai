@@ -372,7 +372,12 @@ fn render_serenity_reasoning_summary(
     options: TranscriptRenderOptions<'_>,
 ) -> Vec<Line<'static>> {
     if options.reasoning_active {
-        return render_block_lines(
+        // Leading blank line so the streaming "Thinking" indicator is separated
+        // from the preceding card, matching the gap every titled block gets.
+        // `render_title: true` would add an empty title row too, so the spacer
+        // is prepended here and the block itself stays title-less.
+        let mut lines = vec![Line::from("")];
+        lines.extend(render_block_lines(
             "",
             vec![serenity_thinking_line(options.tick)],
             theme::palette().progress,
@@ -382,7 +387,8 @@ fn render_serenity_reasoning_summary(
             options.selected,
             false,
             options.focused,
-        );
+        ));
+        return lines;
     }
 
     let label = serenity_thought_label(text.chars().count());
