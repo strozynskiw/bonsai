@@ -2021,10 +2021,41 @@ impl PlanningResearchGuard {
     }
 }
 
-enum PlanningResearchAction {
-    Reject(String),
+/// One guard's verdict on a turn's tool calls: `Reject` answers the offending
+/// calls with synthetic results (the payload — a message, target set, or
+/// per-call rejection map — varies by guard) and lets the run continue; `Stop`
+/// terminates the run with a message. Every guard shares this shape so they all
+/// resolve identically through [`resolve_guard`].
+enum GuardAction<T> {
+    Reject(T),
     Stop(String),
 }
+
+/// Resolve one guard's action. A `Reject` warns and hands its payload back for
+/// the caller to answer the offending calls; a `Stop` warns, logs the discarded
+/// response, and bails the run; `None` passes through. Centralized so no guard
+/// path can forget the warn / `log_response` / bail ritual.
+fn resolve_guard<T>(
+    agent: &Agent,
+    name: &'static str,
+    action: Option<GuardAction<T>>,
+    response: &StreamedResponse,
+) -> Result<Option<T>> {
+    match action {
+        Some(GuardAction::Reject(payload)) => {
+            tracing::warn!(target: "bonsai::guard", guard = name, action = "reject", "guard rejected tool calls");
+            Ok(Some(payload))
+        }
+        Some(GuardAction::Stop(message)) => {
+            tracing::warn!(target: "bonsai::guard", guard = name, action = "stop", "guard stopped run");
+            agent.log_response(response, false);
+            bail!("{message}")
+        }
+        None => Ok(None),
+    }
+}
+
+type PlanningResearchAction = GuardAction<String>;
 
 #[derive(Debug, Clone, Default)]
 struct ToolRejections {
@@ -2239,10 +2270,7 @@ struct FailedCallState {
     last_seen_turn: usize,
 }
 
-enum RepeatedFailureAction {
-    Reject(HashMap<String, String>),
-    Stop(String),
-}
+type RepeatedFailureAction = GuardAction<HashMap<String, String>>;
 
 impl RepeatedFailureGuard {
     fn action_for(&mut self, tool_calls: &[ToolCall]) -> Option<RepeatedFailureAction> {
@@ -2384,10 +2412,7 @@ struct RepeatedInspectionGuard {
 /// matched per tool call: a batch that pairs an over-read file with a fresh one
 /// blocks only the over-read target and names *that* file, instead of painting
 /// the innocent sibling with the wrong file's storm message.
-enum ReadStormAction {
-    Reject(HashSet<String>),
-    Stop(String),
-}
+type ReadStormAction = GuardAction<HashSet<String>>;
 
 #[derive(Default)]
 struct ReadStormGuard {
@@ -2672,10 +2697,7 @@ impl RepeatedInspectionGuard {
     }
 }
 
-enum RepeatedInspectionAction {
-    Reject(String),
-    Stop(String),
-}
+type RepeatedInspectionAction = GuardAction<String>;
 
 /// Nudges the model to batch independent tool calls, at the point of failure.
 /// Fires after [`BATCHING_HINT_STREAK`] consecutive turns that each carried

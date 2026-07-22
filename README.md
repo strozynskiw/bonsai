@@ -1126,3 +1126,22 @@ It needs the `rustfmt` and `clippy` components (bundled with a default `rustup`
 toolchain; otherwise `rustup component add rustfmt clippy`). Tests and the
 release build are left to CI. Skip the hook for a single commit with
 `git commit --no-verify`.
+
+## Contributing and roadmap
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup, quality bar, and PR conventions. Issues labeled
+[`good first issue`](https://github.com/strozynskiw/bonsai/labels/good%20first%20issue)
+are self-contained starters.
+
+Direction is tracked as [GitHub milestones](https://github.com/strozynskiw/bonsai/milestones):
+the `0.x` line leads to the 1.0 **stability** release (distribution → release
+evidence → an experimental server preview for building UIs on top → release
+candidate), and `1.x`/`2.0` map out the phases beyond. Issues labeled
+`research` are experiments, not commitments.
+
+Security reports go through
+[private vulnerability reporting](https://github.com/strozynskiw/bonsai/security/advisories/new),
+never public issues — see [SECURITY.md](SECURITY.md).
+
+bonsai is [MIT licensed](LICENSE).

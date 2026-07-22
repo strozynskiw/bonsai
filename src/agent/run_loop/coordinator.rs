@@ -310,18 +310,12 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         let planning_research_action = self
             .agent
             .planning_research_action(&response.tool_calls, &mut policies.planning_research);
-        let planning_research_rejection = match planning_research_action {
-            Some(PlanningResearchAction::Reject(message)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "planning_research", action = "reject", "guard rejected tool calls");
-                Some(message)
-            }
-            Some(PlanningResearchAction::Stop(message)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "planning_research", action = "stop", "guard stopped run");
-                self.agent.log_response(&response, false);
-                bail!("{message}");
-            }
-            None => None,
-        };
+        let planning_research_rejection = resolve_guard(
+            self.agent,
+            "planning_research",
+            planning_research_action,
+            &response,
+        )?;
         let delegated_read_rejections = self.agent.delegated_read_rejections(&response.tool_calls);
         let read_target_versions = self.agent.read_target_versions(&response.tool_calls).await;
         let repeated_inspection_action = if self.agent.persona_planning_budget() {
@@ -333,18 +327,12 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 &read_target_versions,
             )
         };
-        let repeated_inspection_rejection = match repeated_inspection_action {
-            Some(RepeatedInspectionAction::Reject(message)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "repeated_inspection", action = "reject", "guard rejected tool calls");
-                Some(message)
-            }
-            Some(RepeatedInspectionAction::Stop(message)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "repeated_inspection", action = "stop", "guard stopped run");
-                self.agent.log_response(&response, false);
-                bail!("{message}");
-            }
-            None => None,
-        };
+        let repeated_inspection_rejection = resolve_guard(
+            self.agent,
+            "repeated_inspection",
+            repeated_inspection_action,
+            &response,
+        )?;
         let read_storm_action = if self.agent.persona_planning_budget() {
             None
         } else {
@@ -352,33 +340,15 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 .read_storm
                 .action_for_with_versions(&response.tool_calls, &read_target_versions)
         };
-        let read_storm_rejection = match read_storm_action {
-            Some(ReadStormAction::Reject(targets)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "read_storm", action = "reject", targets = ?targets, "guard rejected tool calls");
-                Some(targets)
-            }
-            Some(ReadStormAction::Stop(message)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "read_storm", action = "stop", "guard stopped run");
-                self.agent.log_response(&response, false);
-                bail!("{message}");
-            }
-            None => None,
-        };
-        let repeated_failure_rejection = match policies
-            .repeated_failure
-            .action_for(&response.tool_calls)
-        {
-            Some(RepeatedFailureAction::Reject(rejections)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "repeated_failure", action = "reject", "guard rejected tool calls");
-                Some(rejections)
-            }
-            Some(RepeatedFailureAction::Stop(message)) => {
-                tracing::warn!(target: "bonsai::guard", guard = "repeated_failure", action = "stop", "guard stopped run");
-                self.agent.log_response(&response, false);
-                bail!("{message}");
-            }
-            None => None,
-        };
+        let read_storm_rejection =
+            resolve_guard(self.agent, "read_storm", read_storm_action, &response)?;
+        let repeated_failure_action = policies.repeated_failure.action_for(&response.tool_calls);
+        let repeated_failure_rejection = resolve_guard(
+            self.agent,
+            "repeated_failure",
+            repeated_failure_action,
+            &response,
+        )?;
         let batching_hint = policies.single_call_streak.hint_for(&response.tool_calls);
 
         self.agent.push_message(build_assistant_message(&response)?);
