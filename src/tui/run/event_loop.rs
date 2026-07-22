@@ -530,6 +530,567 @@ fn handle_paste_event(
     }
 }
 
+/// The Ctrl+C state machine for one keypress: confirm-exit, cancel a running
+/// turn / background subagents / a command and arm the exit prompt, or just arm
+/// it. Returns `true` when the caller should break the run loop (confirmed
+/// exit). Extracted from `run`'s key dispatch; the `break 'run` stays in `run`.
+async fn handle_ctrl_c(
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    ctrl_c_prompt: &mut Option<CtrlCExitPrompt>,
+    subagents: &crate::subagent::SubagentRegistry,
+    agent: &Arc<Mutex<Agent>>,
+) -> bool {
+    let now = Instant::now();
+    let has_running_subagents = subagents
+        .list_detached()
+        .iter()
+        .any(|subagent| !subagent.status.is_finished());
+    match next_ctrl_c_action(app.task_state, has_running_subagents, *ctrl_c_prompt, now) {
+        CtrlCAction::ConfirmExit => {
+            tracing::info!(
+                task_state = ?app.task_state,
+                "ctrl+c: exit confirmed; breaking run loop"
+            );
+            tasks.abort();
+            clear_ctrl_c_prompt(app, ctrl_c_prompt);
+            app.clear_run_timer();
+            app.reduce(AppAction::SetTaskState(TaskState::Exiting));
+            return true;
+        }
+        CtrlCAction::CancelRunAndArm => {
+            let queued_ids = app.queued_input_ids();
+            if let Err(err) = tasks.cancel_agent_messages(&queued_ids) {
+                app.reduce(AppAction::Agent(UiEvent::Error(err)));
+            }
+            app.reduce(AppAction::DropQueuedInput);
+            tasks.cancel();
+            tracing::info!("ctrl+c: cancelling running task; exit armed");
+            app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
+            set_ctrl_c_prompt(app, ctrl_c_prompt, CtrlCExitPromptKind::Cancelling, now);
+        }
+        CtrlCAction::CancelSubagentsAndArm => {
+            agent.lock().await.cancel_running_subagents();
+            tracing::info!("ctrl+c: cancelling background subagents; exit armed");
+            set_ctrl_c_prompt(app, ctrl_c_prompt, CtrlCExitPromptKind::Cancelling, now);
+        }
+        CtrlCAction::CancelCommandAndArm => {
+            tasks.abort();
+            // Invalidate any command spawned on a raw `tokio::spawn`
+            // (auth/model/local-model): `abort` doesn't reach those, so bump the
+            // generation to drop their late, stale `CommandFinished` instead of
+            // letting it flip provider/model after we go idle.
+            app.invalidate_pending_commands();
+            app.clear_run_timer();
+            app.reduce(AppAction::SetTaskState(TaskState::Idle));
+            set_ctrl_c_prompt(app, ctrl_c_prompt, CtrlCExitPromptKind::Exit, now);
+        }
+        CtrlCAction::ArmExit => {
+            tracing::info!(task_state = ?app.task_state, "ctrl+c: armed exit prompt");
+            set_ctrl_c_prompt(app, ctrl_c_prompt, CtrlCExitPromptKind::Exit, now);
+        }
+    }
+    false
+}
+
+/// The terminal submit path: a leading-`/` runs as a command task, otherwise the
+/// composer content starts an agent run (after a vision gate that rejects images
+/// on a non-vision model). Returns `true` only when the vision gate aborted (the
+/// caller `continue`s and skips the completion poll); `false` when a run or
+/// command started and the frame should fall through to `poll_finished`.
+/// Extracted from `run`'s Submit handling via the `RuntimeActionDeps` bundle.
+async fn submit_and_start_run(
+    submission: crate::tui::app::ComposerSubmission,
+    input: &str,
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    deps: RuntimeActionDeps<'_>,
+    repo_map: &mut RepoMapInjector,
+) -> bool {
+    if input.starts_with('/') {
+        app.reduce(AppAction::ScrollBottom);
+        app.reduce(AppAction::SubmitCommandInput(input.to_string()));
+        app.reduce(AppAction::SetTaskState(TaskState::Command));
+        let command_deps = CommandTaskDeps::new(
+            deps.agent.clone(),
+            deps.session_store.clone(),
+            deps.project_root.to_path_buf(),
+            deps.registry.clone(),
+            deps.model_catalog.clone(),
+            Some(deps.storage.clone()),
+            app.credential_persistence,
+            app.active_persona.builtin(),
+        );
+        if let Err(err) = tasks.start_command(
+            input.to_string(),
+            app.transcript.to_vec(),
+            app.command_generation(),
+            command_deps,
+        ) {
+            app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
+        }
+        return false;
+    }
+    // Vision gate: an attached image on a model that can't see images aborts the
+    // submit and leaves the composer intact rather than silently dropping it.
+    if submission.input.has_images()
+        && !crate::model_resolution::model_supports_vision(
+            &deps.registry,
+            Some(&deps.model_catalog),
+            &app.provider,
+            &app.model,
+        )
+    {
+        push_command_message(
+            app,
+            CommandOutputKind::Error,
+            "This model can't see images — remove the [Image N] chip or switch models.",
+        );
+        return true;
+    }
+    // Plan view routes prompts to the planning agent; the agent view talks to the
+    // coding agent.
+    let persona = app.active_persona.clone();
+    app.reduce(AppAction::SetTaskState(TaskState::Running));
+    app.mark_run_started(std::time::Instant::now());
+    app.reduce(AppAction::ScrollBottom);
+    // The transcript (and recall history) get the paste-expanded text — the chat
+    // shows what was pasted, not the `[Text N]` placeholder. The compact `input`
+    // keeps labeling the status line.
+    let transcript_text = submission.transcript_text.trim().to_string();
+    app.reduce(AppAction::SubmitInput(transcript_text.clone()));
+    let phase = app.active_mode().run_status_label();
+    app.reduce(AppAction::Agent(UiEvent::Thinking(format!(
+        "{phase}: {}",
+        summarize_input(input)
+    ))));
+    maybe_seed_session_title(app, deps.storage, &transcript_text).await;
+    sync_agent_self_review_mode(app.self_review_mode, &deps.agent).await;
+    if let Some(report) = repo_map.apply_before_turn(&deps.agent).await {
+        app.latest_context_report = Some(report);
+    }
+    if let Err(err) = tasks.start_agent_run(
+        deps.agent.clone(),
+        submission.input,
+        deps.sink.clone(),
+        persona,
+    ) {
+        app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
+    }
+    false
+}
+
+/// Handle the always-available and running-state submit commands (the `/`
+/// commands that work in any task state, plus running-slash-command routing and
+/// queueing). Returns `true` when the submit was fully handled and the caller
+/// should `continue` the frame; `false` when it falls through to idle
+/// slash-command dispatch / starting a run. Extracted from `run`'s Submit
+/// handling; the wide local list collapses into the `RuntimeActionDeps` bundle
+/// plus the persistence cursor and three registries not carried by it.
+#[allow(clippy::too_many_arguments)]
+async fn handle_toplevel_submit_command(
+    input: &str,
+    intent: KeyIntent,
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    deps: RuntimeActionDeps<'_>,
+    persistence: &mut PersistenceCommandState<'_>,
+    subagents: &crate::subagent::SubagentRegistry,
+    peer_bus: &crate::peer::PeerBus,
+    update_config: &crate::config::UpdateConfig,
+) -> bool {
+    if app.handle_copy_command(input) {
+        app.reduce(AppAction::SubmitCommandInput(input.to_string()));
+        return true;
+    }
+    if open_tasks_command_if_exact(input, app, &deps.background_tasks, &deps.terminals).await {
+        return true;
+    }
+    if matches!(input.trim(), "/subagents" | "/subtasks") {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        app.reduce(AppAction::RefreshSubtaskList {
+            subtasks: subagents.list(),
+        });
+        app.reduce(AppAction::OpenSubtaskList);
+        return true;
+    }
+    if input.trim() == "/peers" {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        let peers = peer_bus.overview().await.unwrap_or_default();
+        app.reduce(AppAction::OpenPeerList { peers });
+        return true;
+    }
+    if input.trim() == "/refresh" {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        handle_runtime_action(AppAction::StartRefresh, app, tasks, deps, persistence).await;
+        return true;
+    }
+    // `/usage` works in any task state, like `/peers`: the dashboard reads only
+    // persisted aggregates.
+    if input.trim() == "/usage" {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        match deps.storage.load_usage_dashboard().await {
+            Ok(dashboard) => {
+                app.reduce(AppAction::OpenUsageDashboard {
+                    dashboard: Box::new(dashboard),
+                });
+            }
+            Err(err) => push_command_message(
+                app,
+                CommandOutputKind::Error,
+                &format!("Failed to load usage analytics: {err:#}"),
+            ),
+        }
+        return true;
+    }
+    // `/bonsai` is pure decoration and works in any task state. Deliberately no
+    // transcript echo — an echoed command would end the empty-transcript welcome
+    // screen the hero tree lives on.
+    if input.trim() == "/bonsai" {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        app.reduce(AppAction::ReplantBonsai);
+        return true;
+    }
+    // `/select` toggles copy mode in any task state — the typed fallback for
+    // Ctrl+G. The draw loop reconciles the real terminal to the flag.
+    if input.trim() == "/select" {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        app.reduce(AppAction::ToggleMouseCapture);
+        return true;
+    }
+    // `/permissions` works in any task state and needs the shared manager.
+    if matches!(input.split_whitespace().next(), Some("/permissions")) {
+        app.reduce(AppAction::ScrollBottom);
+        app.reduce(AppAction::SubmitCommandInput(input.to_string()));
+        apply_permissions_command(
+            input,
+            app,
+            &deps.permissions,
+            &deps.domain_permissions,
+            deps.storage,
+            Some(*persistence.current_session_id),
+        )
+        .await;
+        return true;
+    }
+    // `/agents` works in any task state: the browser reads the shared registry
+    // and builtin-subagent settings handles — never the agent lock, which a
+    // running turn holds for its entire duration.
+    if input.trim() == "/agents" {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        let rows = crate::tui::agent_composer::browser_rows_with_settings(
+            &crate::resource::agent::snapshot(&app.custom_agents),
+            &app.builtin_subagents.snapshot(),
+        );
+        app.reduce(AppAction::OpenModal(ModalKind::AgentBrowser {
+            rows,
+            cursor: 0,
+        }));
+        return true;
+    }
+    // `/skills` works in any task state: rows build from the shared registry
+    // handle plus the loaded-skills mirror — never the agent lock.
+    if input.trim() == "/skills" {
+        app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
+        let rows = crate::tui::skill_manager::skill_rows(
+            &crate::resource::skill::snapshot(&app.skills),
+            &app.loaded_skills,
+        );
+        app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
+            rows,
+            cursor: 0,
+        }));
+        return true;
+    }
+    // `/update` works in any task state: the forced update runs in its own
+    // detached background task and never touches the agent or conversation.
+    if input.trim() == "/update" {
+        app.reduce(AppAction::ScrollBottom);
+        app.reduce(AppAction::SubmitCommandInput(input.to_string()));
+        spawn_update_command(
+            app,
+            tasks.runtime_sender(),
+            deps.storage.home_dir().to_path_buf(),
+            update_config.clone(),
+        );
+        return true;
+    }
+    // `/providers` works in any task state: the manager reads from the model
+    // catalog and registry without touching the conversation.
+    if matches!(input.split_whitespace().next(), Some("/providers")) {
+        app.reduce(AppAction::ScrollBottom);
+        app.reduce(AppAction::SubmitCommandInput(input.to_string()));
+        let providers_args = input.strip_prefix("/providers").unwrap_or("").trim();
+        crate::tui::runtime_actions::handle_providers_command(providers_args, app, deps).await;
+        return true;
+    }
+    if matches!(app.task_state, TaskState::Running) {
+        if input.starts_with('/')
+            && handle_running_slash_command(
+                input,
+                app,
+                PersistenceCommandDeps {
+                    storage: deps.storage,
+                    agent: deps.agent.clone(),
+                    memory: deps.memory.clone(),
+                    session_store: deps.session_store.clone(),
+                    registry: deps.registry.clone(),
+                    model_catalog: deps.model_catalog.clone(),
+                    todo_store: deps.todo_store.clone(),
+                    plan_store: deps.plan_store.clone(),
+                    project_root: deps.session_project_root,
+                    active_session_id: deps.active_session_id.clone(),
+                },
+                &deps.yolo_mode,
+                persistence,
+            )
+            .await
+        {
+            return true;
+        }
+        queue_running_submit(
+            app,
+            &*tasks,
+            intent,
+            &deps.registry,
+            Some(&deps.model_catalog),
+        );
+        return true;
+    }
+    if matches!(
+        app.task_state,
+        TaskState::Command | TaskState::Cancelling | TaskState::Exiting
+    ) {
+        return true;
+    }
+    false
+}
+
+/// Dispatch an idle-state `/`-command parsed from a composer submit. Extracted
+/// from `run`'s Submit handling: every dependency it needs is already carried by
+/// the `RuntimeActionDeps` bundle plus the persistence cursor, so it takes the
+/// same compact shape as `handle_runtime_action` rather than a wide local list.
+/// The caller echoes the command and `continue`s the frame after this returns.
+async fn handle_idle_slash_command(
+    command: IdleSlashCommand<'_>,
+    input: &str,
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    deps: RuntimeActionDeps<'_>,
+    persistence: &mut PersistenceCommandState<'_>,
+) {
+    match command {
+        IdleSlashCommand::Theme(arg) => {
+            if arg.is_empty() {
+                open_theme_picker(app);
+            } else {
+                apply_theme_command(arg, app, deps.project_root, deps.session_store.clone()).await;
+            }
+        }
+        IdleSlashCommand::Start => {
+            open_start_plan_choice(app, &deps.plan_store).await;
+        }
+        IdleSlashCommand::Continue => {
+            // Resume from the first pending phase, skipping the StartPlanChoice modal.
+            implement_plan_with_context(
+                app,
+                tasks,
+                deps.agent.clone(),
+                deps.sink.clone(),
+                deps.todo_store.clone(),
+                deps.plan_store.clone(),
+                crate::agent::PlanContextMode::Keep,
+            )
+            .await;
+        }
+        IdleSlashCommand::Test => {
+            run_test_profile(
+                app,
+                tasks,
+                deps.agent.clone(),
+                deps.sink.clone(),
+                deps.project_root,
+            )
+            .await;
+        }
+        IdleSlashCommand::Build => {
+            run_build_profile(
+                app,
+                tasks,
+                deps.agent.clone(),
+                deps.sink.clone(),
+                deps.project_root,
+            )
+            .await;
+        }
+        IdleSlashCommand::Retry => {
+            retry_last_turn(
+                input,
+                app,
+                tasks,
+                RetryCommandDeps {
+                    agent: deps.agent.clone(),
+                    sink: deps.sink.clone(),
+                    session_store: deps.session_store.clone(),
+                    registry: deps.registry.clone(),
+                    model_catalog: deps.model_catalog.clone(),
+                    storage: deps.storage,
+                    session_id: *persistence.current_session_id,
+                },
+            )
+            .await;
+        }
+        IdleSlashCommand::Commit => {
+            commit_changes(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
+        }
+        IdleSlashCommand::PullRequest => {
+            create_pull_request(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
+        }
+        IdleSlashCommand::Review => {
+            if !app.task_state.is_busy() {
+                app.reduce(AppAction::OpenModal(ModalKind::ReviewScopePicker {
+                    cursor: 0,
+                }));
+            }
+        }
+        IdleSlashCommand::SecurityReview => {
+            security_review_changes(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
+        }
+        IdleSlashCommand::Mode => {
+            // Rows are seeded by the reducer from current app state; pass an empty
+            // placeholder so OpenModal can rebind them.
+            app.reduce(AppAction::OpenModal(ModalKind::ModePicker {
+                rows: Vec::new(),
+                cursor: 0,
+            }));
+        }
+        IdleSlashCommand::Settings => {
+            // SMOL lives on the agent, so seed here (with the lock) rather than in
+            // the reducer.
+            let smol_profile = { deps.agent.lock().await.smol_profile() };
+            let rows = crate::tui::settings::seed_settings_rows(app, smol_profile);
+            let cursor = crate::tui::settings::first_selectable(&rows);
+            app.reduce(AppAction::OpenModal(ModalKind::Settings { rows, cursor }));
+        }
+        IdleSlashCommand::Wizard => {
+            match local_model_wizard_state_for_input(
+                input,
+                &deps.model_catalog,
+                deps.storage.home_dir(),
+                app.credential_persistence,
+            ) {
+                Ok(state) => {
+                    app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
+                        state: Box::new(state),
+                    }));
+                }
+                Err(message) => {
+                    push_command_message(app, CommandOutputKind::Error, &message);
+                }
+            }
+        }
+        IdleSlashCommand::Providers(args) => {
+            crate::tui::runtime_actions::handle_providers_command(args, app, deps).await;
+        }
+        IdleSlashCommand::Skills => {
+            let rows = crate::tui::skill_manager::skill_rows(
+                &crate::resource::skill::snapshot(&app.skills),
+                &app.loaded_skills,
+            );
+            app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
+                rows,
+                cursor: 0,
+            }));
+        }
+        IdleSlashCommand::AgentComposer => {
+            app.reduce(AppAction::OpenModal(ModalKind::AgentComposer {
+                state: Box::new(crate::tui::agent_composer::AgentComposerState::new()),
+            }));
+        }
+        IdleSlashCommand::AgentBrowser => {
+            let rows = crate::tui::agent_composer::browser_rows_with_settings(
+                &crate::resource::agent::snapshot(&app.custom_agents),
+                &app.builtin_subagents.snapshot(),
+            );
+            app.reduce(AppAction::OpenModal(ModalKind::AgentBrowser {
+                rows,
+                cursor: 0,
+            }));
+        }
+        IdleSlashCommand::Model => {
+            open_cached_model_picker(
+                app,
+                deps.session_store.clone(),
+                deps.registry.clone(),
+                deps.model_catalog.clone(),
+            )
+            .await;
+        }
+        IdleSlashCommand::Ctx => {
+            open_context_modal_with_preview(app, deps.agent.clone(), tasks.is_busy(), false).await;
+        }
+        IdleSlashCommand::Episodes => {
+            if app.latest_context_report.is_some() {
+                app.reduce(AppAction::OpenEpisodesModal);
+            } else {
+                push_command_message(
+                    app,
+                    CommandOutputKind::Status,
+                    "Context report is not available yet.",
+                );
+            }
+        }
+        IdleSlashCommand::Autonomy => {
+            apply_autonomy_command(input, app, &deps.yolo_mode, deps.storage).await;
+        }
+        IdleSlashCommand::SelfReview => {
+            apply_self_review_command(
+                input,
+                app,
+                deps.agent.clone(),
+                &deps.session_store,
+                &deps.registry,
+                &deps.model_catalog,
+                deps.storage,
+                true,
+            )
+            .await;
+        }
+        IdleSlashCommand::Smol => {
+            apply_smol_command(input, app, deps.agent.clone(), deps.storage, true).await;
+        }
+        IdleSlashCommand::Serenity => {
+            apply_serenity_command(input, app, deps.storage).await;
+        }
+        IdleSlashCommand::Sandbox => {
+            apply_sandbox_command(input, app, deps.storage).await;
+        }
+        IdleSlashCommand::Persistence(command) => {
+            if let Err(err) = apply_persistence_command(
+                command,
+                app,
+                PersistenceCommandDeps {
+                    storage: deps.storage,
+                    agent: deps.agent.clone(),
+                    memory: deps.memory.clone(),
+                    session_store: deps.session_store.clone(),
+                    registry: deps.registry.clone(),
+                    model_catalog: deps.model_catalog.clone(),
+                    todo_store: deps.todo_store.clone(),
+                    plan_store: deps.plan_store.clone(),
+                    project_root: deps.session_project_root,
+                    active_session_id: deps.active_session_id.clone(),
+                },
+                persistence,
+            )
+            .await
+            {
+                push_command_message(app, CommandOutputKind::Error, &format!("{err:#}"));
+            }
+        }
+    }
+}
+
 fn provider_selection_to_persist(
     app: &AppState,
     event: &RuntimeEvent,
@@ -2416,88 +2977,16 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 break 'run Ok(());
                             }
                             KeyIntent::CancelOrQuit => {
-                                let now = Instant::now();
-                                let has_running_subagents = subagents
-                                    .list_detached()
-                                    .iter()
-                                    .any(|subagent| !subagent.status.is_finished());
-                                match next_ctrl_c_action(
-                                    app.task_state,
-                                    has_running_subagents,
-                                    ctrl_c_prompt,
-                                    now,
-                                ) {
-                                    CtrlCAction::ConfirmExit => {
-                                        tracing::info!(
-                                            task_state = ?app.task_state,
-                                            "ctrl+c: exit confirmed; breaking run loop"
-                                        );
-                                        tasks.abort();
-                                        clear_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt);
-                                        app.clear_run_timer();
-                                        app.reduce(AppAction::SetTaskState(TaskState::Exiting));
-                                        break 'run Ok(());
-                                    }
-                                    CtrlCAction::CancelRunAndArm => {
-                                        let queued_ids = app.queued_input_ids();
-                                        if let Err(err) = tasks.cancel_agent_messages(&queued_ids) {
-                                            app.reduce(AppAction::Agent(UiEvent::Error(err)));
-                                        }
-                                        app.reduce(AppAction::DropQueuedInput);
-                                        tasks.cancel();
-                                        tracing::info!(
-                                            "ctrl+c: cancelling running task; exit armed"
-                                        );
-                                        app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
-                                        set_ctrl_c_prompt(
-                                            &mut app,
-                                            &mut ctrl_c_prompt,
-                                            CtrlCExitPromptKind::Cancelling,
-                                            now,
-                                        );
-                                    }
-                                    CtrlCAction::CancelSubagentsAndArm => {
-                                        agent.lock().await.cancel_running_subagents();
-                                        tracing::info!(
-                                            "ctrl+c: cancelling background subagents; exit armed"
-                                        );
-                                        set_ctrl_c_prompt(
-                                            &mut app,
-                                            &mut ctrl_c_prompt,
-                                            CtrlCExitPromptKind::Cancelling,
-                                            now,
-                                        );
-                                    }
-                                    CtrlCAction::CancelCommandAndArm => {
-                                        tasks.abort();
-                                        // Invalidate any command spawned on a raw
-                                        // `tokio::spawn` (auth/model/local-model):
-                                        // `abort` doesn't reach those, so bump the
-                                        // generation to drop their late, stale
-                                        // `CommandFinished` instead of letting it
-                                        // flip provider/model after we go idle.
-                                        app.invalidate_pending_commands();
-                                        app.clear_run_timer();
-                                        app.reduce(AppAction::SetTaskState(TaskState::Idle));
-                                        set_ctrl_c_prompt(
-                                            &mut app,
-                                            &mut ctrl_c_prompt,
-                                            CtrlCExitPromptKind::Exit,
-                                            now,
-                                        );
-                                    }
-                                    CtrlCAction::ArmExit => {
-                                        tracing::info!(
-                                            task_state = ?app.task_state,
-                                            "ctrl+c: armed exit prompt"
-                                        );
-                                        set_ctrl_c_prompt(
-                                            &mut app,
-                                            &mut ctrl_c_prompt,
-                                            CtrlCExitPromptKind::Exit,
-                                            now,
-                                        );
-                                    }
+                                if handle_ctrl_c(
+                                    &mut app,
+                                    &mut tasks,
+                                    &mut ctrl_c_prompt,
+                                    &subagents,
+                                    &agent,
+                                )
+                                .await
+                                {
+                                    break 'run Ok(());
                                 }
                             }
                             intent @ (KeyIntent::Submit | KeyIntent::SubmitReplacement(_)) => {
@@ -2514,228 +3003,23 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 if input.is_empty() {
                                     continue;
                                 }
-                                if app.handle_copy_command(&input) {
-                                    app.reduce(AppAction::SubmitCommandInput(input.clone()));
-                                    continue;
-                                }
-                                if open_tasks_command_if_exact(
+                                let mut persistence = PersistenceCommandState {
+                                    current_session_id: &mut current_session_id,
+                                    signatures: &mut persisted_signatures,
+                                };
+                                if handle_toplevel_submit_command(
                                     &input,
+                                    intent,
                                     &mut app,
-                                    &background_tasks,
-                                    &terminals,
+                                    &mut tasks,
+                                    runtime_action_deps!(),
+                                    &mut persistence,
+                                    &subagents,
+                                    &peer_bus,
+                                    &update_config,
                                 )
                                 .await
                                 {
-                                    continue;
-                                }
-                                if matches!(input.trim(), "/subagents" | "/subtasks") {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    app.reduce(AppAction::RefreshSubtaskList {
-                                        subtasks: subagents.list(),
-                                    });
-                                    app.reduce(AppAction::OpenSubtaskList);
-                                    continue;
-                                }
-                                if input.trim() == "/peers" {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    let peers = peer_bus.overview().await.unwrap_or_default();
-                                    app.reduce(AppAction::OpenPeerList { peers });
-                                    continue;
-                                }
-                                if input.trim() == "/refresh" {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    let mut persistence = PersistenceCommandState {
-                                        current_session_id: &mut current_session_id,
-                                        signatures: &mut persisted_signatures,
-                                    };
-                                    handle_runtime_action(
-                                        AppAction::StartRefresh,
-                                        &mut app,
-                                        &mut tasks,
-                                        runtime_action_deps!(),
-                                        &mut persistence,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                // `/usage` works in any task state, like `/peers`:
-                                // the dashboard reads only persisted aggregates.
-                                if input.trim() == "/usage" {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    match storage.load_usage_dashboard().await {
-                                        Ok(dashboard) => {
-                                            app.reduce(AppAction::OpenUsageDashboard {
-                                                dashboard: Box::new(dashboard),
-                                            });
-                                        }
-                                        Err(err) => push_command_message(
-                                            &mut app,
-                                            CommandOutputKind::Error,
-                                            &format!("Failed to load usage analytics: {err:#}"),
-                                        ),
-                                    }
-                                    continue;
-                                }
-                                // `/bonsai` is pure decoration and works in any task
-                                // state: reseed and regrow the welcome/sidebar trees.
-                                // Deliberately no transcript echo — an echoed command
-                                // would end the empty-transcript welcome screen the
-                                // hero tree lives on.
-                                if input.trim() == "/bonsai" {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    app.reduce(AppAction::ReplantBonsai);
-                                    continue;
-                                }
-                                // `/select` toggles copy mode (release mouse
-                                // capture for native terminal text selection) in
-                                // any task state — the typed fallback for Ctrl+G,
-                                // guaranteed to reach the app regardless of any
-                                // terminal/IDE keybinding collision. The draw loop
-                                // reconciles the real terminal to the flag.
-                                if input.trim() == "/select" {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    app.reduce(AppAction::ToggleMouseCapture);
-                                    continue;
-                                }
-                                // `/permissions` works in any task state and needs the
-                                // shared manager, so handle it here rather than in the
-                                // running/idle slash-command paths.
-                                if matches!(input.split_whitespace().next(), Some("/permissions")) {
-                                    app.reduce(AppAction::ScrollBottom);
-                                    app.reduce(AppAction::SubmitCommandInput(input.clone()));
-                                    apply_permissions_command(
-                                        &input,
-                                        &mut app,
-                                        &permissions,
-                                        &domain_permissions,
-                                        &storage,
-                                        Some(current_session_id),
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                // `/agents` works in any task state: the browser reads the
-                                // shared custom-agent registry and builtin-subagent settings
-                                // handles — never the agent lock, which a running turn holds
-                                // for its entire duration (locking here froze the whole TUI
-                                // until the turn ended).
-                                if input.trim() == "/agents" {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    let rows =
-                                        crate::tui::agent_composer::browser_rows_with_settings(
-                                            &crate::resource::agent::snapshot(&app.custom_agents),
-                                            &app.builtin_subagents.snapshot(),
-                                        );
-                                    app.reduce(AppAction::OpenModal(ModalKind::AgentBrowser {
-                                        rows,
-                                        cursor: 0,
-                                    }));
-                                    continue;
-                                }
-                                // `/skills` works in any task state: rows build from the
-                                // shared registry handle plus the loaded-skills mirror —
-                                // never the agent lock (see `/agents` above).
-                                if input.trim() == "/skills" {
-                                    app.reduce(AppAction::SubmitCommandInput(
-                                        input.trim().to_string(),
-                                    ));
-                                    let rows = crate::tui::skill_manager::skill_rows(
-                                        &crate::resource::skill::snapshot(&app.skills),
-                                        &app.loaded_skills,
-                                    );
-                                    app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
-                                        rows,
-                                        cursor: 0,
-                                    }));
-                                    continue;
-                                }
-                                // `/update` works in any task state: the forced
-                                // update runs in its own detached background task
-                                // guarded by the update file lock, and never
-                                // touches the agent or the conversation.
-                                if input.trim() == "/update" {
-                                    app.reduce(AppAction::ScrollBottom);
-                                    app.reduce(AppAction::SubmitCommandInput(input.clone()));
-                                    spawn_update_command(
-                                        &mut app,
-                                        tasks.runtime_sender(),
-                                        storage.home_dir().to_path_buf(),
-                                        update_config.clone(),
-                                    );
-                                    continue;
-                                }
-                                // `/providers` works in any task state: the provider
-                                // manager reads from the model catalog and registry
-                                // without touching the conversation.
-                                if matches!(input.split_whitespace().next(), Some("/providers")) {
-                                    app.reduce(AppAction::ScrollBottom);
-                                    app.reduce(AppAction::SubmitCommandInput(input.clone()));
-                                    let providers_args =
-                                        input.strip_prefix("/providers").unwrap_or("").trim();
-                                    crate::tui::runtime_actions::handle_providers_command(
-                                        providers_args,
-                                        &mut app,
-                                        runtime_action_deps!(),
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                if matches!(app.task_state, TaskState::Running) {
-                                    if input.starts_with('/') {
-                                        let mut persistence = PersistenceCommandState {
-                                            current_session_id: &mut current_session_id,
-                                            signatures: &mut persisted_signatures,
-                                        };
-                                        if handle_running_slash_command(
-                                            &input,
-                                            &mut app,
-                                            PersistenceCommandDeps {
-                                                storage: &storage,
-                                                agent: agent.clone(),
-                                                memory: memory.clone(),
-                                                session_store: session_store.clone(),
-                                                registry: registry.clone(),
-                                                model_catalog: model_catalog.clone(),
-                                                todo_store: todo_store.clone(),
-                                                plan_store: plan_store.clone(),
-                                                project_root: &session_project_root,
-                                                active_session_id: active_session_id.clone(),
-                                            },
-                                            &yolo_mode,
-                                            &mut persistence,
-                                        )
-                                        .await
-                                        {
-                                            continue;
-                                        }
-                                    }
-                                    queue_running_submit(
-                                        &mut app,
-                                        &tasks,
-                                        intent,
-                                        &registry,
-                                        Some(&model_catalog),
-                                    );
-                                    continue;
-                                }
-                                if matches!(
-                                    app.task_state,
-                                    TaskState::Command | TaskState::Cancelling | TaskState::Exiting
-                                ) {
                                     continue;
                                 }
                                 if let Some(command) = idle_slash_command(&input) {
@@ -2744,374 +3028,33 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                     // only their distinctive work.
                                     app.reduce(AppAction::ScrollBottom);
                                     app.reduce(AppAction::SubmitCommandInput(input.clone()));
-                                    match command {
-                                        IdleSlashCommand::Theme(arg) => {
-                                            if arg.is_empty() {
-                                                open_theme_picker(&mut app);
-                                            } else {
-                                                apply_theme_command(
-                                                    arg,
-                                                    &mut app,
-                                                    &project_root,
-                                                    session_store.clone(),
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                        IdleSlashCommand::Start => {
-                                            open_start_plan_choice(&mut app, &plan_store).await;
-                                        }
-                                        IdleSlashCommand::Continue => {
-                                            // Resume from the first pending phase, skipping the
-                                            // StartPlanChoice modal.
-                                            implement_plan_with_context(
-                                                &mut app,
-                                                &mut tasks,
-                                                agent.clone(),
-                                                sink.clone(),
-                                                todo_store.clone(),
-                                                plan_store.clone(),
-                                                crate::agent::PlanContextMode::Keep,
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Test => {
-                                            run_test_profile(
-                                                &mut app,
-                                                &mut tasks,
-                                                agent.clone(),
-                                                sink.clone(),
-                                                &project_root,
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Build => {
-                                            run_build_profile(
-                                                &mut app,
-                                                &mut tasks,
-                                                agent.clone(),
-                                                sink.clone(),
-                                                &project_root,
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Retry => {
-                                            retry_last_turn(
-                                                &input,
-                                                &mut app,
-                                                &mut tasks,
-                                                RetryCommandDeps {
-                                                    agent: agent.clone(),
-                                                    sink: sink.clone(),
-                                                    session_store: session_store.clone(),
-                                                    registry: registry.clone(),
-                                                    model_catalog: model_catalog.clone(),
-                                                    storage: &storage,
-                                                    session_id: current_session_id,
-                                                },
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Commit => {
-                                            commit_changes(
-                                                &mut app,
-                                                &mut tasks,
-                                                agent.clone(),
-                                                sink.clone(),
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::PullRequest => {
-                                            create_pull_request(
-                                                &mut app,
-                                                &mut tasks,
-                                                agent.clone(),
-                                                sink.clone(),
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Review => {
-                                            if !app.task_state.is_busy() {
-                                                app.reduce(AppAction::OpenModal(
-                                                    ModalKind::ReviewScopePicker { cursor: 0 },
-                                                ));
-                                            }
-                                        }
-                                        IdleSlashCommand::SecurityReview => {
-                                            security_review_changes(
-                                                &mut app,
-                                                &mut tasks,
-                                                agent.clone(),
-                                                sink.clone(),
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Mode => {
-                                            // Rows are seeded by the reducer from
-                                            // current app state; pass an empty
-                                            // placeholder so OpenModal can rebind
-                                            // them.
-                                            app.reduce(AppAction::OpenModal(
-                                                ModalKind::ModePicker {
-                                                    rows: Vec::new(),
-                                                    cursor: 0,
-                                                },
-                                            ));
-                                        }
-                                        IdleSlashCommand::Settings => {
-                                            // SMOL lives on the agent, so seed here
-                                            // (with the lock) rather than in the
-                                            // reducer.
-                                            let smol_profile =
-                                                { agent.lock().await.smol_profile() };
-                                            let rows = crate::tui::settings::seed_settings_rows(
-                                                &app,
-                                                smol_profile,
-                                            );
-                                            let cursor =
-                                                crate::tui::settings::first_selectable(&rows);
-                                            app.reduce(AppAction::OpenModal(ModalKind::Settings {
-                                                rows,
-                                                cursor,
-                                            }));
-                                        }
-                                        IdleSlashCommand::Wizard => {
-                                            match local_model_wizard_state_for_input(
-                                                &input,
-                                                &model_catalog,
-                                                storage.home_dir(),
-                                                app.credential_persistence,
-                                            ) {
-                                                Ok(state) => {
-                                                    app.reduce(AppAction::OpenModal(
-                                                        ModalKind::LocalModelWizard {
-                                                            state: Box::new(state),
-                                                        },
-                                                    ));
-                                                }
-                                                Err(message) => {
-                                                    push_command_message(
-                                                        &mut app,
-                                                        CommandOutputKind::Error,
-                                                        &message,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        IdleSlashCommand::Providers(args) => {
-                                            crate::tui::runtime_actions::handle_providers_command(
-                                                args,
-                                                &mut app,
-                                                runtime_action_deps!(),
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Skills => {
-                                            let rows = crate::tui::skill_manager::skill_rows(
-                                                &crate::resource::skill::snapshot(&app.skills),
-                                                &app.loaded_skills,
-                                            );
-                                            app.reduce(AppAction::OpenModal(
-                                                ModalKind::SkillManager { rows, cursor: 0 },
-                                            ));
-                                        }
-                                        IdleSlashCommand::AgentComposer => {
-                                            app.reduce(AppAction::OpenModal(
-                                                ModalKind::AgentComposer {
-                                                    state: Box::new(
-                                                        crate::tui::agent_composer::AgentComposerState::new(),
-                                                    ),
-                                                },
-                                            ));
-                                        }
-                                        IdleSlashCommand::AgentBrowser => {
-                                            let rows =
-                                                crate::tui::agent_composer::browser_rows_with_settings(
-                                                    &crate::resource::agent::snapshot(&app.custom_agents),
-                                                    &app.builtin_subagents.snapshot(),
-                                                );
-                                            app.reduce(AppAction::OpenModal(
-                                                ModalKind::AgentBrowser { rows, cursor: 0 },
-                                            ));
-                                        }
-                                        IdleSlashCommand::Model => {
-                                            open_cached_model_picker(
-                                                &mut app,
-                                                session_store.clone(),
-                                                registry.clone(),
-                                                model_catalog.clone(),
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Ctx => {
-                                            open_context_modal_with_preview(
-                                                &mut app,
-                                                agent.clone(),
-                                                tasks.is_busy(),
-                                                false,
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Episodes => {
-                                            if app.latest_context_report.is_some() {
-                                                app.reduce(AppAction::OpenEpisodesModal);
-                                            } else {
-                                                push_command_message(
-                                                    &mut app,
-                                                    CommandOutputKind::Status,
-                                                    "Context report is not available yet.",
-                                                );
-                                            }
-                                        }
-                                        IdleSlashCommand::Autonomy => {
-                                            apply_autonomy_command(
-                                                &input, &mut app, &yolo_mode, &storage,
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::SelfReview => {
-                                            apply_self_review_command(
-                                                &input,
-                                                &mut app,
-                                                agent.clone(),
-                                                &session_store,
-                                                &registry,
-                                                &model_catalog,
-                                                &storage,
-                                                true,
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Smol => {
-                                            apply_smol_command(
-                                                &input,
-                                                &mut app,
-                                                agent.clone(),
-                                                &storage,
-                                                true,
-                                            )
-                                            .await;
-                                        }
-                                        IdleSlashCommand::Serenity => {
-                                            apply_serenity_command(&input, &mut app, &storage)
-                                                .await;
-                                        }
-                                        IdleSlashCommand::Sandbox => {
-                                            apply_sandbox_command(&input, &mut app, &storage).await;
-                                        }
-                                        IdleSlashCommand::Persistence(command) => {
-                                            let mut persistence = PersistenceCommandState {
-                                                current_session_id: &mut current_session_id,
-                                                signatures: &mut persisted_signatures,
-                                            };
-                                            if let Err(err) = apply_persistence_command(
-                                                command,
-                                                &mut app,
-                                                PersistenceCommandDeps {
-                                                    storage: &storage,
-                                                    agent: agent.clone(),
-                                                    memory: memory.clone(),
-                                                    session_store: session_store.clone(),
-                                                    registry: registry.clone(),
-                                                    model_catalog: model_catalog.clone(),
-                                                    todo_store: todo_store.clone(),
-                                                    plan_store: plan_store.clone(),
-                                                    project_root: &session_project_root,
-                                                    active_session_id: active_session_id.clone(),
-                                                },
-                                                &mut persistence,
-                                            )
-                                            .await
-                                            {
-                                                push_command_message(
-                                                    &mut app,
-                                                    CommandOutputKind::Error,
-                                                    &format!("{err:#}"),
-                                                );
-                                            }
-                                        }
-                                    }
+                                    let mut persistence = PersistenceCommandState {
+                                        current_session_id: &mut current_session_id,
+                                        signatures: &mut persisted_signatures,
+                                    };
+                                    handle_idle_slash_command(
+                                        command,
+                                        &input,
+                                        &mut app,
+                                        &mut tasks,
+                                        runtime_action_deps!(),
+                                        &mut persistence,
+                                    )
+                                    .await;
                                     continue;
                                 }
 
-                                if input.starts_with('/') {
-                                    app.reduce(AppAction::ScrollBottom);
-                                    app.reduce(AppAction::SubmitCommandInput(input.clone()));
-                                    app.reduce(AppAction::SetTaskState(TaskState::Command));
-                                    let command_deps = CommandTaskDeps::new(
-                                        agent.clone(),
-                                        session_store.clone(),
-                                        project_root.clone(),
-                                        registry.clone(),
-                                        model_catalog.clone(),
-                                        Some(storage.clone()),
-                                        app.credential_persistence,
-                                        app.active_persona.builtin(),
-                                    );
-                                    if let Err(err) = tasks.start_command(
-                                        input,
-                                        app.transcript.to_vec(),
-                                        app.command_generation(),
-                                        command_deps,
-                                    ) {
-                                        app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(
-                                            err,
-                                        )));
-                                    }
-                                } else {
-                                    // Vision gate: an attached image on a model
-                                    // that can't see images aborts the submit and
-                                    // leaves the composer intact rather than
-                                    // silently dropping the image.
-                                    if submission.input.has_images()
-                                        && !crate::model_resolution::model_supports_vision(
-                                            &registry,
-                                            Some(&model_catalog),
-                                            &app.provider,
-                                            &app.model,
-                                        )
-                                    {
-                                        push_command_message(
-                                            &mut app,
-                                            CommandOutputKind::Error,
-                                            "This model can't see images — remove the [Image N] chip or switch models.",
-                                        );
-                                        continue;
-                                    }
-                                    // Plan view routes prompts to the planning agent;
-                                    // the agent view talks to the coding agent.
-                                    let persona = app.active_persona.clone();
-                                    app.reduce(AppAction::SetTaskState(TaskState::Running));
-                                    app.mark_run_started(std::time::Instant::now());
-                                    app.reduce(AppAction::ScrollBottom);
-                                    // The transcript (and recall history) get the
-                                    // paste-expanded text — the chat shows what was
-                                    // pasted, not the `[Text N]` placeholder. The
-                                    // compact `input` keeps labeling the status line.
-                                    let transcript_text =
-                                        submission.transcript_text.trim().to_string();
-                                    app.reduce(AppAction::SubmitInput(transcript_text.clone()));
-                                    let phase = app.active_mode().run_status_label();
-                                    app.reduce(AppAction::Agent(UiEvent::Thinking(format!(
-                                        "{phase}: {}",
-                                        summarize_input(&input)
-                                    ))));
-                                    maybe_seed_session_title(&mut app, &storage, &transcript_text)
-                                        .await;
-                                    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
-                                    if let Some(report) = repo_map.apply_before_turn(&agent).await {
-                                        app.latest_context_report = Some(report);
-                                    }
-                                    if let Err(err) = tasks.start_agent_run(
-                                        agent.clone(),
-                                        submission.input,
-                                        sink.clone(),
-                                        persona,
-                                    ) {
-                                        app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(
-                                            err,
-                                        )));
-                                    }
+                                if submit_and_start_run(
+                                    submission,
+                                    &input,
+                                    &mut app,
+                                    &mut tasks,
+                                    runtime_action_deps!(),
+                                    &mut repo_map,
+                                )
+                                .await
+                                {
+                                    continue;
                                 }
                             }
                             KeyIntent::Insert(ch) => app.reduce(AppAction::InputChar(ch)),
