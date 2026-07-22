@@ -1984,12 +1984,15 @@ async fn model_numeric_argument_uses_current_provider_model() {
 
     assert!(!outcome.opens_model_picker());
     assert_eq!(store.current_kind_id(), "opencode");
-    assert_eq!(store.session("opencode").model, "model-four");
+    assert_eq!(store.session("opencode").model, "opencode/model-four");
     assert_eq!(
         store.active_connection_id().map(|id| id.as_str()),
         Some("opencode")
     );
-    assert_eq!(store.active_model_id().map(|id| id.as_str()), None);
+    assert_eq!(
+        store.active_model_id().map(|id| id.as_str()),
+        Some("opencode/model-four")
+    );
 }
 
 #[tokio::test]
@@ -2016,7 +2019,10 @@ async fn model_command_records_selection_against_the_active_mode() {
     .await
     .unwrap();
 
-    assert_eq!(store.mode_model("coding"), Some("opencode:model-two"));
+    assert_eq!(
+        store.mode_model("coding"),
+        Some("opencode:opencode/model-two")
+    );
     assert_eq!(store.mode_model("planning"), Some(previous.as_str()));
 }
 
