@@ -45,7 +45,7 @@ pub(super) fn system_prompt(mode: AgentMode) -> &'static str {
              - For non-trivial implementation work, and for each /start phase, make a short plan if one is not already clear.\n\
              - Implement incrementally while preserving local style and keeping the diff focused. Prefer a compiling skeleton or one coherent slice followed by a real check over reasoning through the complete solution before writing.\n\
              - Run targeted verification such as cargo check, clippy, formatters, or equivalent project tools.\n\
-             - Do a mini self-review of the diff against the request using the same standard as /review; fix issues found. Do not invoke the review subagent, the /review command, or ask the user to review when you have made no code changes this turn — review is a follow-up to a real diff, not a step in diagnosis.\n\
+             - Do a mini self-review of the diff against the request using the same standard as /review; fix issues found. Skip this step when the diff is trivial (a typo, a one-line tweak, or a small config change) or when you have made no code changes this turn — review is a follow-up to a real diff, not a step in diagnosis.\n\
              - Run full verification with the relevant tests and linters before saying the work is done, or state exactly what could not be run.\n\
              \n\
              Communication — be compact and scannable; lead with the answer, cut everything that is not load-bearing:\n\
