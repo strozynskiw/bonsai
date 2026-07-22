@@ -409,6 +409,127 @@ fn sync_plan_store_snapshot(
     true
 }
 
+/// Adopt the todo store's list when the model has rewritten it, resetting the
+/// browse state to follow the active phase again. Uses `try_lock` so a
+/// foreground command holding the store can't wedge the loop. Returns whether
+/// anything changed. One of `run`'s per-frame phases.
+fn sync_todo_snapshot(app: &mut AppState, todo_store: &SharedTodoStore) -> bool {
+    let Ok(guard) = todo_store.try_lock() else {
+        return false;
+    };
+    // Only re-clone when the todo list actually changed; the common idle frame
+    // leaves it untouched and pays no allocation.
+    if guard.todos() == app.todo.as_slice() {
+        return false;
+    }
+    app.todo = guard.todos().to_vec();
+    // The model rewrote the list: stop browsing, follow the active phase again,
+    // and bring its in-progress item into view at clamp time (resolved once the
+    // sidebar size is known).
+    app.todo_phase_view = None;
+    app.scroll_todo_in_progress_into_view = true;
+    true
+}
+
+/// Refresh the read-only model-completion snapshots when the persisted catalog
+/// signature changed. Uses `try_lock` so a foreground command already holding
+/// the session lock cannot block the event loop and wedge Ctrl+C. Returns
+/// whether anything changed. One of `run`'s per-frame phases.
+fn refresh_cached_model_choices(
+    app: &mut AppState,
+    session_store: &Arc<Mutex<SessionStore>>,
+    registry: &Arc<ProviderRegistry>,
+    model_catalog: &Arc<crate::model_catalog::ModelCatalog>,
+    last_model_cache_signature: &mut u64,
+) -> bool {
+    let Ok(guard) = session_store.try_lock() else {
+        return false;
+    };
+    let signature = cached_model_signature(&guard, model_catalog);
+    if signature == *last_model_cache_signature {
+        return false;
+    }
+    app.sync_cached_model_choices(&guard, registry, Some(model_catalog));
+    *last_model_cache_signature = signature;
+    true
+}
+
+/// Mirror the frame's run status: publish working/idle into the heartbeat's
+/// shared flag (so concurrent sessions see availability without a message
+/// round-trip), and mirror the in-flight run's persona for the composer meta
+/// line (rendering the pending `Running → Selected` switch instead of silently
+/// relabeling a run still executing under its dispatch-time persona). Returns
+/// whether the persona changed (a redraw is needed). One of `run`'s per-frame
+/// phases.
+fn mirror_run_status(
+    app: &mut AppState,
+    tasks: &TaskController,
+    busy_flag: &crate::storage::SharedBusyFlag,
+) -> bool {
+    busy_flag.store(
+        app.task_state.is_busy(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let running_persona = tasks.active_agent_persona().cloned();
+    if app.running_persona != running_persona {
+        app.running_persona = running_persona;
+        return true;
+    }
+    false
+}
+
+/// Handle a terminal mouse event for the frame: clear any pending Ctrl+C prompt,
+/// map the event to an action against the current layout, and apply it (opening
+/// the context modal with a live preview when that's the mapped action). One of
+/// `run`'s terminal-event handlers.
+async fn handle_mouse_event(
+    mouse: crossterm::event::MouseEvent,
+    app: &mut AppState,
+    ctrl_c_prompt: &mut Option<CtrlCExitPrompt>,
+    terminal: &mut TerminalSession,
+    agent: &Arc<Mutex<Agent>>,
+    tasks: &TaskController,
+) -> Result<()> {
+    clear_ctrl_c_prompt(app, ctrl_c_prompt);
+    let area = terminal.terminal_mut().size()?.into();
+    if let Some(action) = map_mouse(mouse, app, area) {
+        if matches!(action, AppAction::OpenContextModal) {
+            open_context_modal_with_preview(app, agent.clone(), tasks.is_busy(), true).await;
+        } else {
+            apply_action_with_task_side_effects(action, app, tasks);
+        }
+    }
+    Ok(())
+}
+
+/// Handle a bracketed-paste event for the frame: route it to the active modal's
+/// paste path, recover a clipboard image when an empty paste arrives over the
+/// composer (some terminals send that for image-only clipboards), or insert the
+/// text into the composer. One of `run`'s terminal-event handlers.
+fn handle_paste_event(
+    text: String,
+    app: &mut AppState,
+    ctrl_c_prompt: &mut Option<CtrlCExitPrompt>,
+    registry: &Arc<ProviderRegistry>,
+    model_catalog: &Arc<crate::model_catalog::ModelCatalog>,
+) {
+    clear_ctrl_c_prompt(app, ctrl_c_prompt);
+    if matches!(app.modal, Some(ModalKind::ApiKeyPrompt { .. })) {
+        app.reduce(AppAction::ApiKeyInputPaste(text));
+    } else if matches!(app.modal, Some(ModalKind::LocalModelWizard { .. })) {
+        app.reduce(AppAction::LocalModelWizardPaste(text));
+    } else if matches!(app.modal, Some(ModalKind::AgentComposer { .. })) {
+        app.reduce(AppAction::AgentComposerPaste(text));
+    } else if matches!(app.focus, Focus::Input) && text.trim().is_empty() {
+        // Some terminals deliver an empty bracketed paste when the clipboard
+        // holds only an image; recover it via the clipboard-image path rather
+        // than inserting nothing.
+        crate::tui::runtime_actions::paste_from_clipboard(app, registry, Some(model_catalog));
+    } else {
+        app.reduce(AppAction::PasteText(text));
+    }
+}
+
 fn provider_selection_to_persist(
     app: &AppState,
     event: &RuntimeEvent,
@@ -1924,75 +2045,25 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             });
         }
 
-        let mut refresh_task_list = false;
-        let mut wake_candidate = false;
-        while let Ok(event) = background_events.try_recv() {
-            frame_needs_redraw = true;
-            let effect = apply_background_task_event(&mut app, event);
-            refresh_task_list |= effect.refresh_task_list;
-            wake_candidate |= effect.wake_candidate;
-        }
-        while let Ok(event) = terminal_events.try_recv() {
-            frame_needs_redraw = true;
-            let effect = apply_terminal_event(&mut app, event);
-            refresh_task_list |= effect.refresh_task_list;
-            wake_candidate |= effect.wake_candidate;
-        }
-        if refresh_task_list && app.is_task_list_open() {
-            refresh_background_task_list(&mut app, &background_tasks, &terminals).await;
-        }
-        if wake_candidate
-            && (background_tasks.agent_wake_ready().await || terminals.agent_wake_ready().await)
-        {
-            pending_background_wake = Some(Instant::now() + BACKGROUND_AGENT_WAKE_DELAY);
-        }
+        frame_needs_redraw |= drain_background_and_terminal_channels(
+            &mut background_events,
+            &mut terminal_events,
+            &mut app,
+            &background_tasks,
+            &terminals,
+            &mut pending_background_wake,
+        )
+        .await;
 
-        // Subagent activity: while `/subagents` is open, keep its snapshot
-        // fresh so it updates live. Each snapshot deep-clones the run's activity
-        // and result (up to ~18 KB), so only do this work when the modal is
-        // actually visible — the open paths (`/subagents` command and the Alt+S
-        // keybind, below) refresh on open, so a closed modal can't go stale.
-        let mut subagents_changed = false;
-        let mut subagent_wake_candidate = false;
-        loop {
-            match subagent_events.try_recv() {
-                Ok(event) => {
-                    subagents_changed = true;
-                    // Activity only changes the /subtasks snapshot. Marking the
-                    // main view dirty for every streamed token bypasses the
-                    // active redraw throttle and can overwhelm slower terminals
-                    // when several subagents stream concurrently. The normal
-                    // active-frame deadline still advances timers at 10 FPS.
-                    frame_needs_redraw |=
-                        subagent_event_requests_redraw(event, app.is_subtask_list_open());
-                    if matches!(event, crate::subagent::SubagentEvent::Finished) {
-                        subagent_wake_candidate = true;
-                    }
-                }
-                // A burst that overran the 256-slot buffer still means the list
-                // changed; treat the lag as a change so we don't skip the refresh.
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
-                    subagents_changed = true;
-                    subagent_wake_candidate = true;
-                    frame_needs_redraw |= app.is_subtask_list_open();
-                }
-                Err(_) => break,
-            }
-        }
-        if subagents_changed {
-            // Runs adopt their model onto the launching `agent` tool call via a
-            // cheap ids+models projection; the full snapshot list (which clones
-            // every run's activity) is still only taken while /subagents is open.
-            frame_needs_redraw |= app.adopt_subagent_models(&subagents.tool_call_models());
-            if app.is_subtask_list_open() {
-                app.reduce(AppAction::RefreshSubtaskList {
-                    subtasks: subagents.list(),
-                });
-            }
-        }
-        if subagent_wake_candidate && subagents.agent_wake_ready() {
-            pending_background_wake = Some(Instant::now() + BACKGROUND_AGENT_WAKE_DELAY);
-        }
+        // Subagent activity: while `/subagents` is open, keep its snapshot fresh
+        // so it updates live. Each snapshot deep-clones the run's activity and
+        // result (up to ~18 KB), so the work stays gated on the modal being open.
+        frame_needs_redraw |= drain_subagent_channel(
+            &mut subagent_events,
+            &mut app,
+            &subagents,
+            &mut pending_background_wake,
+        );
 
         let registry_before_drain = Arc::as_ptr(&registry);
         let catalog_before_drain = Arc::as_ptr(&model_catalog);
@@ -2146,35 +2217,19 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         if app.bonsai_growing() {
             frame_needs_redraw = true;
         }
-        if let Ok(guard) = todo_store.try_lock() {
-            // Only re-clone when the todo list actually changed; the common
-            // idle frame leaves it untouched and pays no allocation.
-            if guard.todos() != app.todo.as_slice() {
-                app.todo = guard.todos().to_vec();
-                frame_needs_redraw = true;
-                // The model rewrote the list: stop browsing, follow the active
-                // phase again, and bring its in-progress item into view at clamp
-                // time (resolved once the sidebar size is known).
-                app.todo_phase_view = None;
-                app.scroll_todo_in_progress_into_view = true;
-            }
-        }
+        frame_needs_redraw |= sync_todo_snapshot(&mut app, &todo_store);
         if let Ok(plan) = plan_store.try_lock() {
             frame_needs_redraw |=
                 sync_plan_store_snapshot(&mut app, &plan, tasks.active_agent_mode());
         }
 
-        // Refresh the read-only completion snapshots without taking the session
-        // lock on every keystroke. We use try_lock so a foreground command
-        // already holding the lock cannot block the event loop and wedge Ctrl+C.
-        if let Ok(guard) = session_store.try_lock() {
-            let signature = cached_model_signature(&guard, &model_catalog);
-            if signature != last_model_cache_signature {
-                app.sync_cached_model_choices(&guard, &registry, Some(&model_catalog));
-                last_model_cache_signature = signature;
-                frame_needs_redraw = true;
-            }
-        }
+        frame_needs_redraw |= refresh_cached_model_choices(
+            &mut app,
+            &session_store,
+            &registry,
+            &model_catalog,
+            &mut last_model_cache_signature,
+        );
 
         let now = Instant::now();
         if now >= next_persistence_flush && pending_snapshot_flush.is_none() {
@@ -2190,20 +2245,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             next_persistence_flush = now + PERSISTENCE_FLUSH_INTERVAL;
         }
 
-        // Mirror working/idle into the heartbeat's shared flag so
-        // concurrent sessions see availability without a message round-trip.
-        busy_flag.store(
-            app.task_state.is_busy(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        // Mirror the in-flight run's persona for the composer meta line: when
-        // it differs from the selected persona the line renders the pending
-        // switch (`Running → Selected`) instead of silently relabeling a run
-        // that is still executing under its dispatch-time persona.
-        let running_persona = tasks.active_agent_persona().cloned();
-        if app.running_persona != running_persona {
-            app.running_persona = running_persona;
+        if mirror_run_status(&mut app, &tasks, &busy_flag) {
             redraw_requested = true;
         }
 
@@ -3077,42 +3119,24 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                         }
                     }
                     Event::Mouse(mouse) => {
-                        clear_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt);
-                        let area = terminal.terminal_mut().size()?.into();
-                        if let Some(action) = map_mouse(mouse, &app, area) {
-                            if matches!(action, AppAction::OpenContextModal) {
-                                open_context_modal_with_preview(
-                                    &mut app,
-                                    agent.clone(),
-                                    tasks.is_busy(),
-                                    true,
-                                )
-                                .await;
-                            } else {
-                                apply_action_with_task_side_effects(action, &mut app, &tasks);
-                            }
-                        }
+                        handle_mouse_event(
+                            mouse,
+                            &mut app,
+                            &mut ctrl_c_prompt,
+                            &mut terminal,
+                            &agent,
+                            &tasks,
+                        )
+                        .await?;
                     }
                     Event::Paste(text) => {
-                        clear_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt);
-                        if matches!(app.modal, Some(ModalKind::ApiKeyPrompt { .. })) {
-                            app.reduce(AppAction::ApiKeyInputPaste(text));
-                        } else if matches!(app.modal, Some(ModalKind::LocalModelWizard { .. })) {
-                            app.reduce(AppAction::LocalModelWizardPaste(text));
-                        } else if matches!(app.modal, Some(ModalKind::AgentComposer { .. })) {
-                            app.reduce(AppAction::AgentComposerPaste(text));
-                        } else if matches!(app.focus, Focus::Input) && text.trim().is_empty() {
-                            // Some terminals deliver an empty bracketed paste when
-                            // the clipboard holds only an image; recover it via the
-                            // clipboard-image path rather than inserting nothing.
-                            crate::tui::runtime_actions::paste_from_clipboard(
-                                &mut app,
-                                &registry,
-                                Some(&model_catalog),
-                            );
-                        } else {
-                            app.reduce(AppAction::PasteText(text));
-                        }
+                        handle_paste_event(
+                            text,
+                            &mut app,
+                            &mut ctrl_c_prompt,
+                            &registry,
+                            &model_catalog,
+                        );
                     }
                     _ => {}
                 }

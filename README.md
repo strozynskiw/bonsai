@@ -32,6 +32,14 @@ is verified against the release's Ed25519-signed manifest before anything is
 installed — the archive checksum and the extracted binary checksum both have to
 match the signed record. `BONSAI_VERSION=v0.2.4` pins a specific release.
 
+If the install directory isn't on your `PATH`, the installer wires it up for
+your shell (zsh, bash, or fish) with a single guarded line sourcing
+`~/.bonsai/env` — no manual profile editing, and re-running never duplicates
+it. Set `BONSAI_NO_MODIFY_PATH=1` to opt out and get manual instructions
+instead. Prefer a shared directory? `BONSAI_INSTALL_DIR=/usr/local/bin` works
+when you have write access — but the user-local default is what keeps the
+built-in self-updater working without elevated permissions.
+
 Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux glibc
 (x86-64 and arm64).
 

@@ -1329,8 +1329,25 @@ mod tests {
             return;
         }
         let project = tempfile::TempDir::new().expect("project tempdir should be created");
-        let outside = tempfile::TempDir::new().expect("outside tempdir should be created");
-        let target = outside.path().join("interactive-escape");
+        // The out-of-root probe must live somewhere user-writable that the
+        // production policy does NOT allow. A tempdir no longer qualifies —
+        // the OS temp dirs are writable roots now (confstr-based tools like
+        // mktemp need them) — so probe under $HOME instead, which is only
+        // covered for ~/.cargo.
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let target = home.join(format!(
+            ".bonsai-test-interactive-escape-{}",
+            std::process::id()
+        ));
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = RemoveOnDrop(target.clone());
         let sandbox = CommandSandbox::new(backend, project.path());
         let registry = Arc::new(TerminalRegistry::with_sandbox(sandbox));
         let started = registry

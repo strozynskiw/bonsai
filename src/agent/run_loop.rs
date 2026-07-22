@@ -1094,6 +1094,85 @@ impl Agent {
         (tool_call, result, status)
     }
 
+    /// Resolve a read/inspection tool result against its [`ReadAdmission`]
+    /// verdict: `Reuse`/`Reject` collapse the result to a compact pointer
+    /// (rewriting the stored context detail and finishing the sink), while
+    /// `Execute` returns the full rendered summary. Returns the model-visible
+    /// content plus any inspection metadata to record. Extracted from
+    /// [`apply_tool_result`](Self::apply_tool_result) so the three-arm decision
+    /// is a self-contained, independently testable unit.
+    fn apply_read_admission(
+        &mut self,
+        admission: ReadAdmission,
+        tool_call: &ToolCall,
+        model_rendered_summary: String,
+        requested_chars: usize,
+        record_admission: bool,
+        sink: &SharedSink,
+    ) -> (String, Option<ReadAdmissionMetadata>) {
+        match admission {
+            ReadAdmission::Reuse(reuse) => {
+                let returned_chars = reuse.pointer.chars().count();
+                let metadata = ReadAdmissionMetadata {
+                    outcome: InspectionOutcome::Reused,
+                    reason: InspectionReason::FreshVisibleCoverage,
+                    reuse_target_tool_call_id: Some(reuse.target_call_id.clone()),
+                    requested_chars,
+                    returned_chars,
+                    avoided_chars: requested_chars.saturating_sub(returned_chars),
+                };
+                if let Some(detail) = self.tool_context_details.get_mut(&tool_call.id) {
+                    detail.read_evidence = None;
+                    detail.result = ToolContextResult::Text {
+                        rendered: reuse.pointer.clone(),
+                    };
+                    detail.reuse_target_call_id = Some(reuse.target_call_id);
+                }
+                sink.tool_finished(
+                    &tool_call.id,
+                    &reuse.pointer,
+                    crate::output::ToolExecutionStatus::Succeeded,
+                );
+                (reuse.pointer, Some(metadata))
+            }
+            ReadAdmission::Execute(reason) => {
+                let metadata = record_admission.then_some(ReadAdmissionMetadata {
+                    outcome: InspectionOutcome::Executed,
+                    reason,
+                    reuse_target_tool_call_id: None,
+                    requested_chars,
+                    returned_chars: requested_chars,
+                    avoided_chars: 0,
+                });
+                (model_rendered_summary, metadata)
+            }
+            ReadAdmission::Reject(rejection) => {
+                let returned_chars = rejection.pointer.chars().count();
+                let metadata = ReadAdmissionMetadata {
+                    outcome: InspectionOutcome::Rejected,
+                    reason: InspectionReason::RepeatedFreshReuse,
+                    reuse_target_tool_call_id: Some(rejection.target_call_id.clone()),
+                    requested_chars,
+                    returned_chars,
+                    avoided_chars: requested_chars.saturating_sub(returned_chars),
+                };
+                if let Some(detail) = self.tool_context_details.get_mut(&tool_call.id) {
+                    detail.read_evidence = None;
+                    detail.result = ToolContextResult::Text {
+                        rendered: rejection.pointer.clone(),
+                    };
+                    detail.reuse_target_call_id = Some(rejection.target_call_id);
+                }
+                sink.tool_finished(
+                    &tool_call.id,
+                    &rejection.pointer,
+                    crate::output::ToolExecutionStatus::Failed,
+                );
+                (rejection.pointer, Some(metadata))
+            }
+        }
+    }
+
     /// Apply one tool result to the conversation: usage bookkeeping, the
     /// stored context detail, trusted-context and successful-Rust-edit
     /// collection for the batch, read-admission rewriting, and the tool
@@ -1252,67 +1331,14 @@ impl Agent {
                 admission,
                 ReadAdmission::Reuse(_) | ReadAdmission::Reject(_)
             );
-        let (model_content, admission_metadata) = match admission {
-            ReadAdmission::Reuse(reuse) => {
-                let returned_chars = reuse.pointer.chars().count();
-                let metadata = ReadAdmissionMetadata {
-                    outcome: InspectionOutcome::Reused,
-                    reason: InspectionReason::FreshVisibleCoverage,
-                    reuse_target_tool_call_id: Some(reuse.target_call_id.clone()),
-                    requested_chars,
-                    returned_chars,
-                    avoided_chars: requested_chars.saturating_sub(returned_chars),
-                };
-                if let Some(detail) = self.tool_context_details.get_mut(&tool_call.id) {
-                    detail.read_evidence = None;
-                    detail.result = ToolContextResult::Text {
-                        rendered: reuse.pointer.clone(),
-                    };
-                    detail.reuse_target_call_id = Some(reuse.target_call_id);
-                }
-                sink.tool_finished(
-                    &tool_call.id,
-                    &reuse.pointer,
-                    crate::output::ToolExecutionStatus::Succeeded,
-                );
-                (reuse.pointer, Some(metadata))
-            }
-            ReadAdmission::Execute(reason) => {
-                let metadata = record_admission.then_some(ReadAdmissionMetadata {
-                    outcome: InspectionOutcome::Executed,
-                    reason,
-                    reuse_target_tool_call_id: None,
-                    requested_chars,
-                    returned_chars: requested_chars,
-                    avoided_chars: 0,
-                });
-                (model_rendered_summary, metadata)
-            }
-            ReadAdmission::Reject(rejection) => {
-                let returned_chars = rejection.pointer.chars().count();
-                let metadata = ReadAdmissionMetadata {
-                    outcome: InspectionOutcome::Rejected,
-                    reason: InspectionReason::RepeatedFreshReuse,
-                    reuse_target_tool_call_id: Some(rejection.target_call_id.clone()),
-                    requested_chars,
-                    returned_chars,
-                    avoided_chars: requested_chars.saturating_sub(returned_chars),
-                };
-                if let Some(detail) = self.tool_context_details.get_mut(&tool_call.id) {
-                    detail.read_evidence = None;
-                    detail.result = ToolContextResult::Text {
-                        rendered: rejection.pointer.clone(),
-                    };
-                    detail.reuse_target_call_id = Some(rejection.target_call_id);
-                }
-                sink.tool_finished(
-                    &tool_call.id,
-                    &rejection.pointer,
-                    crate::output::ToolExecutionStatus::Failed,
-                );
-                (rejection.pointer, Some(metadata))
-            }
-        };
+        let (model_content, admission_metadata) = self.apply_read_admission(
+            admission,
+            &tool_call,
+            model_rendered_summary,
+            requested_chars,
+            record_admission,
+            sink,
+        );
         if let Some(metadata) = admission_metadata {
             self.usage
                 .record_inspection(&self.execution_lane, &metadata);

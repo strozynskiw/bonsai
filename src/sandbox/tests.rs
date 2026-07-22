@@ -50,7 +50,7 @@ fn policy_includes_project_root() {
 }
 
 #[tokio::test]
-async fn command_uses_private_session_temp_without_shared_temp_write_root() {
+async fn command_exports_private_session_temp_and_allows_the_shared_parent() {
     let proj = tempfile::tempdir().unwrap();
     let private_temp;
     {
@@ -62,12 +62,16 @@ async fn command_uses_private_session_temp_without_shared_temp_write_root() {
         let canonical_temp = private_temp.canonicalize().unwrap();
         assert!(sb.policy().writable_roots.contains(&canonical_temp));
 
+        // Contract change (deliberate): the shared OS temp parent IS writable —
+        // macOS BSD tools (mktemp in git hooks) resolve temp via confstr and
+        // ignore $TMPDIR, so confining them to the private dir is impossible.
+        // The private TMPDIR export below still steers well-behaved tools.
         let shared_temp = std::env::temp_dir()
             .canonicalize()
             .unwrap_or_else(|_| std::env::temp_dir());
         assert!(
-            !sb.policy().writable_roots.contains(&shared_temp),
-            "the shared temp parent must not be writable"
+            sb.policy().writable_roots.contains(&shared_temp),
+            "the OS temp dir must be writable for confstr-based tools"
         );
 
         let (mut command, _decision) = sb.command(
@@ -521,6 +525,89 @@ mod seatbelt {
         let sb = CommandSandbox::new(SandboxBackend::SeatbeltExec, proj.path());
         let profile = macos::generate_profile(&sb.policy());
         assert!(profile.contains(&format!("(subpath \"{}\")", proj_root.display())));
+    }
+
+    /// Regression: macOS BSD `mktemp` resolves temp via confstr and ignores
+    /// `$TMPDIR`, so the production policy must allowlist the OS temp dir —
+    /// observed live as `git commit` failing confined when a pre-commit hook
+    /// called bare `mktemp` ("mkstemp ... Operation not permitted").
+    #[tokio::test]
+    async fn production_policy_allows_bsd_mktemp_confined() {
+        let proj = tempfile::tempdir().unwrap();
+        let sb = macos_sandbox(proj.path());
+        let (mut cmd, decision) = sb.command("/bin/sh", "mktemp && mktemp -d", proj.path());
+        assert!(decision.confined, "test requires the confined path");
+        let status = cmd
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .unwrap();
+        assert!(
+            status.success(),
+            "bare mktemp must succeed under the production confined policy"
+        );
+    }
+
+    /// The reported end-to-end scenario: a confined `git commit` in a repo whose
+    /// pre-commit hook uses `mktemp` must succeed without a sandbox escape.
+    #[tokio::test]
+    async fn confined_git_commit_with_mktemp_hook_succeeds() {
+        let proj = tempfile::tempdir().unwrap();
+        let root = proj.path().canonicalize().unwrap();
+        let git = |args: &str| {
+            let root = root.clone();
+            let args = args.to_string();
+            async move {
+                let status = tokio::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args([
+                        "-c",
+                        "user.email=t@t",
+                        "-c",
+                        "user.name=t",
+                        "-c",
+                        "commit.gpgsign=false",
+                    ])
+                    .args(args.split_whitespace())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .unwrap();
+                assert!(status.success(), "git {args} failed");
+            }
+        };
+        git("init --quiet").await;
+        std::fs::create_dir_all(root.join("hooks")).unwrap();
+        std::fs::write(
+            root.join("hooks/pre-commit"),
+            "#!/bin/sh\nset -e\nt=$(mktemp)\necho probe > \"$t\"\nrm -f \"$t\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            root.join("hooks/pre-commit"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        git("config core.hooksPath hooks").await;
+        std::fs::write(root.join("file.txt"), "content").unwrap();
+        git("add file.txt").await;
+
+        let sb = macos_sandbox(&root);
+        let (mut cmd, decision) = sb.command(
+            "/bin/sh",
+            "git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit --quiet -m confined",
+            &root,
+        );
+        assert!(decision.confined);
+        let output = cmd.output().await.unwrap();
+        assert!(
+            output.status.success(),
+            "confined commit with a mktemp hook must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// The core enforcement proof: with only the project dir writable

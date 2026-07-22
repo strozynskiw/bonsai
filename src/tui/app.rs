@@ -176,19 +176,19 @@ fn modal_identity(kind: &ModalKind) -> (std::mem::Discriminant<ModalKind>, u64) 
 }
 
 pub struct AppState {
-    pub transcript: TranscriptModel,
+    pub(crate) transcript: TranscriptModel,
     /// Per-item rendered-line cache for the chat transcript. Interior-mutable
     /// because the draw path only holds `&AppState`; see
     /// [`crate::tui::widgets::transcript::TranscriptLayoutCache`].
     pub(crate) transcript_layout: crate::tui::widgets::transcript::TranscriptLayoutCache,
-    pub composer: Composer,
+    pub(crate) composer: Composer,
     clipboard: crate::copy::Clipboard,
-    pub view: View,
+    pub(crate) view: View,
     /// The persona the agent will use on the next dispatch: a built-in mode or an
     /// enabled custom agent. Cycled by Shift+Tab (`ToggleView`) and set by `SetView` /
     /// `/review`. Single source of truth — read `active_mode()` for the built-in
     /// mode (custom personas map to a neutral built-in for view/keymap purposes).
-    pub active_persona: crate::agent::ActivePersona,
+    pub(crate) active_persona: crate::agent::ActivePersona,
     /// Mirror of the persona the in-flight run was dispatched with (see
     /// [`TaskController::active_agent_persona`]), refreshed once per frame by
     /// the event loop. `None` while idle. When it differs from
@@ -198,7 +198,7 @@ pub struct AppState {
     pub(crate) running_persona: Option<crate::agent::ActivePersona>,
     /// Shared custom-agent registry, so the reducer/renderer can resolve a custom
     /// persona's view / color / name live (the composer hot-swaps it).
-    pub custom_agents: crate::resource::agent::SharedAgentRegistry,
+    pub(crate) custom_agents: crate::resource::agent::SharedAgentRegistry,
     /// Shared skill registry handle, so `/skills` can snapshot rows without the
     /// agent lock — a running turn holds that lock for its entire duration.
     pub(crate) skills: crate::resource::skill::SharedSkillRegistry,
@@ -217,38 +217,38 @@ pub struct AppState {
     /// Same deferral for the prompt's Subagents index after a mid-run agent
     /// edit (`Agent::refresh_agents_index` at the next lock boundary).
     pub(crate) agents_index_refresh_pending: bool,
-    pub focus: Focus,
-    pub modal: Option<ModalKind>,
-    pub modal_return_focus: Option<Focus>,
+    pub(crate) focus: Focus,
+    pub(crate) modal: Option<ModalKind>,
+    pub(crate) modal_return_focus: Option<Focus>,
     /// Live per-agent subagent model overrides (set from `/subagents`). Shared with
     /// the provider factory: written here by the model picker, read there when a
     /// subagent is minted. Also read by the `/subagents` renderer for the badge.
-    pub subagent_model_overrides: crate::subagent::SubagentModelOverrides,
+    pub(crate) subagent_model_overrides: crate::subagent::SubagentModelOverrides,
     /// The agent name awaiting a model-picker selection (set when the user presses
     /// `m` on a `/subagents` row, consumed by the picker submit).
-    pub pending_agent_model_override: Option<String>,
+    pub(crate) pending_agent_model_override: Option<String>,
     /// Set while the `/self-review model` picker is open. On submit the choice is
     /// persisted under `BuiltinSubagentId::SelfReview` (not the live name-keyed
     /// override map) so the pinned reviewer model survives a restart.
-    pub pending_self_review_model: bool,
+    pub(crate) pending_self_review_model: bool,
     /// The agent composer, stashed while the `/model` picker is open on its behalf.
     /// The picker submit writes the chosen model into it and reopens; picker cancel
     /// (`CloseModal`) reopens it unchanged.
-    pub pending_composer_state: Option<Box<crate::tui::agent_composer::AgentComposerState>>,
-    pub task_list_status: Option<String>,
-    pub shutdown_notice: Option<String>,
+    pub(crate) pending_composer_state: Option<Box<crate::tui::agent_composer::AgentComposerState>>,
+    pub(crate) task_list_status: Option<String>,
+    pub(crate) shutdown_notice: Option<String>,
     /// Self-update hint ("updated to vX — restart to apply" / "update vX
     /// available — …") shown in the composer meta line in place of the
     /// version tag. Set once by the startup update task; never cleared, and
     /// never written to the transcript.
-    pub update_notice: Option<String>,
+    pub(crate) update_notice: Option<String>,
     /// Auto-expiring orientation banner for an actionable session-lifecycle hint
     /// (e.g. "Interrupted session found. Use /resume…"). Ephemeral UI only —
     /// never persisted into the transcript, so resumes don't accumulate notices.
-    pub session_hint: Option<SessionHint>,
-    pub plan_selection: Option<PlanSelection>,
-    pub transcript_selection: Option<TranscriptSelection>,
-    pub transcript_focus: Option<usize>,
+    pub(crate) session_hint: Option<SessionHint>,
+    pub(crate) plan_selection: Option<PlanSelection>,
+    pub(crate) transcript_selection: Option<TranscriptSelection>,
+    pub(crate) transcript_focus: Option<usize>,
     /// Transcript index where the currently streaming provider attempt's
     /// cells begin (set by `UiEvent::AttemptStarted`). Bounds the removal on
     /// `UiEvent::AttemptDiscarded` so retraction can never eat committed
@@ -258,20 +258,20 @@ pub struct AppState {
     /// transcript cell instead of merging into a trailing cell left by an
     /// earlier (committed) model call, so a retraction removes whole cells.
     stream_cell_break: bool,
-    pub active_group_tool_selection: Option<InlineToolSelection>,
-    pub expanded_execution_groups: HashSet<u64>,
-    pub last_mouse_click: Option<LastMouseClick>,
+    pub(crate) active_group_tool_selection: Option<InlineToolSelection>,
+    pub(crate) expanded_execution_groups: HashSet<u64>,
+    pub(crate) last_mouse_click: Option<LastMouseClick>,
     /// True while a left-button pointer selection gesture is in progress
     /// (between mouse-down and mouse-up). Gates the copy-on-release so stray
     /// mouse-ups — e.g. after clicking a tool card — don't re-copy a stale
     /// selection.
-    pub pointer_selecting: bool,
-    pub provider: String,
-    pub model: String,
-    pub reasoning: ReasoningSelection,
+    pub(crate) pointer_selecting: bool,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) reasoning: ReasoningSelection,
     /// The autonomy / approval level (mirrors the shared `YoloMode` holder).
     /// Set via `/autonomy`, `/yolo`, or Alt+M; surfaced in the status bar.
-    pub approval_level: crate::tool::ApprovalLevel,
+    pub(crate) approval_level: crate::tool::ApprovalLevel,
     /// Self-review-before-done policy, mirrored from the live agent for `/mode`.
     pub(crate) self_review_mode: crate::self_review::SelfReviewMode,
     /// Session-scoped SMOL profile mirrored from the live agent for status UI.
@@ -297,72 +297,72 @@ pub struct AppState {
     /// render time so the status bar shows a `sandbox` marker while confinement is
     /// active. `None` in tests (no marker).
     pub(crate) sandbox: Option<crate::sandbox::CommandSandbox>,
-    pub current_session_id: Option<SessionId>,
+    pub(crate) current_session_id: Option<SessionId>,
     /// Status of the live session, shown next to the id in the header so the user
     /// can always see which session they're in. The live session is always
     /// `Active`; transient "resumed" wording rides on `session_toast` instead.
-    pub current_session_status: SessionStatus,
+    pub(crate) current_session_status: SessionStatus,
     pub(crate) current_terminal_reason: Option<crate::run_budget::RunBudgetExhaustion>,
-    pub current_session_name: String,
-    pub current_session_summary: String,
-    pub active_saved_plan_session_id: Option<SavedPlanId>,
-    pub cwd: String,
+    pub(crate) current_session_name: String,
+    pub(crate) current_session_summary: String,
+    pub(crate) active_saved_plan_session_id: Option<SavedPlanId>,
+    pub(crate) cwd: String,
     /// Absolute project root, set by the run loop after construction. Used to
     /// display tool paths under it as root-relative (`src/foo.rs`) instead of the
     /// full absolute path. Empty until set (e.g. in tests) — paths show as-is.
-    pub project_root: std::path::PathBuf,
-    pub branch: Option<String>,
-    pub run_started_at: Option<Instant>,
-    pub completed_run_elapsed: Option<Duration>,
-    pub current_phase: Option<String>,
+    pub(crate) project_root: std::path::PathBuf,
+    pub(crate) branch: Option<String>,
+    pub(crate) run_started_at: Option<Instant>,
+    pub(crate) completed_run_elapsed: Option<Duration>,
+    pub(crate) current_phase: Option<String>,
     /// Tool calls currently executing in this turn, in `started_at` order.
     /// More than one entry means the agent is running concurrent tool calls.
-    pub active_tools: Vec<(String, Instant)>,
-    pub latest_context_report: Option<crate::agent::ContextReport>,
-    pub context_state: ContextModalState,
-    pub todo: Vec<TodoItem>,
-    pub background_tasks: Vec<crate::background::BackgroundTaskSnapshot>,
+    pub(crate) active_tools: Vec<(String, Instant)>,
+    pub(crate) latest_context_report: Option<crate::agent::ContextReport>,
+    pub(crate) context_state: ContextModalState,
+    pub(crate) todo: Vec<TodoItem>,
+    pub(crate) background_tasks: Vec<crate::background::BackgroundTaskSnapshot>,
     /// Cached snapshot of subagent runs, refreshed from the registry by
     /// the run loop so the `/subagents` modal renders without an async lock.
-    pub subtasks: Vec<crate::subagent::SubagentSnapshot>,
+    pub(crate) subtasks: Vec<crate::subagent::SubagentSnapshot>,
     /// The model each subagent run actually uses, keyed by the `agent` tool
     /// call that launched it, adopted from the registry as runs mint their
     /// providers. Read by the tool-detail modal; kept out of `ToolActivity`
     /// so the transcript enum stays small.
-    pub subagent_models: std::collections::HashMap<String, String>,
+    pub(crate) subagent_models: std::collections::HashMap<String, String>,
     /// Mirror of the shared plan store, refreshed each tick by the run loop
     /// so rendering never has to take the async lock.
-    pub plan: crate::plan::PlanDoc,
-    pub task_state: TaskState,
+    pub(crate) plan: crate::plan::PlanDoc,
+    pub(crate) task_state: TaskState,
     /// When a phased plan is being implemented, which phase is currently
     /// running. `None` for flat plans or when no plan run is in flight.
-    pub plan_execution: Option<PlanExecution>,
+    pub(crate) plan_execution: Option<PlanExecution>,
     /// Set by the `AgentFinished` reducer when a phased run terminates, then
     /// consumed by the event loop to auto-advance to the next phase or halt.
-    pub phase_advance: Option<PhaseAdvance>,
+    pub(crate) phase_advance: Option<PhaseAdvance>,
     /// Set by the `AgentFinished` reducer when the coding agent ended its turn
     /// with a confirmed `enter_plan_mode` switch, then consumed by the event
     /// loop to swap the active persona and re-dispatch a continuation under the
     /// new mode. `None` on any other finish.
-    pub pending_persona_switch: Option<AgentMode>,
-    pub tick: u64,
+    pub(crate) pending_persona_switch: Option<AgentMode>,
+    pub(crate) tick: u64,
     /// The bonsai in the empty todo sidebar. Fully grown at startup; `/bonsai`
     /// replants the tree and replays the growth.
-    pub sidebar_bonsai: crate::tui::widgets::bonsai::BonsaiGrowth,
-    pub copy_notice: Option<CopyNotice>,
+    pub(crate) sidebar_bonsai: crate::tui::widgets::bonsai::BonsaiGrowth,
+    pub(crate) copy_notice: Option<CopyNotice>,
     /// Auto-expiring confirmation toast for a completed session-lifecycle action
     /// (e.g. "Resumed session #9."). Ephemeral UI only — cleared on a tick window
     /// like `copy_notice`, never written to the transcript.
-    pub session_toast: Option<SessionToast>,
-    pub next_execution_group_id: u64,
-    pub active_execution_group_id: Option<u64>,
-    pub transcript_scroll: u16,
-    pub sidebar_scroll: u16,
-    pub plan_scroll: u16,
-    pub modal_scroll: u16,
+    pub(crate) session_toast: Option<SessionToast>,
+    pub(crate) next_execution_group_id: u64,
+    pub(crate) active_execution_group_id: Option<u64>,
+    pub(crate) transcript_scroll: u16,
+    pub(crate) sidebar_scroll: u16,
+    pub(crate) plan_scroll: u16,
+    pub(crate) modal_scroll: u16,
     /// Active text selection inside the modal body. `None` when no selection
     /// is in progress. Cleared on scroll, modal close, and modal switch.
-    pub modal_selection: Option<ModalSelection>,
+    pub(crate) modal_selection: Option<ModalSelection>,
     /// Unwrapped body lines cached at render time so the mouse handler can
     /// resolve screen coordinates to grapheme offsets without re-generating
     /// content. Populated by `render_scrollable_modal` / `render_detail_pane`.
@@ -372,44 +372,44 @@ pub struct AppState {
     /// instead of recomputing the layout (which would need the exact
     /// header/footer line counts that only the renderer knows).
     pub(crate) modal_body_rect: std::cell::Cell<Option<ratatui::layout::Rect>>,
-    pub composer_scroll: u16,
-    pub todo_focus_available: bool,
+    pub(crate) composer_scroll: u16,
+    pub(crate) todo_focus_available: bool,
     /// Which phase the todo card shows. `None` follows the active execution
     /// phase; `Some(i)` means the user parked the view on phase `i` (Left/Right).
     /// Reset to `None` whenever the model rewrites the todo list.
-    pub todo_phase_view: Option<usize>,
+    pub(crate) todo_phase_view: Option<usize>,
     /// The phase the todo card rests on once `plan_execution` clears (a phased
     /// run finished all phases, halted, or was interrupted). Without it the card
     /// would snap back to Phase 1 the instant execution ends; instead it holds
     /// the phase that was last active so the user still sees where work stopped.
     /// Reset when a fresh phased run starts.
-    pub resting_todo_phase: Option<usize>,
-    pub composer_follow: bool,
-    pub pending_composer_page: Option<i16>,
-    pub pending_composer_extend: Option<i16>,
-    pub pending_question_visibility: bool,
-    pub transcript_autoscroll: bool,
+    pub(crate) resting_todo_phase: Option<usize>,
+    pub(crate) composer_follow: bool,
+    pub(crate) pending_composer_page: Option<i16>,
+    pub(crate) pending_composer_extend: Option<i16>,
+    pub(crate) pending_question_visibility: bool,
+    pub(crate) transcript_autoscroll: bool,
     /// Count of assistant replies the user had already seen the last time the
     /// transcript was sitting at the bottom. Frozen the moment they scroll up
     /// so [`AppState::unseen_message_count`] can report how many new replies
     /// arrived while they were reading back — drives the jump-to-latest pill.
-    pub transcript_seen_messages: usize,
-    pub scroll_transcript_focus_into_view: bool,
+    pub(crate) transcript_seen_messages: usize,
+    pub(crate) scroll_transcript_focus_into_view: bool,
     /// Pending request to scroll the in-progress todo item into view, resolved in
     /// `clamp_scrolls` once the sidebar `Rect` is known. Mirrors
     /// `scroll_transcript_focus_into_view`. Set when the model rewrites the todo
     /// list or the user browses to another phase.
-    pub scroll_todo_in_progress_into_view: bool,
+    pub(crate) scroll_todo_in_progress_into_view: bool,
     /// Default storage selected for the next newly entered provider credential.
-    pub credential_persistence: crate::session::CredentialPersistence,
+    pub(crate) credential_persistence: crate::session::CredentialPersistence,
     /// Active guided-setup checkpoint, retained while provider/model submodals
     /// temporarily replace the onboarding modal.
-    pub first_run_step: Option<crate::onboarding::FirstRunStep>,
+    pub(crate) first_run_step: Option<crate::onboarding::FirstRunStep>,
     /// Generation of the session-model command submitted from first-run setup.
     /// Only its matching outcome may advance or clear the Model checkpoint.
-    pub first_run_model_selection_pending: Option<u64>,
-    pub provider_auth_form: ProviderAuthForm,
-    pub model_picker: ModelPickerState,
+    pub(crate) first_run_model_selection_pending: Option<u64>,
+    pub(crate) provider_auth_form: ProviderAuthForm,
+    pub(crate) model_picker: ModelPickerState,
     /// Viewport offset of the `/providers` list. Interior-mutable because it is
     /// reconciled at render time (the only place the list capacity is known),
     /// like the modal body caches. The cursor moves inside the visible window
@@ -419,42 +419,42 @@ pub struct AppState {
     /// reconcile-at-render-time semantics — the cursor moves inside the window
     /// and the list scrolls only when it reaches an edge.
     pub(crate) authorize_provider_offset: std::cell::Cell<usize>,
-    pub completion: CompletionState,
-    pub queued_inputs: Vec<QueuedInput>,
+    pub(crate) completion: CompletionState,
+    pub(crate) queued_inputs: Vec<QueuedInput>,
     /// Peer messages that have arrived but await injection on the next turn
     /// (peers). Drives the composer "peers waiting" badge; self-heals to 0 once
     /// a turn drains the inbox.
-    pub pending_peer_inbox: usize,
+    pub(crate) pending_peer_inbox: usize,
     /// UI delivery leases awaiting the same transaction that persists their
     /// transcript items. Keyed by durable message id for replay deduplication.
     pub(crate) pending_peer_delivery_receipts: BTreeMap<i64, crate::storage::PeerDeliveryReceipt>,
     /// The peer this session's last run parked on (`wake_when_done`), if the
     /// park is still pending. Structured state for the wake sweep and tests —
     /// the "Waiting for peer #N" phase string is display only.
-    pub waiting_for_peer: Option<crate::agent::PeerWait>,
-    pub deferred_commands: Vec<DeferredCommand>,
-    pub next_queued_input_id: u64,
-    pub next_deferred_command_id: u64,
-    pub next_local_model_wizard_request_id: u64,
+    pub(crate) waiting_for_peer: Option<crate::agent::PeerWait>,
+    pub(crate) deferred_commands: Vec<DeferredCommand>,
+    pub(crate) next_queued_input_id: u64,
+    pub(crate) next_deferred_command_id: u64,
+    pub(crate) next_local_model_wizard_request_id: u64,
     /// Generation tag for command-style background work (auth/model/local-model
     /// commits) that runs on a raw `tokio::spawn` outside `TaskController`.
     /// Cancelling such a command bumps this so its late `CommandFinished` is
     /// recognised as stale and dropped instead of flipping provider/model or
     /// rewriting the transcript after the UI returned to idle.
-    pub command_generation: u64,
+    pub(crate) command_generation: u64,
     /// Whether at least one provider is authorized. Seeded at startup from the
     /// session store; flips true when a provider selection is applied (only an
     /// authorized provider can be selected). Drives the welcome screen's
     /// authorize-first guidance.
-    pub has_authorized_provider: bool,
+    pub(crate) has_authorized_provider: bool,
     /// Mirror of the registry's provider metadata, used by the keymap for completion
     /// without taking the session lock on every keystroke.
-    pub provider_choices: Vec<ProviderOption>,
+    pub(crate) provider_choices: Vec<ProviderOption>,
     /// Mirror of cached models across all authorized providers, used by the keymap.
-    pub cached_model_choices: Vec<ModelOption>,
+    pub(crate) cached_model_choices: Vec<ModelOption>,
     /// Recent non-active persisted sessions for synchronous command completion.
-    pub session_choices: Vec<crate::storage::SessionSummary>,
-    pub path_search: Option<crate::tui::path_search::PathSearch>,
+    pub(crate) session_choices: Vec<crate::storage::SessionSummary>,
+    pub(crate) path_search: Option<crate::tui::path_search::PathSearch>,
 }
 
 fn move_index(current: usize, delta: i16, max: usize) -> usize {

@@ -284,6 +284,10 @@ impl CommandSandbox {
         (command, SpawnDecision::escaped(self.inner.backend))
     }
 
+    /// Steer temp/cache writes into the per-session private root. Advisory,
+    /// not sufficient on its own: macOS BSD tools (mktemp(1) and friends)
+    /// resolve temp via confstr and ignore these variables, which is why the
+    /// policy also allowlists the OS temp directories (`policy::writable_roots`).
     fn configure_temp_environment(&self, command: &mut Command) {
         let Some(temp_dir) = self.temp_dir() else {
             return;

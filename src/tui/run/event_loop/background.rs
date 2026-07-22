@@ -136,6 +136,100 @@ pub(super) fn apply_terminal_event(
     effect
 }
 
+/// Drain the background-task and terminal channels for one frame: apply each
+/// event to `app`, refresh the `/tasks` list if it's open, and arm a
+/// background-agent wake when one just became ready. Returns whether anything
+/// changed (i.e. the frame needs a redraw). One of `run`'s per-frame phases,
+/// extracted so the loop body reads as named steps.
+pub(super) async fn drain_background_and_terminal_channels(
+    background_events: &mut tokio::sync::broadcast::Receiver<BackgroundTaskEvent>,
+    terminal_events: &mut tokio::sync::broadcast::Receiver<TerminalEvent>,
+    app: &mut AppState,
+    background_tasks: &Arc<BackgroundTaskRegistry>,
+    terminals: &Arc<TerminalRegistry>,
+    pending_background_wake: &mut Option<Instant>,
+) -> bool {
+    let mut changed = false;
+    let mut refresh_task_list = false;
+    let mut wake_candidate = false;
+    while let Ok(event) = background_events.try_recv() {
+        changed = true;
+        let effect = apply_background_task_event(app, event);
+        refresh_task_list |= effect.refresh_task_list;
+        wake_candidate |= effect.wake_candidate;
+    }
+    while let Ok(event) = terminal_events.try_recv() {
+        changed = true;
+        let effect = apply_terminal_event(app, event);
+        refresh_task_list |= effect.refresh_task_list;
+        wake_candidate |= effect.wake_candidate;
+    }
+    if refresh_task_list && app.is_task_list_open() {
+        refresh_background_task_list(app, background_tasks, terminals).await;
+    }
+    if wake_candidate
+        && (background_tasks.agent_wake_ready().await || terminals.agent_wake_ready().await)
+    {
+        *pending_background_wake = Some(Instant::now() + BACKGROUND_AGENT_WAKE_DELAY);
+    }
+    changed
+}
+
+/// Drain the subagent activity channel for one frame: keep the `/subtasks`
+/// snapshot fresh while it's open, adopt each subagent's model onto its
+/// launching `agent` tool call, and arm a background-agent wake when a subagent
+/// just finished. Returns whether the frame needs a redraw. One of `run`'s
+/// per-frame phases.
+pub(super) fn drain_subagent_channel(
+    subagent_events: &mut tokio::sync::broadcast::Receiver<crate::subagent::SubagentEvent>,
+    app: &mut AppState,
+    subagents: &crate::subagent::SubagentRegistry,
+    pending_background_wake: &mut Option<Instant>,
+) -> bool {
+    let mut changed = false;
+    let mut subagents_changed = false;
+    let mut subagent_wake_candidate = false;
+    loop {
+        match subagent_events.try_recv() {
+            Ok(event) => {
+                subagents_changed = true;
+                // Activity only changes the /subtasks snapshot. Marking the main
+                // view dirty for every streamed token bypasses the active redraw
+                // throttle and can overwhelm slower terminals when several
+                // subagents stream concurrently. The normal active-frame deadline
+                // still advances timers at 10 FPS.
+                changed |= subagent_event_requests_redraw(event, app.is_subtask_list_open());
+                if matches!(event, crate::subagent::SubagentEvent::Finished) {
+                    subagent_wake_candidate = true;
+                }
+            }
+            // A burst that overran the 256-slot buffer still means the list
+            // changed; treat the lag as a change so we don't skip the refresh.
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                subagents_changed = true;
+                subagent_wake_candidate = true;
+                changed |= app.is_subtask_list_open();
+            }
+            Err(_) => break,
+        }
+    }
+    if subagents_changed {
+        // Runs adopt their model onto the launching `agent` tool call via a
+        // cheap ids+models projection; the full snapshot list (which clones every
+        // run's activity) is still only taken while /subagents is open.
+        changed |= app.adopt_subagent_models(&subagents.tool_call_models());
+        if app.is_subtask_list_open() {
+            app.reduce(AppAction::RefreshSubtaskList {
+                subtasks: subagents.list(),
+            });
+        }
+    }
+    if subagent_wake_candidate && subagents.agent_wake_ready() {
+        *pending_background_wake = Some(Instant::now() + BACKGROUND_AGENT_WAKE_DELAY);
+    }
+    changed
+}
+
 pub(super) fn apply_terminal_snapshot(
     app: &mut AppState,
     terminal: &TerminalSnapshot,

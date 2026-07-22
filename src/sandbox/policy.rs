@@ -15,9 +15,9 @@ pub(crate) struct SandboxPolicy {
 }
 
 /// Resolve the full writable-root set for a session: the project root, its
-/// private temp dir, the repository's git common dir when it lives elsewhere,
-/// the two shared dependency stores that common build tools
-/// cannot layer read-only, and any
+/// private temp dir, the OS temp directories, the repository's git common dir
+/// when it lives elsewhere, the shared dependency/build stores that common
+/// build tools cannot layer read-only, and any
 /// `BONSAI_SANDBOX_WRITABLE_ROOTS` extras — canonicalized and de-duplicated.
 /// Computed once at construction (these don't change for a session), so per-spawn
 /// policy lookups don't re-hit the filesystem.
@@ -25,6 +25,18 @@ pub(crate) fn writable_roots(project_root: &Path, temp_root: &Path) -> Vec<PathB
     let mut roots = Vec::new();
     push_canonical(&mut roots, project_root.to_path_buf());
     push_canonical(&mut roots, temp_root.to_path_buf());
+    // The OS temp directories, in addition to the private TMPDIR the sandbox
+    // exports. Deliberate, don't simplify: macOS BSD tools — mktemp(1) most
+    // visibly, which git pre-commit hooks routinely call — resolve their
+    // default temp location via confstr(_CS_DARWIN_USER_TEMP_DIR) and ignore
+    // $TMPDIR entirely, so environment redirection can never keep them inside
+    // the private root (observed live: `git commit` failing confined with
+    // "mkstemp ... Operation not permitted" from the hook's bare `mktemp`).
+    // Temp is shared scratch by design; the sandbox exists to confine writes
+    // to user data and system state, not to break standard tooling. The
+    // private TMPDIR still steers well-behaved tools into per-session space.
+    push_canonical(&mut roots, std::env::temp_dir());
+    push_canonical(&mut roots, PathBuf::from("/tmp"));
     if let Some(git_dir) = external_git_common_dir(project_root) {
         push_canonical_outside(&mut roots, git_dir);
     }
@@ -80,6 +92,13 @@ fn shared_dependency_cache_roots() -> Vec<PathBuf> {
     let home = home.as_deref();
     push_env_or_home(&mut roots, home, "CARGO_HOME", ".cargo");
     if let Some(path) = env_path("GOMODCACHE") {
+        push_canonical(&mut roots, path);
+    }
+    // A configured shared build directory: with CARGO_TARGET_DIR pointing
+    // outside the project (a common local setup to share one target dir across
+    // checkouts), every cargo build/clippy — including a repo's pre-commit
+    // hook — writes there and would otherwise be denied under confinement.
+    if let Some(path) = env_path("CARGO_TARGET_DIR") {
         push_canonical(&mut roots, path);
     }
     roots
@@ -155,6 +174,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn writable_roots_include_the_os_temp_dirs() {
+        // macOS BSD mktemp resolves temp via confstr and ignores $TMPDIR, so
+        // the OS temp dirs must be writable or confined git hooks fail.
+        let proj = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let roots = writable_roots(proj.path(), temp.path());
+
+        let os_temp = std::env::temp_dir();
+        let os_temp = os_temp.canonicalize().unwrap_or(os_temp);
+        assert!(
+            roots.contains(&os_temp),
+            "OS temp dir {os_temp:?} missing from {roots:?}"
+        );
+        let tmp = PathBuf::from("/tmp");
+        let tmp = tmp.canonicalize().unwrap_or(tmp);
+        assert!(roots.contains(&tmp), "/tmp missing from {roots:?}");
+    }
+
+    #[test]
     fn writable_roots_include_only_shared_dependency_caches_and_project() {
         let proj = tempfile::tempdir().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -216,11 +254,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let roots = writable_roots(&worktree, temp.path());
         let common = source.path().join(".git").canonicalize().unwrap();
+        // Coverage, not literal membership: these test repos live under the OS
+        // temp dir, which is itself a writable root now, so the git common dir
+        // is (correctly) subsumed rather than pushed as its own entry.
         assert!(
-            roots.contains(&common),
+            roots.iter().any(|root| common.starts_with(root)),
             "worktree session must be able to write the source git dir: {roots:?}"
         );
-        assert!(roots.contains(&worktree.canonicalize().unwrap()));
+        let worktree_canonical = worktree.canonicalize().unwrap();
+        assert!(
+            roots
+                .iter()
+                .any(|root| worktree_canonical.starts_with(root))
+        );
     }
 
     #[test]

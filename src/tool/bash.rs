@@ -28,7 +28,7 @@ mod output;
 pub(crate) use output::BashOutputBudget;
 
 mod session;
-use session::{EscapeApproval, SandboxEscapeGrants};
+use session::{ConfinedFailures, EscapeApproval, SandboxEscapeGrants};
 
 mod process;
 use process::{CommandResult, CommandSummary, compact_summary_line};
@@ -89,6 +89,9 @@ pub struct BashTool {
     /// Session-scoped sandbox-escape grants. In-memory only (escapes are never
     /// persisted) and shared by normal/SMOL bash tools for one session.
     pub(in crate::tool::bash) escape_grants: Arc<SandboxEscapeGrants>,
+    /// Commands whose confined run failed with a sandbox-shaped denial; lifts
+    /// the decline-unnecessary-escape shortcut so a retry can reach the prompt.
+    pub(in crate::tool::bash) confined_failures: Arc<ConfinedFailures>,
     pub(in crate::tool::bash) hooks: Arc<crate::hooks::HookEngine>,
     pub(in crate::tool::bash) authorization_ledger: AuthorizationLedger,
 }
@@ -277,6 +280,7 @@ impl BashTool {
             sandbox,
             output_budget: BashOutputBudget::normal(),
             escape_grants: Arc::new(SandboxEscapeGrants::default()),
+            confined_failures: Arc::new(ConfinedFailures::default()),
             hooks,
             authorization_ledger,
         }
@@ -300,6 +304,7 @@ impl BashTool {
             sandbox: self.sandbox.clone(),
             output_budget,
             escape_grants: self.escape_grants.clone(),
+            confined_failures: self.confined_failures.clone(),
             hooks: self.hooks.clone(),
             authorization_ledger: self.authorization_ledger.clone(),
         }
@@ -452,8 +457,15 @@ impl BashTool {
         // the model explicitly asked and the sandbox is actually active. Resolved
         // after `cwd` so the grant can be scoped to the directory the command runs
         // in (an approval doesn't leak to a different cwd at an unclamped level).
+        let mut escape_auto_declined = false;
         let escape = if escape_sandbox && self.sandbox.is_active() {
-            if escape_is_unnecessary(&analysis) {
+            // The decline shortcut is lifted once this exact (cwd, command)
+            // failed confined with a sandbox-shaped error: the failure
+            // diagnostic tells the model to retry with escape_sandbox=true, so
+            // declining that retry too would loop it forever (e.g. a pre-commit
+            // hook writing temp files, or gpg-signed commits touching ~/.gnupg).
+            if escape_is_unnecessary(&analysis) && !self.confined_failures.contains(&cwd, &command)
+            {
                 // The model habitually asks to escape for `git add && git commit`,
                 // but those write only inside `.git/` — within the sandbox's
                 // writable roots — so they succeed confined. Decline the escape
@@ -464,6 +476,7 @@ impl BashTool {
                     command = %command,
                     "declining unnecessary sandbox escape: workspace-only command"
                 );
+                escape_auto_declined = true;
                 EscapeApproval::None
             } else {
                 self.authorize_escape(&cwd, &command, origin).await?
@@ -549,8 +562,26 @@ impl BashTool {
             .await;
         emit_hook_warnings(context.as_ref(), &post_outcome.warnings);
 
+        // Remember sandbox-shaped confined failures so a follow-up
+        // escape_sandbox=true retry for this exact command reaches the real
+        // approval prompt instead of being auto-declined again.
+        if confined
+            && !timed_out
+            && matches!(exit_code, Some(code) if code != 0)
+            && failure_looks_sandbox_related(&body)
+        {
+            self.confined_failures.record(&cwd, &command);
+        }
+
         let mut rendered = Self::finalize_foreground(
-            &command, &body, exit_code, timed_out, confined, escape, &summary,
+            &command,
+            &body,
+            exit_code,
+            timed_out,
+            confined,
+            escape,
+            escape_auto_declined,
+            &summary,
         );
 
         self.mark_read_files(&cwd, &analysis, &stdout).await;
@@ -593,6 +624,7 @@ impl BashTool {
     /// exit-code frame, failure summary, sandbox-escape audit/nudge, and the
     /// command-summary footer. Pure string assembly — unit-testable without
     /// spawning a process.
+    #[allow(clippy::too_many_arguments)]
     fn finalize_foreground(
         command: &str,
         body: &str,
@@ -600,6 +632,7 @@ impl BashTool {
         timed_out: bool,
         confined: bool,
         escape: EscapeApproval,
+        escape_auto_declined: bool,
         summary: &CommandSummary,
     ) -> String {
         let mut rendered = Self::frame_output(body, exit_code, timed_out);
@@ -625,10 +658,16 @@ impl BashTool {
                     && matches!(exit_code, Some(code) if code != 0)
                     && failure_looks_sandbox_related(body)
                 {
-                    Self::push_paragraph(
-                        &mut rendered,
-                        "This failed while confined to the sandbox — the error looks like a blocked write or network access. If it legitimately must write outside the project root or use the network, retry with escape_sandbox=true.",
-                    );
+                    // Two variants so the guidance is never a dead end: when the
+                    // escape request was auto-declined (workspace-only git), say
+                    // so and promise the retry reaches the prompt — the failure
+                    // was recorded, which lifts the decline shortcut.
+                    let nudge = if escape_auto_declined {
+                        "This failed while confined to the sandbox — the error looks like a blocked write or network access. Your escape_sandbox request was declined because the command looked workspace-only, but this failure lifts that shortcut: retry with escape_sandbox=true and it will reach the approval prompt."
+                    } else {
+                        "This failed while confined to the sandbox — the error looks like a blocked write or network access. If it legitimately must write outside the project root or use the network, retry with escape_sandbox=true."
+                    };
+                    Self::push_paragraph(&mut rendered, nudge);
                 }
             }
             scope => {
@@ -1116,6 +1155,7 @@ mod tests {
             false,
             true,
             EscapeApproval::None,
+            false,
             &failed,
         );
         assert!(nudged.contains("escape_sandbox=true"), "{nudged}");
@@ -1131,6 +1171,7 @@ mod tests {
             false,
             true,
             EscapeApproval::None,
+            false,
             &failed,
         );
         assert!(
@@ -1147,6 +1188,7 @@ mod tests {
             false,
             true,
             EscapeApproval::None,
+            false,
             &summary_with_exit(Some(0)),
         );
         assert!(!succeeded.contains("escape_sandbox=true"), "{succeeded}");
@@ -1158,6 +1200,7 @@ mod tests {
             false,
             false,
             EscapeApproval::None,
+            false,
             &failed,
         );
         assert!(!unconfined.contains("escape_sandbox=true"), "{unconfined}");
@@ -1169,9 +1212,47 @@ mod tests {
             false,
             true,
             EscapeApproval::Once,
+            false,
             &failed,
         );
         assert!(!escaped.contains("escape_sandbox=true"), "{escaped}");
+    }
+
+    #[test]
+    fn declined_escape_failure_promises_the_prompt_on_retry() {
+        // When the escape was auto-declined and the confined run then failed
+        // sandbox-shaped, the nudge must say the shortcut is lifted — otherwise
+        // the guidance ("retry with escape_sandbox=true") loops the model into
+        // another silent decline.
+        let failed = summary_with_exit(Some(1));
+        let declined = BashTool::finalize_foreground(
+            "git commit -m x",
+            "mktemp: mkstemp failed on /var/folders/x/T/tmp.abc: Operation not permitted",
+            Some(1),
+            false,
+            true,
+            EscapeApproval::None,
+            true,
+            &failed,
+        );
+        assert!(declined.contains("declined"), "{declined}");
+        assert!(declined.contains("escape_sandbox=true"), "{declined}");
+        assert!(declined.contains("approval prompt"), "{declined}");
+    }
+
+    #[test]
+    fn confined_failures_lift_the_decline_shortcut_per_exact_command() {
+        use super::session::ConfinedFailures;
+        let failures = ConfinedFailures::default();
+        let cwd = std::path::Path::new("/repo");
+
+        assert!(!failures.contains(cwd, "git commit -m x"));
+        failures.record(cwd, "git commit -m x");
+        assert!(failures.contains(cwd, "git commit -m x"));
+        // Exact-match scoping, mirroring escape grants: neither a different
+        // command nor a different cwd inherits the lifted shortcut.
+        assert!(!failures.contains(cwd, "git commit -m y"));
+        assert!(!failures.contains(std::path::Path::new("/other"), "git commit -m x"));
     }
 
     #[derive(Default)]

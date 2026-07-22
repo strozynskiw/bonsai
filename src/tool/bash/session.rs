@@ -71,6 +71,36 @@ impl SandboxEscapeGrants {
     }
 }
 
+/// Session-scoped record of `(working-dir, command)` pairs whose *confined* run
+/// failed with a sandbox-shaped denial in the output. Consulted by the escape
+/// gate so the "decline unnecessary escape" shortcut for workspace-only git
+/// commands can never trap the model in a loop: the failure diagnostic tells it
+/// to retry with `escape_sandbox=true`, so silently declining that retry would
+/// re-run confined, fail identically, and repeat (observed live with a
+/// pre-commit hook whose `mktemp` the sandbox denied). One sandbox-shaped
+/// failure lifts the shortcut for that exact command, and the next escape
+/// request reaches the normal user approval prompt. Keyed like
+/// [`SandboxEscapeGrants`]: exact command string plus resolved cwd.
+#[derive(Default)]
+pub(super) struct ConfinedFailures {
+    inner: std::sync::Mutex<std::collections::HashSet<(PathBuf, String)>>,
+}
+
+impl ConfinedFailures {
+    pub(super) fn contains(&self, cwd: &Path, command: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|failures| failures.contains(&(cwd.to_path_buf(), command.to_string())))
+            .unwrap_or(false)
+    }
+
+    pub(super) fn record(&self, cwd: &Path, command: &str) {
+        if let Ok(mut failures) = self.inner.lock() {
+            failures.insert((cwd.to_path_buf(), command.to_string()));
+        }
+    }
+}
+
 impl BashTool {
     /// Remove a simple leading `cd` only when it resolves to `cwd` exactly.
     ///
