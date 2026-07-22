@@ -429,22 +429,22 @@ fn program_tier(words: &[&str], lower: &str) -> RiskTier {
 
     // Read-only / low-risk prefixes are matched on the unwrapped command so a
     // wrapper prefix (`env git status`) doesn't defeat the `git status` prefix.
-    let effective_lower = std::iter::once(prog)
-        .chain(effective.iter().copied().skip(1))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // The args after the program are compared token-wise (`command_has_prefix`),
+    // so a prefix like `cargo check` matches `cargo check --all` but not
+    // `cargo checkfoo` — and no per-command string is allocated on this hot path.
+    let args = &effective[1..];
 
     // Read-only: introspection and safe git/build queries.
-    if is_read_only(prog, &effective_lower) {
+    if is_read_only(prog, args) {
         return RiskTier::ReadOnly;
     }
 
     // Low: reversible, in-project build/test/format/lint.
-    if is_low_risk(prog, &effective_lower) {
+    if is_low_risk(prog, args) {
         return RiskTier::Low;
     }
 
-    if is_medium_risk(prog, &effective_lower) {
+    if is_medium_risk(prog, args) {
         return RiskTier::Medium;
     }
 
@@ -1440,7 +1440,17 @@ fn scaffold_path_tier(operands: &[&str]) -> RiskTier {
         .max(RiskTier::Medium)
 }
 
-fn is_read_only(prog: &str, lower: &str) -> bool {
+/// Whether the command `[prog, ..args]` begins with `prefix`, token by token.
+/// Word-boundary aware — unlike a `starts_with` on the space-joined string,
+/// `["cargo", "check"]` matches `cargo check --all` but not `cargo checkfoo`.
+fn command_has_prefix(prog: &str, args: &[&str], prefix: &[&str]) -> bool {
+    match prefix.split_first() {
+        Some((head, rest)) => *head == prog && args.starts_with(rest),
+        None => false,
+    }
+}
+
+fn is_read_only(prog: &str, args: &[&str]) -> bool {
     // `env` is intentionally absent: it is a command wrapper (`env rm -rf /`),
     // resolved by `effective_program_index` to the command it fronts. `printenv`
     // is secret exposure and classified `High` before this check.
@@ -1522,24 +1532,24 @@ fn is_read_only(prog: &str, lower: &str) -> bool {
     }
     // Git is deliberately absent: `git_tier` classifies every recognized git
     // form (a prefix like "git branch" would silently bless creation forms).
-    const READ_ONLY_PREFIXES: &[&str] = &[
-        "cargo --version",
-        "cargo check",
-        "cargo tree",
-        "cargo metadata",
-        "go version",
-        "go list",
-        "go env",
-        "go doc",
-        "node --version",
-        "python --version",
-        "python3 --version",
-        "rustc --version",
-        "rustup show",
+    const READ_ONLY_PREFIXES: &[&[&str]] = &[
+        &["cargo", "--version"],
+        &["cargo", "check"],
+        &["cargo", "tree"],
+        &["cargo", "metadata"],
+        &["go", "version"],
+        &["go", "list"],
+        &["go", "env"],
+        &["go", "doc"],
+        &["node", "--version"],
+        &["python", "--version"],
+        &["python3", "--version"],
+        &["rustc", "--version"],
+        &["rustup", "show"],
     ];
     READ_ONLY_PREFIXES
         .iter()
-        .any(|prefix| lower.starts_with(prefix))
+        .any(|prefix| command_has_prefix(prog, args, prefix))
 }
 
 fn reads_sensitive_path(prog: &str, words: &[&str]) -> bool {
@@ -1569,65 +1579,68 @@ fn looks_like_sensitive_path(path: &str) -> bool {
     })
 }
 
-fn is_low_risk(prog: &str, lower: &str) -> bool {
-    const LOW_PREFIXES: &[&str] = &[
-        "cargo test",
-        "cargo clippy",
-        "cargo fmt",
-        "cargo doc",
-        "cargo bench",
-        "rustfmt",
-        "npm run",
-        "npm test",
-        "yarn run",
-        "yarn test",
-        "pnpm run",
-        "pnpm test",
-        "bun run",
-        "bun test",
-        "go test",
-        "go vet",
-        "go fmt",
-        "go build",
-        "python -m pytest",
-        "python -m unittest",
-        "python -m doctest",
-        "python -m compileall",
-        "python3 -m pytest",
-        "python3 -m unittest",
-        "python3 -m doctest",
-        "python3 -m compileall",
-        "pypy -m pytest",
-        "sh -n",
-        "bash -n",
-        "zsh -n",
-        "dash -n",
-        "pytest",
-        "node --test",
-        "node --check",
-        "deno test",
-        "deno check",
-        "gradle test",
-        "gradle check",
-        "gradle build",
-        "gradlew test",
-        "gradlew check",
-        "gradlew build",
-        "mvn test",
-        "mvn verify",
-        "mvnw test",
-        "mvnw verify",
-        "make test",
-        "make check",
-        "make lint",
-        "make fmt",
-        "eslint",
-        "prettier",
-        "ruff",
-        "black",
-        "mypy",
+fn is_low_risk(prog: &str, args: &[&str]) -> bool {
+    const LOW_PREFIXES: &[&[&str]] = &[
+        &["cargo", "test"],
+        &["cargo", "clippy"],
+        &["cargo", "fmt"],
+        &["cargo", "doc"],
+        &["cargo", "bench"],
+        &["rustfmt"],
+        &["npm", "run"],
+        &["npm", "test"],
+        &["yarn", "run"],
+        &["yarn", "test"],
+        &["pnpm", "run"],
+        &["pnpm", "test"],
+        &["bun", "run"],
+        &["bun", "test"],
+        &["go", "test"],
+        &["go", "vet"],
+        &["go", "fmt"],
+        &["go", "build"],
+        &["python", "-m", "pytest"],
+        &["python", "-m", "unittest"],
+        &["python", "-m", "doctest"],
+        &["python", "-m", "compileall"],
+        &["python3", "-m", "pytest"],
+        &["python3", "-m", "unittest"],
+        &["python3", "-m", "doctest"],
+        &["python3", "-m", "compileall"],
+        &["pypy", "-m", "pytest"],
+        &["sh", "-n"],
+        &["bash", "-n"],
+        &["zsh", "-n"],
+        &["dash", "-n"],
+        &["pytest"],
+        &["node", "--test"],
+        &["node", "--check"],
+        &["deno", "test"],
+        &["deno", "check"],
+        &["gradle", "test"],
+        &["gradle", "check"],
+        &["gradle", "build"],
+        &["gradlew", "test"],
+        &["gradlew", "check"],
+        &["gradlew", "build"],
+        &["mvn", "test"],
+        &["mvn", "verify"],
+        &["mvnw", "test"],
+        &["mvnw", "verify"],
+        &["make", "test"],
+        &["make", "check"],
+        &["make", "lint"],
+        &["make", "fmt"],
+        &["eslint"],
+        &["prettier"],
+        &["ruff"],
+        &["black"],
+        &["mypy"],
     ];
-    if LOW_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+    if LOW_PREFIXES
+        .iter()
+        .any(|prefix| command_has_prefix(prog, args, prefix))
+    {
         return true;
     }
     // `mkdir`/`touch`/`cp`/`ln`/`mv` inside the project are reversible-ish edits;
@@ -1639,23 +1652,23 @@ fn is_low_risk(prog: &str, lower: &str) -> bool {
 /// irreversible shape. Keeping this explicit makes the unknown-command fallback
 /// fail closed without changing the established autonomy treatment of these
 /// commands.
-fn is_medium_risk(prog: &str, lower: &str) -> bool {
-    const MEDIUM_PREFIXES: &[&str] = &[
-        "cargo build",
-        "cargo run",
+fn is_medium_risk(prog: &str, args: &[&str]) -> bool {
+    const MEDIUM_PREFIXES: &[&[&str]] = &[
+        &["cargo", "build"],
+        &["cargo", "run"],
         // Project scaffolding: writes manifest + src in-tree; out-of-tree
         // targets were escalated by `file_write_target_tier` before this.
-        "cargo init",
-        "cargo new",
+        &["cargo", "init"],
+        &["cargo", "new"],
         // Deletes only the build cache; a rebuild restores it.
-        "cargo clean",
-        "make",
-        "docker",
-        "docker-compose",
+        &["cargo", "clean"],
+        &["make"],
+        &["docker"],
+        &["docker-compose"],
     ];
     MEDIUM_PREFIXES
         .iter()
-        .any(|prefix| lower.starts_with(prefix))
+        .any(|prefix| command_has_prefix(prog, args, prefix))
         || matches!(prog, "make" | "docker" | "docker-compose")
 }
 
@@ -1692,6 +1705,26 @@ mod tests {
         assert_eq!(tier("rm -rf build/"), RiskTier::Destructive);
         assert_eq!(tier("git push --force origin main"), RiskTier::Destructive);
         assert_eq!(tier("git reset --hard HEAD~3"), RiskTier::Destructive);
+    }
+
+    #[test]
+    fn prefix_classification_respects_word_boundaries() {
+        // The blessed prefixes match at token boundaries, so their exact and
+        // flagged forms keep their tier...
+        assert_eq!(tier("cargo check"), RiskTier::ReadOnly);
+        assert_eq!(tier("cargo check --workspace"), RiskTier::ReadOnly);
+        assert_eq!(tier("make test"), RiskTier::Low);
+        assert_eq!(tier("cargo build"), RiskTier::Medium);
+        assert_eq!(tier("docker ps"), RiskTier::Medium);
+
+        // ...but a program that merely *starts with* a blessed prefix is a
+        // different, unproven command and must not inherit the lower tier — it
+        // falls through to the always-ask floor. (Previously `starts_with` on
+        // the joined string leaked these into ReadOnly/Low/Medium.)
+        assert_eq!(tier("cargo checkfoo"), RiskTier::Destructive);
+        assert_eq!(tier("makepkg"), RiskTier::Destructive);
+        assert_eq!(tier("dockerd"), RiskTier::Destructive);
+        assert_eq!(tier("rustfmtd --daemon"), RiskTier::Destructive);
     }
 
     #[test]
