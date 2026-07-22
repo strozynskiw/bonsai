@@ -137,10 +137,8 @@ fn main() -> anyhow::Result<()> {
             logging::init_tracing();
             match block_on_with_shutdown(commands::bug::run_standalone(&description, include_log))?
             {
-                Ok(messages) => {
-                    for message in messages {
-                        println!("{message}");
-                    }
+                Ok(message) => {
+                    println!("{message}");
                     Ok(())
                 }
                 Err(err) => {

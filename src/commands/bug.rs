@@ -248,10 +248,7 @@ fn newest_session_log_tail(home_dir: &Path, suffix: &str) -> Option<String> {
 /// offline doctor report plus (with `--include-log`) the newest session-log
 /// tail, written with the default sections. Prints nothing itself; the caller
 /// prints the returned closing lines.
-pub(crate) async fn run_standalone(
-    description: &str,
-    include_log: bool,
-) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn run_standalone(description: &str, include_log: bool) -> anyhow::Result<String> {
     let project_root =
         std::env::current_dir().map_err(|err| anyhow::anyhow!("Cannot resolve cwd: {err}"))?;
     let doctor =
@@ -286,7 +283,7 @@ pub(crate) async fn run_standalone(
         .unwrap_or(0);
     let path = bundle_path(&home_dir, now_ms)?;
     std::fs::write(&path, render_bundle(&inputs, &included))?;
-    Ok(closing_messages(description, &path))
+    Ok(closing_message(description, &path))
 }
 
 /// `$BONSAI_HOME/support/bug-<YYYYMMDD>T<HHMMSS>Z.md`, directory created.
@@ -329,18 +326,19 @@ pub(crate) const GITHUB_NEW_ISSUE_BASE: Option<&str> =
 /// bundle: a public issue's attachments are world-readable and the bundle can
 /// carry machine/workflow data, so whether to attach it stays the user's own
 /// call (see [`closing_messages`]). The link only carries the narrative.
-pub(crate) fn issue_url(description: &str, bundle_path: &Path) -> Option<String> {
+pub(crate) fn issue_url(description: &str) -> Option<String> {
     let base = GITHUB_NEW_ISSUE_BASE?;
     let description = crate::redact::redact(description);
     let title: String = description.chars().take(80).collect();
+    // Keep the query lean: a bloated prefill (HTML comments, the local bundle
+    // path, doubled newlines) balloons into a many-line percent-encoded blob in
+    // the transcript. Title + the full description + one compact env line is all
+    // the maintainer needs; everything else lives in the (local) bundle.
     let body = format!(
-        "<!-- bonsai {} on {}/{} -->\n\n{description}\n\n<!-- A local support bundle \
-         was saved at {}. It may contain machine/workflow data; attach it here only \
-         if you're comfortable making it public. -->\n",
+        "{description}\n\nEnvironment: bonsai {} on {} {}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
-        bundle_path.display(),
     );
     reqwest::Url::parse_with_params(
         &format!("{base}/issues/new"),
@@ -350,30 +348,36 @@ pub(crate) fn issue_url(description: &str, bundle_path: &Path) -> Option<String>
     .map(String::from)
 }
 
-/// The user-facing closing lines after a bundle is written.
+/// The user-facing closing note after a bundle is written — a single Markdown
+/// message (the transcript renders it as one status card via `render_markdown`,
+/// so **bold**, `inline code`, and `>` blockquotes all style through).
 ///
 /// The bundle itself is always a local file — nothing is transmitted. When the
 /// repo is public we add a prefilled new-issue link so the user can file the
 /// narrative in one click, but attaching the bundle stays their choice: a
 /// public issue's attachments are world-readable and the bundle can carry
-/// machine/workflow data, so the note frames the attachment as opt-in rather
-/// than a step. (The user can always open the issue and attach later.)
-pub(crate) fn closing_messages(description: &str, path: &Path) -> Vec<String> {
-    let mut messages = vec![format!("Bug bundle written to {}.", path.display())];
-    match issue_url(description, path) {
+/// machine/workflow data, so the blockquote frames the attachment as opt-in
+/// rather than a step. (The user can always open the issue and attach later.)
+///
+/// The issue URL is written as bare text, not a `[label](url)` link: the
+/// transcript's Markdown appends the raw URL after a link anyway, and a bare
+/// URL is what terminals auto-linkify for click-to-open.
+pub(crate) fn closing_message(description: &str, path: &Path) -> String {
+    let mut out = format!("**Bug bundle saved** — `{}`", path.display());
+    match issue_url(description) {
         Some(url) => {
-            messages.push(format!("Open a prefilled issue: {url}"));
-            messages.push(
-                "The bundle stays on your machine — attach it to the issue only if \
-                 you're comfortable making its contents public; otherwise send it \
+            out.push_str(&format!(
+                "\n\n**Open a prefilled issue:**\n{url}\
+                 \n\n> The bundle stays on your machine. Attach it to the issue only if \
+                 you're comfortable making its contents public — otherwise send it \
                  privately if a maintainer asks."
-                    .to_string(),
-            );
+            ));
         }
-        None => messages
-            .push("Keep this file local and share it privately if a maintainer asks.".to_string()),
+        None => {
+            out.push_str("\n\n> Keep this file local and share it privately if a maintainer asks.");
+        }
     }
-    messages
+    out
 }
 
 /// The full `/bug` flow for surfaces running through the shared command
@@ -390,7 +394,7 @@ pub(crate) async fn run_bug_flow(
     session_store: &crate::session::SessionStore,
     registry: &crate::provider::ProviderRegistry,
     project_root: &Path,
-) -> Result<Vec<String>, String> {
+) -> Result<String, String> {
     // Gather first: the review modal should describe what actually exists.
     let sandbox = agent.sandbox();
     let doctor = Some(
@@ -453,9 +457,7 @@ pub(crate) async fn run_bug_flow(
                 ))) => sections_from_choices(&offered, &choices),
                 Ok(crate::interaction::InteractionOutcome::Question(None))
                 | Err(crate::interaction::InteractionStatus::Cancelled) => {
-                    return Ok(vec![
-                        "Bug report cancelled; nothing was written.".to_string(),
-                    ]);
+                    return Ok("Bug report cancelled; nothing was written.".to_string());
                 }
                 // Noninteractive surfaces (and any unexpected outcome shape)
                 // degrade to the defaults rather than failing the report.
@@ -511,7 +513,7 @@ pub(crate) async fn run_bug_flow(
     std::fs::write(&path, rendered)
         .map_err(|err| format!("Cannot write {}: {err}", path.display()))?;
 
-    Ok(closing_messages(description, &path))
+    Ok(closing_message(description, &path))
 }
 
 #[cfg(test)]
@@ -607,27 +609,32 @@ mod tests {
     }
 
     #[test]
-    fn closing_messages_link_a_prefilled_issue_and_keep_the_bundle_opt_in() {
-        let messages = closing_messages("it crashed on start", Path::new("/tmp/b.md"));
-        assert!(messages[0].contains("/tmp/b.md"));
+    fn closing_message_is_one_formatted_block_and_keeps_the_bundle_opt_in() {
+        let message = closing_message("it crashed on start", Path::new("/tmp/b.md"));
+        // One message, Markdown-formatted: the path is bold + inline code, the
+        // aside is a blockquote.
+        assert!(message.contains("**Bug bundle saved**"), "{message}");
+        assert!(message.contains("`/tmp/b.md`"), "{message}");
+        assert!(
+            message.contains("\n> "),
+            "expected a blockquote aside: {message}"
+        );
         match GITHUB_NEW_ISSUE_BASE {
             Some(base) => {
                 assert!(
-                    messages
-                        .iter()
-                        .any(|message| message.contains(base) && message.contains("issues/new")),
-                    "expected a prefilled new-issue link: {messages:?}"
+                    message.contains(base) && message.contains("issues/new"),
+                    "expected a prefilled new-issue link: {message}"
                 );
                 // Attaching the (potentially sensitive) bundle stays opt-in, never
                 // an instruction — the note must frame it around going public.
                 assert!(
-                    messages.iter().any(|message| message.contains("public")),
-                    "expected a note that attaching makes the bundle public: {messages:?}"
+                    message.contains("public"),
+                    "expected a note that attaching makes the bundle public: {message}"
                 );
             }
             None => assert!(
-                messages.iter().any(|message| message.contains("local")),
-                "private repo keeps the bundle local: {messages:?}"
+                message.contains("local"),
+                "private repo keeps the bundle local: {message}"
             ),
         }
     }
@@ -636,10 +643,7 @@ mod tests {
     fn issue_url_redacts_secrets_and_encodes_when_public() {
         let secret =
             "sk-ant-api03-abcdefghijklmnopqrstuvwx1234567890abcdefghijklmnopqrstuvwx1234-abcdAA";
-        let url = issue_url(
-            &format!("broke; my key is {secret}"),
-            Path::new("/tmp/b.md"),
-        );
+        let url = issue_url(&format!("broke; my key is {secret}"));
         match GITHUB_NEW_ISSUE_BASE {
             Some(_) => {
                 let url = url.expect("a public repo yields a prefilled url");
@@ -651,5 +655,21 @@ mod tests {
             }
             None => assert!(url.is_none()),
         }
+    }
+
+    #[test]
+    fn issue_url_for_a_short_report_stays_compact() {
+        // Regression guard for the many-line percent-encoded blob: a terse
+        // report must produce a short URL — no HTML-comment prefill, no local
+        // bundle path, no doubled boilerplate.
+        let Some(url) = issue_url("crash on start") else {
+            return; // private repo: no URL to bound
+        };
+        assert!(
+            url.len() < 160,
+            "prefilled issue URL should stay compact, got {} chars: {url}",
+            url.len()
+        );
+        assert!(!url.contains("%3C%21"), "no encoded HTML comment: {url}");
     }
 }

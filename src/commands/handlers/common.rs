@@ -304,11 +304,7 @@ pub(crate) async fn handle_command_with_catalog(
                 )
                 .await
                 {
-                    Ok(messages) => {
-                        for message in messages {
-                            outcome.messages.push(status(message));
-                        }
-                    }
+                    Ok(message) => outcome.messages.push(status(message)),
                     Err(message) => outcome.messages.push(error(message)),
                 }
             }
