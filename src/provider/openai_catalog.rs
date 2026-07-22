@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::model_catalog::{AvailableModel, ModelFeature};
+use crate::provider::ModelPricing;
 
 pub(crate) fn model_ids_from_response(value: &Value) -> Vec<String> {
     available_models_from_response(value)
@@ -37,12 +38,15 @@ pub(crate) fn available_models_from_response(value: &Value) -> Vec<AvailableMode
                     if !is_coding_model_id(id) {
                         return None;
                     }
-                    Some(AvailableModel::with_metadata(
-                        id,
-                        context_window_from_model_item(item),
-                        display_name_from_model_item(item, id),
-                        features_from_model_item(item),
-                    ))
+                    Some(
+                        AvailableModel::with_metadata(
+                            id,
+                            context_window_from_model_item(item),
+                            display_name_from_model_item(item, id),
+                            features_from_model_item(item),
+                        )
+                        .with_pricing(pricing_from_model_item(item)),
+                    )
                 })
                 .collect()
         })
@@ -135,9 +139,12 @@ fn display_name_from_model_item(item: &Value, id: &str) -> Option<String> {
 }
 
 /// Best-effort capability sniff: OpenRouter-style `supported_parameters`
-/// listing `tools` marks tool-call support. Absence means "unreported", so no
-/// feature is recorded rather than an explicit unsupported.
+/// listing `tools` marks tool-call support, and `architecture.input_modalities`
+/// (or a top-level `input_modalities`) containing `image` marks vision. Absence
+/// means "unreported", so no feature is recorded rather than an explicit
+/// unsupported.
 fn features_from_model_item(item: &Value) -> Vec<ModelFeature> {
+    let mut features = Vec::new();
     let supports_tools = item
         .get("supported_parameters")
         .and_then(Value::as_array)
@@ -148,10 +155,54 @@ fn features_from_model_item(item: &Value) -> Vec<ModelFeature> {
                 .any(|parameter| parameter == "tools")
         });
     if supports_tools {
-        vec![ModelFeature::ToolCall]
-    } else {
-        Vec::new()
+        features.push(ModelFeature::ToolCall);
     }
+    if input_modalities_include_image(item) {
+        features.push(ModelFeature::Attachment);
+    }
+    features
+}
+
+/// Whether a listing item advertises image input, via OpenRouter's
+/// `architecture.input_modalities` or a flat `input_modalities` array.
+fn input_modalities_include_image(item: &Value) -> bool {
+    ["architecture", "input_modalities"]
+        .iter()
+        .filter_map(|field| item.get(field))
+        // `architecture` nests the array; a flat field is the array itself.
+        .filter_map(|value| value.get("input_modalities").or(Some(value)))
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|modality| modality == "image")
+}
+
+/// Parse the per-token pricing an aggregator gateway publishes in its listing
+/// (OpenRouter: `pricing.prompt` / `.completion` as USD-per-token strings). A
+/// `"0"` price is a real free tier (priced at $0), not a missing price, so it
+/// yields `Some`. `None` only when the pricing object or the two required rates
+/// are absent or unparseable.
+fn pricing_from_model_item(item: &Value) -> Option<ModelPricing> {
+    let pricing = item.get("pricing")?;
+    let input = usd_per_token_micros_per_million(pricing.get("prompt"))?;
+    let output = usd_per_token_micros_per_million(pricing.get("completion"))?;
+    let cache_read = usd_per_token_micros_per_million(pricing.get("input_cache_read"));
+    let cache_write = usd_per_token_micros_per_million(pricing.get("input_cache_write"));
+    Some(ModelPricing::new(input, output).with_cache_rates(cache_read, cache_write))
+}
+
+/// Convert a USD-per-token rate (number or numeric string) into micro-USD per
+/// million tokens, the catalog's pricing unit. Negative/non-finite → `None`.
+fn usd_per_token_micros_per_million(value: Option<&Value>) -> Option<u64> {
+    let raw = value?;
+    let usd_per_token = raw
+        .as_f64()
+        .or_else(|| raw.as_str()?.trim().parse::<f64>().ok())?;
+    if !usd_per_token.is_finite() || usd_per_token < 0.0 {
+        return None;
+    }
+    // per-million (×1e6) then micro-USD (×1e6).
+    Some((usd_per_token * 1_000_000.0 * 1_000_000.0).round() as u64)
 }
 
 fn context_window_from_model_item(item: &Value) -> Option<u32> {
@@ -363,6 +414,58 @@ mod tests {
         assert_eq!(models[1].context_window, Some(65_536));
         assert_eq!(models[2].context_window, Some(131_072));
         assert_eq!(models[3].context_window, None);
+    }
+
+    #[test]
+    fn openrouter_pricing_and_image_modality_parse_from_listing() {
+        // Shape validated live against OpenRouter /api/v1/models (kimi-k3 row).
+        let models = available_models_from_response(&serde_json::json!({
+            "data": [{
+                "id": "moonshotai/kimi-k3",
+                "context_length": 262_144,
+                "supported_parameters": ["tools"],
+                "architecture": { "input_modalities": ["text", "image"], "output_modalities": ["text"] },
+                "pricing": {
+                    "prompt": "0.000003",
+                    "completion": "0.000015",
+                    "input_cache_read": "0.0000003"
+                }
+            }]
+        }));
+
+        assert_eq!(models.len(), 1);
+        let pricing = models[0].pricing.expect("gateway pricing parses");
+        // 0.000003 USD/token → 3 USD/M → 3_000_000 micro-USD/M.
+        assert_eq!(pricing.input_micros_per_million, 3_000_000);
+        assert_eq!(pricing.output_micros_per_million, 15_000_000);
+        assert_eq!(pricing.cache_read_micros_per_million, Some(300_000));
+        assert!(models[0].features.contains(&ModelFeature::ToolCall));
+        assert!(models[0].features.contains(&ModelFeature::Attachment));
+    }
+
+    #[test]
+    fn free_gateway_model_is_priced_at_zero_not_unpriced() {
+        // OpenRouter free tiers list "0" prices — a real $0, not a missing price.
+        let models = available_models_from_response(&serde_json::json!({
+            "data": [{
+                "id": "poolside/laguna-m.1:free",
+                "pricing": { "prompt": "0", "completion": "0" }
+            }]
+        }));
+
+        let pricing = models[0]
+            .pricing
+            .expect("free model still carries $0 pricing");
+        assert_eq!(pricing.input_micros_per_million, 0);
+        assert_eq!(pricing.output_micros_per_million, 0);
+    }
+
+    #[test]
+    fn missing_pricing_object_leaves_price_none() {
+        let models = available_models_from_response(
+            &serde_json::json!({ "data": [{ "id": "bare-model" }] }),
+        );
+        assert_eq!(models[0].pricing, None);
     }
 
     #[test]

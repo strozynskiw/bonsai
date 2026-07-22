@@ -1001,6 +1001,19 @@ mod tests {
                 decision: PromptDecision::AllowProject,
             })
         ));
+        // "Never": the persistent per-project deny, offered wherever `p` is.
+        for code in [KeyCode::Char('n'), KeyCode::Char('N')] {
+            assert!(
+                matches!(
+                    press(&app, code),
+                    KeyIntent::Action(AppAction::PromptDecision {
+                        family: PromptFamily::WebDomain,
+                        decision: PromptDecision::DenyProject,
+                    })
+                ),
+                "{code:?} should map to a per-project never"
+            );
+        }
         for code in [KeyCode::Char('d'), KeyCode::Esc, KeyCode::Char('q')] {
             assert!(
                 matches!(
@@ -1017,6 +1030,40 @@ mod tests {
         assert!(matches!(
             press(&app, KeyCode::Down),
             KeyIntent::Action(AppAction::ScrollModal(1))
+        ));
+    }
+
+    #[test]
+    fn permission_prompt_never_key_persists_but_sandbox_escape_ignores_it() {
+        let press =
+            |app: &AppState, code: KeyCode| map_key(KeyEvent::new(code, KeyModifiers::NONE), app);
+
+        // The permission prompt offers a project scope, so `n` denies-for-project.
+        let mut perm = app();
+        perm.modal = Some(ModalKind::PermissionPrompt {
+            request_id: 1,
+            command: "rm secrets".to_string(),
+            origin: None,
+        });
+        assert!(matches!(
+            press(&perm, KeyCode::Char('n')),
+            KeyIntent::Action(AppAction::PromptDecision {
+                family: PromptFamily::Permission,
+                decision: PromptDecision::DenyProject,
+            })
+        ));
+
+        // Sandbox escapes are never persisted: `n` has no per-project deny to
+        // map to, so it stays a no-op rather than silently denying.
+        let mut escape = app();
+        escape.modal = Some(ModalKind::SandboxEscalationPrompt {
+            request_id: 2,
+            command: "curl https://example.com".to_string(),
+            origin: None,
+        });
+        assert!(matches!(
+            press(&escape, KeyCode::Char('n')),
+            KeyIntent::Noop
         ));
     }
 

@@ -528,6 +528,15 @@ impl WebFetchTool {
                     .await;
                 Ok(())
             }
+            Ok(InteractionOutcome::Permission(PermissionDecision::DenyForProject)) => {
+                if let Err(err) = self.domain_permissions.deny_for_project(host).await {
+                    tracing::warn!(host, %err, "failed to persist project domain deny rule");
+                }
+                self.authorization_ledger
+                    .record(plan, permission, level, "deny", "user denied for project")
+                    .await;
+                anyhow::bail!("Permission denied by user to fetch from '{host}'.")
+            }
             Ok(InteractionOutcome::Permission(PermissionDecision::Deny)) => {
                 self.authorization_ledger
                     .record(plan, permission, level, "deny", "user denied")

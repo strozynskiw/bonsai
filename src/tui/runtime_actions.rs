@@ -906,19 +906,23 @@ fn permission_decision(decision: PromptDecision) -> PermissionDecision {
         PromptDecision::AllowOnce => PermissionDecision::AllowOnce,
         PromptDecision::AllowSession => PermissionDecision::AllowMatching,
         PromptDecision::AllowProject => PermissionDecision::AllowForProject,
+        PromptDecision::DenyProject => PermissionDecision::DenyForProject,
         PromptDecision::Deny => PermissionDecision::Deny,
     }
 }
 
 /// Map the shared prompt tiers onto [`EscalationDecision`]. Sandbox escapes
 /// have no project tier (they are never persisted) — the keymap and the mouse
-/// scrim never produce `AllowProject` for this family, so it falls through to
-/// the fail-safe deny rather than silently widening an approval.
+/// scrim never produce `AllowProject`/`DenyProject` for this family, so those
+/// fall through to the fail-safe deny rather than silently widening (or
+/// persisting) an approval.
 fn escalation_decision(decision: PromptDecision) -> EscalationDecision {
     match decision {
         PromptDecision::AllowOnce => EscalationDecision::AllowOnce,
         PromptDecision::AllowSession => EscalationDecision::AllowForSession,
-        PromptDecision::AllowProject | PromptDecision::Deny => EscalationDecision::Deny,
+        PromptDecision::AllowProject | PromptDecision::DenyProject | PromptDecision::Deny => {
+            EscalationDecision::Deny
+        }
     }
 }
 

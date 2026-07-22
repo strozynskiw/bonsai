@@ -4,10 +4,15 @@ set -eu
 MODE="${1:---dry-run}"
 URL="${BONSAI_MODELS_DEV_URL:-https://models.dev/api.json}"
 CACHE="${BONSAI_MODELS_DEV_CACHE:-$HOME/.bonsai/cache/models-dev.json}"
+# Second-opinion pricing source for cross-validation (best-effort). LiteLLM
+# tracks direct-provider prices, so gross divergence flags a likely models.dev
+# data error (a misplaced decimal), not resale markup.
+LITELLM_URL="${BONSAI_LITELLM_URL:-https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json}"
 TMP="$(mktemp)"
+LITELLM_TMP="$(mktemp)"
 
 cleanup() {
-  rm -f "$TMP"
+  rm -f "$TMP" "$LITELLM_TMP"
 }
 trap cleanup EXIT
 
@@ -22,8 +27,11 @@ esac
 
 curl -fsSL "$URL" -o "$TMP"
 cargo run --quiet -- model-catalog check "$TMP"
+# Best-effort: a fetch failure leaves an empty file and cross-validation degrades
+# to sanity checks only, never blocking the refresh.
+curl -fsSL "$LITELLM_URL" -o "$LITELLM_TMP" || : >"$LITELLM_TMP"
 
-python3 - "$TMP" "$MODE" <<'PY'
+python3 - "$TMP" "$MODE" "$LITELLM_TMP" <<'PY'
 import json
 import pathlib
 import re
@@ -32,8 +40,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 models_dev_path = pathlib.Path(sys.argv[1])
 mode = sys.argv[2]
+litellm_path = pathlib.Path(sys.argv[3]) if len(sys.argv) > 3 else None
 write = mode in {"--write", "write"}
 check = mode in {"--check", "check"}
+import os
+
+strict_crosscheck = os.environ.get("BONSAI_STRICT_CROSSCHECK") == "1"
 
 root = pathlib.Path("models/builtin")
 data = json.loads(models_dev_path.read_text())
@@ -523,8 +535,82 @@ def split_targets(content):
     return chunks
 
 
+def litellm_price_index(path):
+    """Index LiteLLM's public price sheet for cross-validation.
+
+    Returns (full, bare): `full` keyed by the entry's own id, `bare` keyed by
+    the last path segment so a models.dev `provider/model` can match LiteLLM's
+    route-prefixed ids. Bare names with conflicting prices are dropped to avoid
+    false matches. Prices are micro-USD per million tokens, matching models.dev.
+    """
+    if path is None or not path.exists():
+        return {}, {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}, {}
+
+    def to_micros(value):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        micros = int(round(float(value) * 1_000_000 * 1_000_000))
+        return micros if micros >= 0 else None
+
+    full = {}
+    bare = {}
+    conflict = set()
+    for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        inp = to_micros(entry.get("input_cost_per_token"))
+        out = to_micros(entry.get("output_cost_per_token"))
+        if inp is None or out is None:
+            continue
+        price = (inp, out)
+        full[key.lower()] = price
+        name = key.split("/")[-1].lower()
+        if name in bare and bare[name] != price:
+            conflict.add(name)
+        else:
+            bare[name] = price
+    for name in conflict:
+        bare.pop(name, None)
+    return full, bare
+
+
+def crosscheck_shipped(shipped, litellm_full, litellm_bare):
+    """Data-quality warnings for the models we actually ship a target for."""
+    warnings = []
+    for key in sorted(shipped):
+        pricing = shipped[key].get("pricing")
+        # (a) A model models.dev lists but cannot price.
+        if pricing is None:
+            warnings.append(f"{key}: no Models.dev price for a shipped model")
+            continue
+        inp = pricing["input_micros_per_million"]
+        out = pricing["output_micros_per_million"]
+        # (b) Output cheaper than input is almost always a data error.
+        if out < inp:
+            warnings.append(
+                f"{key}: output ${out / 1e6:.2f}/M < input ${inp / 1e6:.2f}/M (suspicious)"
+            )
+        # (c) Second-opinion divergence past an order-of-magnitude-ish band —
+        # a misplaced decimal, not vendor-to-vendor variation.
+        name = key.split("/", 1)[1].lower()
+        other = litellm_full.get(key.lower()) or litellm_bare.get(name)
+        if other and inp > 0 and other[0] > 0:
+            ratio = inp / other[0]
+            if ratio > 2 or ratio < 0.5:
+                warnings.append(
+                    f"{key}: input ${inp / 1e6:.2f}/M vs LiteLLM ${other[0] / 1e6:.2f}/M "
+                    f"({ratio:.1f}x)"
+                )
+    return warnings
+
+
 changes = []
 missing = []
+shipped = {}
 for path in sorted(root.glob("*.toml")):
     original = path.read_text()
     rewritten_chunks = []
@@ -551,6 +637,7 @@ for path in sorted(root.glob("*.toml")):
             missing.append(f"{path}: {key} missing from Models.dev")
             rewritten_chunks.append(header + lines)
             continue
+        shipped[key] = metadata
 
         current = current_numbers(lines)
         number_changed = False
@@ -579,6 +666,17 @@ for path in sorted(root.glob("*.toml")):
     rewritten = "".join("".join(chunk) for chunk in rewritten_chunks)
     if changed and write:
         path.write_text(rewritten)
+
+litellm_full, litellm_bare = litellm_price_index(litellm_path)
+crosscheck = crosscheck_shipped(shipped, litellm_full, litellm_bare)
+if crosscheck:
+    print("Cross-validation warnings:", file=sys.stderr)
+    for item in crosscheck:
+        print(f"  {item}", file=sys.stderr)
+    # Informational by default so legitimate vendor differences never block a
+    # refresh; opt into a hard gate for CI with BONSAI_STRICT_CROSSCHECK=1.
+    if strict_crosscheck:
+        sys.exit(1)
 
 if missing:
     for item in missing:

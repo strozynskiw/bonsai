@@ -178,6 +178,15 @@ impl ExtensionGate {
                     .await;
                 Ok(())
             }
+            Ok(InteractionOutcome::Permission(PermissionDecision::DenyForProject)) => {
+                if let Err(err) = self.permissions.deny_for_project(grant_key).await {
+                    tracing::warn!(display_id, %err, "failed to persist project mcp deny rule");
+                }
+                self.authorization_ledger
+                    .record(plan, permission, level, "deny", "user denied for project")
+                    .await;
+                anyhow::bail!("Permission denied by user for '{display_id}'.")
+            }
             Ok(InteractionOutcome::Permission(PermissionDecision::Deny)) => {
                 self.authorization_ledger
                     .record(plan, permission, level, "deny", "user denied")

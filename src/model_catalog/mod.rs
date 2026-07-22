@@ -541,8 +541,21 @@ impl ModelCatalog {
             })?;
         let models_dev_id = target.metadata_model.as_ref().unwrap_or(model_id);
         let models_dev = self.models_dev_read().model(models_dev_id).cloned();
+        let remote_model_id = target
+            .remote_model
+            .clone()
+            .unwrap_or_else(|| target.model.model().into());
+        let live_pricing = self
+            .live_model_for_connection_model(connection_id, &remote_model_id)
+            .and_then(|available| available.pricing);
 
-        Ok(resolve_target(connection, target, models_dev.as_ref()))
+        Ok(resolve_target(
+            connection,
+            target,
+            models_dev.as_ref(),
+            live_pricing,
+            ModelSource::BuiltIn,
+        ))
     }
 
     pub(crate) fn resolve_connection_model(
@@ -572,6 +585,92 @@ impl ModelCatalog {
                     .flatten()
             })
             .or_else(|| self.resolve_connection_display_name(connection_id, model))
+            .or_else(|| self.resolve_shadow_target(connection_id, model))
+    }
+
+    /// Resolve a model that has no static catalog target by synthesizing a
+    /// minimal "shadow" target from live discovery and/or models.dev metadata.
+    ///
+    /// This closes the class of bug where a provider begins offering a new
+    /// model (e.g. `kimi-k3`) that no `[[targets]]` block lists: without a
+    /// target, [`resolve`] returns `None`, the estimator falls back to
+    /// `from_metadata` (pricing always `None`, no features), so the model runs
+    /// unpriced and stripped of capabilities like vision. Grounding the shadow
+    /// in live availability (the provider genuinely lists it) or a models.dev
+    /// row (the catalog genuinely knows it) means we only synthesize for models
+    /// that really exist — a typo'd name matches neither and stays `None`.
+    fn resolve_shadow_target(
+        &self,
+        connection_id: &ConnectionId,
+        model: &str,
+    ) -> Option<ResolvedModel> {
+        let connection = self.connections.get(connection_id)?;
+        let live = self.live_model_for_connection_model(connection_id, model);
+        // models.dev keys models as `provider/model`; a bare remote id (how
+        // live discovery stores them) is namespaced under the connection id,
+        // which is the models.dev provider for direct providers. Remapped
+        // connections (id != models.dev provider) miss here and return `None` —
+        // no regression over today's unpriced behaviour for those.
+        let canonical: ModelId = model
+            .parse()
+            .or_else(|_err| format!("{connection_id}/{model}").parse())
+            .ok()?;
+        let models_dev = self.models_dev_read().model(&canonical).cloned();
+        // Only synthesize when something real backs the model. Neither signal
+        // present → keep the historical `None` so we never fabricate a target.
+        if models_dev.is_none() && live.is_none() {
+            return None;
+        }
+        let remote_model = live
+            .as_ref()
+            .map(|available| available.remote_model_id.clone())
+            .unwrap_or_else(|| canonical.model().into());
+        // Leave features empty when models.dev has the row so `resolve_target`
+        // pulls its (more complete) capability set — live `/models` listings
+        // routinely under-report vision. Use live features only as a fallback
+        // when models.dev is silent about this model.
+        let features = if models_dev.is_some() {
+            Vec::new()
+        } else {
+            live.as_ref()
+                .map(|available| available.features.clone())
+                .unwrap_or_default()
+        };
+        let shadow = TargetSpec {
+            connection: connection_id.clone(),
+            enabled: true,
+            model: canonical,
+            display_name: live
+                .as_ref()
+                .and_then(|available| available.display_name.clone()),
+            metadata_model: None,
+            remote_model: Some(remote_model),
+            recommended: false,
+            recommended_effort: None,
+            discouraged_efforts: Vec::new(),
+            is_default: false,
+            transport: None,
+            prompt_cache_policy: None,
+            endpoint_path: None,
+            context_window: None,
+            output_limit: None,
+            token_counter: None,
+            max_tokens: None,
+            reasoning_codec: None,
+            reasoning_options: None,
+            features,
+            pricing: None,
+            roles: Vec::new(),
+            pinned: false,
+        };
+        let live_pricing = live.as_ref().and_then(|available| available.pricing);
+        Some(resolve_target(
+            connection,
+            &shadow,
+            models_dev.as_ref(),
+            live_pricing,
+            ModelSource::Discovered,
+        ))
     }
 
     pub(crate) fn resolve_connection_display_name(
@@ -866,6 +965,13 @@ pub(crate) struct AvailableModel {
     /// Codex backend routing contract for models that use Responses Lite.
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_responses_lite: bool,
+    /// Live per-token pricing the provider publishes in its own model listing.
+    /// Only aggregator gateways (OpenRouter) expose this; direct providers omit
+    /// it, leaving `None`. When present it is the authoritative *billed* price
+    /// for that route, so resolution ranks it above the models.dev estimate but
+    /// below a hand-pinned catalog `pricing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricing>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -900,7 +1006,14 @@ impl AvailableModel {
             supported_reasoning: Vec::new(),
             recommended_reasoning: None,
             use_responses_lite: false,
+            pricing: None,
         }
+    }
+
+    /// Attach provider-published live pricing (gateway listings only).
+    pub(crate) fn with_pricing(mut self, pricing: Option<ModelPricing>) -> Self {
+        self.pricing = pricing;
+        self
     }
 
     pub(crate) fn with_reasoning(
@@ -1106,12 +1219,18 @@ fn models_dev_drift_lines(target: &TargetSpec, models_dev_model: &ModelsDevModel
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ModelSource {
     BuiltIn,
+    /// Resolved from a synthesized "shadow" target — a model the provider
+    /// offers (or models.dev knows) that has no hand-written `[[targets]]`
+    /// block. Its metadata comes entirely from live discovery + models.dev.
+    Discovered,
 }
 
 fn resolve_target(
     connection: &ConnectionSpec,
     target: &TargetSpec,
     models_dev: Option<&ModelsDevModel>,
+    live_pricing: Option<ModelPricing>,
+    source: ModelSource,
 ) -> ResolvedModel {
     let remote_model_id = target
         .remote_model
@@ -1172,8 +1291,12 @@ fn resolve_target(
             .or_else(|| models_dev.and_then(|model| model.context_window)),
         output_limit,
         token_counter: target.token_counter.or(connection.default_token_counter),
+        // Precedence: a hand-pinned catalog price wins (deliberate divergence);
+        // then the gateway's own published billed price; then the models.dev
+        // estimate. Only `None` when no source knows this model.
         pricing: target
             .pricing
+            .or(live_pricing)
             .or_else(|| models_dev.and_then(|model| model.pricing)),
         reasoning_options,
         parameter_preview,
@@ -1182,7 +1305,7 @@ fn resolve_target(
         recommended_effort: target.recommended_effort,
         discouraged_efforts: target.discouraged_efforts.clone(),
         roles: target.roles.clone(),
-        source: ModelSource::BuiltIn,
+        source,
     }
 }
 
@@ -2239,6 +2362,134 @@ default_base_url = "http://localhost:11434/v1"
                 .as_deref(),
             Some("qwen/qwen3.6-35b-a3b")
         );
+    }
+
+    #[test]
+    fn discovered_model_without_target_resolves_via_shadow_from_models_dev() {
+        // Session-23 shape: a connection that offers `kimi-k3`, no `[[targets]]`
+        // block for it, but models.dev knows the model. Before shadow targets
+        // this resolved to `None` → unpriced (frozen "spent") and vision-less.
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "moonshotai"
+                    display_name = "Moonshot"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    default_base_url = "https://api.moonshot.ai/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "heuristic"
+                "#,
+            )],
+            &[],
+        )
+        .unwrap()
+        .with_models_dev(
+            parse_models_dev_catalog(
+                "test",
+                r#"{
+                    "moonshotai": {
+                        "models": {
+                            "kimi-k3": {
+                                "id": "kimi-k3",
+                                "name": "Kimi K3",
+                                "tool_call": true,
+                                "reasoning": true,
+                                "attachment": true,
+                                "modalities": { "input": ["text", "image"], "output": ["text"] },
+                                "cost": { "input": 3, "output": 15, "cache_read": 0.3 },
+                                "limit": { "context": 1048576, "output": 131072 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("moonshotai");
+
+        let resolved = catalog
+            .resolve_connection_model(&connection, "kimi-k3")
+            .expect("discovered model resolves through a shadow target");
+
+        assert_eq!(resolved.source, ModelSource::Discovered);
+        assert_eq!(resolved.model_id.as_str(), "moonshotai/kimi-k3");
+        assert_eq!(resolved.remote_model_id.as_ref(), "kimi-k3");
+        // Pricing now flows from models.dev — the fix for the frozen counter.
+        assert!(
+            resolved.pricing.is_some(),
+            "shadow target must carry models.dev pricing"
+        );
+        // Vision now flows from models.dev modalities — the fix for lost images.
+        assert!(
+            resolved.features.contains(&ModelFeature::Attachment),
+            "shadow target must carry the model's vision capability"
+        );
+        assert_eq!(resolved.context_window, Some(1_048_576));
+
+        // A model neither offered live nor known to models.dev stays `None` —
+        // shadow resolution never fabricates a target for a typo'd name.
+        assert!(
+            catalog
+                .resolve_connection_model(&connection, "kimi-k9-typo")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn shadow_target_uses_live_gateway_pricing_when_models_dev_is_silent() {
+        // Gateway (OpenRouter-class) model with no target and no models.dev row,
+        // but the live listing published a price — step 5's path.
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openrouter"
+                    display_name = "OpenRouter"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    default_base_url = "https://openrouter.ai/api/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "heuristic"
+                "#,
+            )],
+            &[],
+        )
+        .unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("openrouter");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability {
+                    models: vec![
+                        AvailableModel::with_metadata(
+                            "poolside/laguna-m.1",
+                            None,
+                            None,
+                            vec![ModelFeature::ToolCall],
+                        )
+                        .with_pricing(Some(ModelPricing::new(1_000_000, 2_000_000))),
+                    ],
+                    ..LiveModelAvailability::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = catalog
+            .resolve_connection_model(&connection, "poolside/laguna-m.1")
+            .expect("discovered gateway model resolves via shadow");
+
+        assert_eq!(resolved.source, ModelSource::Discovered);
+        let pricing = resolved
+            .pricing
+            .expect("live gateway pricing flows through the shadow target");
+        assert_eq!(pricing.input_micros_per_million, 1_000_000);
+        assert_eq!(pricing.output_micros_per_million, 2_000_000);
     }
 
     #[test]

@@ -189,6 +189,23 @@ impl BashTool {
                     .await;
                 Ok(())
             }
+            Ok(InteractionOutcome::Permission(PermissionDecision::DenyForProject)) => {
+                if let Err(err) = self
+                    .permissions
+                    .deny_for_project(analysis.permission_command())
+                    .await
+                {
+                    tracing::warn!(
+                        command = analysis.permission_command(),
+                        %err,
+                        "failed to persist project deny rule"
+                    );
+                }
+                self.authorization_ledger
+                    .record(plan, permission, level, "deny", "user denied for project")
+                    .await;
+                anyhow::bail!("Permission denied by user for command: {command}");
+            }
             Ok(InteractionOutcome::Permission(PermissionDecision::Deny)) => {
                 self.authorization_ledger
                     .record(plan, permission, level, "deny", "user denied")

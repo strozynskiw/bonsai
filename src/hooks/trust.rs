@@ -139,6 +139,12 @@ pub(super) async fn authorize(
             }
             TrustOutcome::Trusted
         }
+        Ok(InteractionOutcome::Permission(PermissionDecision::DenyForProject)) => {
+            if let Err(err) = permissions.deny_for_project(pattern).await {
+                tracing::warn!(hook = %def.name, %err, "failed to persist project hook-trust deny rule");
+            }
+            TrustOutcome::Denied
+        }
         Ok(InteractionOutcome::Permission(PermissionDecision::Deny)) => TrustOutcome::Denied,
         Err(InteractionStatus::Noninteractive) | Err(InteractionStatus::Cancelled) | Ok(_) => {
             TrustOutcome::Denied

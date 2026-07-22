@@ -107,8 +107,15 @@ When an action prompts, you choose:
 | --- | --- | --- |
 | `A` / Enter | Allow once | no rule recorded |
 | `S` / `M` | Always for this session | in-memory rule, lost on restart |
-| `P` | Always for this project | persisted rule, survives restarts |
-| `D` / Esc | Deny | the action fails |
+| `P` | Always for this project | persisted allow rule, survives restarts |
+| `D` / Esc | Deny once | the action fails; no rule recorded |
+| `N` | Never for this project | persisted **deny** rule; refused automatically next time, no re-prompt |
+
+`N` ("Never") is the mirror of `P`: where `P` remembers a "yes", `N` remembers a
+"no", so a request you keep rejecting stops asking. It is offered on every prompt
+that offers `P` (bash, domain, MCP, hook) but never on the sandbox-escape prompt —
+escaping the OS sandbox is the enforcement floor and is never made sticky. Lift a
+`Never` rule the same way as any other: `/permissions remove <id>`.
 
 Rules are glob patterns in **separate namespaces** so a bash pattern can
 never match a web domain or an MCP tool:

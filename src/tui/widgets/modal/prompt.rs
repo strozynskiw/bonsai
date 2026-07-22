@@ -29,6 +29,11 @@ pub(super) fn approval_footer(scopes: &ApprovalScopes) -> Vec<Line<'static>> {
         hints.push(("P", "project"));
     }
     hints.push(("D/Esc", "deny"));
+    if scopes.project {
+        // "Never": the persistent-deny counterpart to "project". Placed after
+        // "deny" so the once/session/project allow tiers stay grouped.
+        hints.push(("N", "never"));
+    }
     vec![footer_hint_line(&hints)]
 }
 

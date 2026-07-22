@@ -99,6 +99,11 @@ pub enum PermissionDecision {
     /// "Always for project" — persist a rule for matching commands so it
     /// survives restarts.
     AllowForProject,
+    /// "Never for project" — persist a *deny* rule for matching commands so the
+    /// action is refused automatically on future runs, without re-prompting.
+    /// The symmetric counterpart to [`Self::AllowForProject`]; attacks the
+    /// decision-fatigue trap of an approval prompt that only remembers "yes".
+    DenyForProject,
     Deny,
 }
 

@@ -47,7 +47,8 @@ const fn prompt_key_spec(family: PromptFamily) -> PromptKeySpec {
 
 /// Shared keymap for the five approval prompts (permission, sandbox
 /// escalation, web domain, extension tool, hook trust): a/Enter allow once,
-/// s allows for the session, p for the project (where offered), d denies.
+/// s allows for the session, p for the project (where offered), n denies for
+/// the project ("Never", where offered), d denies once.
 ///
 /// q mirrors Esc — deny the pending request rather than close the modal
 /// silently and leave the requesting tool call hung on the interaction.
@@ -64,6 +65,12 @@ pub(super) fn map_prompt_decision_key(family: PromptFamily, key: KeyEvent) -> Ke
         KeyCode::Char('s') | KeyCode::Char('S') => decide(PromptDecision::AllowSession),
         KeyCode::Char('p') | KeyCode::Char('P') if spec.offers_project => {
             decide(PromptDecision::AllowProject)
+        }
+        // "Never": persist a per-project deny so this exact request stops
+        // prompting. Only offered where a persistent project rule makes sense
+        // (i.e. wherever `p` is), keeping the sandbox-escape floor un-stickable.
+        KeyCode::Char('n') | KeyCode::Char('N') if spec.offers_project => {
+            decide(PromptDecision::DenyProject)
         }
         KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => decide(PromptDecision::Deny),
         KeyCode::Char('q') | KeyCode::Char('Q') => decide(PromptDecision::Deny),

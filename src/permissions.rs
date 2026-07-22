@@ -638,9 +638,12 @@ impl PermissionManager {
         self.reload(&persistence).await
     }
 
-    /// Persist a project-scoped deny decision. Used only for workspace trust
-    /// so "keep restricted" is remembered rather than reprompting at every
-    /// launch of the same repository.
+    /// "Never for project" — persist (scope `Project`) a deny for `pattern` and
+    /// apply it immediately, so a matching request is refused without
+    /// re-prompting. Used by workspace trust ("keep restricted" is remembered
+    /// rather than reprompting at every launch of the same repository) and by
+    /// the approval prompts' "Never" option. Without a database it falls back to
+    /// a session rule so the current run still honors the decision.
     pub(crate) async fn deny_for_project(&self, pattern: &str) -> Result<()> {
         self.set_for_project(pattern, Permission::Deny).await
     }
@@ -973,6 +976,19 @@ mod tests {
             Permission::Allow
         );
         assert!(manager.user_rules().iter().all(|r| r.id.is_none()));
+    }
+
+    #[tokio::test]
+    async fn never_for_project_persists_a_matching_deny() {
+        let manager = PermissionManager::memory_only();
+        // The prompt's "Never" option: a default-allowed read-only command is
+        // refused once a per-project deny is recorded for it.
+        assert_eq!(
+            manager.check_all(&["ls foo".to_string()]),
+            Permission::Allow
+        );
+        manager.deny_for_project("ls *").await.unwrap();
+        assert_eq!(manager.check_all(&["ls foo".to_string()]), Permission::Deny);
     }
 
     #[test]

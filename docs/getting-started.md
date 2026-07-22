@@ -99,7 +99,8 @@ With onboarding done, just type. A few things worth knowing on day one:
 - **Approvals.** At the default `balanced` autonomy, the routine dev loop
   (builds, tests, formatters, `git commit`) runs unprompted, while pushes,
   deletes, installs, and network access stop for you. `/autonomy` changes the
-  level; every prompt offers allow-once / session / project / deny. See
+  level; every prompt offers allow-once / session / project / deny / never
+  (persistent per-project deny). See
   [Autonomy and permissions](autonomy-and-permissions.md).
 - **Files.** Reference files in the composer with `@path` mentions. The agent
   must read a file (this session) before it may edit it.

@@ -257,7 +257,17 @@ pub(crate) fn session_io_label(report: &ContextReport) -> String {
 }
 
 pub(crate) fn session_cost_label(report: &ContextReport) -> String {
-    format!("cost {}", optional_cost_micros(report.session_cost_micros))
+    match report.session_cost_micros {
+        // Known cost, but an unpriced turn means the real total is higher — mark
+        // it as a lower bound so a frozen figure never reads as a stopped counter.
+        Some(_) if report.session_cost_is_partial() => {
+            format!("cost {}+", optional_cost_micros(report.session_cost_micros))
+        }
+        Some(_) => format!("cost {}", optional_cost_micros(report.session_cost_micros)),
+        // Nothing priced at all: say why rather than a bare "n/a".
+        None if !report.unpriced_models().is_empty() => "cost n/a (unpriced model)".to_string(),
+        None => format!("cost {}", optional_cost_micros(report.session_cost_micros)),
+    }
 }
 
 pub(crate) fn optional_cost_micros(cost_micros: Option<u64>) -> String {
@@ -604,6 +614,107 @@ mod tests {
         ContextEntry, ContextInclusion, ContextNodeKind, ContextTokenMetadata,
     };
     use crate::provider::{EstimateConfidence, InputCacheUsage, TokenCounterKind};
+
+    /// A parent-lane turn with reported usage and an optional price. `None` cost
+    /// models an unpriced turn (the model has no catalog pricing).
+    fn priced_turn(seq: usize, model: &str, cost_micros: Option<u64>) -> UsageTurnReport {
+        UsageTurnReport {
+            seq,
+            lane_kind: crate::agent::ExecutionLaneKind::Parent,
+            lane_id: "parent-1".to_string(),
+            lane_seq: seq,
+            parent_tool_call_id: None,
+            launch_group_id: None,
+            status: crate::agent::UsageTurnStatus::Reported,
+            finish_reason: None,
+            reasoning_chars: 0,
+            provider_attempts: Vec::new(),
+            provider_id: None,
+            model: Some(model.to_string()),
+            effective_reasoning: None,
+            prompt_tokens: Some(1_000),
+            completion_tokens: Some(200),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_measured_input_tokens: None,
+            turn_cost_micros: cost_micros,
+            no_cache_cost_micros: None,
+            estimated_prompt_tokens: None,
+            estimate_source: None,
+            estimate_confidence: None,
+            tool_schema_tokens: None,
+            tool_schema_hash: None,
+            tool_schema_names: Vec::new(),
+            request_body_bytes: None,
+            request_body_hash: None,
+            cache_mechanism: None,
+            cache_route_fingerprint: None,
+            expected_cacheable_percent: None,
+            actual_cache_read_percent: None,
+            local_reusable_prefix_tokens: None,
+            local_reusable_prefix_percent: None,
+            cacheable_prefix_tokens: None,
+            volatile_tail_tokens: None,
+            context_window_tokens: None,
+            rewrite_kind: crate::agent::ContextRewriteKind::None,
+            rewrite_saved_tokens: None,
+            episode_seq: None,
+            created_at_ms: 1_700_000_000_000 + seq as i64 * 30_000,
+            latency_ms: None,
+            ttft_ms: None,
+            prefix_hash: None,
+            inspection_executed: 0,
+            inspection_reused: 0,
+            inspection_rejected: 0,
+            inspection_returned_chars: 0,
+            inspection_avoided_chars: 0,
+            delegated_parent_overlap: 0,
+        }
+    }
+
+    #[test]
+    fn session_cost_label_marks_partial_when_a_turn_ran_unpriced() {
+        // Priced planning turn, then an unpriced coding turn (session 23).
+        let report = ContextReport {
+            session_cost_micros: Some(73_710),
+            usage_turns: vec![
+                priced_turn(1, "deepseek/deepseek-v4-pro", Some(73_710)),
+                priced_turn(2, "moonshotai/kimi-k3", None),
+            ],
+            ..ContextReport::default()
+        };
+        assert!(report.session_cost_is_partial());
+        assert_eq!(
+            report.unpriced_models(),
+            vec!["moonshotai/kimi-k3".to_string()]
+        );
+        assert!(
+            session_cost_label(&report).ends_with('+'),
+            "partial cost must carry a `+` lower-bound marker: {}",
+            session_cost_label(&report)
+        );
+    }
+
+    #[test]
+    fn session_cost_label_is_exact_when_every_turn_priced() {
+        let report = ContextReport {
+            session_cost_micros: Some(73_710),
+            usage_turns: vec![priced_turn(1, "deepseek/deepseek-v4-pro", Some(73_710))],
+            ..ContextReport::default()
+        };
+        assert!(!report.session_cost_is_partial());
+        assert!(!session_cost_label(&report).contains('+'));
+    }
+
+    #[test]
+    fn session_cost_label_names_fully_unpriced_session() {
+        let report = ContextReport {
+            session_cost_micros: None,
+            usage_turns: vec![priced_turn(1, "moonshotai/kimi-k3", None)],
+            ..ContextReport::default()
+        };
+        assert_eq!(session_cost_label(&report), "cost n/a (unpriced model)");
+    }
 
     fn token_metadata() -> ContextTokenMetadata {
         ContextTokenMetadata {

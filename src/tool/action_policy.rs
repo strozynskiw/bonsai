@@ -580,6 +580,15 @@ impl ActionPolicy {
                     .await;
                 Ok(())
             }
+            Ok(InteractionOutcome::Permission(PermissionDecision::DenyForProject)) => {
+                if let Err(error) = self.permissions.deny_for_project(plan.rule_key()).await {
+                    tracing::warn!(rule = plan.rule_key(), %error, "failed to persist mutation deny rule");
+                }
+                self.ledger
+                    .record(plan, permission, level, "deny", "user denied for project")
+                    .await;
+                anyhow::bail!("Permission denied by user for action: {}", plan.subject())
+            }
             Ok(InteractionOutcome::Permission(PermissionDecision::Deny)) => {
                 self.ledger
                     .record(plan, permission, level, "deny", "user denied")

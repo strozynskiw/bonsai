@@ -116,7 +116,7 @@ intended content.
 - **Global-config hooks are pre-trusted** — you wrote your own home file.
 - A **project** hook with a `shell` or `http` action needs a one-time
   approval before it first runs, shown as a permission-style prompt (action
-  command/URL; once / session / project / deny). The trust record hashes the
+  command/URL; once / session / project / deny / never). The trust record hashes the
   *complete* effect declaration — name, event, action, matcher, timeout,
   blocking, failure policy — so editing any of it re-prompts.
 - `llm_prompt` hooks skip the gate: they only reach the model provider you

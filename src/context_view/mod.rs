@@ -112,6 +112,32 @@ impl ContextReport {
             .max(self.session_prompt_tokens)
     }
 
+    /// Distinct models that ran a turn with reported usage but no price — the
+    /// reason a session's cost is only partial. First-seen order. A model whose
+    /// catalog entry prices it at `$0` (free tier) is *priced*, not unpriced, so
+    /// it never appears here. Drives the "partial cost" marker so a frozen dollar
+    /// figure can never masquerade as a stopped counter.
+    pub fn unpriced_models(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for turn in &self.usage_turns {
+            let reported = turn.prompt_tokens.is_some() || turn.completion_tokens.is_some();
+            if reported
+                && turn.turn_cost_micros.is_none()
+                && let Some(model) = &turn.model
+                && !seen.iter().any(|known| known == model)
+            {
+                seen.push(model.clone());
+            }
+        }
+        seen
+    }
+
+    /// The session has some known cost but at least one turn ran unpriced, so
+    /// the total is a lower bound, not exact.
+    pub fn session_cost_is_partial(&self) -> bool {
+        self.session_cost_micros.is_some() && !self.unpriced_models().is_empty()
+    }
+
     pub fn default_expanded_node_ids(&self) -> HashSet<String> {
         self.ledger
             .iter()

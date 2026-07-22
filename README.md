@@ -413,12 +413,14 @@ When a command prompts, you choose:
 - **A** — allow once
 - **S** — always for this session (in-memory)
 - **P** — always for this project (persisted; survives restarts)
-- **D / Esc** — deny
+- **D / Esc** — deny once
+- **N** — never for this project (persists a *deny*; the command is refused
+  automatically next time, no re-prompt)
 
 `/permissions` lists the active rules (built-in + your session/project rules);
-`/permissions remove <id>` drops a persisted one. Rules are scoped per project
-(plus a global scope) and a user rule can relax a default but never re-enable the
-denied-outright set.
+`/permissions remove <id>` drops a persisted one — including a **N**ever rule you
+want to lift. Rules are scoped per project (plus a global scope) and a user rule
+can relax a default but never re-enable the denied-outright set.
 
 ## Agents and subagents
 

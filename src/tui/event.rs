@@ -353,12 +353,16 @@ impl PromptFamily {
 
 /// The decision tiers an approval prompt offers. Sandbox escalation has no
 /// project tier (escapes are never persisted) — its keymap never emits
-/// `AllowProject`, and the responder maps a stray one to the fail-safe deny.
+/// `AllowProject`/`DenyProject`, and the responder maps a stray one to the
+/// fail-safe deny.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptDecision {
     AllowOnce,
     AllowSession,
     AllowProject,
+    /// Persist a per-project *deny* ("Never") so the request is refused
+    /// automatically next time. Offered only by the project-scoped families.
+    DenyProject,
     Deny,
 }
 

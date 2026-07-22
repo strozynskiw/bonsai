@@ -265,7 +265,7 @@ Fetch an http(s) URL as markdown (`url`, `max_chars` 1,000–100,000, default
 30,000). HTML converts via html5ever-based markdown conversion; text/JSON/XML
 pass through; binary is refused; ≤5 redirects with each new domain re-checked.
 Fetching a fresh domain is **High** risk: `balanced` and below prompt per
-domain (allow once / session / project / deny); domain rules live in their own
+domain (allow once / session / project / deny / never); domain rules live in their own
 permission namespace. SSRF protection validates resolved addresses are public.
 
 ### `websearch` (aliases `web_search`, `WebSearch`)

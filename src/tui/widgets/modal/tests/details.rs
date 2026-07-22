@@ -1366,6 +1366,11 @@ fn confirm_prompt_specs_render_expected_content() {
         footer.contains("P project"),
         "permission offers project: {footer}"
     );
+    // The persistent-deny "Never" hint rides alongside the project scope.
+    assert!(
+        footer.contains("N never"),
+        "permission offers a per-project never: {footer}"
+    );
 
     // Sandbox escalation: never offers project; subtitle warns about confinement.
     let s = sandbox_escalation_prompt("rm -rf /", None);
@@ -1374,6 +1379,10 @@ fn confirm_prompt_specs_render_expected_content() {
     assert!(
         !s_footer.contains("P project"),
         "sandbox escape never offers a persistent project rule: {s_footer}"
+    );
+    assert!(
+        !s_footer.contains("N never"),
+        "sandbox escape never offers a persistent per-project deny: {s_footer}"
     );
     assert!(rendered_lines_text(&s.subtitle).contains("confinement"));
 
