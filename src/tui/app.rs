@@ -286,6 +286,11 @@ pub struct AppState {
     pub(crate) reduced_motion: bool,
     /// Render a labelled, linear transcript for assistive terminal readers.
     pub(crate) screen_reader_mode: bool,
+    /// Desired mouse-capture state (the "copy mode" toggle). `true` = in-app
+    /// mouse (scroll/click) is live; `false` = capture released so the terminal
+    /// handles native click-drag selection. The run loop reconciles the real
+    /// terminal to this flag; the meta line shows a marker while it is off.
+    pub(crate) mouse_capture: bool,
     /// Optional user-selected caps for future foreground runs.
     pub(crate) run_budget: crate::run_budget::RunBudget,
     /// Shared OS-sandbox handle, set by the run loop after construction. Read at
@@ -556,6 +561,7 @@ impl AppState {
             support_log_enabled: false,
             reduced_motion: false,
             screen_reader_mode: false,
+            mouse_capture: true,
             run_budget: crate::run_budget::RunBudget::default(),
             sandbox: None,
             current_session_id: None,
@@ -1550,6 +1556,29 @@ mod tests {
             "workspace".to_string(),
             None,
         )
+    }
+
+    #[test]
+    fn toggle_mouse_capture_flips_flag_and_notifies() {
+        let mut app = app();
+        assert!(app.mouse_capture, "capture is on by default");
+
+        app.reduce(AppAction::ToggleMouseCapture);
+        assert!(!app.mouse_capture, "toggle releases capture");
+        let notice = app.copy_notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.text.contains("select"),
+            "off notice mentions selection"
+        );
+
+        app.reduce(AppAction::ToggleMouseCapture);
+        assert!(app.mouse_capture, "toggle again restores capture");
+        assert!(
+            app.copy_notice
+                .as_ref()
+                .is_some_and(|notice| notice.text.contains("on")),
+            "on notice confirms restore"
+        );
     }
 
     #[test]

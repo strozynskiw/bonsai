@@ -985,6 +985,10 @@ pub enum AppAction {
     /// `/bonsai` — reseed and regrow the decorative trees (welcome screen and
     /// todo sidebar).
     ReplantBonsai,
+    /// Toggle "copy mode": release mouse capture so the terminal handles native
+    /// click-drag text selection, or re-enable in-app mouse (scroll/click). The
+    /// run loop reconciles the terminal to `AppState::mouse_capture`.
+    ToggleMouseCapture,
     InputChar(char),
     Backspace,
     ComposerUndo,

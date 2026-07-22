@@ -154,6 +154,13 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
             Span::styled("Click/Drag", theme::body(theme::palette().text)),
             Span::styled(" select", theme::dim()),
         ]),
+        Line::from(vec![
+            Span::styled("Ctrl+G", theme::body(theme::palette().text)),
+            Span::styled(
+                "     copy mode: native terminal selection (toggle · or /select)",
+                theme::dim(),
+            ),
+        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("/help", theme::body(theme::palette().text)),

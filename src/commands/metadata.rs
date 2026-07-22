@@ -86,6 +86,14 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
         surface: both(),
     },
     CommandMetadata {
+        name: "/select",
+        description: "Toggle copy mode: release the mouse for native terminal text selection (Ctrl+G)",
+        usage_hint: None,
+        surface: tui_only(
+            "Copy mode is a TUI-only feature; there is no terminal to release in headless mode.",
+        ),
+    },
+    CommandMetadata {
         name: "/ctx",
         description: "Visualize the current context window",
         usage_hint: None,
@@ -534,8 +542,10 @@ pub(crate) fn busy_behavior_for(input: &str) -> BusyCommandBehavior {
     let args = parts.collect::<Vec<_>>();
 
     match canonical_command_name(command) {
-        "/help" | "/keys" | "/ctx" | "/episodes" | "/perf" | "/cost" | "/usage" | "/sessions"
-        | "/skills" | "/agents" | "/subagents" | "/peers" => BusyCommandBehavior::ReadOnlyNow,
+        "/help" | "/keys" | "/select" | "/ctx" | "/episodes" | "/perf" | "/cost" | "/usage"
+        | "/sessions" | "/skills" | "/agents" | "/subagents" | "/peers" => {
+            BusyCommandBehavior::ReadOnlyNow
+        }
         "/tasks" if args.is_empty() => BusyCommandBehavior::ReadOnlyNow,
         // Setting toggles apply mid-run: their sets go through lock-free state
         // (sandbox handle, storage, app mirrors) so `/sandbox off` typed while

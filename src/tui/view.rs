@@ -403,6 +403,15 @@ pub(crate) fn serenity_marker_span() -> Span<'static> {
     )
 }
 
+/// Meta-line marker shown while mouse capture is released ("copy mode") — a cue
+/// that in-app scroll/click are off and the terminal owns click-drag selection.
+pub(crate) fn select_mode_marker_span() -> Span<'static> {
+    Span::styled(
+        "⊙ select",
+        theme::body(theme::palette().todo).add_modifier(ratatui::style::Modifier::BOLD),
+    )
+}
+
 fn smol_status_pill() -> Span<'static> {
     Span::styled(" smol ", theme::pill(theme::palette().edit))
 }
@@ -1605,6 +1614,32 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
 
         assert!(buffer_text(&buffer).contains("smol"));
+    }
+
+    #[test]
+    fn composer_meta_line_shows_select_marker_only_when_capture_is_off() {
+        let render = |mouse_capture: bool| {
+            let backend = TestBackend::new(130, 40);
+            let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+            let mut app = AppState::new(
+                "codex",
+                "gpt-5.5".to_string(),
+                "bonsai".to_string(),
+                Some("master".to_string()),
+            );
+            app.mouse_capture = mouse_capture;
+            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            buffer_text(&terminal.backend().buffer().clone())
+        };
+
+        assert!(
+            !render(true).contains("select"),
+            "no select marker while capture is on"
+        );
+        assert!(
+            render(false).contains("select"),
+            "select marker appears when capture is released"
+        );
     }
 
     #[test]

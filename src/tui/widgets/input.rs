@@ -567,6 +567,11 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
         push_sep(&mut left, " · ");
         left.push(view::serenity_marker_span());
     }
+    // Copy mode: capture is released, so flag that in-app mouse is off.
+    if !app.mouse_capture {
+        push_sep(&mut left, " · ");
+        left.push(view::select_mode_marker_span());
+    }
     // Only surface the approval level when it deviates from the quiet `ask`
     // default (the agent label already names the active agent).
     if !app.approval_level.is_ask() {

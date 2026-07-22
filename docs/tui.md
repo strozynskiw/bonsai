@@ -114,6 +114,7 @@ Keybindings are fixed (no user keymap file). The essentials:
 | `Alt+M` | cycle autonomy (never lands on yolo) |
 | `Alt+I` | implement plan (`/start`) |
 | `Alt+T` / `Alt+S` | tasks view / subagents view |
+| `Ctrl+G` (or `/select`) | copy mode: release mouse capture for native terminal text selection (toggle; a `⊙ select` marker shows while it's on) |
 | `Ctrl+T` | cycle focus pane |
 | `Ctrl+End` | jump transcript to latest |
 | `Esc` | progressive: dismiss popup → clear selection → clear draft → close modal |

@@ -1877,6 +1877,7 @@ fn every_registered_command_declares_its_busy_behavior() {
     let expected = [
         ("/help", ReadOnlyNow),
         ("/keys", ReadOnlyNow),
+        ("/select", ReadOnlyNow),
         ("/ctx", ReadOnlyNow),
         ("/episodes", ReadOnlyNow),
         ("/perf", ReadOnlyNow),

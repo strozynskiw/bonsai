@@ -323,6 +323,15 @@ fn subagent_event_requests_redraw(
 }
 
 fn draw_tui_frame(terminal: &mut TerminalSession, app: &mut AppState) -> Result<()> {
+    // Reconcile the terminal's real mouse capture to the desired copy-mode
+    // state before drawing. Idempotent (no-op unless they diverge) and
+    // best-effort — a failed toggle must not abort the frame.
+    if terminal.mouse_capture() != app.mouse_capture
+        && let Err(err) = terminal.set_mouse_capture(app.mouse_capture)
+    {
+        tracing::debug!(%err, "failed to reconcile mouse capture to copy-mode flag");
+    }
+
     let terminal_area = terminal.terminal_mut().size()?.into();
     clamp_scrolls(app, terminal_area);
 
@@ -1554,6 +1563,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         app.support_log_enabled = support_log_enabled;
         app.reduced_motion = accessibility.reduced_motion;
         app.screen_reader_mode = accessibility.screen_reader;
+        // Seed the copy-mode flag from the terminal's real capture state (off in
+        // screen-reader mode, on otherwise); the loop reconciles the two after
+        // every toggle from here on.
+        app.mouse_capture = terminal.mouse_capture();
         app.run_budget = run_budget;
         app.credential_persistence = credential_persistence;
         app.provider_auth_form.credential_persistence = credential_persistence;
@@ -2539,6 +2552,19 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                         input.trim().to_string(),
                                     ));
                                     app.reduce(AppAction::ReplantBonsai);
+                                    continue;
+                                }
+                                // `/select` toggles copy mode (release mouse
+                                // capture for native terminal text selection) in
+                                // any task state — the typed fallback for Ctrl+G,
+                                // guaranteed to reach the app regardless of any
+                                // terminal/IDE keybinding collision. The draw loop
+                                // reconciles the real terminal to the flag.
+                                if input.trim() == "/select" {
+                                    app.reduce(AppAction::SubmitCommandInput(
+                                        input.trim().to_string(),
+                                    ));
+                                    app.reduce(AppAction::ToggleMouseCapture);
                                     continue;
                                 }
                                 // `/permissions` works in any task state and needs the

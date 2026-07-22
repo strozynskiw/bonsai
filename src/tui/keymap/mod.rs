@@ -248,6 +248,16 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
             modifiers: KeyModifiers::ALT,
             ..
         } => KeyIntent::Action(AppAction::CycleApprovalLevel),
+        // Copy mode: release mouse capture so the terminal does native text
+        // selection (and re-enable it). Ctrl (not Alt) so it sends a clean
+        // control byte on every terminal — Alt+letter inserts a diacritic on
+        // macOS when Option isn't Meta. VS Code's Ctrl+G (go-to-line) is
+        // editor-scoped, so it reaches the terminal here. Also on `/select`.
+        KeyEvent {
+            code: KeyCode::Char('g') | KeyCode::Char('G'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => KeyIntent::Action(AppAction::ToggleMouseCapture),
         KeyEvent {
             code: KeyCode::Char('t'),
             modifiers: KeyModifiers::CONTROL,
@@ -1351,6 +1361,18 @@ mod tests {
             intent,
             KeyIntent::Action(AppAction::CycleApprovalLevel)
         ));
+    }
+
+    #[test]
+    fn ctrl_g_toggles_mouse_capture() {
+        let app = app();
+        for code in [KeyCode::Char('g'), KeyCode::Char('G')] {
+            let intent = map_key(KeyEvent::new(code, KeyModifiers::CONTROL), &app);
+            assert!(
+                matches!(intent, KeyIntent::Action(AppAction::ToggleMouseCapture)),
+                "{code:?} with Ctrl should toggle mouse capture"
+            );
+        }
     }
 
     #[test]

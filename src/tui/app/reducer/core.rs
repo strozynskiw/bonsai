@@ -33,6 +33,19 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         AppAction::ReplantBonsai => {
             app.sidebar_bonsai.replant();
         }
+        AppAction::ToggleMouseCapture => {
+            // Flip the desired state; the run loop reconciles the real terminal
+            // (Enable/DisableMouseCapture) to this flag after the reduce. The
+            // persistent meta-line marker tracks it; this transient notice
+            // confirms the switch and reminds how to reverse it.
+            app.mouse_capture = !app.mouse_capture;
+            let text = if app.mouse_capture {
+                "Mouse capture on — in-app scroll & click restored"
+            } else {
+                "Mouse capture off — drag to select text; Ctrl+G or /select to re-enable"
+            };
+            app.set_copy_notice(text, crate::tui::app::CopyNoticeKind::Status);
+        }
         AppAction::ToggleView => {
             // The switcher cycles the personas — built-in (coding → planning) then enabled
             // custom agents — against a live registry snapshot; `view` follows the

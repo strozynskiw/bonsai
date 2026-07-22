@@ -116,6 +116,28 @@ impl TerminalSession {
         &mut self.terminal
     }
 
+    /// Whether the terminal is currently capturing mouse events.
+    pub(in crate::tui::run) fn mouse_capture(&self) -> bool {
+        self.mouse_capture
+    }
+
+    /// Enable or disable mouse capture at runtime — the "copy mode" toggle.
+    /// Releasing capture hands click-drag back to the terminal for native text
+    /// selection; re-enabling restores in-app scroll/click. Idempotent, and the
+    /// field stays authoritative so [`Self::restore`] only disables what is on.
+    pub(in crate::tui::run) fn set_mouse_capture(&mut self, enabled: bool) -> io::Result<()> {
+        if self.mouse_capture == enabled {
+            return Ok(());
+        }
+        if enabled {
+            execute!(self.terminal.backend_mut(), EnableMouseCapture)?;
+        } else {
+            execute!(self.terminal.backend_mut(), DisableMouseCapture)?;
+        }
+        self.mouse_capture = enabled;
+        Ok(())
+    }
+
     pub(in crate::tui::run) fn restore(&mut self) -> Result<()> {
         if self.restored {
             return Ok(());
