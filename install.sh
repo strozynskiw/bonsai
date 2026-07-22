@@ -6,9 +6,16 @@
 # Environment:
 #   BONSAI_VERSION      Tag to install (e.g. v0.2.4). Default: newest release.
 #   BONSAI_INSTALL_DIR  Install directory. Default: $HOME/.local/bin
+#   BONSAI_NO_MODIFY_PATH=1
+#                       Never touch shell profiles. When the install directory
+#                       is not on PATH, print the manual export line instead.
 #   BONSAI_SKIP_SIGNATURE=1
 #                       Install with checksum-only verification when the local
 #                       OpenSSL cannot verify Ed25519. Weaker: see verify_manifest.
+#
+# The default stays user-local (no sudo, and bonsai's self-updater must be able
+# to replace its own binary). A shared directory works when you can write to
+# it: BONSAI_INSTALL_DIR=/usr/local/bin — but updates then need the same access.
 #
 # Verification chain (each step gates the next):
 #   1. release-manifest.json is Ed25519-verified against the key baked in below.
@@ -178,6 +185,67 @@ manifest_field() {
     | head -n1
 }
 
+# ------------------------------------------------------------- PATH set-up ---
+
+# Append `line` to `file` once; create the file if missing. Idempotent so
+# re-running the installer never stacks duplicate lines.
+append_once() {
+  # append_once <file> <line>
+  if [ -f "$1" ] && grep -Fqs "$2" "$1"; then
+    return 0
+  fi
+  printf '\n%s\n' "$2" >> "$1" || die "could not update $1"
+  log "updated $1"
+}
+
+# Make INSTALL_DIR reachable in future shells without a manual profile edit —
+# the rustup/uv pattern. The actual export lives in ~/.bonsai/env; profiles get
+# a single guarded source line, so changing the directory later (or removing
+# bonsai) is a one-file edit. Opt out with BONSAI_NO_MODIFY_PATH=1.
+configure_path() {
+  env_file="$HOME/.bonsai/env"
+  mkdir -p "$HOME/.bonsai" || die "could not create $HOME/.bonsai"
+  {
+    printf '# Added by the bonsai installer: keep the install directory on PATH.\n'
+    printf 'case ":$PATH:" in\n'
+    printf '  *":%s:"*) ;;\n' "$INSTALL_DIR"
+    printf '  *) export PATH="%s:$PATH" ;;\n' "$INSTALL_DIR"
+    printf 'esac\n'
+  } > "$env_file" || die "could not write $env_file"
+
+  # Guarded so the line silently no-ops if bonsai is ever removed — an
+  # unguarded source of a missing file errors on every shell startup.
+  source_line="[ -s \"\$HOME/.bonsai/env\" ] && . \"\$HOME/.bonsai/env\""
+  case "$(basename "${SHELL:-sh}")" in
+    zsh)
+      # .zshenv is read by every zsh (login, interactive, scripts).
+      append_once "${ZDOTDIR:-$HOME}/.zshenv" "$source_line"
+      ;;
+    bash)
+      append_once "$HOME/.bashrc" "$source_line"
+      # macOS login shells read .bash_profile (or .profile), never .bashrc.
+      if [ -f "$HOME/.bash_profile" ]; then
+        append_once "$HOME/.bash_profile" "$source_line"
+      else
+        append_once "$HOME/.profile" "$source_line"
+      fi
+      ;;
+    fish)
+      fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
+      mkdir -p "$fish_dir" || die "could not create $fish_dir"
+      # fish does not read POSIX env files; fish_add_path is idempotent.
+      printf '# Added by the bonsai installer.\nfish_add_path --global %s\n' \
+        "$INSTALL_DIR" > "$fish_dir/bonsai.fish" || die "could not write $fish_dir/bonsai.fish"
+      log "updated $fish_dir/bonsai.fish"
+      ;;
+    *)
+      append_once "$HOME/.profile" "$source_line"
+      ;;
+  esac
+  log "added $INSTALL_DIR to PATH for future shells"
+  log "restart your shell, or run:  . \"$HOME/.bonsai/env\""
+}
+
 # --------------------------------------------------------------- main flow ---
 
 main() {
@@ -237,9 +305,13 @@ main() {
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)
-      log ""
-      log "$INSTALL_DIR is not on your PATH. Add it:"
-      log "    export PATH=\"$INSTALL_DIR:\$PATH\""
+      if [ "${BONSAI_NO_MODIFY_PATH:-}" = "1" ]; then
+        log ""
+        log "$INSTALL_DIR is not on your PATH. Add it:"
+        log "    export PATH=\"$INSTALL_DIR:\$PATH\""
+      else
+        configure_path
+      fi
       ;;
   esac
 }
