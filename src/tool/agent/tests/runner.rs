@@ -84,6 +84,36 @@ fn path_preflight_allows_existing_paths_inside_project() {
     );
 }
 
+#[test]
+fn root_slash_is_not_flagged() {
+    let project = tempfile::TempDir::new().unwrap();
+    let prompt = "look at / for the filesystem root";
+    assert_eq!(outside_project_path_in_prompt(prompt, project.path()), None);
+}
+
+#[test]
+fn top_level_users_is_not_flagged() {
+    let project = tempfile::TempDir::new().unwrap();
+    let prompt = "check /Users directory";
+    assert_eq!(outside_project_path_in_prompt(prompt, project.path()), None);
+}
+
+#[test]
+fn outside_path_still_rejected() {
+    let project = tempfile::TempDir::new().unwrap();
+    let prompt = "read /etc/passwd";
+    let matched = outside_project_path_in_prompt(prompt, project.path());
+    assert!(matched.is_some(), "must reject outside path /etc/passwd");
+}
+
+#[test]
+fn source_location_outside_still_rejected() {
+    let project = tempfile::TempDir::new().unwrap();
+    let prompt = "inspect `/etc/hosts:1:5`";
+    let matched = outside_project_path_in_prompt(prompt, project.path());
+    assert!(matched.is_some(), "must reject outside path /etc/hosts");
+}
+
 #[tokio::test]
 async fn read_only_agent_can_run_in_background() {
     let tool =

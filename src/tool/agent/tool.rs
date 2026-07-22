@@ -304,6 +304,14 @@ pub(super) fn outside_project_path_in_prompt(prompt: &str, project_root: &Path) 
         if !path.is_absolute() {
             return None;
         }
+        // Skip filesystem root and known top-level system directories —
+        // these appear in generated prompt content, never as real delegation
+        // targets. Check the original token before canonicalization, because
+        // canonicalize resolves symlinks (e.g. /Users → /System/Volumes/Data/Users
+        // on macOS).
+        if is_harmless_system_path(path) {
+            return None;
+        }
         let canonical = match path.canonicalize() {
             Ok(canonical) => canonical,
             Err(_) => {
@@ -311,11 +319,48 @@ pub(super) fn outside_project_path_in_prompt(prompt: &str, project_root: &Path) 
                 if without_location == token {
                     return None;
                 }
-                Path::new(without_location).canonicalize().ok()?
+                let trimmed = Path::new(without_location);
+                if is_harmless_system_path(trimmed) {
+                    return None;
+                }
+                trimmed.canonicalize().ok()?
             }
         };
         (!canonical.starts_with(&canonical_root)).then_some(canonical)
     })
+}
+
+/// Returns true for filesystem root (`/`) and top-level system directories that
+/// appear in generated prompt text but are never genuine subagent delegation
+/// targets (e.g. a bare `/` or `/Users` token in the project context block).
+fn is_harmless_system_path(path: &Path) -> bool {
+    // The filesystem root itself has no parent.
+    if path.parent().is_none() {
+        return true;
+    }
+    // Top-level directory directly under `/` (e.g. /Users, /tmp, /etc).
+    if path.parent().is_some_and(|p| p.parent().is_none())
+        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+    {
+        return matches!(
+            name,
+            "Users"
+                | "home"
+                | "tmp"
+                | "var"
+                | "etc"
+                | "dev"
+                | "proc"
+                | "sys"
+                | "opt"
+                | "usr"
+                | "root"
+                | "sbin"
+                | "bin"
+                | "lib"
+        );
+    }
+    false
 }
 
 fn trim_source_location(path: &str) -> &str {
