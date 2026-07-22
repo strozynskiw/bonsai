@@ -389,7 +389,7 @@ fn recent_cache_percent(turns: &[UsageTurnReport]) -> Option<u64> {
     let (total, count) = turns
         .iter()
         .rev()
-        .take(10)
+        .take(5)
         .filter_map(turn_cache_percent)
         .fold((0_u64, 0_u64), |(total, count), percent| {
             (total.saturating_add(percent), count + 1)
@@ -939,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn status_cache_percentage_averages_last_ten_rounds() {
+    fn status_cache_percentage_averages_last_five_rounds() {
         let mut report = report();
         report.usage_turns = (0..11)
             .map(|seq| {
@@ -954,8 +954,8 @@ mod tests {
 
         let telemetry = CostTelemetry::from_report(&report);
 
-        assert_eq!(telemetry.recent_cache_percent, Some(55));
-        assert!(telemetry.header_label(&report, 88).contains("cache 55%"));
+        assert_eq!(telemetry.recent_cache_percent, Some(80));
+        assert!(telemetry.header_label(&report, 88).contains("cache 80%"));
     }
 
     #[test]
