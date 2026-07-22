@@ -18,8 +18,8 @@ use serde::Deserialize;
 use crate::diff::{FileDiff, build_deleted_file_diff, build_file_diff};
 use crate::tool::file_mutation::{
     FileMutationAction, FileMutationContext, FileWriteRequest, ParentDirs, ResolvedMutationPath,
-    WriteContentContext, WritePrecondition, reject_replayed_elision_marker, remove_created_file,
-    restore_file_content,
+    WriteContentContext, WritePrecondition, file_mutation_tool_ctors,
+    reject_replayed_elision_marker, remove_created_file, restore_file_content,
 };
 use crate::tool::schema::{object, parse_args, string_property};
 use crate::tool::{
@@ -38,48 +38,7 @@ pub struct ApplyPatchTool {
     ctx: FileMutationContext,
 }
 
-impl ApplyPatchTool {
-    #[cfg(test)]
-    pub fn new(project_root: PathBuf, read_tracker: ReadTracker) -> Self {
-        Self::with_yolo_mode(project_root, read_tracker, YoloMode::new())
-    }
-
-    #[cfg(test)]
-    pub fn with_yolo_mode(
-        project_root: PathBuf,
-        read_tracker: ReadTracker,
-        yolo_mode: YoloMode,
-    ) -> Self {
-        Self::with_hooks_and_locks(
-            project_root.clone(),
-            read_tracker,
-            yolo_mode,
-            std::sync::Arc::new(crate::hooks::HookEngine::disabled()),
-            WorkspaceLockContext::disabled(project_root),
-            ActionPolicy::testing(),
-        )
-    }
-
-    pub fn with_hooks_and_locks(
-        project_root: PathBuf,
-        read_tracker: ReadTracker,
-        yolo_mode: YoloMode,
-        hooks: std::sync::Arc<crate::hooks::HookEngine>,
-        workspace_locks: WorkspaceLockContext,
-        policy: ActionPolicy,
-    ) -> Self {
-        Self {
-            ctx: FileMutationContext::new_with_locks(
-                project_root,
-                read_tracker,
-                yolo_mode,
-                hooks,
-                workspace_locks,
-                policy,
-            ),
-        }
-    }
-}
+file_mutation_tool_ctors!(ApplyPatchTool);
 
 // ---------------------------------------------------------------------------
 // Patch model + parser

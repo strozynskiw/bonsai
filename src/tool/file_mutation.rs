@@ -388,6 +388,61 @@ fn log_hook_warnings(warnings: &[String]) {
     }
 }
 
+/// Generate the shared constructor triplet for a file-mutation tool that is a
+/// newtype `struct $tool { ctx: FileMutationContext }` — `edit`, `write`, and
+/// `apply_patch`. The three differ only in the wrapping type, so their `new` /
+/// `with_yolo_mode` / `with_hooks_and_locks` live here once instead of being
+/// copy-pasted into each file. Invoked in each tool's own module so the
+/// constructors stay inherent (no call site changes); the bare type names
+/// resolve from that module's imports.
+macro_rules! file_mutation_tool_ctors {
+    ($tool:ty) => {
+        impl $tool {
+            #[cfg(test)]
+            pub fn new(project_root: PathBuf, read_tracker: ReadTracker) -> Self {
+                Self::with_yolo_mode(project_root, read_tracker, YoloMode::new())
+            }
+
+            #[cfg(test)]
+            pub fn with_yolo_mode(
+                project_root: PathBuf,
+                read_tracker: ReadTracker,
+                yolo_mode: YoloMode,
+            ) -> Self {
+                Self::with_hooks_and_locks(
+                    project_root.clone(),
+                    read_tracker,
+                    yolo_mode,
+                    std::sync::Arc::new(crate::hooks::HookEngine::disabled()),
+                    WorkspaceLockContext::disabled(project_root),
+                    ActionPolicy::testing(),
+                )
+            }
+
+            pub fn with_hooks_and_locks(
+                project_root: PathBuf,
+                read_tracker: ReadTracker,
+                yolo_mode: YoloMode,
+                hooks: std::sync::Arc<crate::hooks::HookEngine>,
+                workspace_locks: WorkspaceLockContext,
+                policy: ActionPolicy,
+            ) -> Self {
+                Self {
+                    ctx: FileMutationContext::new_with_locks(
+                        project_root,
+                        read_tracker,
+                        yolo_mode,
+                        hooks,
+                        workspace_locks,
+                        policy,
+                    ),
+                }
+            }
+        }
+    };
+}
+pub(crate) use file_mutation_tool_ctors;
+
 /// Owns the shared state (`project_root`, `read_tracker`, `yolo_mode`) that the
 /// write and edit tools need to build a [`FileMutationGuard`] per invocation.
 pub(crate) struct FileMutationContext {

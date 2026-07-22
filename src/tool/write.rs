@@ -7,8 +7,8 @@ use serde::Deserialize;
 use crate::diff::build_file_diff;
 use crate::tool::file_mutation::{
     FileMutationAction, FileMutationContext, FileWriteRequest, ParentDirs, WriteContentContext,
-    WritePrecondition, build_mutation_output, noop_mutation_output, reject_replayed_elision_marker,
-    write_effects,
+    WritePrecondition, build_mutation_output, file_mutation_tool_ctors, noop_mutation_output,
+    reject_replayed_elision_marker, write_effects,
 };
 use crate::tool::schema::{object, parse_args, path_property, string_property};
 use crate::tool::{ActionPlan, ActionPolicy, ReadTracker, Tool, ToolOutput, WorkspaceLockContext};
@@ -24,48 +24,7 @@ pub struct WriteTool {
     ctx: FileMutationContext,
 }
 
-impl WriteTool {
-    #[cfg(test)]
-    pub fn new(project_root: PathBuf, read_tracker: ReadTracker) -> Self {
-        Self::with_yolo_mode(project_root, read_tracker, YoloMode::new())
-    }
-
-    #[cfg(test)]
-    pub fn with_yolo_mode(
-        project_root: PathBuf,
-        read_tracker: ReadTracker,
-        yolo_mode: YoloMode,
-    ) -> Self {
-        Self::with_hooks_and_locks(
-            project_root.clone(),
-            read_tracker,
-            yolo_mode,
-            std::sync::Arc::new(crate::hooks::HookEngine::disabled()),
-            WorkspaceLockContext::disabled(project_root),
-            ActionPolicy::testing(),
-        )
-    }
-
-    pub fn with_hooks_and_locks(
-        project_root: PathBuf,
-        read_tracker: ReadTracker,
-        yolo_mode: YoloMode,
-        hooks: std::sync::Arc<crate::hooks::HookEngine>,
-        workspace_locks: WorkspaceLockContext,
-        policy: ActionPolicy,
-    ) -> Self {
-        Self {
-            ctx: FileMutationContext::new_with_locks(
-                project_root,
-                read_tracker,
-                yolo_mode,
-                hooks,
-                workspace_locks,
-                policy,
-            ),
-        }
-    }
-}
+file_mutation_tool_ctors!(WriteTool);
 
 #[async_trait]
 impl Tool for WriteTool {
