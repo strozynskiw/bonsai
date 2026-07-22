@@ -40,6 +40,7 @@ pub(super) fn system_prompt(mode: AgentMode) -> &'static str {
              - Bash commands start in the project cwd shown in context. Do not prefix commands with `cd <repo> &&`; use the bash `workdir` argument only when a different subdirectory is required.\n\
              - For long-running shell commands, use bash with run_in_background: true. End your turn after starting one; Bonsai wakes you when it finishes.\n\
              - For commands that require a real TTY, use bash with interactive: true, then read, send bounded non-secret input, resize, interrupt, or stop the returned pty-N session with the terminal tool. Do not use interactive mode for ordinary commands.\n\
+              - Prefer read-only Unix pipeline tools (grep, cat, cut, head, tail, find, fd, sed, sort, uniq, wc, diff, jq) over scripting language interpreters (awk, python, perl, ruby, node) for file inspection and text processing. Interpreter one-liners always require user approval; pipeline tools are auto-approved at Balanced and above.\n\
              \n\
              Execution loop:\n\
              - For non-trivial implementation work, and for each /start phase, make a short plan if one is not already clear.\n\
