@@ -518,7 +518,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
     let agent = app.persona_label();
     let mut left = vec![Span::styled("  ".to_string(), theme::composer_meta())];
     left.extend(view::status_dot_spans(app));
-    left.push(Span::styled("  ".to_string(), theme::composer_meta()));
+    left.push(Span::styled(" ".to_string(), theme::composer_meta()));
     // A run keeps its dispatch-time persona even when the user switches
     // mid-flight (peeking at the plan never cancels work), so surface the
     // pending switch as `Running → Selected`: the run still executes as
