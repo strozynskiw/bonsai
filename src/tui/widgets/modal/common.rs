@@ -74,6 +74,7 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         ModalKind::SkillManager { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
         ModalKind::ProviderDetail { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
         ModalKind::MemoryManager { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
+        ModalKind::PermissionsManager { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
         ModalKind::MemoryAddWizard { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
         ModalKind::Settings { .. } => area,
         ModalKind::AgentComposer { .. } => centered_rect(area, MODAL_WIDTH_FORM, 72),

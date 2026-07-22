@@ -155,11 +155,17 @@ Two floors bound even an explicit allow:
 
 ### Managing rules
 
-- `/permissions` lists built-in counts, your custom rules in priority order
-  with ids, web-domain rules, and the recent **authorization ledger**
-  (every decision with tier, effects, source, autonomy, and sandbox
-  posture).
-- `/permissions remove <id>` deletes a persisted rule.
+- `/permissions` opens an **interactive manager**: a single searchable list of
+  every editable rule (bash commands + web domains, session *and* persisted),
+  each shown with its lane, scope, decision, and id. `/` filters by pattern,
+  scope, or decision; `d` / Delete removes the selected rule (persisted → deleted
+  from storage; session → dropped from memory); Esc closes (clearing an applied
+  filter first). Deleting a rule rebuilds the list in place.
+- `/permissions list` prints the same rules as text — built-in counts, custom
+  rules in priority order with ids, web-domain rules, and the recent
+  **authorization ledger** (every decision with tier, effects, source, autonomy,
+  and sandbox posture) — as a scriptable fallback.
+- `/permissions remove <id>` deletes a persisted rule by id.
 - Rules persist in SQLite per project (plus a global scope); when no database
   is available, "always for project" degrades to a session rule.
 

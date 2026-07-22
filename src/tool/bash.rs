@@ -598,11 +598,22 @@ impl BashTool {
         }
         match escape {
             EscapeApproval::None => {
-                // Soft nudge: a confined command failed and escape wasn't asked for.
-                if confined && !timed_out && matches!(exit_code, Some(code) if code != 0) {
+                // Soft nudge: a confined command failed *because the sandbox
+                // blocked it*. Gated on a denial signature in the output, not on
+                // failure alone — otherwise every ordinary non-zero exit (a
+                // failing test, a clippy warning under a `git commit` pre-commit
+                // hook, a bad path) told the model to escape, and it would burn a
+                // user escape-approval on a command the sandbox never touched
+                // (writes to `.git/` and the workspace succeed confined). See
+                // `failure_looks_sandbox_related`.
+                if confined
+                    && !timed_out
+                    && matches!(exit_code, Some(code) if code != 0)
+                    && failure_looks_sandbox_related(body)
+                {
                     Self::push_paragraph(
                         &mut rendered,
-                        "If this needs to run outside the sandbox (write outside the project root or use the network), retry with escape_sandbox=true.",
+                        "This failed while confined to the sandbox — the error looks like a blocked write or network access. If it legitimately must write outside the project root or use the network, retry with escape_sandbox=true.",
                     );
                 }
             }
@@ -710,6 +721,34 @@ impl BashTool {
             }
         }
     }
+}
+
+/// Whether a confined command's failure output carries a signature of the
+/// sandbox itself blocking it — an OS write denial or a denied-network error.
+/// Only these should steer the model toward `escape_sandbox`; every other
+/// non-zero exit (lint/test failure, missing path, non-sandbox auth error) is a
+/// real failure that escaping cannot fix. Kept deliberately narrow: false
+/// negatives just withhold a nudge (the tool schema still documents escape),
+/// whereas the old always-nudge trained the model to escape on any failure.
+///
+/// Signatures span both backends: macOS Seatbelt surfaces write and network
+/// denials as EPERM ("operation not permitted"); Linux Bubblewrap surfaces a
+/// read-only bind as EROFS ("read-only file system") and other blocks as EACCES
+/// ("permission denied"). The DNS/route strings catch denied network egress,
+/// which fails before any connection when resolution or routing is walled off.
+fn failure_looks_sandbox_related(body: &str) -> bool {
+    const SIGNATURES: &[&str] = &[
+        "operation not permitted",
+        "read-only file system",
+        "permission denied",
+        "could not resolve host",
+        "couldn't resolve host",
+        "temporary failure in name resolution",
+        "network is unreachable",
+        "no route to host",
+    ];
+    let lower = body.to_ascii_lowercase();
+    SIGNATURES.iter().any(|sig| lower.contains(sig))
 }
 
 fn effective_timeout_secs(timeout: Option<u64>, run_in_background: bool) -> u64 {
@@ -921,12 +960,44 @@ mod tests {
     }
 
     #[test]
-    fn finalize_foreground_nudges_escape_only_on_confined_failure() {
+    fn sandbox_denial_signatures_are_detected_case_insensitively() {
+        // Both backends' denial shapes, plus denied-network errors.
+        for body in [
+            "touch: /etc/x: Operation not permitted",
+            "error: Read-only file system (os error 30)",
+            "fatal: could not create work tree dir: Permission denied",
+            "fatal: unable to access 'https://…': Could not resolve host: github.com",
+            "curl: (7) Couldn't resolve host 'example.com'",
+            "ping: connect: Network is unreachable",
+        ] {
+            assert!(
+                failure_looks_sandbox_related(body),
+                "should flag as sandbox-shaped: {body}"
+            );
+        }
+
+        // Ordinary failures escaping cannot fix — no nudge.
+        for body in [
+            "error[E0433]: failed to resolve: use of undeclared crate",
+            "test result: FAILED. 1 passed; 2 failed",
+            "fatal: pathspec 'nope.rs' did not match any files",
+            "clippy: unused variable `x`",
+        ] {
+            assert!(
+                !failure_looks_sandbox_related(body),
+                "should NOT flag as sandbox-shaped: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn finalize_foreground_nudges_escape_only_on_sandbox_shaped_failure() {
         let failed = summary_with_exit(Some(1));
 
+        // A confined failure whose output shows an OS write denial: nudge.
         let nudged = BashTool::finalize_foreground(
-            "false",
-            "out",
+            "touch /etc/blocked",
+            "touch: /etc/blocked: Operation not permitted",
             Some(1),
             false,
             true,
@@ -936,8 +1007,25 @@ mod tests {
         assert!(nudged.contains("escape_sandbox=true"), "{nudged}");
         assert!(nudged.contains("[Command summary]"), "{nudged}");
 
+        // A confined failure that is NOT the sandbox — a `git commit` whose
+        // pre-commit hook's clippy failed — must not steer toward escape, which
+        // would waste a user approval on a command the sandbox never blocked.
+        let lint_failure = BashTool::finalize_foreground(
+            "git commit -m x",
+            "error: unused variable `foo`\nerror: could not compile due to previous error",
+            Some(1),
+            false,
+            true,
+            EscapeApproval::None,
+            &failed,
+        );
+        assert!(
+            !lint_failure.contains("escape_sandbox=true"),
+            "{lint_failure}"
+        );
+
         // No nudge on success, outside confinement, or when the run already
-        // escaped the sandbox.
+        // escaped the sandbox — even with a denial-shaped body.
         let succeeded = BashTool::finalize_foreground(
             "true",
             "out",
@@ -950,8 +1038,8 @@ mod tests {
         assert!(!succeeded.contains("escape_sandbox=true"), "{succeeded}");
 
         let unconfined = BashTool::finalize_foreground(
-            "false",
-            "out",
+            "touch /etc/blocked",
+            "touch: /etc/blocked: Operation not permitted",
             Some(1),
             false,
             false,
@@ -961,8 +1049,8 @@ mod tests {
         assert!(!unconfined.contains("escape_sandbox=true"), "{unconfined}");
 
         let escaped = BashTool::finalize_foreground(
-            "false",
-            "out",
+            "touch /etc/blocked",
+            "touch: /etc/blocked: Operation not permitted",
             Some(1),
             false,
             true,
@@ -1253,19 +1341,29 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn confined_failure_nudges_toward_escape() {
-        // Real confinement (macOS) so the command is actually `confined`; a
-        // non-zero exit without an escape request appends the retry nudge.
+    async fn confined_write_denial_nudges_toward_escape() {
+        // Real confinement (macOS Seatbelt) so the command is actually
+        // `confined`. A write outside the project root is blocked with
+        // "Operation not permitted", which is a genuine sandbox denial, so the
+        // retry nudge is appended.
         let fixture = TestFixture::new();
         let service = Arc::new(InteractionService::noninteractive());
         let tool = escape_tool(&fixture, service, active_sandbox(&fixture.project_root));
 
         let output = tool
-            .execute(json!({"command": "exit 3"}))
+            .execute(json!({"command": "touch /etc/bonsai-sandbox-denial-test"}))
             .await
             .expect("a non-zero exit is not a tool error");
         assert!(rendered_command_output(output).contains("escape_sandbox=true"));
     }
+
+    // The escape-only-on-sandbox-signature behaviour is covered by the unit
+    // test `finalize_foreground_nudges_escape_only_on_sandbox_shaped_failure`
+    // above. An integration test through the full `execute` path is unreliable
+    // on macOS: `sandbox-exec` often refuses to apply a nested profile from
+    // within a test-process seatbelt (exit 71, "sandbox_apply: Operation not
+    // permitted"), and that error itself contains the denial signature we are
+    // trying to avoid, making the test self-defeating.
 
     #[tokio::test]
     async fn large_output_streams_to_a_spool_file_with_full_contents() {

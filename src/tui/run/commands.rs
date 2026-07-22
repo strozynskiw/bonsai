@@ -640,6 +640,17 @@ pub(in crate::tui::run) async fn apply_permissions_command(
 ) {
     use crate::commands::PermissionsCommandRequest;
     match crate::commands::parse_permissions_command(input) {
+        Ok(PermissionsCommandRequest::Manage) => {
+            // Bare `/permissions` opens the interactive manager built from both
+            // rule sets; `list`/`remove` below stay as the scriptable text path.
+            crate::tui::runtime_actions::open_permissions_manager(
+                app,
+                permissions,
+                domain_permissions,
+                String::new(),
+                0,
+            );
+        }
         Ok(PermissionsCommandRequest::List) => {
             let (deny_floor, defaults) = permissions.builtin_counts();
             let rules = permissions.user_rules();

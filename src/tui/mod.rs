@@ -11,6 +11,7 @@ pub(crate) mod mcp;
 pub(crate) mod memory_manager;
 pub mod mouse;
 pub mod path_search;
+pub(crate) mod permissions_manager;
 pub(crate) mod pickers;
 pub(crate) mod provider_manager;
 pub mod run;

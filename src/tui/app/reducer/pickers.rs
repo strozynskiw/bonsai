@@ -468,6 +468,73 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *cursor = 0;
             }
         }
+        AppAction::PermissionsManagerMove(delta) => {
+            if let Some(ModalKind::PermissionsManager {
+                rows,
+                filter,
+                cursor,
+                ..
+            }) = &mut app.modal
+            {
+                let max =
+                    crate::tui::permissions_manager::permission_manager_filtered(rows, filter)
+                        .len()
+                        .saturating_sub(1);
+                *cursor = move_index(*cursor, delta, max);
+            }
+        }
+        AppAction::PermissionsManagerBeginSearch => {
+            if let Some(ModalKind::PermissionsManager { searching, .. }) = &mut app.modal {
+                *searching = true;
+            }
+        }
+        AppAction::PermissionsManagerSearchChar(ch) => {
+            if let Some(ModalKind::PermissionsManager {
+                filter,
+                searching,
+                cursor,
+                ..
+            }) = &mut app.modal
+                && *searching
+            {
+                filter.push(ch);
+                *cursor = 0;
+            }
+        }
+        AppAction::PermissionsManagerSearchBackspace => {
+            if let Some(ModalKind::PermissionsManager {
+                filter,
+                searching,
+                cursor,
+                ..
+            }) = &mut app.modal
+                && *searching
+            {
+                filter.pop();
+                *cursor = 0;
+            }
+        }
+        AppAction::PermissionsManagerSearchExit => {
+            if let Some(ModalKind::PermissionsManager { searching, .. }) = &mut app.modal {
+                *searching = false;
+            }
+        }
+        AppAction::PermissionsManagerClearFilter => {
+            if let Some(ModalKind::PermissionsManager {
+                filter,
+                searching,
+                cursor,
+                ..
+            }) = &mut app.modal
+            {
+                filter.clear();
+                *searching = false;
+                *cursor = 0;
+            }
+        }
+        // The delete effect (storage/memory removal + list rebuild) is
+        // runtime-owned; see `tui::runtime_actions`.
+        AppAction::PermissionsManagerDelete => {}
         AppAction::ProviderDetailBack => {
             if let Some(ModalKind::ProviderDetail { detail }) = app.modal.take() {
                 app.reduce(AppAction::OpenModal(ModalKind::ProviderManager {

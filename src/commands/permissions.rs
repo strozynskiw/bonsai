@@ -1,6 +1,8 @@
-//! `/permissions` — list the active permission rules and remove persisted ones.
-//! The prompt's "always for project / session" options are the primary way to
-//! *add* rules; this command is for inspecting and pruning them.
+//! `/permissions` — inspect and prune permission rules. The approval prompt's
+//! "always/never for project / session" options are the primary way to *add*
+//! rules; this command manages them. Bare `/permissions` opens the interactive
+//! manager modal (search + delete); `list` and `remove <id>` are the scriptable
+//! text forms parsed here.
 
 use crate::permissions::RuleView;
 use crate::storage::AuthorizationDecisionRecord;
@@ -9,7 +11,11 @@ pub(crate) const PERMISSIONS_USAGE: &str = "Usage: /permissions [list|remove <id
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PermissionsCommandRequest {
+    /// Bare `/permissions` — open the interactive manager modal.
+    Manage,
+    /// `/permissions list` — print the rules as text (scriptable fallback).
     List,
+    /// `/permissions remove <id>` — delete a persisted rule by id.
     Remove(i64),
 }
 
@@ -18,7 +24,8 @@ pub(crate) fn parse_permissions_command(
 ) -> std::result::Result<PermissionsCommandRequest, String> {
     let args = super::command_args(input, "/permissions", PERMISSIONS_USAGE)?;
     match args.as_slice() {
-        [] | ["list"] => Ok(PermissionsCommandRequest::List),
+        [] => Ok(PermissionsCommandRequest::Manage),
+        ["list"] => Ok(PermissionsCommandRequest::List),
         ["remove", id] => id
             .parse::<i64>()
             .map(PermissionsCommandRequest::Remove)
@@ -104,7 +111,7 @@ mod tests {
     fn parses_list_and_remove() {
         assert_eq!(
             parse_permissions_command("/permissions"),
-            Ok(PermissionsCommandRequest::List)
+            Ok(PermissionsCommandRequest::Manage)
         );
         assert_eq!(
             parse_permissions_command("/permissions list"),

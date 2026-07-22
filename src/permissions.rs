@@ -235,6 +235,16 @@ impl PermissionService {
         Ok(())
     }
 
+    /// Drop the in-memory session rule whose raw pattern is `pattern`. Returns
+    /// whether a rule matched. Session rules have no database id, so this is the
+    /// only way to remove one — `delete_permission_rule` is id-keyed and never
+    /// touches them.
+    pub fn remove_session_rule(&mut self, pattern: &str) -> bool {
+        let before = self.session_rules.len();
+        self.session_rules.retain(|rule| rule.raw != pattern);
+        self.session_rules.len() != before
+    }
+
     /// Replace the persisted-rule set (project + global) from storage rows,
     /// preserving session rules. Rows arrive project-first then newest-first, so
     /// they keep that order here. Invalid glob patterns are skipped.
@@ -603,6 +613,23 @@ impl PermissionManager {
             && let Err(err) = svc.add_session_rule(pattern, permission)
         {
             tracing::warn!(pattern, %err, "invalid permission pattern; rule skipped");
+        }
+    }
+
+    /// Remove the in-memory session rule with this exact pattern, returning
+    /// whether one matched. The `/permissions` manager uses this to delete a
+    /// session rule, which — having no database id — cannot go through
+    /// [`Self::remove`]. Persisted rules are untouched.
+    pub fn remove_session_rule(&self, pattern: &str) -> bool {
+        match self.service.lock() {
+            Ok(mut svc) => svc.remove_session_rule(pattern),
+            Err(_) => {
+                tracing::warn!(
+                    pattern,
+                    "permission service lock poisoned; session rule not removed"
+                );
+                false
+            }
         }
     }
 
@@ -976,6 +1003,27 @@ mod tests {
             Permission::Allow
         );
         assert!(manager.user_rules().iter().all(|r| r.id.is_none()));
+    }
+
+    #[test]
+    fn remove_session_rule_drops_only_the_matching_pattern() {
+        let manager = PermissionManager::memory_only();
+        manager.add_session_rule("make *", Permission::Allow);
+        manager.add_session_rule("rm -rf *", Permission::Deny);
+
+        assert!(manager.remove_session_rule("make *"));
+        // Gone: no longer allowed, falls back to the default ask.
+        assert_eq!(
+            manager.check_all(&["make all".to_string()]),
+            Permission::Ask
+        );
+        // The sibling session rule is untouched.
+        assert_eq!(
+            manager.check_all(&["rm -rf x".to_string()]),
+            Permission::Deny
+        );
+        // Removing a pattern that isn't a session rule reports no match.
+        assert!(!manager.remove_session_rule("make *"));
     }
 
     #[tokio::test]

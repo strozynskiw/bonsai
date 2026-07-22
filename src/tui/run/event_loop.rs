@@ -1702,6 +1702,8 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 memory: memory.clone(),
                 yolo_mode: yolo_mode.clone(),
                 session_store: session_store.clone(),
+                permissions: permissions.clone(),
+                domain_permissions: domain_permissions.clone(),
                 registry: registry.clone(),
                 model_catalog: model_catalog.clone(),
                 storage: &storage,
@@ -2294,6 +2296,29 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             let terminal_event =
                 terminal_event.filter(|event| !terminal_event_is_pointer_motion(event));
             if let Some(terminal_event) = terminal_event {
+                // TEMP diagnostic (first-letter-eaten hunt): log every non-motion
+                // terminal event at intake, before any filtering/dispatch. A
+                // "letter" that never appears as a `Key { kind: Press }` here is
+                // being dropped/misclassified by the terminal, not the keymap.
+                match &terminal_event {
+                    Event::Key(key) => tracing::info!(
+                        target: "bonsai::input",
+                        kind = ?key.kind,
+                        code = ?key.code,
+                        modifiers = ?key.modifiers,
+                        focus = ?app.focus,
+                        modal = app.modal.is_some(),
+                        task_state = ?app.task_state,
+                        "terminal key event"
+                    ),
+                    other => tracing::info!(
+                        target: "bonsai::input",
+                        event = ?other,
+                        focus = ?app.focus,
+                        task_state = ?app.task_state,
+                        "terminal non-key event"
+                    ),
+                }
                 redraw_requested = true;
                 if terminal_event_requests_immediate_redraw(&terminal_event) {
                     let draw_started = Instant::now();
@@ -2322,6 +2347,15 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 match terminal_event {
                     Event::Key(key) => {
                         let intent = map_key(key, &app);
+                        // TEMP diagnostic (first-letter-eaten hunt): the intent the
+                        // keymap produced for this key. `Noop` on a plain letter is
+                        // the smoking gun (filtered kind, wrong focus, or a modal).
+                        tracing::info!(
+                            target: "bonsai::input",
+                            code = ?key.code,
+                            intent = intent.diagnostic_label(),
+                            "mapped key intent"
+                        );
                         if clears_ctrl_c_prompt(&intent) {
                             clear_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt);
                         }

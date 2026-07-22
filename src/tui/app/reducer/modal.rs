@@ -653,6 +653,17 @@ fn clamp_open_cursor(kind: &mut ModalKind) {
         }
         ModalKind::McpServers { rows, cursor } => (cursor, rows.len().saturating_sub(1)),
         ModalKind::MemoryManager { rows, cursor } => (cursor, rows.len().saturating_sub(1)),
+        ModalKind::PermissionsManager {
+            rows,
+            filter,
+            cursor,
+            ..
+        } => {
+            let max = crate::tui::permissions_manager::permission_manager_filtered(rows, filter)
+                .len()
+                .saturating_sub(1);
+            (cursor, max)
+        }
         ModalKind::ReviewScopePicker { cursor } => (
             cursor,
             crate::agent::ReviewScope::all().len().saturating_sub(1),

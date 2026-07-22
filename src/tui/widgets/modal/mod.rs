@@ -49,6 +49,7 @@ mod model;
 mod onboarding;
 mod peers;
 mod perf;
+mod permissions;
 mod picker_common;
 mod prompt;
 mod providers;
@@ -86,6 +87,7 @@ use model::render_model_picker;
 use onboarding::*;
 use peers::*;
 use perf::*;
+use permissions::render_permissions_manager;
 use prompt::*;
 use providers::*;
 use refresh::*;
@@ -195,6 +197,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         ModalKind::MemoryManager { rows, cursor } => {
             render_memory_manager(f, modal, app, rows, *cursor)
         }
+        ModalKind::PermissionsManager {
+            rows,
+            filter,
+            searching,
+            cursor,
+        } => render_permissions_manager(f, modal, rows, filter, *searching, *cursor),
         ModalKind::MemoryAddWizard { state } => render_memory_wizard(f, modal, app, state),
         ModalKind::Settings { rows, cursor } => render_settings(f, modal, rows, *cursor),
         ModalKind::AgentComposer { state } => render_agent_composer(f, modal, state),

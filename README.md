@@ -417,10 +417,14 @@ When a command prompts, you choose:
 - **N** — never for this project (persists a *deny*; the command is refused
   automatically next time, no re-prompt)
 
-`/permissions` lists the active rules (built-in + your session/project rules);
-`/permissions remove <id>` drops a persisted one — including a **N**ever rule you
-want to lift. Rules are scoped per project (plus a global scope) and a user rule
-can relax a default but never re-enable the denied-outright set.
+`/permissions` opens an interactive manager: a searchable list of every editable
+rule (bash commands + web domains, session *and* persisted). Type `/` to filter
+by pattern, scope, or decision, `d` (or Delete) to remove the selected rule, Esc
+to close. It's the quickest way to lift a rule you added by mistake — including a
+**N**ever deny. Prefer scripting? `/permissions list` prints the same rules as
+text and `/permissions remove <id>` deletes one by id. Rules are scoped per
+project (plus a global scope) and a user rule can relax a default but never
+re-enable the denied-outright set.
 
 ## Agents and subagents
 

@@ -60,6 +60,10 @@ pub(super) struct RuntimeActionDeps<'a> {
     /// (Alt+M) without locking the agent mid-turn.
     pub(super) yolo_mode: crate::yolo::YoloMode,
     pub(super) session_store: Arc<Mutex<SessionStore>>,
+    /// The bash command and web-domain permission managers, cloned in so the
+    /// `/permissions` manager modal can delete rules without locking the agent.
+    pub(super) permissions: crate::permissions::PermissionManager,
+    pub(super) domain_permissions: crate::permissions::PermissionManager,
     pub(super) registry: Arc<ProviderRegistry>,
     pub(super) model_catalog: Arc<ModelCatalog>,
     pub(super) storage: &'a Storage,
@@ -319,6 +323,9 @@ pub(super) async fn handle_runtime_action(
         }
         AppAction::MemoryManagerEdit => {
             open_memory_edit_wizard(app);
+        }
+        AppAction::PermissionsManagerDelete => {
+            delete_selected_permission_rule(app, &deps).await;
         }
         AppAction::MemoryAddWizardSubmit => {
             submit_memory_add_wizard(app, deps).await;
@@ -674,6 +681,101 @@ fn open_memory_manager(
         rows,
         cursor,
     }));
+}
+
+/// Open (or re-open) the `/permissions` manager built from the current bash and
+/// domain rule sets, preserving the active filter and clamping the cursor.
+pub(super) fn open_permissions_manager(
+    app: &mut AppState,
+    permissions: &crate::permissions::PermissionManager,
+    domain_permissions: &crate::permissions::PermissionManager,
+    filter: String,
+    cursor: usize,
+) {
+    let bash_rules = permissions.user_rules();
+    let domain_rules = domain_permissions.user_rules();
+    let rows = crate::tui::permissions_manager::permission_manager_rows(&bash_rules, &domain_rules);
+    let visible =
+        crate::tui::permissions_manager::permission_manager_filtered(&rows, &filter).len();
+    let cursor = cursor.min(visible.saturating_sub(1));
+    app.reduce(AppAction::OpenModal(ModalKind::PermissionsManager {
+        rows,
+        filter,
+        searching: false,
+        cursor,
+    }));
+}
+
+/// Remove the selected rule from the `/permissions` manager: a persisted rule is
+/// deleted from storage by id (kind-agnostic, so the owning manager reloads and
+/// the sibling is refreshed), a session rule is dropped from memory by pattern.
+/// The list is then rebuilt so the modal reflects the removal in place.
+async fn delete_selected_permission_rule(app: &mut AppState, deps: &RuntimeActionDeps<'_>) {
+    use crate::tui::permissions_manager::{RuleLane, permission_manager_filtered};
+
+    let Some(ModalKind::PermissionsManager {
+        rows,
+        filter,
+        cursor,
+        ..
+    }) = app.modal.as_ref()
+    else {
+        return;
+    };
+    let filter = filter.clone();
+    let cursor = *cursor;
+    let Some(row) = permission_manager_filtered(rows, &filter)
+        .get(cursor)
+        .map(|row| (*row).clone())
+    else {
+        return;
+    };
+
+    let (owner, sibling) = match row.lane {
+        RuleLane::Bash => (&deps.permissions, &deps.domain_permissions),
+        RuleLane::Domain => (&deps.domain_permissions, &deps.permissions),
+    };
+
+    match row.id {
+        Some(id) => match owner.remove(id).await {
+            Ok(true) => {
+                // The delete is kind-agnostic at the storage layer, so the
+                // sibling manager's cache may hold the now-deleted row; refresh
+                // it (matches the `/permissions remove` text-command handler).
+                if let Err(err) = sibling.refresh().await {
+                    tracing::warn!(%err, "failed to refresh sibling permission cache after delete");
+                }
+            }
+            Ok(false) => {
+                push_command_message(
+                    app,
+                    CommandOutputKind::Error,
+                    &format!("No persisted permission rule #{id}."),
+                );
+                return;
+            }
+            Err(err) => {
+                push_command_message(
+                    app,
+                    CommandOutputKind::Error,
+                    &format!("Could not remove permission rule #{id}: {err:#}"),
+                );
+                return;
+            }
+        },
+        None => {
+            // Session rules have no id; drop the in-memory entry by pattern.
+            owner.remove_session_rule(&row.pattern);
+        }
+    }
+
+    open_permissions_manager(
+        app,
+        &deps.permissions,
+        &deps.domain_permissions,
+        filter,
+        cursor,
+    );
 }
 
 async fn open_memory_add_wizard(app: &mut AppState) {

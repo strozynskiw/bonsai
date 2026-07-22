@@ -327,6 +327,58 @@ pub(super) fn map_provider_manager_key(key: KeyEvent, app: &AppState) -> KeyInte
     }
 }
 
+/// The `/permissions` manager keymap. Mirrors the provider manager: `/` starts
+/// a type-to-filter search, and while searching bare letters build the query so
+/// `d`/`q` are suspended and Esc leaves search (keeping the filter). Outside
+/// search, `d`/Delete removes the selected rule and the three-step Esc clears an
+/// applied filter before closing.
+pub(super) fn map_permissions_manager_key(key: KeyEvent, app: &AppState) -> KeyIntent {
+    let (searching, filter_active) = match &app.modal {
+        Some(ModalKind::PermissionsManager {
+            searching, filter, ..
+        }) => (*searching, !filter.is_empty()),
+        _ => (false, false),
+    };
+
+    if searching {
+        return match key.code {
+            // Esc/Enter both commit the query and drop back to shortcut mode,
+            // keeping the filter applied (there is no per-row detail to open).
+            KeyCode::Esc | KeyCode::Enter => {
+                KeyIntent::Action(AppAction::PermissionsManagerSearchExit)
+            }
+            KeyCode::Backspace => KeyIntent::Action(AppAction::PermissionsManagerSearchBackspace),
+            KeyCode::Up => KeyIntent::Action(AppAction::PermissionsManagerMove(-1)),
+            KeyCode::Down => KeyIntent::Action(AppAction::PermissionsManagerMove(1)),
+            KeyCode::PageUp => KeyIntent::Action(AppAction::PermissionsManagerMove(-8)),
+            KeyCode::PageDown => KeyIntent::Action(AppAction::PermissionsManagerMove(8)),
+            KeyCode::Home => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MIN)),
+            KeyCode::End => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MAX)),
+            KeyCode::Char(ch) => KeyIntent::Action(AppAction::PermissionsManagerSearchChar(ch)),
+            _ => KeyIntent::Noop,
+        };
+    }
+
+    match key.code {
+        // Three-step Esc: clear an applied filter first, then close.
+        KeyCode::Esc if filter_active => {
+            KeyIntent::Action(AppAction::PermissionsManagerClearFilter)
+        }
+        KeyCode::Esc | KeyCode::Char('q') => KeyIntent::Action(AppAction::CloseModal),
+        KeyCode::Char('/') => KeyIntent::Action(AppAction::PermissionsManagerBeginSearch),
+        KeyCode::Up => KeyIntent::Action(AppAction::PermissionsManagerMove(-1)),
+        KeyCode::Down => KeyIntent::Action(AppAction::PermissionsManagerMove(1)),
+        KeyCode::PageUp => KeyIntent::Action(AppAction::PermissionsManagerMove(-8)),
+        KeyCode::PageDown => KeyIntent::Action(AppAction::PermissionsManagerMove(8)),
+        KeyCode::Home => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MIN)),
+        KeyCode::End => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MAX)),
+        KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
+            KeyIntent::Action(AppAction::PermissionsManagerDelete)
+        }
+        _ => KeyIntent::Noop,
+    }
+}
+
 pub(super) fn map_provider_detail_key(key: KeyEvent) -> KeyIntent {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => KeyIntent::Action(AppAction::ProviderDetailBack),

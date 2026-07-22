@@ -579,6 +579,8 @@ fn runtime_action_deps<'a>(
         memory: None,
         yolo_mode: crate::yolo::YoloMode::new(),
         session_store,
+        permissions: crate::permissions::PermissionManager::memory_only(),
+        domain_permissions: crate::permissions::PermissionManager::memory_only_domains(),
         registry: Arc::new(ProviderRegistry::default_registry()),
         model_catalog: test_model_catalog(),
         storage,
@@ -591,6 +593,109 @@ fn runtime_action_deps<'a>(
         background_tasks: Arc::new(BackgroundTaskRegistry::new()),
         terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
     }
+}
+
+fn runtime_action_deps_with_permissions<'a>(
+    storage: &'a Storage,
+    project_root: &'a std::path::Path,
+    current_session_id: SessionId,
+    session_store: Arc<Mutex<SessionStore>>,
+    runtime_sender: mpsc::UnboundedSender<RuntimeEvent>,
+    permissions: crate::permissions::PermissionManager,
+    domain_permissions: crate::permissions::PermissionManager,
+) -> RuntimeActionDeps<'a> {
+    let (interaction, _interaction_rx) = InteractionService::new();
+    RuntimeActionDeps {
+        interaction: Arc::new(interaction),
+        runtime_sender,
+        agent: test_agent(Box::new(CompleteProvider)),
+        memory: None,
+        yolo_mode: crate::yolo::YoloMode::new(),
+        session_store,
+        permissions,
+        domain_permissions,
+        registry: Arc::new(ProviderRegistry::default_registry()),
+        model_catalog: test_model_catalog(),
+        storage,
+        project_root,
+        session_project_root: project_root,
+        active_session_id: Arc::new(Mutex::new(Some(current_session_id))),
+        todo_store: Arc::new(Mutex::new(crate::todo::TodoStore::new())),
+        plan_store: Arc::new(Mutex::new(crate::plan::PlanDoc::default())),
+        sink: Arc::new(NullSink),
+        background_tasks: Arc::new(BackgroundTaskRegistry::new()),
+        terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+    }
+}
+
+#[tokio::test]
+async fn permissions_manager_delete_removes_session_rule_and_rebuilds() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let permissions = crate::permissions::PermissionManager::memory_only();
+    let domain_permissions = crate::permissions::PermissionManager::memory_only_domains();
+    permissions.add_session_rule("make *", crate::permissions::Permission::Allow);
+    permissions.add_session_rule("rm -rf *", crate::permissions::Permission::Deny);
+
+    let session_store = Arc::new(Mutex::new(SessionStore::default()));
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx.clone());
+    let mut current_session_id = session_id;
+    let mut signatures = zero_signatures();
+    let mut state = PersistenceCommandState {
+        current_session_id: &mut current_session_id,
+        signatures: &mut signatures,
+    };
+    let mut app = app();
+    crate::tui::runtime_actions::open_permissions_manager(
+        &mut app,
+        &permissions,
+        &domain_permissions,
+        String::new(),
+        0,
+    );
+
+    let removed_pattern = match &app.modal {
+        Some(ModalKind::PermissionsManager { rows, .. }) => {
+            assert_eq!(rows.len(), 2, "both session rules should be listed");
+            rows[0].pattern.clone()
+        }
+        other => panic!("expected permissions manager, got {other:?}"),
+    };
+
+    let result = handle_runtime_action(
+        AppAction::PermissionsManagerDelete,
+        &mut app,
+        &mut tasks,
+        runtime_action_deps_with_permissions(
+            &storage,
+            temp_dir.path(),
+            session_id,
+            session_store,
+            runtime_tx,
+            permissions.clone(),
+            domain_permissions.clone(),
+        ),
+        &mut state,
+    )
+    .await;
+
+    assert!(matches!(result, RuntimeActionResult::Handled));
+    // The manager rebuilt in place with the deleted rule gone.
+    match &app.modal {
+        Some(ModalKind::PermissionsManager { rows, .. }) => {
+            assert_eq!(rows.len(), 1);
+            assert!(rows.iter().all(|row| row.pattern != removed_pattern));
+        }
+        other => panic!("expected permissions manager, got {other:?}"),
+    }
+    // And the live manager no longer carries the session rule.
+    assert!(
+        permissions
+            .user_rules()
+            .iter()
+            .all(|rule| rule.pattern != removed_pattern)
+    );
 }
 
 fn context_report() -> crate::agent::ContextReport {
@@ -2471,6 +2576,8 @@ async fn agent_browser_edit_and_toggle_do_not_block_on_held_agent_lock() {
             memory: None,
             yolo_mode: crate::yolo::YoloMode::new(),
             session_store: Arc::new(Mutex::new(authorized_codex_store())),
+            permissions: crate::permissions::PermissionManager::memory_only(),
+            domain_permissions: crate::permissions::PermissionManager::memory_only_domains(),
             registry: Arc::new(ProviderRegistry::default_registry()),
             model_catalog: test_model_catalog(),
             storage: &storage,
@@ -2762,6 +2869,8 @@ async fn model_picker_submit_while_running_queues_selected_model() {
             memory: None,
             yolo_mode: crate::yolo::YoloMode::new(),
             session_store,
+            permissions: crate::permissions::PermissionManager::memory_only(),
+            domain_permissions: crate::permissions::PermissionManager::memory_only_domains(),
             registry,
             model_catalog,
             storage: &storage,
@@ -7559,6 +7668,8 @@ async fn discard_confirm_deletes_saved_record_and_clears_canvas() {
             memory: None,
             yolo_mode: crate::yolo::YoloMode::new(),
             session_store: Arc::new(Mutex::new(SessionStore::default())),
+            permissions: crate::permissions::PermissionManager::memory_only(),
+            domain_permissions: crate::permissions::PermissionManager::memory_only_domains(),
             registry: Arc::new(ProviderRegistry::default_registry()),
             model_catalog: test_model_catalog(),
             storage: &storage,

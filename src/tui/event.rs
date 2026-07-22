@@ -168,6 +168,17 @@ pub enum ModalKind {
         rows: Vec<crate::memory::entry::MemoryEntry>,
         cursor: usize,
     },
+    /// `/permissions` — an interactive manager listing every editable permission
+    /// rule (bash command + web-domain, session + persisted) with type-to-filter
+    /// search and delete. `cursor` indexes the *filtered* view (see
+    /// `permission_manager_filtered`); `searching` distinguishes "typing a
+    /// filter" from "filter applied, shortcuts live", like the provider manager.
+    PermissionsManager {
+        rows: Vec<crate::tui::permissions_manager::PermissionRuleRow>,
+        filter: String,
+        searching: bool,
+        cursor: usize,
+    },
     /// The create/edit memory wizard opened from the manager (`state.editing`
     /// carries the original identity in edit mode).
     MemoryAddWizard {
@@ -1269,6 +1280,21 @@ pub enum AppAction {
     MemoryManagerAdd,
     /// Edit the selected memory entry in the wizard (prefilled, identity kept).
     MemoryManagerEdit,
+    /// `/permissions`: move the selection over the filtered rule list.
+    PermissionsManagerMove(i16),
+    /// Delete the selected permission rule (persisted → storage; session →
+    /// memory), then rebuild the manager list.
+    PermissionsManagerDelete,
+    /// Begin type-to-filter search in the permissions manager.
+    PermissionsManagerBeginSearch,
+    /// Append a character to the permissions-manager filter.
+    PermissionsManagerSearchChar(char),
+    /// Delete the last character of the permissions-manager filter.
+    PermissionsManagerSearchBackspace,
+    /// Leave search mode, keeping the applied filter.
+    PermissionsManagerSearchExit,
+    /// Clear the applied filter and leave search mode.
+    PermissionsManagerClearFilter,
     /// Move between wizard fields.
     MemoryAddWizardMoveField(i16),
     /// Input into the active wizard field.

@@ -27,6 +27,23 @@ pub enum KeyIntent {
     Noop,
 }
 
+impl KeyIntent {
+    /// TEMP diagnostic (first-letter-eaten hunt): a short variant label for the
+    /// intake trace, without the noise of `Debug`-printing the whole
+    /// `AppAction`. Remove alongside the `bonsai::input` traces.
+    pub(crate) fn diagnostic_label(&self) -> &'static str {
+        match self {
+            KeyIntent::Action(_) => "Action",
+            KeyIntent::Submit => "Submit",
+            KeyIntent::SubmitReplacement(_) => "SubmitReplacement",
+            KeyIntent::CancelOrQuit => "CancelOrQuit",
+            KeyIntent::Quit => "Quit",
+            KeyIntent::Insert(_) => "Insert",
+            KeyIntent::Noop => "Noop",
+        }
+    }
+}
+
 pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return KeyIntent::Noop;
@@ -92,6 +109,10 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
 
     if matches!(app.modal, Some(ModalKind::MemoryManager { .. })) {
         return map_memory_manager_key(key);
+    }
+
+    if matches!(app.modal, Some(ModalKind::PermissionsManager { .. })) {
+        return map_permissions_manager_key(key, app);
     }
 
     if matches!(app.modal, Some(ModalKind::MemoryAddWizard { .. })) {
@@ -2465,6 +2486,56 @@ mod tests {
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app),
             KeyIntent::Action(AppAction::ProviderManagerClearFilter)
+        ));
+    }
+
+    #[test]
+    fn permissions_manager_slash_toggles_search_mode_routing() {
+        use crate::tui::permissions_manager::{PermissionRuleRow, RuleLane};
+        let manager = |filter: &str, searching: bool| {
+            Some(ModalKind::PermissionsManager {
+                rows: vec![PermissionRuleRow {
+                    lane: RuleLane::Bash,
+                    source: crate::permissions::RuleSource::Project,
+                    pattern: "make *".to_string(),
+                    permission: crate::permissions::Permission::Allow,
+                    id: Some(1),
+                }],
+                filter: filter.to_string(),
+                searching,
+                cursor: 0,
+            })
+        };
+        let mut app = app();
+        app.focus = Focus::Modal;
+
+        // Idle: `d` deletes the selected rule, `/` begins search.
+        app.modal = manager("", false);
+        assert!(matches!(
+            map_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &app),
+            KeyIntent::Action(AppAction::PermissionsManagerDelete)
+        ));
+        assert!(matches!(
+            map_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &app),
+            KeyIntent::Action(AppAction::PermissionsManagerBeginSearch)
+        ));
+
+        // Searching: the same `d` now types into the filter; Esc leaves search.
+        app.modal = manager("", true);
+        assert!(matches!(
+            map_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &app),
+            KeyIntent::Action(AppAction::PermissionsManagerSearchChar('d'))
+        ));
+        assert!(matches!(
+            map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app),
+            KeyIntent::Action(AppAction::PermissionsManagerSearchExit)
+        ));
+
+        // Filter applied but not typing: Esc clears it before closing.
+        app.modal = manager("make", false);
+        assert!(matches!(
+            map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app),
+            KeyIntent::Action(AppAction::PermissionsManagerClearFilter)
         ));
     }
 
