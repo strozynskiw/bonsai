@@ -1410,41 +1410,41 @@ impl Agent {
         !self.repair_advisory.is_empty()
     }
 
-    pub(in crate::agent) fn set_repair_advisory(&mut self, advisory: Option<String>) {
+    /// Normalize `advisory` into a harness note and write it to `field`,
+    /// returning whether it actually changed. Rebuilding the system context is
+    /// left to the caller so this borrows only the one field, not all of `self`.
+    fn apply_advisory(field: &mut String, advisory: Option<String>) -> bool {
         let next = advisory
             .map(|advisory| message_injection::harness_note(&advisory))
             .unwrap_or_default();
-        if self.repair_advisory == next {
-            return;
+        if *field == next {
+            return false;
         }
-        self.repair_advisory = next;
-        self.rebuild_project_system_context();
+        *field = next;
+        true
+    }
+
+    pub(in crate::agent) fn set_repair_advisory(&mut self, advisory: Option<String>) {
+        if Self::apply_advisory(&mut self.repair_advisory, advisory) {
+            self.rebuild_project_system_context();
+        }
     }
 
     pub(in crate::agent) fn set_planning_advisory(&mut self, advisory: Option<String>) {
-        let next = advisory
-            .map(|advisory| message_injection::harness_note(&advisory))
-            .unwrap_or_default();
-        if self.planning_advisory == next {
-            return;
+        if Self::apply_advisory(&mut self.planning_advisory, advisory) {
+            self.rebuild_project_system_context();
         }
-        self.planning_advisory = next;
-        self.rebuild_project_system_context();
     }
 
     pub(in crate::agent) fn set_subagent_status_advisory(
         &mut self,
         advisory: Option<String>,
     ) -> bool {
-        let next = advisory
-            .map(|advisory| message_injection::harness_note(&advisory))
-            .unwrap_or_default();
-        if self.subagent_status_advisory == next {
-            return false;
+        let changed = Self::apply_advisory(&mut self.subagent_status_advisory, advisory);
+        if changed {
+            self.rebuild_project_system_context();
         }
-        self.subagent_status_advisory = next;
-        self.rebuild_project_system_context();
-        true
+        changed
     }
 
     pub(in crate::agent) fn rebuild_project_system_context(&mut self) {

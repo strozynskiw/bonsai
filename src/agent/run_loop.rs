@@ -589,6 +589,36 @@ impl Agent {
     /// references every tool-call id, so dropped and not-yet-started calls are
     /// answered with a synthetic interrupted result to keep the next request
     /// well-formed.
+    /// Answer a set of not-yet-run tool calls with synthetic "skipped" results:
+    /// announce each, then report + apply the skip so the transcript and model
+    /// history stay consistent. Shared by the peer-wait and queued-message exit
+    /// paths so the two can't drift.
+    async fn drain_skipped_calls(
+        &mut self,
+        skipped_calls: Vec<ToolCall>,
+        reason: &str,
+        sink: &SharedSink,
+        trusted_contexts: &mut Vec<String>,
+    ) -> Result<()> {
+        for call in &skipped_calls {
+            sink.tool_started(&call.id, &call.name, &call.arguments);
+        }
+        let mut skipped_rust_edits = Vec::new();
+        for (tool_call, result, status) in skipped_tool_results(skipped_calls, reason) {
+            report_tool_completion(sink, &tool_call, &result, status);
+            self.apply_tool_result(
+                tool_call,
+                result,
+                status,
+                sink,
+                trusted_contexts,
+                &mut skipped_rust_edits,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn execute_tool_calls(
         &mut self,
         tool_calls: &[ToolCall],
@@ -774,25 +804,13 @@ impl Agent {
             if let Some(reason) = batch_wait_reason {
                 outcome.wait_reason = Some(reason);
                 let skipped_calls = batches.by_ref().flatten().collect::<Vec<_>>();
-                for call in &skipped_calls {
-                    sink.tool_started(&call.id, &call.name, &call.arguments);
-                }
-                let mut skipped_rust_edits = Vec::new();
-                for (tool_call, result, status) in skipped_tool_results(
+                self.drain_skipped_calls(
                     skipped_calls,
                     "Tool skipped because the agent entered a nonterminal peer wait.",
-                ) {
-                    report_tool_completion(sink, &tool_call, &result, status);
-                    self.apply_tool_result(
-                        tool_call,
-                        result,
-                        status,
-                        sink,
-                        &mut trusted_contexts,
-                        &mut skipped_rust_edits,
-                    )
-                    .await?;
-                }
+                    sink,
+                    &mut trusted_contexts,
+                )
+                .await?;
                 self.emit_context_updated(sink);
                 break;
             }
@@ -801,25 +819,13 @@ impl Agent {
                 let queued = queued_messages.next();
                 if !queued.is_empty() {
                     let skipped_calls = batches.by_ref().flatten().collect::<Vec<_>>();
-                    for call in &skipped_calls {
-                        sink.tool_started(&call.id, &call.name, &call.arguments);
-                    }
-                    let mut skipped_rust_edits = Vec::new();
-                    for (tool_call, result, status) in skipped_tool_results(
+                    self.drain_skipped_calls(
                         skipped_calls,
                         "Tool skipped because a new queued user message took priority.",
-                    ) {
-                        report_tool_completion(sink, &tool_call, &result, status);
-                        self.apply_tool_result(
-                            tool_call,
-                            result,
-                            status,
-                            sink,
-                            &mut trusted_contexts,
-                            &mut skipped_rust_edits,
-                        )
-                        .await?;
-                    }
+                        sink,
+                        &mut trusted_contexts,
+                    )
+                    .await?;
                     for message in queued {
                         self.self_review.append_request(&message.input.text);
                         self.push_live_user_message(&message.input).await?;

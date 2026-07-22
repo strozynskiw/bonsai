@@ -390,38 +390,24 @@ impl Agent {
                 None => Some(provider_call.await),
             };
             let Some(response) = response else {
-                let output = attempt_sink.discard();
-                let response = generation_budget_response();
-                attempts.push(attempt_report(
-                    attempt + 1,
-                    started_at.elapsed(),
-                    &output,
-                    &response,
-                ));
-                return Ok(RetriedStream {
-                    response,
+                return Ok(budget_exit(
+                    &attempt_sink,
+                    attempt,
+                    started_at,
                     attempts,
-                    budget_exhaustion: Some(
-                        crate::run_budget::RunBudgetExhaustion::GenerationTime {
-                            limit_seconds: budget.max_duration.map_or(0, |d| d.as_secs()),
-                        },
-                    ),
-                });
+                    crate::run_budget::RunBudgetExhaustion::GenerationTime {
+                        limit_seconds: budget.max_duration.map_or(0, |d| d.as_secs()),
+                    },
+                ));
             };
             if attempt_sink.budget_exceeded() {
-                let output = attempt_sink.discard();
-                let response = generation_budget_response();
-                attempts.push(attempt_report(
-                    attempt + 1,
-                    started_at.elapsed(),
-                    &output,
-                    &response,
-                ));
-                return Ok(RetriedStream {
-                    response,
+                return Ok(budget_exit(
+                    &attempt_sink,
+                    attempt,
+                    started_at,
                     attempts,
-                    budget_exhaustion: Some(output_exhaustion),
-                });
+                    output_exhaustion,
+                ));
             }
             match response {
                 Ok(response) => {
@@ -562,6 +548,33 @@ fn generation_budget_response() -> StreamedResponse {
             crate::provider::FinishReason::GenerationBudget,
         ),
         ..StreamedResponse::default()
+    }
+}
+
+/// The generation-budget exit ritual shared by the timeout and output-cap
+/// paths: discard the aborted attempt, record it in `attempts`, and return the
+/// budget-exhausted stream. Centralized so no exit path can forget the
+/// `attempt_report` push. (The `Err`-arm session-output exit is not routed here:
+/// it already recorded a `failed_attempt_report` and only differs in the exhaustion.)
+fn budget_exit(
+    attempt_sink: &AttemptSink,
+    attempt: usize,
+    started_at: std::time::Instant,
+    mut attempts: Vec<ProviderAttemptReport>,
+    exhaustion: crate::run_budget::RunBudgetExhaustion,
+) -> RetriedStream {
+    let output = attempt_sink.discard();
+    let response = generation_budget_response();
+    attempts.push(attempt_report(
+        attempt + 1,
+        started_at.elapsed(),
+        &output,
+        &response,
+    ));
+    RetriedStream {
+        response,
+        attempts,
+        budget_exhaustion: Some(exhaustion),
     }
 }
 
