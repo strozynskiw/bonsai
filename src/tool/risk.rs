@@ -950,7 +950,7 @@ fn short_option_consumes_next(word: &str, value_options: &[char]) -> bool {
 
 /// The git subcommand, skipping global options (`git -C path push` →
 /// `push`). `-c`/`-C`/`--git-dir`/`--work-tree`/`--namespace` take a value.
-fn git_subcommand<'a>(words: &[&'a str]) -> Option<&'a str> {
+pub(crate) fn git_subcommand<'a>(words: &[&'a str]) -> Option<&'a str> {
     let mut index = 1;
     while let Some(word) = words.get(index) {
         match *word {

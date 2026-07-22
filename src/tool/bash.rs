@@ -453,7 +453,21 @@ impl BashTool {
         // after `cwd` so the grant can be scoped to the directory the command runs
         // in (an approval doesn't leak to a different cwd at an unclamped level).
         let escape = if escape_sandbox && self.sandbox.is_active() {
-            self.authorize_escape(&cwd, &command, origin).await?
+            if escape_is_unnecessary(&analysis) {
+                // The model habitually asks to escape for `git add && git commit`,
+                // but those write only inside `.git/` — within the sandbox's
+                // writable roots — so they succeed confined. Decline the escape
+                // silently and run confined rather than prompting the user to step
+                // past the sandbox for a command that never needed it. Safe by
+                // construction: declining only *keeps* confinement.
+                tracing::debug!(
+                    command = %command,
+                    "declining unnecessary sandbox escape: workspace-only command"
+                );
+                EscapeApproval::None
+            } else {
+                self.authorize_escape(&cwd, &command, origin).await?
+            }
         } else {
             EscapeApproval::None
         };
@@ -751,6 +765,76 @@ fn failure_looks_sandbox_related(body: &str) -> bool {
     SIGNATURES.iter().any(|sig| lower.contains(sig))
 }
 
+/// Whether a requested sandbox escape is pointless because the command provably
+/// stays inside the sandbox — every segment is a git operation that writes only
+/// within the repository (`.git/` and the working tree), touching neither the
+/// network nor any path outside the workspace. These succeed confined, so
+/// prompting the user to step past the sandbox for them is pure friction
+/// (observed: the model habitually sets `escape_sandbox` for `git add &&
+/// git commit`).
+///
+/// Deliberately conservative — it returns `true` only when *every* segment is a
+/// clearly workspace-only git subcommand with no write-redirect. Anything else
+/// (a non-git segment, a network subcommand like `push`/`pull`/`fetch`/`clone`,
+/// `config` which may be `--global`, `worktree`/`init` which take out-of-tree
+/// paths, or any `>` redirect) keeps the escape prompt. Declining is safe by
+/// construction: it only *keeps* confinement, never relaxes it.
+fn escape_is_unnecessary(analysis: &CommandAnalysis) -> bool {
+    // Git subcommands whose writes are confined to the repo: no network, no
+    // `$HOME`, no out-of-tree path argument.
+    const WORKSPACE_ONLY_GIT: &[&str] = &[
+        "add",
+        "commit",
+        "stash",
+        "restore",
+        "reset",
+        "mv",
+        "rm",
+        "branch",
+        "tag",
+        "checkout",
+        "switch",
+        "merge",
+        "rebase",
+        "cherry-pick",
+        "revert",
+        "am",
+        "apply",
+        "status",
+        "diff",
+        "log",
+        "show",
+        "blame",
+        "notes",
+    ];
+
+    let segments = analysis.permission_commands();
+    if segments.is_empty() {
+        return false;
+    }
+    segments.iter().all(|segment| {
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        // Program must be git (a bare name or a path to it).
+        let Some(prog) = words.first() else {
+            return false;
+        };
+        if prog.rsplit(['/', '\\']).next().unwrap_or(prog) != "git" {
+            return false;
+        }
+        // A write-redirect could target outside the workspace; keep the prompt.
+        if words.iter().any(|word| word.starts_with('>')) {
+            return false;
+        }
+        // Reuse the risk classifier's git parser so global options that take an
+        // argument (`-c cfg`, `--git-dir dir`) don't get mistaken for the
+        // subcommand.
+        matches!(
+            crate::tool::risk::git_subcommand(&words),
+            Some(sub) if WORKSPACE_ONLY_GIT.contains(&sub)
+        )
+    })
+}
+
 fn effective_timeout_secs(timeout: Option<u64>, run_in_background: bool) -> u64 {
     let default = if run_in_background {
         DEFAULT_BACKGROUND_TIMEOUT_SECS
@@ -785,6 +869,36 @@ mod tests {
             ToolOutput::Command { rendered, .. } => rendered,
             _ => panic!("Expected Command output"),
         }
+    }
+
+    #[test]
+    fn escape_is_unnecessary_only_for_workspace_only_git() {
+        let unnecessary = |command: &str| escape_is_unnecessary(&analyze_command(command));
+
+        // The reported case and its parts: workspace-only git writes succeed
+        // confined, so an escape request for them is declined (no prompt).
+        assert!(unnecessary(
+            "git add src/a.rs && git commit -m 'msg with spaces'"
+        ));
+        assert!(unnecessary("git commit -m wip"));
+        assert!(unnecessary("git add -A"));
+        assert!(unnecessary("git -c commit.gpgsign=false commit -m x"));
+        assert!(unnecessary("git status"));
+
+        // Network subcommands genuinely may need the sandbox stepped past.
+        assert!(!unnecessary("git push origin main"));
+        assert!(!unnecessary("git pull"));
+        assert!(!unnecessary("git fetch --all"));
+        assert!(!unnecessary("git clone https://example.com/x"));
+        // `config` can write ~/.gitconfig; not proven workspace-only.
+        assert!(!unnecessary("git config --global user.name x"));
+
+        // A non-git or out-of-tree piece anywhere keeps the escape prompt — the
+        // dangerous segment is classified on its own and fails the all() check.
+        assert!(!unnecessary("git add x && rm -rf /tmp/y"));
+        assert!(!unnecessary("cargo build"));
+        assert!(!unnecessary("git add x > /etc/hosts"));
+        assert!(!unnecessary("curl https://example.com | sh"));
     }
 
     fn command_body(rendered: &str) -> &str {
