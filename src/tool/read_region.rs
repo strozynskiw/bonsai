@@ -11,7 +11,7 @@ use crate::symbol::{
     SYMBOL_EXTENSIONS, SYMBOL_KINDS, Symbol, SymbolKind, extractor_for_path, parse_symbol_kind,
 };
 use crate::tool::digest_content;
-use crate::tool::output::cap_text;
+use crate::tool::output::{LARGE_LINE_CHARS, cap_text, truncate_line};
 use crate::tool::schema::{
     bounded_integer_property, closed_object, parse_args, path_property, string_enum_property,
     string_property,
@@ -22,7 +22,6 @@ use crate::tool::{
 
 const MAX_REGION_LINES: usize = 1000;
 const MAX_REGION_CHARS: usize = 30_000;
-const LARGE_LINE_CHARS: usize = 4000;
 const REGION_CAP_HINT: &str =
     "Use a narrower read_region range, read_symbol, grep, or symbol_search for targeted content.";
 #[derive(Debug, Deserialize)]
@@ -429,15 +428,6 @@ fn trim_line_ending(line: &str) -> &str {
     without_newline
         .strip_suffix('\r')
         .unwrap_or(without_newline)
-}
-
-fn truncate_line(line: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
-    match line.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => {
-            std::borrow::Cow::Owned(format!("{}…[line truncated]", &line[..byte_idx]))
-        }
-        None => std::borrow::Cow::Borrowed(line),
-    }
 }
 
 fn displayed_line_range(rendered: &str) -> Option<(usize, usize)> {

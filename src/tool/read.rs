@@ -9,6 +9,7 @@ use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 use crate::tool::arg_repair::{RepairAction, RepairNote};
+use crate::tool::output::{LARGE_LINE_CHARS, truncate_line};
 use crate::tool::read_evidence::digest_content;
 use crate::tool::schema::{bounded_integer_property, closed_object, parse_args, path_property};
 use crate::tool::{
@@ -54,22 +55,6 @@ const MAX_TREE_ENTRIES: usize = 300;
 /// multi-gigabyte file would otherwise risk OOM. Files above this are paged from
 /// disk one line at a time via [`ReadTool::read_large_file_window`].
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024;
-
-/// Per-line display cap for the large-file streaming path: a line longer than
-/// this is truncated so one enormous (e.g. minified) line can't flood a window.
-const LARGE_LINE_CHARS: usize = 4000;
-
-/// Borrow a line as-is when it's within `max_chars`, otherwise truncate at a
-/// char boundary with a marker. `char_indices().nth` stops at `max_chars`, so
-/// the common (short) line costs O(max_chars), not O(line length).
-fn truncate_line(line: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
-    match line.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => {
-            std::borrow::Cow::Owned(format!("{}…[line truncated]", &line[..byte_idx]))
-        }
-        None => std::borrow::Cow::Borrowed(line),
-    }
-}
 
 /// Upper bound on image size before base64-encoding, to avoid token/cost blowup.
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;

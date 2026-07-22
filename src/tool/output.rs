@@ -35,6 +35,23 @@ pub(crate) fn cap_text(text: String, max_chars: usize, next_action: &str) -> Str
     capped
 }
 
+/// Per-line display cap for the large-file / region streaming paths: a line
+/// longer than this is truncated so one enormous (e.g. minified) line can't
+/// flood a window. Shared by `read` and `read_region` so the cap can't drift.
+pub(crate) const LARGE_LINE_CHARS: usize = 4000;
+
+/// Borrow a line as-is when it's within `max_chars`, otherwise truncate at a
+/// char boundary with a marker. `char_indices().nth` stops at `max_chars`, so
+/// the common (short) line costs O(max_chars), not O(line length).
+pub(crate) fn truncate_line(line: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    match line.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => {
+            std::borrow::Cow::Owned(format!("{}…[line truncated]", &line[..byte_idx]))
+        }
+        None => std::borrow::Cow::Borrowed(line),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
