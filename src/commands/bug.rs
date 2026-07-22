@@ -12,13 +12,6 @@ use std::path::{Path, PathBuf};
 use crate::interaction::QuestionOption;
 use crate::storage::AuthorizationDecisionRecord;
 
-/// The public repository, once it exists. `None` keeps `/bug` fully local:
-/// the closing message explains the repo is not public yet and the bundle
-/// file is the artifact to keep. Set to `Some("https://github.com/<owner>/bonsai")`
-/// when the repository goes public — the closing message then links a
-/// prefilled new-issue URL to attach the bundle to.
-pub(crate) const GITHUB_NEW_ISSUE_BASE: Option<&str> = None;
-
 /// How many trailing lines of a log file a bundle may embed. Hard cap: log
 /// tails are the riskiest sections, so they stay small and reviewable.
 pub(crate) const LOG_TAIL_LINES: usize = 200;
@@ -324,12 +317,26 @@ pub(crate) fn format_utc_compact(now_ms: u64) -> String {
     format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
 }
 
-/// The prefilled new-issue URL, once the repo is public.
+/// The public repository, used to build the prefilled new-issue link in the
+/// `/bug` closing message. `None` keeps `/bug` fully local (no link emitted).
+pub(crate) const GITHUB_NEW_ISSUE_BASE: Option<&str> =
+    Some("https://github.com/strozynskiw/bonsai");
+
+/// A prefilled "new issue" URL for [`GITHUB_NEW_ISSUE_BASE`], or `None` when it
+/// is unset. Title and body are redacted (the description is free user text).
+///
+/// The body deliberately does **not** tell the user to attach the local
+/// bundle: a public issue's attachments are world-readable and the bundle can
+/// carry machine/workflow data, so whether to attach it stays the user's own
+/// call (see [`closing_messages`]). The link only carries the narrative.
 pub(crate) fn issue_url(description: &str, bundle_path: &Path) -> Option<String> {
     let base = GITHUB_NEW_ISSUE_BASE?;
+    let description = crate::redact::redact(description);
     let title: String = description.chars().take(80).collect();
     let body = format!(
-        "<!-- bonsai {} on {}/{} -->\n\nPlease drag the bundle file into this issue:\n`{}`\n",
+        "<!-- bonsai {} on {}/{} -->\n\n{description}\n\n<!-- A local support bundle \
+         was saved at {}. It may contain machine/workflow data; attach it here only \
+         if you're comfortable making it public. -->\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -344,17 +351,27 @@ pub(crate) fn issue_url(description: &str, bundle_path: &Path) -> Option<String>
 }
 
 /// The user-facing closing lines after a bundle is written.
+///
+/// The bundle itself is always a local file — nothing is transmitted. When the
+/// repo is public we add a prefilled new-issue link so the user can file the
+/// narrative in one click, but attaching the bundle stays their choice: a
+/// public issue's attachments are world-readable and the bundle can carry
+/// machine/workflow data, so the note frames the attachment as opt-in rather
+/// than a step. (The user can always open the issue and attach later.)
 pub(crate) fn closing_messages(description: &str, path: &Path) -> Vec<String> {
     let mut messages = vec![format!("Bug bundle written to {}.", path.display())];
     match issue_url(description, path) {
-        Some(url) => messages.push(format!(
-            "File the report by opening {url} and attaching the bundle file."
-        )),
-        None => messages.push(
-            "The bonsai repository is not public yet — keep this file and attach it \
-             wherever you report the issue."
-                .to_string(),
-        ),
+        Some(url) => {
+            messages.push(format!("Open a prefilled issue: {url}"));
+            messages.push(
+                "The bundle stays on your machine — attach it to the issue only if \
+                 you're comfortable making its contents public; otherwise send it \
+                 privately if a maintainer asks."
+                    .to_string(),
+            );
+        }
+        None => messages
+            .push("Keep this file local and share it privately if a maintainer asks.".to_string()),
     }
     messages
 }
@@ -590,14 +607,49 @@ mod tests {
     }
 
     #[test]
-    fn issue_url_is_none_while_private_and_encodes_when_set() {
-        // The const is None while the repo is private; closing messages degrade.
-        let messages = closing_messages("spaces & newlines", Path::new("/tmp/b.md"));
-        assert_eq!(messages.len(), 2);
-        if GITHUB_NEW_ISSUE_BASE.is_none() {
-            assert!(messages[1].contains("not public yet"));
-        } else {
-            assert!(messages[1].contains("/issues/new?"));
+    fn closing_messages_link_a_prefilled_issue_and_keep_the_bundle_opt_in() {
+        let messages = closing_messages("it crashed on start", Path::new("/tmp/b.md"));
+        assert!(messages[0].contains("/tmp/b.md"));
+        match GITHUB_NEW_ISSUE_BASE {
+            Some(base) => {
+                assert!(
+                    messages
+                        .iter()
+                        .any(|message| message.contains(base) && message.contains("issues/new")),
+                    "expected a prefilled new-issue link: {messages:?}"
+                );
+                // Attaching the (potentially sensitive) bundle stays opt-in, never
+                // an instruction — the note must frame it around going public.
+                assert!(
+                    messages.iter().any(|message| message.contains("public")),
+                    "expected a note that attaching makes the bundle public: {messages:?}"
+                );
+            }
+            None => assert!(
+                messages.iter().any(|message| message.contains("local")),
+                "private repo keeps the bundle local: {messages:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn issue_url_redacts_secrets_and_encodes_when_public() {
+        let secret =
+            "sk-ant-api03-abcdefghijklmnopqrstuvwx1234567890abcdefghijklmnopqrstuvwx1234-abcdAA";
+        let url = issue_url(
+            &format!("broke; my key is {secret}"),
+            Path::new("/tmp/b.md"),
+        );
+        match GITHUB_NEW_ISSUE_BASE {
+            Some(_) => {
+                let url = url.expect("a public repo yields a prefilled url");
+                assert!(url.contains("/issues/new?"), "{url}");
+                assert!(
+                    !url.contains("sk-ant-"),
+                    "a secret in the description must be redacted out of the url: {url}"
+                );
+            }
+            None => assert!(url.is_none()),
         }
     }
 }

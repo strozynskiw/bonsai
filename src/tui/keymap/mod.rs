@@ -27,23 +27,6 @@ pub enum KeyIntent {
     Noop,
 }
 
-impl KeyIntent {
-    /// TEMP diagnostic (first-letter-eaten hunt): a short variant label for the
-    /// intake trace, without the noise of `Debug`-printing the whole
-    /// `AppAction`. Remove alongside the `bonsai::input` traces.
-    pub(crate) fn diagnostic_label(&self) -> &'static str {
-        match self {
-            KeyIntent::Action(_) => "Action",
-            KeyIntent::Submit => "Submit",
-            KeyIntent::SubmitReplacement(_) => "SubmitReplacement",
-            KeyIntent::CancelOrQuit => "CancelOrQuit",
-            KeyIntent::Quit => "Quit",
-            KeyIntent::Insert(_) => "Insert",
-            KeyIntent::Noop => "Noop",
-        }
-    }
-}
-
 pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return KeyIntent::Noop;

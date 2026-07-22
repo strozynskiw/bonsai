@@ -497,7 +497,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
                 .map(|toast| (toast.text.clone(), theme::body(theme::palette().muted)))
         });
     if let Some((text, style)) = notice {
-        let mut spans = vec![Span::styled(" ".to_string(), theme::composer_meta())];
+        let mut spans = vec![Span::styled("  ".to_string(), theme::composer_meta())];
         spans.extend(view::status_dot_spans(app));
         spans.push(Span::styled("  ".to_string(), theme::composer_meta()));
         spans.push(Span::styled(text, style));
@@ -516,7 +516,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
         .and_then(|spec| theme::persona_color(&spec))
         .unwrap_or_else(|| theme::view_accent(view).0);
     let agent = app.persona_label();
-    let mut left = vec![Span::styled(" ".to_string(), theme::composer_meta())];
+    let mut left = vec![Span::styled("  ".to_string(), theme::composer_meta())];
     left.extend(view::status_dot_spans(app));
     left.push(Span::styled("  ".to_string(), theme::composer_meta()));
     // A run keeps its dispatch-time persona even when the user switches

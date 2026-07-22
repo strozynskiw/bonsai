@@ -330,6 +330,13 @@ impl Composer {
         let byte = self.byte_index_for_cursor();
         self.text.insert(byte, ch);
         self.cursor = text_bounds::grapheme_index_after_byte(&self.text, byte + ch.len_utf8());
+        // Collapse any dangling anchor, exactly as `move_to` does. A mouse click
+        // leaves a zero-width anchor (`anchor == cursor`, which `has_selection`
+        // treats as no selection); inserting here advances the cursor past it,
+        // which would silently promote it to a real one-char selection and make
+        // the *next* keystroke overwrite this char. That was the "first letter
+        // gets eaten" bug: click, type `/`, type `b` → `b`.
+        self.selection_anchor = None;
         self.record_edit(before);
     }
 
@@ -367,6 +374,9 @@ impl Composer {
         // when the pasted text begins with a combining mark that merges with the
         // grapheme before the caret.
         self.cursor = text_bounds::grapheme_index_after_byte(&self.text, byte + normalized.len());
+        // Collapse any dangling zero-width anchor left by a click; see the note
+        // in `insert_char`.
+        self.selection_anchor = None;
         self.record_edit(before);
     }
 
@@ -1051,6 +1061,30 @@ mod tests {
             "workspace".to_string(),
             None,
         )
+    }
+
+    #[test]
+    fn click_then_type_does_not_eat_the_first_char() {
+        // A mouse click on the empty composer leaves a zero-width selection
+        // anchor (anchor == cursor), which `has_selection` correctly treats as
+        // no selection. Inserting the first char must collapse that anchor —
+        // otherwise advancing the cursor past it promotes it to a real one-char
+        // selection and the second keystroke overwrites the first. This is the
+        // reproduced "typing / then b eats the /" bug (live session 35).
+        let mut app = app();
+        app.focus = Focus::Input;
+        app.composer.extend_selection_to(0); // click at offset 0 on empty input
+        assert!(!app.composer.has_selection());
+
+        app.reduce(AppAction::InputChar('/'));
+        assert!(
+            !app.composer.has_selection(),
+            "insert must collapse the stale click anchor"
+        );
+        app.reduce(AppAction::InputChar('b'));
+
+        assert_eq!(app.composer.text, "/b");
+        assert_eq!(app.input(), "/b");
     }
 
     #[test]
