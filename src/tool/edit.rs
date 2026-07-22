@@ -8,8 +8,8 @@ use crate::diff::build_file_diff;
 use crate::tool::edit_recovery;
 use crate::tool::file_mutation::{
     FileMutationAction, FileMutationContext, FileMutationGuard, FileWriteRequest, ParentDirs,
-    WriteContentContext, WritePrecondition, build_mutation_output, noop_mutation_output,
-    reject_replayed_elision_marker, write_effects,
+    WriteContentContext, WritePrecondition, build_mutation_output, file_mutation_tool_ctors,
+    noop_mutation_output, reject_replayed_elision_marker, write_effects,
 };
 use crate::tool::schema::{
     array_property, boolean_property, object, parse_args_with_schema, path_property,
@@ -377,48 +377,7 @@ pub struct EditTool {
     ctx: FileMutationContext,
 }
 
-impl EditTool {
-    #[cfg(test)]
-    pub fn new(project_root: PathBuf, read_tracker: ReadTracker) -> Self {
-        Self::with_yolo_mode(project_root, read_tracker, YoloMode::new())
-    }
-
-    #[cfg(test)]
-    pub fn with_yolo_mode(
-        project_root: PathBuf,
-        read_tracker: ReadTracker,
-        yolo_mode: YoloMode,
-    ) -> Self {
-        Self::with_hooks_and_locks(
-            project_root.clone(),
-            read_tracker,
-            yolo_mode,
-            std::sync::Arc::new(crate::hooks::HookEngine::disabled()),
-            WorkspaceLockContext::disabled(project_root),
-            ActionPolicy::testing(),
-        )
-    }
-
-    pub fn with_hooks_and_locks(
-        project_root: PathBuf,
-        read_tracker: ReadTracker,
-        yolo_mode: YoloMode,
-        hooks: std::sync::Arc<crate::hooks::HookEngine>,
-        workspace_locks: WorkspaceLockContext,
-        policy: ActionPolicy,
-    ) -> Self {
-        Self {
-            ctx: FileMutationContext::new_with_locks(
-                project_root,
-                read_tracker,
-                yolo_mode,
-                hooks,
-                workspace_locks,
-                policy,
-            ),
-        }
-    }
-}
+file_mutation_tool_ctors!(EditTool);
 
 #[async_trait]
 impl Tool for EditTool {
@@ -498,17 +457,22 @@ impl Tool for EditTool {
         let yolo_enabled = guard.yolo_enabled();
         let resolved_path = guard.resolve_path(&args.path)?;
 
-        let regions = match args.edits.as_deref() {
-            Some([]) => anyhow::bail!("edits must contain at least one region"),
-            Some(regions) => Some(regions),
-            None => None,
-        };
+        // The two mutually-exclusive edit shapes, resolved once so the invariant
+        // is type-enforced rather than re-asserted with an `expect()` downstream:
+        // a multi-region `edits` array, or a single top-level old/new pair. Only
+        // holds shared refs into `args`, so it is `Copy`.
+        #[derive(Clone, Copy)]
+        enum EditMode<'a> {
+            Multi(&'a [EditRegion]),
+            Single { old: &'a str, new: &'a str },
+        }
 
-        // For the single-edit form (no `edits` array), validate and bind
-        // old/new once, with intent-specific guidance when either is missing —
-        // omitting `old_string` is the most common edit-tool failure.
-        let single = match regions {
-            Some(_) => None,
+        let mode = match args.edits.as_deref() {
+            Some([]) => anyhow::bail!("edits must contain at least one region"),
+            Some(regions) => EditMode::Multi(regions),
+            // The single-edit form: validate and bind old/new once, with
+            // intent-specific guidance when either is missing — omitting
+            // `old_string` is the most common edit-tool failure.
             None => {
                 let old_string = args.old_string.as_deref();
                 let new_string = args.new_string.as_deref();
@@ -537,7 +501,10 @@ impl Tool for EditTool {
                         )
                         .await;
                 }
-                Some((old_string, new_string))
+                EditMode::Single {
+                    old: old_string,
+                    new: new_string,
+                }
             }
         };
 
@@ -548,35 +515,34 @@ impl Tool for EditTool {
 
         let old_content = guard.read_existing_content(canonical, &args.path).await?;
 
-        let new_content = if let Some(regions) = regions {
-            let mut content = old_content.clone();
-            for (i, region) in regions.iter().enumerate() {
-                if region.old_string.is_empty() {
-                    anyhow::bail!(
-                        "edits[{i}].old_string is empty. Empty old_string is only valid at the top level to create a new file, not inside the `edits` array."
-                    );
+        let new_content = match mode {
+            EditMode::Multi(regions) => {
+                let mut content = old_content.clone();
+                for (i, region) in regions.iter().enumerate() {
+                    if region.old_string.is_empty() {
+                        anyhow::bail!(
+                            "edits[{i}].old_string is empty. Empty old_string is only valid at the top level to create a new file, not inside the `edits` array."
+                        );
+                    }
+                    content = apply_region(
+                        &content,
+                        &args.path,
+                        &region.old_string,
+                        &region.new_string,
+                        region.replace_all,
+                        OnAmbiguous::from_yolo(yolo_enabled),
+                    )?;
                 }
-                content = apply_region(
-                    &content,
-                    &args.path,
-                    &region.old_string,
-                    &region.new_string,
-                    region.replace_all,
-                    OnAmbiguous::from_yolo(yolo_enabled),
-                )?;
+                content
             }
-            content
-        } else {
-            let (old_string, new_string) =
-                single.expect("single-edit fields validated when regions is None");
-            apply_region(
+            EditMode::Single { old, new } => apply_region(
                 &old_content,
                 &args.path,
-                old_string,
-                new_string,
+                old,
+                new,
                 args.replace_all,
                 OnAmbiguous::from_yolo(yolo_enabled),
-            )?
+            )?,
         };
 
         if old_content == new_content {
@@ -606,7 +572,10 @@ impl Tool for EditTool {
             .write_content("edit", &args.path, &diff, write)
             .await?;
 
-        let region_count = regions.map_or(0, |regions| regions.len());
+        let region_count = match mode {
+            EditMode::Multi(regions) => regions.len(),
+            EditMode::Single { .. } => 0,
+        };
         let action = if new_content.is_empty() {
             "emptied"
         } else {
