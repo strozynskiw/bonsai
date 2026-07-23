@@ -1,6 +1,7 @@
 use super::{
-    SandboxCommandRequest, SelfReviewCommandRequest, SerenityCommandRequest, SmolCommandRequest,
-    parse_sandbox_command, parse_self_review_command, parse_serenity_command, parse_smol_command,
+    PureCommandRequest, SandboxCommandRequest, SelfReviewCommandRequest, SerenityCommandRequest,
+    SmolCommandRequest, parse_pure_command, parse_sandbox_command, parse_self_review_command,
+    parse_serenity_command, parse_smol_command,
 };
 use crate::model_role::ModelShortcutKey;
 
@@ -147,6 +148,12 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
         name: "/self-review",
         description: "Gate the self-review pass; `model` pins the reviewer model",
         usage_hint: Some("auto|on|ask|off|status|model"),
+        surface: both(),
+    },
+    CommandMetadata {
+        name: "/pure",
+        description: "Switch to zero-tool conversational persona",
+        usage_hint: Some("on|off|status"),
         surface: both(),
     },
     CommandMetadata {
@@ -560,6 +567,9 @@ pub(crate) fn busy_behavior_for(input: &str) -> BusyCommandBehavior {
         }),
         "/self-review" => set_or_status_busy(parse_self_review_command(trimmed), |request| {
             matches!(request, SelfReviewCommandRequest::Status)
+        }),
+        "/pure" => set_or_status_busy(parse_pure_command(trimmed), |request| {
+            matches!(request, PureCommandRequest::Status)
         }),
         "/smol" => set_or_status_busy(parse_smol_command(trimmed), |request| {
             matches!(request, SmolCommandRequest::Status)

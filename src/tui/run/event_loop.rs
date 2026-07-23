@@ -1056,6 +1056,9 @@ async fn handle_idle_slash_command(
             )
             .await;
         }
+        IdleSlashCommand::Pure => {
+            apply_pure_command(input, app, deps.agent.clone(), true).await;
+        }
         IdleSlashCommand::Smol => {
             apply_smol_command(input, app, deps.agent.clone(), deps.storage, true).await;
         }

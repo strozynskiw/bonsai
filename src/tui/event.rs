@@ -1043,6 +1043,8 @@ pub enum AppAction {
     SetApprovalLevel(crate::tool::ApprovalLevel),
     /// Mirror the live agent's effective SMOL profile into view state.
     SetSmolMode(bool),
+    /// Mirror the live agent's pure-mode into view state.
+    SetPureMode(bool),
     /// Toggle the TUI-only calm transcript presentation.
     SetSerenityMode(bool),
     ScrollCurrent(i16),

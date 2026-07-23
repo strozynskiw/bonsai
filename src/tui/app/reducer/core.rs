@@ -131,6 +131,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         AppAction::SetSmolMode(on) => {
             app.smol_mode = on;
         }
+        AppAction::SetPureMode(on) => {
+            app.pure_mode = on;
+        }
         AppAction::SetSerenityMode(on) => {
             app.serenity_mode = on;
             app.active_group_tool_selection = None;

@@ -245,6 +245,8 @@ struct ToolRegistrySet {
     planning: Arc<ToolRegistry>,
     smol: Arc<ToolRegistry>,
     review: Arc<ToolRegistry>,
+    /// Empty registry for pure mode.
+    pure: Arc<ToolRegistry>,
     /// Read-only registry a custom switcher persona scopes its `tools:` from (no
     /// write/edit/bash, no plan-canvas tools).
     read_only: Arc<ToolRegistry>,
@@ -339,6 +341,8 @@ pub struct Agent {
     /// only changes the built-in coding persona: compact prompt/context,
     /// minimal tools, and earlier context pressure handling.
     smol_mode: bool,
+    /// Ultra-minimal mode: empty tools, slim prompt, environment-only context.
+    pure_mode: bool,
     /// The active persona: a built-in mode or a custom agent.
     active_persona: ActivePersona,
     read_tracker: ReadTracker,
@@ -833,11 +837,16 @@ impl Agent {
                 ],
             );
         }
+        if self.pure_mode {
+            return String::new();
+        }
         self.system_context.clone()
     }
 
     fn system_prompt_for_mode(&self, mode: AgentMode) -> &'static str {
-        if self.smol_applies_to_mode(mode) {
+        if self.pure_mode {
+            pure_coding_system_prompt()
+        } else if self.smol_applies_to_mode(mode) {
             smol_coding_system_prompt()
         } else {
             persona::persona_for(mode).system_prompt()
@@ -866,11 +875,22 @@ impl Agent {
     }
 
     fn refresh_effective_smol_profile(&mut self) -> bool {
+        // Pure mode is active: never let an internal path (model switch,
+        // budget change) re-enable smol behind pure's back. Explicit
+        // set_smol_preference calls still go through set_pure_mode(false)
+        // before reaching here.
+        if self.pure_mode {
+            return false;
+        }
         let enabled = self.smol_preference.is_effective();
         if self.smol_mode == enabled {
             return false;
         }
         self.smol_mode = enabled;
+        // Pure and SMOL are mutually exclusive: turning smol on disables pure.
+        if enabled {
+            self.pure_mode = false;
+        }
         if self.active_persona.builtin().is_some() {
             self.tool_registry = self.registry_for_mode(self.mode);
             self.set_system_context_message(self.system_message_for_mode(self.mode));
@@ -885,6 +905,11 @@ impl Agent {
     pub(crate) fn set_smol_preference(&mut self, preference: crate::smol::SmolPreference) -> bool {
         let preference_changed = self.smol_preference != preference;
         self.smol_preference = preference;
+        // Explicit smol activation overrides pure: disable pure so that
+        // refresh_effective_smol_profile can activate smol below.
+        if self.pure_mode && self.smol_preference.is_effective() {
+            self.pure_mode = false;
+        }
         self.refresh_effective_smol_profile() || preference_changed
     }
 
@@ -899,6 +924,33 @@ impl Agent {
 
     pub(crate) const fn smol_mode(&self) -> bool {
         self.smol_mode
+    }
+
+    pub(crate) const fn pure_mode(&self) -> bool {
+        self.pure_mode
+    }
+
+    pub(crate) fn set_pure_mode(&mut self, enabled: bool) -> bool {
+        if self.pure_mode == enabled {
+            return false;
+        }
+        self.pure_mode = enabled;
+        // Pure and SMOL are mutually exclusive: turning pure on disables smol
+        // and overrides the smol preference so implicit reactivation paths
+        // (model switch, budget change) don't silently re-enable smol.
+        if enabled {
+            self.smol_mode = false;
+            self.smol_preference = crate::smol::SmolPreference::Off;
+        }
+        if self.active_persona.builtin().is_some() {
+            self.tool_registry = self.registry_for_mode(self.mode);
+            self.set_system_context_message(self.system_message_for_mode(self.mode));
+            self.refresh_project_info_runtime();
+        }
+        self.clear_tool_schema_cache();
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
+        true
     }
 
     pub(crate) const fn smol_profile(&self) -> crate::smol::SmolProfile {
@@ -1473,7 +1525,9 @@ impl Agent {
         let Some(context) = self.project_context.as_ref() else {
             return;
         };
-        let system_context = if self.appends_project_state_history() {
+        let system_context = if self.pure_mode {
+            String::new()
+        } else if self.appends_project_state_history() {
             context.cacheable_prefix()
         } else {
             // IMPORTANT PROVIDER BOUNDARY: preserve the established mutable
@@ -1518,6 +1572,10 @@ impl Agent {
     /// prior turn.
     pub(in crate::agent) fn append_volatile_context_if_changed(&mut self) -> bool {
         if !self.appends_project_state_history() {
+            return false;
+        }
+        // Pure mode: no context, no advisories — nothing to append.
+        if self.pure_mode {
             return false;
         }
         let Some(context) = self.project_context.as_ref() else {
@@ -1623,6 +1681,9 @@ impl Agent {
     }
 
     fn registry_for_mode(&self, mode: AgentMode) -> Arc<ToolRegistry> {
+        if self.pure_mode {
+            return self.registries.pure.clone();
+        }
         match mode {
             AgentMode::Coding if self.smol_mode => self.registries.smol.clone(),
             AgentMode::Coding => self.registries.coding.clone(),

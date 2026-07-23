@@ -187,6 +187,11 @@ pipe-backed background mode, or a sandbox escape. PTYs also appear in `/tasks`;
 their live screen is normalized for TUI/headless events, and a resumed session
 marks any previously running process as lost rather than pretending to reattach.
 
+- **Pure** (`/pure`) strips everything down to the persona only: zero built-in
+  tools, no project context, no environment block, no steering files. Use it
+  for clean conversational sessions where you don't want the agent touching
+  your codebase at all, or as a base for a custom agent with hand-picked tools.
+
 ### Model shortcuts
 
 Open `/model`, focus the Reasoning pane for a model, and press any single ASCII

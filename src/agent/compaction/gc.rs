@@ -204,7 +204,7 @@ impl Agent {
 
         if plan
             .before_tokens
-            .saturating_add(DEFAULT_OUTPUT_RESERVE_TOKENS)
+            .saturating_add(self.output_reserve_tokens())
             > self.budget.context_budget_tokens
         {
             return true;

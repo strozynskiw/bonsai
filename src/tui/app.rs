@@ -276,6 +276,8 @@ pub struct AppState {
     pub(crate) self_review_mode: crate::self_review::SelfReviewMode,
     /// Session-scoped SMOL profile mirrored from the live agent for status UI.
     pub(crate) smol_mode: bool,
+    /// Session-scoped pure-mode mirror from the live agent.
+    pub(crate) pure_mode: bool,
     /// TUI-only calm presentation mode: suppress reasoning rows and fold tool
     /// groups by default without changing provider reasoning.
     pub(crate) serenity_mode: bool,
@@ -557,6 +559,7 @@ impl AppState {
             approval_level: crate::tool::ApprovalLevel::default(),
             self_review_mode: crate::self_review::SelfReviewMode::default(),
             smol_mode: false,
+            pure_mode: false,
             serenity_mode: false,
             support_log_enabled: false,
             reduced_motion: false,
@@ -954,6 +957,7 @@ impl AppState {
     /// of forever.
     pub(crate) fn refresh_agent_mirrors(&mut self, agent: &crate::agent::Agent) {
         self.smol_mode = agent.smol_mode();
+        self.pure_mode = agent.pure_mode();
         self.self_review_mode = agent.self_review_mode();
         self.loaded_skills = agent.loaded_skills().clone();
     }

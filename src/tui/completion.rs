@@ -922,6 +922,7 @@ mod tests {
             "/forget",
             "/model",
             "/permissions",
+            "/pure",
             "/resume",
             "/retry",
             "/sandbox",

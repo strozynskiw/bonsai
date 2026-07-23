@@ -124,6 +124,30 @@ pub(crate) async fn handle_command_with_catalog(
             }
             Err(message) => outcome.messages.push(error(message)),
         },
+        Some("/pure") => match parse_pure_command(input) {
+            Ok(request) => {
+                let target = match request {
+                    PureCommandRequest::Toggle => {
+                        if agent.pure_mode() {
+                            PureTarget::Off
+                        } else {
+                            PureTarget::On
+                        }
+                    }
+                    PureCommandRequest::Set(target) => target,
+                    PureCommandRequest::Status => {
+                        outcome
+                            .messages
+                            .push(status(pure_status_message(agent.pure_mode())));
+                        return Ok(outcome);
+                    }
+                };
+                if agent.set_pure_mode(matches!(target, PureTarget::On)) {
+                    outcome.messages.push(status(pure_set_message(target)));
+                }
+            }
+            Err(message) => outcome.messages.push(error(message)),
+        },
         Some("/smol") => match parse_smol_command(input) {
             Ok(request) => match request.target_preference(agent.smol_profile()) {
                 Some(preference) => {

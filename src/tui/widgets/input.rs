@@ -563,6 +563,10 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
         push_sep(&mut left, " · ");
         left.push(view::smol_marker_span());
     }
+    if app.pure_mode {
+        push_sep(&mut left, " · ");
+        left.push(view::pure_marker_span());
+    }
     if app.serenity_mode {
         push_sep(&mut left, " · ");
         left.push(view::serenity_marker_span());

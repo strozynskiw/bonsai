@@ -160,3 +160,125 @@ async fn direct_persona_selection_rejects_subagent_only_and_reserved_builtin_ids
         );
     }
 }
+
+#[tokio::test]
+async fn pure_builtin_persona_has_empty_tool_registry() {
+    let fixture = TestFixture::new();
+    let coding_registry = registry_with(&["read", "write", "bash"]);
+    let planning_registry = registry_with(&["plan_add_task", "read"]);
+
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        coding_registry,
+        planning_registry,
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+
+    // Set up pure mode and force registry update via mode switch.
+    agent.set_persona(ActivePersona::Builtin(super::AgentMode::Planning));
+    // Use the setter so mutual exclusion with smol and registry/system
+    // message rebuild are exercised.
+    agent.set_pure_mode(true);
+    agent.set_persona(ActivePersona::Builtin(super::AgentMode::Coding));
+
+    // Pure persona should have zero tools.
+    assert!(
+        agent.tool_registry.get("read").is_none(),
+        "pure persona must have no tools, not even read"
+    );
+    assert!(
+        agent.tool_registry.get("write").is_none(),
+        "pure persona must have no mutating tools"
+    );
+
+    // Explicit names list should be empty too.
+    assert!(
+        agent.tool_registry.names().count() == 0,
+        "pure tool registry should list zero tool names"
+    );
+}
+
+#[tokio::test]
+async fn pure_mode_survives_context_budget_change() {
+    let fixture = TestFixture::new();
+    let coding_registry = registry_with(&["read", "write", "bash"]);
+    let planning_registry = registry_with(&["plan_add_task", "read"]);
+
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        coding_registry,
+        planning_registry,
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+
+    // Give smol a reason to activate.
+    agent.set_smol_mode(true);
+    assert!(agent.smol_mode(), "smol should be on before pure");
+
+    // Enable pure — should disable smol.
+    agent.set_pure_mode(true);
+    assert!(agent.pure_mode(), "pure should be on");
+    assert!(!agent.smol_mode(), "pure should disable smol");
+
+    // Simulate a model switch: set_context_budget_tokens calls
+    // refresh_effective_smol_profile internally. set_pure_mode(true)
+    // overrides smol_preference to Off, so the budget change must not
+    // re-enable smol.
+    agent.set_context_budget_tokens(100_000);
+    assert!(
+        agent.pure_mode(),
+        "pure mode should survive a budget change"
+    );
+    assert!(
+        !agent.smol_mode(),
+        "smol must not re-enable behind pure's back"
+    );
+
+    // Explicit smol activation should still override pure.
+    agent.set_smol_mode(true);
+    assert!(agent.smol_mode(), "explicit smol activation should work");
+    assert!(!agent.pure_mode(), "explicit smol should disable pure");
+}
+
+#[tokio::test]
+async fn pure_mode_blocks_internal_smol_reactivation() {
+    let fixture = TestFixture::new();
+    let coding_registry = registry_with(&["read", "write", "bash"]);
+    let planning_registry = registry_with(&["plan_add_task", "read"]);
+
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        coding_registry,
+        planning_registry,
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+
+    // Enable smol first.
+    agent.set_smol_mode(true);
+    assert!(agent.smol_mode());
+
+    // Enable pure — must disable smol and set smol_preference to Off.
+    agent.set_pure_mode(true);
+    assert!(agent.pure_mode());
+    assert!(!agent.smol_mode());
+
+    // Internal budget change must NOT re-enable smol behind pure's back.
+    // refresh_effective_smol_profile sees pure_mode==true and returns false.
+    agent.set_context_budget_tokens(10_000);
+    assert!(agent.pure_mode(), "pure must survive budget change");
+    assert!(!agent.smol_mode(), "smol must stay off");
+
+    // Explicit smol activation overrides pure.
+    agent.set_smol_mode(true);
+    assert!(agent.smol_mode(), "explicit smol must activate");
+    assert!(!agent.pure_mode(), "explicit smol must disable pure");
+}

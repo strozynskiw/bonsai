@@ -1890,6 +1890,7 @@ fn every_registered_command_declares_its_busy_behavior() {
         // status (read-only); `/smol` and `/serenity` parse bare as a toggle
         // (a set, which applies mid-run).
         ("/self-review", ReadOnlyNow),
+        ("/pure", RunNow),
         ("/smol", RunNow),
         ("/serenity", RunNow),
         ("/sandbox", ReadOnlyNow),

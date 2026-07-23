@@ -396,6 +396,13 @@ pub(crate) fn smol_marker_span() -> Span<'static> {
     )
 }
 
+pub(crate) fn pure_marker_span() -> Span<'static> {
+    Span::styled(
+        "pure",
+        theme::body(theme::palette().success).add_modifier(ratatui::style::Modifier::BOLD),
+    )
+}
+
 pub(crate) fn serenity_marker_span() -> Span<'static> {
     Span::styled(
         "serenity",

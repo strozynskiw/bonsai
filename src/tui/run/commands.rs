@@ -47,6 +47,7 @@ pub(in crate::tui::run) enum IdleSlashCommand<'a> {
     Episodes,
     Autonomy,
     SelfReview,
+    Pure,
     Smol,
     Serenity,
     Sandbox,
@@ -98,6 +99,7 @@ pub(in crate::tui::run) fn idle_slash_command(input: &str) -> Option<IdleSlashCo
     match input.split_whitespace().next() {
         Some("/autonomy") | Some("/yolo") => return Some(IdleSlashCommand::Autonomy),
         Some("/self-review") => return Some(IdleSlashCommand::SelfReview),
+        Some("/pure") => return Some(IdleSlashCommand::Pure),
         Some("/smol") => return Some(IdleSlashCommand::Smol),
         Some("/serenity") => return Some(IdleSlashCommand::Serenity),
         Some("/sandbox") => return Some(IdleSlashCommand::Sandbox),
@@ -532,6 +534,9 @@ pub(in crate::tui::run) async fn apply_smol_command(
                     return;
                 }
                 app.reduce(AppAction::SetSmolMode(preference.is_effective()));
+                if preference.is_effective() {
+                    app.reduce(AppAction::SetPureMode(false));
+                }
                 let agent = agent.clone();
                 tokio::spawn(async move {
                     agent.lock().await.set_smol_preference(preference);
@@ -575,6 +580,9 @@ pub(in crate::tui::run) async fn apply_smol_command(
             };
             app.latest_context_report = Some(context_report);
             app.reduce(AppAction::SetSmolMode(profile.enabled));
+            if profile.enabled {
+                app.reduce(AppAction::SetPureMode(false));
+            }
             push_command_message(
                 app,
                 CommandOutputKind::Status,
@@ -590,6 +598,65 @@ pub(in crate::tui::run) async fn apply_smol_command(
             );
         }
     }
+}
+
+pub(in crate::tui::run) async fn apply_pure_command(
+    input: &str,
+    app: &mut AppState,
+    agent: std::sync::Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    sync_agent: bool,
+) {
+    let request = match crate::commands::parse_pure_command(input) {
+        Ok(request) => request,
+        Err(message) => {
+            push_command_message(app, CommandOutputKind::Error, &message);
+            return;
+        }
+    };
+    let is_pure = app.pure_mode;
+    let target = match request {
+        crate::commands::PureCommandRequest::Toggle => {
+            if is_pure {
+                crate::commands::PureTarget::Off
+            } else {
+                crate::commands::PureTarget::On
+            }
+        }
+        crate::commands::PureCommandRequest::Set(target) => target,
+        crate::commands::PureCommandRequest::Status => {
+            push_command_message(
+                app,
+                CommandOutputKind::Status,
+                &crate::commands::pure_status_message(is_pure),
+            );
+            return;
+        }
+    };
+    let enabled = matches!(target, crate::commands::PureTarget::On);
+    // Pure mode is intentionally ephemeral — scoped to this session, not
+    // persisted across restarts (unlike smol which is a global preference).
+    app.reduce(AppAction::SetPureMode(enabled));
+    if enabled {
+        app.reduce(AppAction::SetSmolMode(false));
+    }
+    if !sync_agent {
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            agent.lock().await.set_pure_mode(enabled);
+        });
+    } else {
+        let context_report = {
+            let mut agent = agent.lock().await;
+            agent.set_pure_mode(enabled);
+            agent.context_report()
+        };
+        app.latest_context_report = Some(context_report);
+    }
+    push_command_message(
+        app,
+        CommandOutputKind::Status,
+        &crate::commands::pure_set_message(target),
+    );
 }
 
 pub(in crate::tui::run) async fn apply_serenity_command(
@@ -818,6 +885,7 @@ pub(in crate::tui) async fn apply_non_idle_read_only_command(
             .await
         }
         "/smol" => apply_smol_command(input, app, deps.agent.clone(), deps.storage, false).await,
+        "/pure" => apply_pure_command(input, app, deps.agent.clone(), false).await,
         "/serenity" => apply_serenity_command(input, app, deps.storage).await,
         "/sessions" => {
             if let Some(command) = persistence_command(input)
@@ -922,6 +990,7 @@ async fn apply_non_idle_immediate_command(
             .await
         }
         "/smol" => apply_smol_command(input, app, deps.agent.clone(), deps.storage, false).await,
+        "/pure" => apply_pure_command(input, app, deps.agent.clone(), false).await,
         // Memory writes go to the file store, never the live conversation, so
         // they are declared safe mid-run — but they need an arm here (the
         // generic command task can't start while a run holds the task slot).

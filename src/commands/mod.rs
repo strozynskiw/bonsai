@@ -26,6 +26,7 @@ pub(crate) mod model_switch;
 mod permissions;
 mod providers;
 mod providers_manage;
+mod pure;
 mod retry;
 mod sandbox;
 mod self_review;
@@ -72,6 +73,9 @@ pub(crate) use providers::{
     RefreshSourceState, RefreshSourceStatus, ResolvedModelSelection, refresh_all_provider_models,
     refresh_models_dev_source, refresh_provider_source, refresh_stale_authorized_provider_models,
     refresh_stale_model_cache,
+};
+pub(crate) use pure::{
+    PureCommandRequest, PureTarget, parse_pure_command, pure_set_message, pure_status_message,
 };
 pub(crate) use retry::parse_retry_command;
 pub(crate) use sandbox::{

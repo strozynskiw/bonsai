@@ -532,13 +532,16 @@ impl Agent {
     }
 
     fn output_reserve_tokens(&self) -> usize {
-        if !self.smol_applies_to_active_persona() {
-            return DEFAULT_OUTPUT_RESERVE_TOKENS;
+        let budget = self.budget.context_budget_tokens;
+        if self.smol_applies_to_active_persona() {
+            return budget.checked_div(8).unwrap_or(0).clamp(512, 2_000);
         }
-        self.budget
-            .context_budget_tokens
-            .checked_div(8)
-            .unwrap_or(0)
-            .clamp(512, 2_000)
+        // Cap the output reserve so it never exceeds ~67% of the context
+        // window. A fixed 16k reserve is larger than the entire window for
+        // small models (e.g. 10k tokens), causing the budget check to fail
+        // on every turn. For larger windows (≥24k) the cap is above 16k so
+        // the default reserve is kept intact.
+        let max_for_window = ((budget / 3) * 2).max(1024);
+        DEFAULT_OUTPUT_RESERVE_TOKENS.min(max_for_window)
     }
 }
