@@ -225,7 +225,7 @@ impl AgentMode {
 pub(crate) use persona::{ActivePersona, PersonaView, next_persona};
 
 #[derive(Debug)]
-struct ActiveVerificationRun {
+pub(crate) struct ActiveVerificationRun {
     record_index: usize,
     last_check_snapshot: Option<WorktreeSnapshot>,
     last_failure_signature: Option<String>,
@@ -286,6 +286,16 @@ pub(crate) struct PerfCaches {
     pub(crate) last_perf_report: Option<PerfReport>,
     pub(crate) previous_request_body: Option<Vec<u8>>,
     pub(crate) cache_warning_lanes: HashSet<(ExecutionLaneKind, String)>,
+}
+
+/// State for verification workflows (`/test`, `/build`, post-edit verification).
+/// Four fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+#[derive(Debug)]
+pub(crate) struct VerificationState {
+    pub(crate) verification_runs: Vec<crate::verification::VerificationRunRecord>,
+    pub(crate) active_verification: Option<ActiveVerificationRun>,
+    pub(crate) after_edit_verification_pending: bool,
+    pub(crate) after_edit_verification_injected: bool,
 }
 
 pub struct Agent {
@@ -434,14 +444,7 @@ pub struct Agent {
     /// around bash/file-mutation by their own tools. `HookEngine::disabled()`
     /// in evals and most unit tests, where it never matches any hook.
     hooks: Arc<crate::hooks::HookEngine>,
-    /// Durable evidence from explicit `/test` and `/build` workflows.
-    verification_runs: Vec<crate::verification::VerificationRunRecord>,
-    /// Ephemeral workspace observation state for the currently running profile.
-    active_verification: Option<ActiveVerificationRun>,
-    /// A coding mutation still needs the configured post-edit verification gate.
-    after_edit_verification_pending: bool,
-    /// Prevents a verification workflow from recursively triggering itself.
-    after_edit_verification_injected: bool,
+    verification: VerificationState,
     /// Whether this context contains a human-submitted turn that `/retry` may
     /// continue without replaying its prompt.
     last_retryable_turn: bool,

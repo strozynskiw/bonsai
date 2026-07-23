@@ -282,10 +282,12 @@ impl Agent {
             mcp_hub: builder.mcp_hub,
             extensions: builder.extensions,
             hooks: builder.hooks,
-            verification_runs: Vec::new(),
-            active_verification: None,
-            after_edit_verification_pending: false,
-            after_edit_verification_injected: false,
+            verification: VerificationState {
+                verification_runs: Vec::new(),
+                active_verification: None,
+                after_edit_verification_pending: false,
+                after_edit_verification_injected: false,
+            },
             last_retryable_turn: false,
             episode_store: builder.episode_store,
         };

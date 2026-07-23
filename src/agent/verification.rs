@@ -78,16 +78,20 @@ impl Agent {
     }
 
     fn arm_verification_record(&mut self, kind: VerificationKind, checks: &[VerificationCheck]) {
-        if let Some(active) = self.active_verification.take()
-            && let Some(record) = self.verification_runs.get_mut(active.record_index)
+        if let Some(active) = self.verification.active_verification.take()
+            && let Some(record) = self
+                .verification
+                .verification_runs
+                .get_mut(active.record_index)
         {
             record.status = VerificationRunStatus::Interrupted;
             record.finished_at_ms = Some(crate::util::time::now_ms());
         }
-        let record_index = self.verification_runs.len();
-        self.verification_runs
+        let record_index = self.verification.verification_runs.len();
+        self.verification
+            .verification_runs
             .push(VerificationRunRecord::running(kind, checks));
-        self.active_verification = Some(ActiveVerificationRun {
+        self.verification.active_verification = Some(ActiveVerificationRun {
             record_index,
             last_check_snapshot: None,
             last_failure_signature: None,
@@ -99,27 +103,27 @@ impl Agent {
     }
 
     pub(super) fn reset_after_edit_verification(&mut self) {
-        self.after_edit_verification_pending = false;
-        self.after_edit_verification_injected = false;
+        self.verification.after_edit_verification_pending = false;
+        self.verification.after_edit_verification_injected = false;
     }
 
     pub(super) fn note_typed_verification_worthy_mutation(&mut self, paths: Vec<String>) {
         self.mark_latest_verification_stale(&paths);
         self.self_review.note_typed_mutation(paths);
-        self.after_edit_verification_pending = true;
+        self.verification.after_edit_verification_pending = true;
     }
 
     pub(super) fn note_bash_window_verification_worthy_mutation(&mut self, paths: Vec<String>) {
         self.mark_latest_verification_stale(&paths);
         self.self_review.note_bash_window_mutation(paths);
-        self.after_edit_verification_pending = true;
+        self.verification.after_edit_verification_pending = true;
     }
 
     fn mark_latest_verification_stale(&mut self, paths: &[String]) {
-        if self.active_verification.is_some() {
+        if self.verification.active_verification.is_some() {
             return;
         }
-        let Some(record) = self.verification_runs.last_mut() else {
+        let Some(record) = self.verification.verification_runs.last_mut() else {
             return;
         };
         if !matches!(
@@ -144,15 +148,15 @@ impl Agent {
         sink: &SharedSink,
         cancellation_token: CancellationToken,
     ) -> bool {
-        if !self.after_edit_verification_pending
-            || self.after_edit_verification_injected
-            || self.active_verification.is_some()
+        if !self.verification.after_edit_verification_pending
+            || self.verification.after_edit_verification_injected
+            || self.verification.active_verification.is_some()
             || self.mode != AgentMode::Coding
         {
             return false;
         }
-        self.after_edit_verification_pending = false;
-        self.after_edit_verification_injected = true;
+        self.verification.after_edit_verification_pending = false;
+        self.verification.after_edit_verification_injected = true;
         let policy = self.config.verification.after_edit;
         if policy == VerifyAfterEdit::Off {
             return false;
@@ -242,7 +246,7 @@ impl Agent {
     }
 
     pub(crate) fn verification_runs(&self) -> &[VerificationRunRecord] {
-        &self.verification_runs
+        &self.verification.verification_runs
     }
 
     pub(crate) fn restore_verification_runs(&mut self, mut runs: Vec<VerificationRunRecord>) {
@@ -253,8 +257,8 @@ impl Agent {
                 run.finished_at_ms = Some(now);
             }
         }
-        self.verification_runs = runs;
-        self.active_verification = None;
+        self.verification.verification_runs = runs;
+        self.verification.active_verification = None;
     }
 
     pub(super) async fn record_verification_tool_result(
@@ -275,9 +279,10 @@ impl Agent {
             return;
         };
         let explicit = self
+            .verification
             .active_verification
             .as_ref()
-            .and_then(|active| self.verification_runs.get(active.record_index))
+            .and_then(|active| self.verification.verification_runs.get(active.record_index))
             .is_some_and(|record| record.checks.iter().any(|check| check.command == command));
         let passed = matches!(
             result,
@@ -289,15 +294,15 @@ impl Agent {
         ) && status.is_success();
         self.self_review
             .note_check_result(&command, passed, explicit);
-        if self.active_verification.is_none() {
+        if self.verification.active_verification.is_none() {
             self.record_observed_verification(&command, tool_call, result, status);
             return;
         }
-        let Some(active) = self.active_verification.as_ref() else {
+        let Some(active) = self.verification.active_verification.as_ref() else {
             return;
         };
         let record_index = active.record_index;
-        let Some(record) = self.verification_runs.get(record_index) else {
+        let Some(record) = self.verification.verification_runs.get(record_index) else {
             return;
         };
         let Some(check_index) = record.checks.iter().position(|check| {
@@ -323,12 +328,12 @@ impl Agent {
 
         let base_reasoning = self.provider.reasoning();
         let available_reasoning_escalation = self.provider.reasoning_escalation();
-        let Some(mut active) = self.active_verification.take() else {
+        let Some(mut active) = self.verification.active_verification.take() else {
             return;
         };
         active.last_check_snapshot = snapshot;
         let mut recovery_event = None;
-        if let Some(record) = self.verification_runs.get_mut(record_index)
+        if let Some(record) = self.verification.verification_runs.get_mut(record_index)
             && let Some(check) = record.checks.get_mut(check_index)
         {
             check.status = check_status;
@@ -413,7 +418,7 @@ impl Agent {
                 }
             }
         }
-        self.active_verification = Some(active);
+        self.verification.active_verification = Some(active);
         if let Some(event) = recovery_event {
             self.push_harness_note(&event.harness_note());
         }
@@ -456,35 +461,38 @@ impl Agent {
         let now = crate::util::time::now_ms();
         let failure_signature = (check_status != VerificationCheckStatus::Passed)
             .then(|| verification_failure_signature(command, result, check_status));
-        self.verification_runs.push(VerificationRunRecord {
-            kind,
-            status: if check_status == VerificationCheckStatus::Passed {
-                VerificationRunStatus::Passed
-            } else {
-                VerificationRunStatus::Failed
-            },
-            checks: vec![VerificationCheckRecord {
-                name: check_name,
-                command: command.to_string(),
-                status: check_status,
-                tool_call_id: Some(tool_call.id.clone()),
-                exit_code,
-                completed_at_ms: Some(now),
-                attempt_count: 1,
-                last_failure_signature: failure_signature,
-            }],
-            started_at_ms: now,
-            finished_at_ms: Some(now),
-            observed_final_workspace: Some(true),
-            workspace_changes_after_last_check: Vec::new(),
-            repair_attempts: 0,
-            reasoning_escalations: Vec::new(),
-            terminal_reason: None,
-        });
+        self.verification
+            .verification_runs
+            .push(VerificationRunRecord {
+                kind,
+                status: if check_status == VerificationCheckStatus::Passed {
+                    VerificationRunStatus::Passed
+                } else {
+                    VerificationRunStatus::Failed
+                },
+                checks: vec![VerificationCheckRecord {
+                    name: check_name,
+                    command: command.to_string(),
+                    status: check_status,
+                    tool_call_id: Some(tool_call.id.clone()),
+                    exit_code,
+                    completed_at_ms: Some(now),
+                    attempt_count: 1,
+                    last_failure_signature: failure_signature,
+                }],
+                started_at_ms: now,
+                finished_at_ms: Some(now),
+                observed_final_workspace: Some(true),
+                workspace_changes_after_last_check: Vec::new(),
+                repair_attempts: 0,
+                reasoning_escalations: Vec::new(),
+                terminal_reason: None,
+            });
     }
 
     pub(super) fn verification_blocker(&self) -> Option<&str> {
-        self.active_verification
+        self.verification
+            .active_verification
             .as_ref()
             .and_then(|active| active.pending_blocker.as_deref())
     }
@@ -493,7 +501,7 @@ impl Agent {
         if matches!(result, Ok(AgentRunResult::Waiting(_))) {
             return;
         }
-        let Some(active) = self.active_verification.take() else {
+        let Some(active) = self.verification.active_verification.take() else {
             return;
         };
 
@@ -511,7 +519,11 @@ impl Agent {
                 _ => (None, Vec::new()),
             };
 
-        let Some(record) = self.verification_runs.get_mut(active.record_index) else {
+        let Some(record) = self
+            .verification
+            .verification_runs
+            .get_mut(active.record_index)
+        else {
             return;
         };
         record.finished_at_ms = Some(crate::util::time::now_ms());

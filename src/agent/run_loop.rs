@@ -468,6 +468,7 @@ impl Agent {
         let provider_started_at = std::time::Instant::now();
         let (provider_sink, first_output) = PerfSink::shared(sink.clone());
         let verification_reasoning = self
+            .verification
             .active_verification
             .as_ref()
             .and_then(|active| active.reasoning_override);
