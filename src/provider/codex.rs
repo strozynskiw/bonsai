@@ -145,6 +145,10 @@ pub struct CodexProvider {
     /// back into the next request so the model does not re-reason from scratch.
     /// Off by default until validated against the live backend.
     persist_reasoning: bool,
+    /// Whether the active model accepts image input. When false, image parts
+    /// are downgraded to a text placeholder before serialization so an image
+    /// already in history cannot 400 every later turn.
+    supports_vision: bool,
     /// Reasoning items captured per assistant turn, keyed by that turn's first
     /// tool-call id (the `call_id` that round-trips into the rebuilt assistant
     /// message). Rebuilt empty per conversation, so resumed history simply omits
@@ -175,6 +179,7 @@ impl CodexProvider {
             prompt_cache_key,
             routing_thread_id,
             persist_reasoning: codex_reasoning_persistence_enabled(),
+            supports_vision: target.supports_vision,
             reasoning_by_call_id: Mutex::new(HashMap::new()),
             last_request_diagnostics: Mutex::new(None),
         }
@@ -265,6 +270,14 @@ impl CodexProvider {
             messages,
             transform::ProjectStateWireLayout::AppendOnly,
         );
+        // Vision safety net: mirror of the OpenAI-chat/Anthropic strip — an
+        // image already in history must not 400 every later turn when the
+        // active model rejects image input.
+        let wire_messages = if self.supports_vision {
+            wire_messages
+        } else {
+            transform::strip_image_parts_for_wire(wire_messages.as_ref())
+        };
         // IMPORTANT OFFICIAL-CODEX PARITY: emit the native Responses items
         // exactly. A synthetic developer "cache checkpoint" was live-tested
         // and pinned reuse to only the original ~14k prefix instead of letting
@@ -1175,6 +1188,57 @@ mod tests {
         let mut target = crate::provider::fallback_run_target(&CODEX_METADATA, session);
         target.use_responses_lite = true;
         CodexProvider::new(session, &target)
+    }
+
+    fn pasted_image_user_message() -> ChatCompletionRequestMessage {
+        use async_openai::types::chat::{
+            ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestUserMessage,
+            ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+            ImageUrl,
+        };
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AAAA".to_string(),
+                            detail: None,
+                        },
+                    },
+                ),
+            ]),
+            name: None,
+        })
+    }
+
+    #[test]
+    fn request_body_strips_images_for_non_vision_model() {
+        // Mirror of the OpenAI-chat/Anthropic safety net: an image already in
+        // history must not 400 every later turn when the active model rejects
+        // image input.
+        let session = make_session();
+        let mut target = crate::provider::fallback_run_target(&CODEX_METADATA, &session);
+        target.supports_vision = false;
+        let provider = CodexProvider::new(&session, &target);
+
+        let body = provider
+            .request_body(&[user_message("hi"), pasted_image_user_message()], &[])
+            .unwrap();
+        let serialized = body.to_string();
+
+        assert!(!serialized.contains("input_image"));
+        assert!(serialized.contains(crate::provider::transform::IMAGE_OMITTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn request_body_keeps_images_for_vision_model() {
+        let provider = make_provider(&make_session());
+
+        let body = provider
+            .request_body(&[user_message("hi"), pasted_image_user_message()], &[])
+            .unwrap();
+
+        assert!(body.to_string().contains("input_image"));
     }
 
     #[test]

@@ -1129,6 +1129,7 @@ impl ResolvedModel {
             output_limit: self.output_limit,
             reasoning,
             reasoning_escalation,
+            supports_vision: self.features.contains(&ModelFeature::Attachment),
             use_responses_lite: false,
         }
     }

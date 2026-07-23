@@ -101,6 +101,14 @@ pub(crate) struct RunTarget {
     /// One request-local effort increase that the resolved model explicitly
     /// supports. Used only after a failed verification repair.
     pub reasoning_escalation: Option<ReasoningSelection>,
+    /// Whether the resolved model accepts image content parts. From the
+    /// catalog `attachment` feature on the resolved path, or the provider's
+    /// metadata capabilities on the fallback path; transports OR in the
+    /// provider-level capability so known-vision providers keep working when
+    /// the catalog has no row. Non-vision transports downgrade image parts to
+    /// a text placeholder so an image already in history cannot 400 every
+    /// later turn.
+    pub supports_vision: bool,
     pub use_responses_lite: bool,
 }
 

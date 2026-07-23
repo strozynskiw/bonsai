@@ -851,6 +851,11 @@ pub(crate) fn provider_for(
                 anthropic::AnthropicTransportFlags {
                     require_api_key: metadata.auth_requirement != AuthRequirement::ApiKeyOptional,
                     supports_prompt_cache: metadata.capabilities.supports_prompt_cache,
+                    // The target carries the per-model catalog feature; the
+                    // metadata flag keeps known-vision providers (native
+                    // Anthropic) working when the catalog has no row.
+                    supports_vision: target.supports_vision
+                        || metadata.capabilities.supports_vision,
                 },
                 metadata.raw_api_key_header_name(),
             ))
@@ -904,6 +909,7 @@ pub(crate) fn fallback_run_target(
         output_limit: None,
         reasoning,
         reasoning_escalation,
+        supports_vision: metadata.capabilities.supports_vision,
         use_responses_lite: false,
     }
 }

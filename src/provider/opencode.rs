@@ -150,6 +150,10 @@ pub struct OpenAiCompatibleProvider {
     /// default preserves every compatible provider's historic wire body;
     /// OpenCode opts into rolling append-only history explicitly.
     prompt_cache_policy: crate::model_catalog::PromptCachePolicy,
+    /// Whether the active model accepts image content parts. When false,
+    /// image parts are downgraded to a text placeholder before serialization
+    /// so an image already in history cannot 400 every later turn.
+    supports_vision: bool,
     prompt_cache_key: String,
     /// Native reasoning captured for assistant tool-call turns, keyed by the
     /// first call id so it can be restored when that turn re-enters history.
@@ -191,6 +195,10 @@ impl OpenAiCompatibleProvider {
             echoes_reasoning_content: capabilities.echoes_reasoning_content,
             usage_frame_is_stream_terminal: capabilities.usage_frame_is_stream_terminal,
             prompt_cache_policy: target.prompt_cache_policy,
+            // The target carries the per-model catalog feature; the
+            // capabilities flag keeps known-vision providers working when the
+            // catalog has no row.
+            supports_vision: target.supports_vision || capabilities.supports_vision,
             prompt_cache_key: crate::provider::new_conversation_cache_key(),
             reasoning_by_call_id: std::sync::Mutex::new(HashMap::new()),
             last_request_diagnostics: std::sync::Mutex::new(None),
@@ -257,7 +265,18 @@ impl OpenAiCompatibleProvider {
         // as system messages, so fold any non-leading system turn into the user
         // stream before it hits the wire. Leaves the leading system prompt — and
         // therefore the cache prefix — byte-stable.
-        let request_messages = transform::demote_non_leading_system_messages(staged.as_ref());
+        let demoted = transform::demote_non_leading_system_messages(staged.as_ref());
+        // Vision safety net: a text-only model rejects `image_url` parts with a
+        // 400 (DeepSeek: "unknown variant image_url, expected text"). The
+        // composer gate blocks new pastes, but images already in history
+        // (model switch, resumed session) would otherwise wedge every later
+        // turn. The strip is deterministic per provider instance, so cache
+        // prefixes stay byte-stable.
+        let request_messages = if self.supports_vision {
+            demoted
+        } else {
+            transform::strip_image_parts_for_wire(demoted.as_ref())
+        };
 
         request_builder
             .model(&self.model)
@@ -1186,6 +1205,72 @@ mod tests {
                 .all(|message| message.get("reasoning_content").is_none()),
             "the off-schema field stays off backends that have not asked for it",
         );
+    }
+
+    fn image_user_message() -> ChatCompletionRequestMessage {
+        use async_openai::types::chat::{
+            ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestUserMessage,
+            ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+            ImageUrl,
+        };
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AAAA".to_string(),
+                            detail: None,
+                        },
+                    },
+                ),
+            ]),
+            name: None,
+        })
+    }
+
+    #[test]
+    fn request_body_strips_images_for_non_vision_model() {
+        // Regression (observed live on DeepSeek, session 57): an image pasted
+        // under a vision model stays in history after a switch to a text-only
+        // model, and the next request 400s with "unknown variant image_url,
+        // expected text" — and so does every later turn. The wire body must
+        // downgrade the image to a placeholder instead of wedging the session.
+        let session = provider_session("sk", "http://localhost/v1", "deepseek-v4-pro");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN,
+        );
+
+        let body = provider
+            .request_body(&[user_message("see this"), image_user_message()], &[])
+            .unwrap();
+
+        let serialized = body.to_string();
+        assert!(!serialized.contains("image_url"));
+        assert!(serialized.contains(crate::provider::transform::IMAGE_OMITTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn request_body_keeps_images_for_vision_model() {
+        let session = provider_session("sk", "http://localhost/v1", "vision-model");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN.with_vision(),
+        );
+
+        let body = provider
+            .request_body(&[user_message("see this"), image_user_message()], &[])
+            .unwrap();
+
+        assert!(body.to_string().contains("image_url"));
     }
 
     #[test]

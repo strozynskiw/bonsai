@@ -12,9 +12,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use async_openai::types::chat::{
     ChatCompletionRequestDeveloperMessage, ChatCompletionRequestDeveloperMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionTool,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
 };
 use serde_json::{Value, json};
 
@@ -51,6 +52,75 @@ pub(crate) fn content_parts(content: Option<&Value>) -> Vec<ContentPart> {
         Some(Value::Array(items)) => items.iter().filter_map(content_part).collect(),
         _ => Vec::new(),
     }
+}
+
+/// Text substituted for each image content part when the wire target cannot
+/// see images. Deterministic so prompt-cache prefixes stay byte-stable.
+pub(crate) const IMAGE_OMITTED_PLACEHOLDER: &str =
+    "[image omitted: this model does not support image input]";
+
+/// Replace image content parts in user messages with a text placeholder, for
+/// providers whose active model rejects image input. Wire-only: the persisted
+/// history keeps the image so switching back to a vision model restores it.
+/// Returns `Borrowed` when no message carries an image, keeping the common
+/// wire body byte-identical.
+pub(crate) fn strip_image_parts_for_wire(
+    messages: &[ChatCompletionRequestMessage],
+) -> Cow<'_, [ChatCompletionRequestMessage]> {
+    if !messages.iter().any(user_message_has_image) {
+        return Cow::Borrowed(messages);
+    }
+    let stripped = messages
+        .iter()
+        .map(|message| {
+            let ChatCompletionRequestMessage::User(user) = message else {
+                return message.clone();
+            };
+            let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+                return message.clone();
+            };
+            if !parts.iter().any(is_image_part) {
+                return message.clone();
+            }
+            let parts = parts
+                .iter()
+                .map(|part| match part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => {
+                        ChatCompletionRequestUserMessageContentPart::Text(
+                            ChatCompletionRequestMessageContentPartText {
+                                text: IMAGE_OMITTED_PLACEHOLDER.to_string(),
+                            },
+                        )
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Array(parts),
+                name: user.name.clone(),
+            })
+        })
+        .collect();
+    Cow::Owned(stripped)
+}
+
+fn user_message_has_image(message: &ChatCompletionRequestMessage) -> bool {
+    matches!(
+        message,
+        ChatCompletionRequestMessage::User(user)
+            if matches!(
+                &user.content,
+                ChatCompletionRequestUserMessageContent::Array(parts)
+                    if parts.iter().any(is_image_part)
+            )
+    )
+}
+
+fn is_image_part(part: &ChatCompletionRequestUserMessageContentPart) -> bool {
+    matches!(
+        part,
+        ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+    )
 }
 
 /// Provider-wire placement for Bonsai's immutable project-state snapshots.
@@ -592,6 +662,101 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0], ContentPart::Text(t) if t == "hi"));
         assert!(matches!(&parts[1], ContentPart::ImageUrl(u) if u == "http://x/y.png"));
+    }
+
+    fn image_user_message(name: Option<&str>) -> ChatCompletionRequestMessage {
+        use async_openai::types::chat::ChatCompletionRequestMessageContentPartImage;
+        use async_openai::types::chat::ImageUrl;
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: "look at this".to_string(),
+                    },
+                ),
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AAAA".to_string(),
+                            detail: None,
+                        },
+                    },
+                ),
+            ]),
+            name: name.map(str::to_string),
+        })
+    }
+
+    #[test]
+    fn strip_image_parts_borrows_when_no_images() {
+        let messages = vec![system_message("sys"), user_message("hello")];
+        assert!(matches!(
+            strip_image_parts_for_wire(&messages),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn strip_image_parts_replaces_images_with_placeholder_and_keeps_text() {
+        let messages = vec![
+            system_message("sys"),
+            image_user_message(Some("bonsai_user")),
+            user_message("plain"),
+        ];
+
+        let stripped = strip_image_parts_for_wire(&messages);
+
+        let ChatCompletionRequestMessage::User(user) = &stripped[1] else {
+            panic!("expected a user message");
+        };
+        assert_eq!(user.name.as_deref(), Some("bonsai_user"));
+        let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+            panic!("expected array content");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(
+            matches!(&parts[0], ChatCompletionRequestUserMessageContentPart::Text(t) if t.text == "look at this")
+        );
+        assert!(
+            matches!(&parts[1], ChatCompletionRequestUserMessageContentPart::Text(t) if t.text == IMAGE_OMITTED_PLACEHOLDER),
+            "image part must become the placeholder text"
+        );
+        // The plain user message is untouched, and the source history is not
+        // mutated (the image stays for a later vision model).
+        assert_eq!(stripped[2], messages[2]);
+        assert!(user_message_has_image(&messages[1]));
+    }
+
+    #[test]
+    fn strip_image_parts_keeps_content_non_empty_for_image_only_messages() {
+        use async_openai::types::chat::ChatCompletionRequestMessageContentPartImage;
+        use async_openai::types::chat::ImageUrl;
+        let image_only = ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AAAA".to_string(),
+                            detail: None,
+                        },
+                    },
+                ),
+            ]),
+            name: None,
+        });
+
+        let messages = [image_only];
+        let stripped = strip_image_parts_for_wire(&messages);
+        let ChatCompletionRequestMessage::User(user) = &stripped[0] else {
+            panic!("expected a user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+            panic!("expected array content");
+        };
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], ChatCompletionRequestUserMessageContentPart::Text(t) if t.text == IMAGE_OMITTED_PLACEHOLDER)
+        );
     }
 
     #[test]

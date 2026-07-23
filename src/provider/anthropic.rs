@@ -218,6 +218,10 @@ pub struct AnthropicCompatibleProvider {
     /// Whether to emit `cache_control` prompt-cache breakpoints in the request
     /// body. Sourced from the provider's [`ProviderCapabilities`].
     supports_prompt_cache: bool,
+    /// Whether the active model accepts image content. When false, image
+    /// parts are downgraded to a text placeholder before serialization so an
+    /// image already in history cannot 400 every later turn.
+    supports_vision: bool,
     /// Connection/model-specific placement of mutable project state relative
     /// to the rolling history breakpoint.
     prompt_cache_policy: crate::model_catalog::PromptCachePolicy,
@@ -239,6 +243,7 @@ pub struct AnthropicCompatibleProvider {
 pub(crate) struct AnthropicTransportFlags {
     pub(crate) require_api_key: bool,
     pub(crate) supports_prompt_cache: bool,
+    pub(crate) supports_vision: bool,
 }
 
 impl AnthropicCompatibleProvider {
@@ -252,6 +257,7 @@ impl AnthropicCompatibleProvider {
         let AnthropicTransportFlags {
             require_api_key,
             supports_prompt_cache,
+            supports_vision,
         } = flags;
         let base_url = target.base_url.trim().trim_end_matches('/').to_string();
         let model = target.remote_model_id.to_string();
@@ -280,6 +286,7 @@ impl AnthropicCompatibleProvider {
             },
             require_api_key,
             supports_prompt_cache,
+            supports_vision,
             prompt_cache_policy: target.prompt_cache_policy,
             thinking_by_call_id: Mutex::new(HashMap::new()),
             last_request_diagnostics: Mutex::new(None),
@@ -395,6 +402,14 @@ impl AnthropicCompatibleProvider {
         };
         let wire_messages =
             transform::messages_for_project_state_layout(messages, project_state_layout);
+        // Vision safety net: mirror of the OpenAI-chat strip — a text-only
+        // Anthropic-compatible endpoint rejects image blocks with a 400, and
+        // images already in history would otherwise wedge every later turn.
+        let wire_messages = if self.supports_vision {
+            wire_messages
+        } else {
+            transform::strip_image_parts_for_wire(wire_messages.as_ref())
+        };
         let (system, mut anthropic_messages) =
             transform_messages_with_thinking(wire_messages.as_ref(), Some(&thinking))?;
         drop(thinking);
@@ -1215,6 +1230,7 @@ mod tests {
             AnthropicTransportFlags {
                 require_api_key: true,
                 supports_prompt_cache: false,
+                supports_vision: true,
             },
             "x-api-key",
         )
@@ -1233,6 +1249,7 @@ mod tests {
             AnthropicTransportFlags {
                 require_api_key: true,
                 supports_prompt_cache: false,
+                supports_vision: true,
             },
             "x-api-key",
         )
@@ -1362,6 +1379,68 @@ mod tests {
 
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert!(body.get("output_config").is_none());
+    }
+
+    fn pasted_image_user_message() -> ChatCompletionRequestMessage {
+        use async_openai::types::chat::{
+            ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestUserMessage,
+            ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+            ImageUrl,
+        };
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AAAA".to_string(),
+                            detail: None,
+                        },
+                    },
+                ),
+            ]),
+            name: None,
+        })
+    }
+
+    #[test]
+    fn request_body_strips_images_for_non_vision_model() {
+        // An image already in history (pasted under a vision model, then a
+        // switch to a text-only Anthropic-compatible endpoint) must not 400
+        // every later turn — the wire body downgrades it to a placeholder.
+        let session = make_session();
+        let target = crate::provider::fallback_run_target(&ANTHROPIC_METADATA, &session);
+        let provider = AnthropicCompatibleProvider::new(
+            "minimax-coding-plan",
+            &session,
+            &target,
+            AnthropicTransportFlags {
+                require_api_key: true,
+                supports_prompt_cache: false,
+                supports_vision: false,
+            },
+            "x-api-key",
+        );
+
+        let body = provider
+            .request_body(&[user_message("hi"), pasted_image_user_message()], &[])
+            .unwrap();
+        let serialized = body.to_string();
+
+        assert!(!serialized.contains("image_url"));
+        assert!(!serialized.contains("\"type\":\"image\""));
+        assert!(serialized.contains(crate::provider::transform::IMAGE_OMITTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn request_body_keeps_images_for_vision_model() {
+        let provider = concrete_anthropic_provider(ReasoningSelection::Off, None);
+
+        let body = provider
+            .request_body(&[user_message("hi"), pasted_image_user_message()], &[])
+            .unwrap();
+        let serialized = body.to_string();
+
+        assert!(serialized.contains("\"type\":\"image\""));
     }
 
     #[tokio::test]
@@ -2100,6 +2179,7 @@ mod tests {
             AnthropicTransportFlags {
                 require_api_key: true,
                 supports_prompt_cache,
+                supports_vision: true,
             },
             "x-api-key",
         )
@@ -2116,6 +2196,7 @@ mod tests {
             AnthropicTransportFlags {
                 require_api_key: true,
                 supports_prompt_cache: true,
+                supports_vision: true,
             },
             "x-api-key",
         )
