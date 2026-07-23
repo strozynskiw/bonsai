@@ -4924,9 +4924,15 @@ async fn pending_queued_image_is_rechecked_before_idle_run() {
 #[tokio::test]
 async fn deferred_model_command_applies_after_idle_drain() {
     let temp_dir = tempfile::TempDir::new().unwrap();
+    let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))
+        .await
+        .unwrap();
+    let mut session_store = SessionStore::load_with_storage(&storage).await.unwrap();
+    session_store.ensure_provider("codex");
+    session_store.session_mut("codex").api_key = "codex-token".to_string();
+    let session_store = Arc::new(Mutex::new(session_store));
     let (runtime_tx, mut runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
-    let session_store = Arc::new(Mutex::new(authorized_codex_store()));
     let registry = Arc::new(ProviderRegistry::default_registry());
     let model_catalog = test_model_catalog();
     let mut app = app();
@@ -4950,7 +4956,7 @@ async fn deferred_model_command_applies_after_idle_drain() {
         DeferredCommandDeps {
             registry,
             model_catalog,
-            storage: None,
+            storage: Some(&storage),
         },
     )
     .await;
@@ -4975,9 +4981,15 @@ async fn deferred_model_command_applies_after_idle_drain() {
 #[tokio::test]
 async fn deferred_model_selection_preserves_reasoning_after_idle_drain() {
     let temp_dir = tempfile::TempDir::new().unwrap();
+    let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))
+        .await
+        .unwrap();
+    let mut session_store = SessionStore::load_with_storage(&storage).await.unwrap();
+    session_store.ensure_provider("codex");
+    session_store.session_mut("codex").api_key = "codex-token".to_string();
+    let session_store = Arc::new(Mutex::new(session_store));
     let (runtime_tx, mut runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
-    let session_store = Arc::new(Mutex::new(authorized_codex_store()));
     let registry = Arc::new(ProviderRegistry::default_registry());
     let model_catalog = test_model_catalog();
     let mut app = app();
@@ -5005,7 +5017,7 @@ async fn deferred_model_selection_preserves_reasoning_after_idle_drain() {
         DeferredCommandDeps {
             registry,
             model_catalog,
-            storage: None,
+            storage: Some(&storage),
         },
     )
     .await;

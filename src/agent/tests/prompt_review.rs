@@ -273,7 +273,7 @@ fn planning_prompt_plans_behavior_not_code() {
     // not a code walkthrough: grouped behavior-level changes, minimal file
     // naming, and only the detail needed for implementation safety.
     let content = system_content(AgentMode::Planning, "");
-    assert!(content.contains("decision-complete specification"));
+    assert!(content.contains("decision-complete spec"));
     assert!(content.contains("DECIDED approach"));
     assert!(content.contains("by subsystem or behavior rather than file-by-file inventories"));
     assert!(content.contains("behavior-level descriptions over symbol-by-symbol edit lists"));
@@ -318,7 +318,7 @@ fn planning_prompt_requires_evidence_based_precise_plans() {
     assert!(content.contains("Prefer current code and command output over stale docs"));
     assert!(content.contains("separate facts, assumptions, decisions, and open questions"));
     assert!(content.contains("Make plans clean and precise"));
-    assert!(content.contains("Be concise, but not sparse"));
+    assert!(content.contains("Concise, not sparse"));
     assert!(content.contains("nothing consequential is left to guess"));
     assert!(content.contains("Context, Goals, Non-goals, Phases, and Validation"));
     assert!(content.contains("Do not invent line counts, test counts, performance claims"));
@@ -344,14 +344,14 @@ fn planning_prompt_synthesizes_detail_into_a_decision_complete_draft() {
     assert!(content.contains("ordinary user messages as valid free-form answers"));
     assert!(content.contains("Synthesize user answers and repository evidence"));
     assert!(content.contains("close consequential gaps before declaring the plan complete"));
-    assert!(content.contains("decision-complete specification"));
+    assert!(content.contains("decision-complete spec"));
     for requirement in [
-        "intended behavior",
-        "scope and non-goals",
-        "key technical decisions",
+        "behavior",
+        "scope",
+        "key decisions",
         "edge cases",
-        "validation",
-        "explicit assumptions",
+        "test strategy",
+        "assumptions",
     ] {
         assert!(content.contains(requirement), "missing {requirement}");
     }
@@ -389,7 +389,7 @@ fn planning_prompt_carves_out_memory_write() {
 #[test]
 fn review_prompt_requires_read_only_evidence_and_severity_definitions() {
     let content = system_content(AgentMode::Review, "");
-    assert!(content.contains("read-only code reviewer"));
+    assert!(content.contains("You are a code reviewer"));
     assert!(content.contains("Do not modify files, run mutating commands, or update todos"));
     assert!(
         content.contains("plan_add_finding"),
