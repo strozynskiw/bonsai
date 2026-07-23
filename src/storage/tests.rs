@@ -2070,7 +2070,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
         ),
         (300, 0, 0)
     );
-    assert_eq!(opus.cache_hit_percent(), Some(40));
+    assert_eq!(opus.cache_hit_percent(), Some(400));
     assert_eq!(opus.last_used_ms, DAY0 + DAY);
     let glm = &dashboard.models[1];
     assert_eq!(

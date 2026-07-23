@@ -62,7 +62,7 @@ fn model_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'stat
         .min(inner_width.saturating_sub(46).max(12));
 
     let header = format!(
-        " {:<name_width$}  {:>7}  {:>7}  {:>10}  {:>4}  {:>5}  LAST USED",
+        " {:<name_width$}  {:>7}  {:>7}  {:>10}  {:>4}  {:>6}  LAST USED",
         "MODEL", "IN", "OUT", "COST", "SESS", "CACHE"
     );
     lines.push(Line::from(Span::styled(
@@ -73,7 +73,7 @@ fn model_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'stat
         let mut label = model_label(model);
         label.truncate(name_width);
         let row = format!(
-            " {:<name_width$}  {:>7}  {:>7}  {:>10}  {:>4}  {:>5}  {}",
+            " {:<name_width$}  {:>7}  {:>7}  {:>10}  {:>4}  {:>6}  {}",
             label,
             tokens_label(model.input_tokens),
             tokens_label(model.output_tokens),
@@ -81,7 +81,7 @@ fn model_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'stat
             model.sessions,
             model
                 .cache_hit_percent()
-                .map(|percent| format!("{percent}%"))
+                .map(|percent| format!("{}.{}%", percent / 10, percent % 10))
                 .unwrap_or_else(|| "n/a".to_string()),
             relative_age(model.last_used_ms),
         );
@@ -360,9 +360,11 @@ fn cache_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'stat
         .map(|day| day.cache_measured_tokens)
         .sum();
     let hit_rate = if measured > 0 {
+        let tenths = read.saturating_mul(1000) / measured;
         format!(
-            "{}% lifetime ({} read / {} measured)",
-            read.saturating_mul(100) / measured,
+            "{}.{}% lifetime ({} read / {} measured)",
+            tenths / 10,
+            tenths % 10,
             tokens_label(read),
             tokens_label(measured)
         )

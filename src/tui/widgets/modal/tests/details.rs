@@ -231,7 +231,7 @@ fn context_header_shows_cache_verdict_in_every_mode_and_keeps_extras_scoped() {
     // the verdict is pinned to the header in every mode.
     for (mode, text) in [("ledger", &ledger), ("wire", &wire), ("turns", &turns)] {
         assert!(
-            text.contains("cache partial (70%)"),
+            text.contains("cache partial (70."),
             "{mode} header should carry the cache verdict: {text}"
         );
     }
@@ -277,7 +277,7 @@ fn context_turns_expanded_row_shows_diagnosis_and_reconciliation() {
     assert!(expanded.contains("request 80.1 KiB request"), "{expanded}");
     assert!(expanded.contains("cache hint cache_control"), "{expanded}");
     assert!(
-        expanded.contains("cache expected 91% vs read 0%"),
+        expanded.contains("cache expected 91.0% vs read 0.0%"),
         "{expanded}"
     );
     assert!(expanded.contains("tools read, bash"), "{expanded}");

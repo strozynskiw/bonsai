@@ -57,12 +57,13 @@ fn build_with_budget(root: &Path, char_budget: usize) -> String {
 
     // Collect candidate source files and sort by path for a deterministic
     // ranking and a byte-stable map (walkdir yields filesystem order).
-    let mut files: Vec<_> = search::walk_project_files(root, root)
-        .filter(|file| {
-            language_for_path(&file.relative).is_some()
-                && !is_excluded(&file.relative, gitignore.as_ref(), respect_gitignore)
-        })
-        .collect();
+    let mut files: Vec<_> =
+        search::walk_project_files(root, root, gitignore.as_ref(), respect_gitignore, root)
+            .filter(|file| {
+                language_for_path(&file.relative).is_some()
+                    && !is_excluded(&file.relative, gitignore.as_ref(), respect_gitignore)
+            })
+            .collect();
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
 
     // Bound the scan so a pathologically large repo can't stall startup.

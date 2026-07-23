@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(cache.total_input_tokens, usage.prompt_tokens);
         assert_eq!(cache.read_tokens, 900_000);
         // Honest hit rate: 900k / 1_400k = 64%, not the optimistic 90%.
-        assert_eq!(cache.hit_rate_percent(), Some(64));
+        assert_eq!(cache.hit_rate_percent(), Some(642));
         // The backfilled leading turn renders `read 0%`, not `read n/a`: its
         // diagnosis field must match its now-zeroed cache counters. The warm
         // turn keeps its measured 900k/1000k = 90%.

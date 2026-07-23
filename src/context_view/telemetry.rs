@@ -308,7 +308,7 @@ fn context_warning(percent: usize) -> Option<&'static str> {
 
 fn cache_label(prefix: &str, percent: Option<u64>) -> String {
     percent
-        .map(|percent| format!("{prefix} {percent}%"))
+        .map(|percent| format!("{prefix} {}.{}%", percent / 10, percent % 10))
         .unwrap_or_else(|| format!("{prefix} n/a"))
 }
 
@@ -336,7 +336,7 @@ fn format_usage_turn_line(turn: &UsageTurnReport) -> String {
         .map(format_u64_tokens)
         .unwrap_or_else(|| "n/a".to_string());
     let cache = turn_cache_percent(turn)
-        .map(|percent| format!("{percent}%"))
+        .map(|percent| format!("{}.{}%", percent / 10, percent % 10))
         .unwrap_or_else(|| "n/a".to_string());
     let context = turn
         .estimated_prompt_tokens
@@ -362,17 +362,8 @@ fn format_usage_turn_line(turn: &UsageTurnReport) -> String {
     )
 }
 
-fn session_cache_label(report: &ContextReport) -> &'static str {
-    let lanes = report
-        .usage_turns
-        .iter()
-        .map(|turn| (turn.lane_kind, turn.lane_id.as_str()))
-        .collect::<std::collections::HashSet<_>>();
-    if lanes.len() > 1 {
-        "cache (mixed lanes)"
-    } else {
-        "cache"
-    }
+fn session_cache_label(_report: &ContextReport) -> &'static str {
+    "cache"
 }
 
 fn format_u64_tokens(tokens: u64) -> String {
@@ -381,7 +372,7 @@ fn format_u64_tokens(tokens: u64) -> String {
 
 pub(crate) fn turn_cache_percent(turn: &UsageTurnReport) -> Option<u64> {
     turn.cache_read_input_tokens?
-        .saturating_mul(100)
+        .saturating_mul(1000)
         .checked_div(turn.cache_measured_input_tokens?)
 }
 
@@ -408,15 +399,24 @@ fn turn_flags(turn: &UsageTurnReport) -> Vec<String> {
             compact_tokens(turn.reasoning_chars)
         ));
     }
-    if turn_cache_percent(turn).is_some_and(|percent| percent < 50) {
+    if turn_cache_percent(turn).is_some_and(|percent| percent < 500) {
         flags.push("cold".to_string());
     }
     if let Some(expected) = turn.expected_cacheable_percent {
         let actual = turn
             .actual_cache_read_percent
-            .map(|percent| percent.to_string())
+            .map(|percent| {
+                let tenths = percent.saturating_mul(10);
+                format!("{}.{}", tenths / 10, tenths % 10)
+            })
             .unwrap_or_else(|| "n/a".to_string());
-        flags.push(format!("cache exp {expected}%/read {actual}%"));
+        let expected_tenths = expected.saturating_mul(10);
+        flags.push(format!(
+            "cache exp {}.{}%/read {}%",
+            expected_tenths / 10,
+            expected_tenths % 10,
+            actual
+        ));
     }
     match turn.status {
         UsageTurnStatus::Missing => flags.push("missing usage".to_string()),
@@ -954,8 +954,8 @@ mod tests {
 
         let telemetry = CostTelemetry::from_report(&report);
 
-        assert_eq!(telemetry.recent_cache_percent, Some(80));
-        assert!(telemetry.header_label(&report, 88).contains("cache 80%"));
+        assert_eq!(telemetry.recent_cache_percent, Some(800));
+        assert!(telemetry.header_label(&report, 88).contains("cache 80.0%"));
     }
 
     #[test]
@@ -964,9 +964,9 @@ mod tests {
         let telemetry = CostTelemetry::from_report(&report);
 
         assert_eq!(telemetry.context_percent, 55);
-        assert_eq!(telemetry.session_cache_percent, Some(50));
+        assert_eq!(telemetry.session_cache_percent, Some(500));
         assert_eq!(telemetry.recent_cache_percent, None);
-        assert_eq!(telemetry.last_cache_percent, Some(50));
+        assert_eq!(telemetry.last_cache_percent, Some(500));
         assert_eq!(
             telemetry.driver(ContextDriverKind::ToolOutputs),
             Some(&ContextDriver {
@@ -992,7 +992,7 @@ mod tests {
             telemetry
                 .last_turn_summary_line(&report)
                 .unwrap()
-                .contains("cache 50%")
+                .contains("cache 50.0%")
         );
     }
 

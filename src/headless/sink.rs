@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(value["session_id"], 42);
         assert_eq!(value["usage"]["total_tokens"], 15);
         assert_eq!(value["usage"]["input_cache"]["read_tokens"], 6);
-        assert_eq!(value["usage"]["input_cache"]["hit_rate_percent"], 60);
+        assert_eq!(value["usage"]["input_cache"]["hit_rate_percent"], 600);
         assert_eq!(value["persistence_duration_ms"], 7);
         assert_eq!(value["completion_report"]["status"], "completed");
         assert!(read_buffer(&stderr_buffer).is_empty());

@@ -82,7 +82,7 @@ impl ModelUsage {
     /// Lifetime cache hit rate for this model, when anything was measured.
     pub fn cache_hit_percent(&self) -> Option<i64> {
         (self.cache_measured_tokens > 0)
-            .then(|| self.cache_read_tokens.saturating_mul(100) / self.cache_measured_tokens)
+            .then(|| self.cache_read_tokens.saturating_mul(1000) / self.cache_measured_tokens)
     }
 }
 

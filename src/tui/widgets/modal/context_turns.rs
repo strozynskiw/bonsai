@@ -387,15 +387,29 @@ fn wire_detail(turn: &UsageTurnReport) -> Option<String> {
     if let Some(expected) = turn.expected_cacheable_percent {
         let actual = turn
             .actual_cache_read_percent
-            .map(|percent| format!("{percent}%"))
+            .map(|percent| {
+                let tenths = percent.saturating_mul(10);
+                format!("{}.{}", tenths / 10, tenths % 10)
+            })
             .unwrap_or_else(|| "n/a".to_string());
-        parts.push(format!("cache expected {expected}% vs read {actual}"));
+        let expected_tenths = expected.saturating_mul(10);
+        parts.push(format!(
+            "cache expected {}.{}% vs read {}%",
+            expected_tenths / 10,
+            expected_tenths % 10,
+            actual
+        ));
     }
     if let Some(route) = turn.cache_route_fingerprint.as_deref() {
         parts.push(format!("route {}", short_hash(route)));
     }
     if let Some(percent) = turn.local_reusable_prefix_percent {
-        parts.push(format!("wire prefix {percent}% bytes"));
+        let tenths = percent.saturating_mul(10);
+        parts.push(format!(
+            "wire prefix {}.{}% bytes",
+            tenths / 10,
+            tenths % 10
+        ));
     }
     if !turn.tool_schema_names.is_empty() {
         parts.push(format!(
@@ -459,14 +473,14 @@ fn cache_cell(turn: &UsageTurnReport) -> (String, Style) {
     let Some(percent) = turn_cache_percent(turn) else {
         return ("n/a".to_string(), theme::dim());
     };
-    let mut text = format!("{percent:>3}%");
+    let mut text = format!("{}.{}%", percent / 10, percent % 10);
     if let Some(written) = turn
         .cache_creation_input_tokens
         .filter(|written| *written > 0)
     {
         text.push_str(&format!(" +{}w", compact_tokens(written as usize)));
     }
-    let style = if percent >= 80 {
+    let style = if percent >= 800 {
         theme::body(p.success)
     } else if percent > 0 {
         theme::body(p.todo)

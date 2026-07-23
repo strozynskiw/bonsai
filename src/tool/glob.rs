@@ -95,7 +95,13 @@ impl Tool for GlobTool {
 
         let mut matches: Vec<(PathBuf, SystemTime)> = tokio::task::spawn_blocking(move || {
             let mut matches: Vec<(PathBuf, SystemTime)> = Vec::new();
-            for file in search::walk_project_files(&walk_root, &display_base) {
+            for file in search::walk_project_files(
+                &walk_root,
+                &display_base,
+                gitignore.as_ref(),
+                respect_gitignore,
+                &display_base,
+            ) {
                 let glob_path = file
                     .absolute
                     .strip_prefix(&glob_base)

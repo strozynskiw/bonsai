@@ -62,7 +62,25 @@ pub(crate) fn is_hidden_path(path: &Path) -> bool {
         .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
-pub(crate) fn is_visible_walk_entry(entry: &walkdir::DirEntry, search_root: &Path) -> bool {
+/// Whether a walkdir entry is visible (not hidden and not gitignored).
+/// Directories matched by gitignore are pruned so the walker never enters
+/// them, saving the IO cost of enumerating build artifacts.
+///
+/// `gitignore_root` is the path that gitignore patterns are relative to
+/// (the project root). The entry's path is stripped against this root before
+/// matching — not against `search_root`, which may be a subdirectory.
+///
+/// This is a best-effort directory pruning optimisation. Callers must still
+/// apply their own exact gitignore checks with the correct path base because
+/// a directory entry that passes the walk filter may still be gitignored at
+/// a more specific depth (e.g. `src/generated/` when walking from `src/`).
+pub(crate) fn is_visible_walk_entry(
+    entry: &walkdir::DirEntry,
+    search_root: &Path,
+    gitignore_root: &Path,
+    gitignore: Option<&Gitignore>,
+    respect_gitignore: bool,
+) -> bool {
     if entry.depth() == 0 {
         return true;
     }
@@ -70,7 +88,23 @@ pub(crate) fn is_visible_walk_entry(entry: &walkdir::DirEntry, search_root: &Pat
         .path()
         .strip_prefix(search_root)
         .unwrap_or(entry.path());
-    !is_hidden_path(relative)
+    if is_hidden_path(relative) {
+        return false;
+    }
+    if respect_gitignore && let Some(gi) = gitignore {
+        let is_dir = entry.file_type().is_dir();
+        // Compute the path relative to the project root so gitignore
+        // patterns (which are always root-relative) match correctly even
+        // when walk_root is a subdirectory.
+        let git_relative = entry
+            .path()
+            .strip_prefix(gitignore_root)
+            .unwrap_or(entry.path());
+        if gi.matched(git_relative, is_dir).is_ignore() {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn is_hidden_or_gitignored(
@@ -103,24 +137,46 @@ pub(crate) struct ProjectFile {
     pub relative: PathBuf,
 }
 
-/// Walk `walk_root` for regular files, pruning hidden directories from
-/// traversal, never following symlinks, and yielding each file with its path
-/// made relative to `strip_base`.
+/// Walk `walk_root` for regular files, pruning hidden and gitignored
+/// directories from traversal, never following symlinks, and yielding each
+/// file with its path made relative to `strip_base`.
 ///
-/// Callers layer their own filters (gitignore, glob, type) on top of the
-/// returned `relative` path. For directory searches `walk_root` and
-/// `strip_base` are the same directory; for single-file searches `strip_base`
-/// is the file's parent so the relative path keeps the file name.
-pub(crate) fn walk_project_files(
+/// `gitignore` and `respect_gitignore` control directory-level pruning:
+/// gitignored directories (e.g. `target/`) are never entered, saving the
+/// IO cost of enumerating thousands of build artifacts. `gitignore_root` is
+/// the path that gitignore patterns are relative to (the project root); it
+/// must be the same root that was passed to [`build_gitignore`]. Callers
+/// that already build a [`Gitignore`] should pass it here; pass
+/// `(None, false, &Path)` to skip.
+///
+/// Callers must still apply their own exact gitignore checks downstream —
+/// this pruning is best-effort (see [`is_visible_walk_entry`]).
+///
+/// For directory searches `walk_root` and `strip_base` are the same
+/// directory; for single-file searches `strip_base` is the file's parent
+/// so the relative path keeps the file name.
+pub(crate) fn walk_project_files<'g>(
     walk_root: &Path,
     strip_base: &Path,
-) -> impl Iterator<Item = ProjectFile> {
+    gitignore: Option<&'g Gitignore>,
+    respect_gitignore: bool,
+    gitignore_root: &Path,
+) -> impl Iterator<Item = ProjectFile> + 'g {
     let walk_root = walk_root.to_path_buf();
     let strip_base = strip_base.to_path_buf();
+    let gitignore_root = gitignore_root.to_path_buf();
     walkdir::WalkDir::new(&walk_root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(move |entry| is_visible_walk_entry(entry, &walk_root))
+        .filter_entry(move |entry| {
+            is_visible_walk_entry(
+                entry,
+                &walk_root,
+                &gitignore_root,
+                gitignore,
+                respect_gitignore,
+            )
+        })
         .filter_map(move |entry| {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -205,7 +261,7 @@ mod tests {
         touch(&root.join("a.txt"));
         touch(&root.join("nested/b.txt"));
 
-        let mut relatives: Vec<String> = walk_project_files(root, root)
+        let mut relatives: Vec<String> = walk_project_files(root, root, None, false, root)
             .map(|f| f.relative.to_string_lossy().replace('\\', "/"))
             .collect();
         relatives.sort();
@@ -220,7 +276,7 @@ mod tests {
         touch(&root.join(".hidden/secret.txt"));
         std::fs::create_dir_all(root.join("emptydir")).unwrap();
 
-        let relatives: Vec<String> = walk_project_files(root, root)
+        let relatives: Vec<String> = walk_project_files(root, root, None, false, root)
             .map(|f| f.relative.to_string_lossy().to_string())
             .collect();
         assert_eq!(relatives, vec!["visible.txt"]);
@@ -233,7 +289,7 @@ mod tests {
         let file = root.join("only.txt");
         touch(&file);
 
-        let files: Vec<ProjectFile> = walk_project_files(&file, root).collect();
+        let files: Vec<ProjectFile> = walk_project_files(&file, root, None, false, root).collect();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].relative.to_string_lossy(), "only.txt");
         assert_eq!(files[0].absolute, file);
@@ -243,7 +299,10 @@ mod tests {
     fn walk_nonexistent_root_yields_nothing() {
         let dir = tempfile::TempDir::new().unwrap();
         let missing = dir.path().join("does-not-exist");
-        assert_eq!(walk_project_files(&missing, &missing).count(), 0);
+        assert_eq!(
+            walk_project_files(&missing, &missing, None, false, &missing).count(),
+            0
+        );
     }
 
     #[test]

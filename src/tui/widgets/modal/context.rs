@@ -202,7 +202,7 @@ fn context_usage_summary_line(report: &ContextReport) -> Line<'static> {
 }
 
 /// Real provider counts from the last turn, when reported:
-/// `last ↑42.1k ↓1.2k · cache 92% · $0.021 · saved $0.018`
+/// `last ↑42.1k ↓1.2k · cache 92.0% · $0.021 · saved $0.018`
 fn context_last_turn_line(report: &ContextReport) -> Option<Line<'static>> {
     use crate::context_view::telemetry::compact_tokens;
     let p = theme::palette();
@@ -961,7 +961,7 @@ pub(super) fn collect_context_rows<'a>(
 pub(super) fn input_cache_label(input_cache: Option<crate::provider::InputCacheUsage>) -> String {
     input_cache
         .and_then(|usage| usage.hit_rate_percent())
-        .map(|percent| format!("cache {percent}%"))
+        .map(|percent| format!("cache {}.{}%", percent / 10, percent % 10))
         .unwrap_or_else(|| "cache n/a".to_string())
 }
 

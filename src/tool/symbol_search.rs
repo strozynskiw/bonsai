@@ -175,7 +175,13 @@ impl Tool for SymbolSearchTool {
             tokio::task::spawn_blocking(move || -> Result<(Vec<SymbolMatch>, bool)> {
                 let mut results: Vec<SymbolMatch> = Vec::new();
                 let mut truncated = false;
-                'walk: for file in search::walk_project_files(&walk_root, &display_base) {
+                'walk: for file in search::walk_project_files(
+                    &walk_root,
+                    &display_base,
+                    gitignore.as_ref(),
+                    respect_gitignore,
+                    &display_base,
+                ) {
                     let relative_path = file.relative;
                     let glob_path = file
                         .absolute

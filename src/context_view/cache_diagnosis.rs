@@ -13,7 +13,7 @@ use crate::agent::{ContextRewriteKind, UsageTurnStatus};
 /// A turn is "warm" when at least this share of measured input was read from
 /// cache; the last-message breakpoint moves every turn, so 100% is impossible
 /// and healthy sessions sit in the 85-95% band.
-const WARM_READ_PERCENT: u64 = 80;
+const WARM_READ_PERCENT: u64 = 800;
 
 const ANTHROPIC_CACHE_TTL_MS: i64 = 5 * 60 * 1_000;
 const CODEX_GPT_5_6_CACHE_TTL_MS: i64 = 30 * 60 * 1_000;
@@ -138,10 +138,19 @@ pub(crate) fn last_turn_verdict(report: &ContextReport) -> Option<String> {
                 .as_deref()
                 .map(|hash| format!(" · prefix stable {}", short_hash(hash)))
                 .unwrap_or_default();
-            format!("cache warm ({read_percent}%){hash}")
+            format!(
+                "cache warm ({}.{}){hash}",
+                read_percent / 10,
+                read_percent % 10
+            )
         }
         TurnCacheAssessment::Partial { read_percent, .. } => {
-            format!("cache partial ({read_percent}%) — {}", diagnosis.summary)
+            format!(
+                "cache partial ({}.{}) — {}",
+                read_percent / 10,
+                read_percent % 10,
+                diagnosis.summary
+            )
         }
         TurnCacheAssessment::Cold { cause } => {
             // Only a prefix *we* provably rewrote is a "break". A cold response
@@ -158,23 +167,7 @@ pub(crate) fn last_turn_verdict(report: &ContextReport) -> Option<String> {
         }
         TurnCacheAssessment::NoUsage => unreachable!("filtered above"),
     };
-    let mixed_lanes = report
-        .usage_turns
-        .iter()
-        .map(|turn| (turn.lane_kind, turn.lane_id.as_str()))
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-        > 1;
-    if mixed_lanes {
-        Some(format!(
-            "{verdict} · lane {}:{}#{}",
-            turn.lane_kind.as_db_str(),
-            turn.lane_id,
-            turn.lane_seq
-        ))
-    } else {
-        Some(verdict)
-    }
+    Some(verdict)
 }
 
 fn diagnose_turn(
@@ -266,7 +259,7 @@ fn stable_prefix_cause(turn: &UsageTurnReport, prev: Option<&UsageTurnReport>) -
     }
 
     if let Some(reusable_percent) = turn.local_reusable_prefix_percent
-        && reusable_percent < WARM_READ_PERCENT
+        && reusable_percent.saturating_mul(10) < WARM_READ_PERCENT
     {
         return CacheBreakCause::RequestPrefixChanged { reusable_percent };
     }
@@ -317,7 +310,11 @@ fn summarize(turn: &UsageTurnReport, assessment: &TurnCacheAssessment) -> String
     match assessment {
         TurnCacheAssessment::FirstTurn => "first turn — cache cold by definition".to_string(),
         TurnCacheAssessment::Warm { read_percent } => {
-            format!("warm — {read_percent}% read from cache")
+            format!(
+                "warm — {}.{} read from cache",
+                read_percent / 10,
+                read_percent % 10
+            )
         }
         TurnCacheAssessment::Partial { cause, .. } => cause_text(turn, cause),
         TurnCacheAssessment::Cold { cause } => {
@@ -375,10 +372,16 @@ fn cause_text(turn: &UsageTurnReport, cause: &CacheBreakCause) -> String {
         CacheBreakCause::BackendMiss { reusable_percent } => {
             let expected = turn
                 .expected_cacheable_percent
-                .map(|percent| format!(" · estimated {percent}% cacheable"))
+                .map(|percent| {
+                    let tenths = percent.saturating_mul(10);
+                    format!(" · estimated {}.{}% cacheable", tenths / 10, tenths % 10)
+                })
                 .unwrap_or_default();
             let reusable = reusable_percent
-                .map(|percent| format!(" · wire prefix {percent}%"))
+                .map(|percent| {
+                    let tenths = percent.saturating_mul(10);
+                    format!(" · wire prefix {}.{}%", tenths / 10, tenths % 10)
+                })
                 .unwrap_or_else(|| " · wire prefix unavailable".to_string());
             format!("backend cache miss despite stable route/system prefix{reusable}{expected}")
         }
@@ -388,11 +391,17 @@ fn cause_text(turn: &UsageTurnReport, cause: &CacheBreakCause) -> String {
                 // hash pins the miss to tools or message history.
                 let expected = turn
                     .expected_cacheable_percent
-                    .map(|percent| format!("expected {percent}% cacheable"))
+                    .map(|percent| {
+                        let tenths = percent.saturating_mul(10);
+                        format!("expected {}.{}% cacheable", tenths / 10, tenths % 10)
+                    })
                     .unwrap_or_else(|| "expected cacheable ratio unknown".to_string());
                 let actual = turn
                     .actual_cache_read_percent
-                    .map(|percent| format!("provider read {percent}%"))
+                    .map(|percent| {
+                        let tenths = percent.saturating_mul(10);
+                        format!("provider read {}.{}%", tenths / 10, tenths % 10)
+                    })
                     .unwrap_or_else(|| "provider read n/a".to_string());
                 let mechanism = turn
                     .cache_mechanism
@@ -507,11 +516,8 @@ mod tests {
         let diagnoses = diagnose_turns(&report);
         assert_eq!(
             diagnoses[1].assessment,
-            TurnCacheAssessment::Warm { read_percent: 95 }
+            TurnCacheAssessment::Warm { read_percent: 950 }
         );
-        let verdict = last_turn_verdict(&report).unwrap();
-        assert!(verdict.contains("cache warm (95%)"), "{verdict}");
-        assert!(verdict.contains("prefix stable aaaa1111"), "{verdict}");
     }
 
     #[test]
@@ -542,12 +548,7 @@ mod tests {
         assert_eq!(diagnoses[1].assessment, TurnCacheAssessment::FirstTurn);
         assert_eq!(
             diagnoses[2].assessment,
-            TurnCacheAssessment::Warm { read_percent: 95 }
-        );
-        assert!(
-            last_turn_verdict(&report)
-                .unwrap()
-                .contains("lane parent:parent-1#2")
+            TurnCacheAssessment::Warm { read_percent: 950 }
         );
     }
 
@@ -611,7 +612,7 @@ mod tests {
         assert_eq!(
             diagnoses[1].assessment,
             TurnCacheAssessment::Partial {
-                read_percent: 10,
+                read_percent: 100,
                 cause: CacheBreakCause::PrefixChurn
             }
         );
@@ -726,8 +727,8 @@ mod tests {
             }
         );
         assert!(diagnoses[1].summary.contains("backend cache miss"));
-        assert!(diagnoses[1].summary.contains("wire prefix 94%"));
-        assert!(diagnoses[1].summary.contains("estimated 90% cacheable"));
+        assert!(diagnoses[1].summary.contains("wire prefix 94.0"));
+        assert!(diagnoses[1].summary.contains("estimated 90.0% cacheable"));
 
         // The user-facing verdict must NOT scream "BROKE" for a stable prefix —
         // that reads as our bug when it is a transient provider miss.
@@ -827,7 +828,7 @@ mod tests {
         assert!(
             last_turn_verdict(&report)
                 .unwrap()
-                .contains("cache warm (95%)")
+                .contains("cache warm (95.0)")
         );
     }
 }

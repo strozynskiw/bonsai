@@ -237,7 +237,7 @@ pub(crate) fn format_eval_summary(report: &EvalReport) -> String {
         "- Cache reuse: {}\n",
         report
             .cache_reuse_percent
-            .map(|percent| format!("{percent}%"))
+            .map(|percent| format!("{}.{}%", percent / 10, percent % 10))
             .unwrap_or_else(|| "n/a".to_string())
     ));
     summary.push_str(&format!("- Repair turns: {}\n", report.repair_turns));
@@ -257,7 +257,11 @@ pub(crate) fn format_eval_summary(report: &EvalReport) -> String {
             baseline
                 .deltas
                 .cache_reuse_percent
-                .map(|delta| format!("{delta:+} points"))
+                .map(|delta| {
+                    let abs = delta.unsigned_abs();
+                    let sign = if delta >= 0 { "+" } else { "-" };
+                    format!("{sign}{}.{} points", abs / 10, abs % 10)
+                })
                 .unwrap_or_else(|| "n/a".to_string()),
             baseline.deltas.repair_turns,
         ));

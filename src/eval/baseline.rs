@@ -372,9 +372,12 @@ fn validate_baseline(baseline: &EvalBaselineFile, path: &Path) -> Result<()> {
                 );
             }
         }
-        if profile.cache_reuse_percent.is_some_and(|value| value > 100) {
+        if profile
+            .cache_reuse_percent
+            .is_some_and(|value| value > 1000)
+        {
             anyhow::bail!(
-                "Eval baseline {:?} profile {profile_number} cache_reuse_percent must be between 0 and 100",
+                "Eval baseline {:?} profile {profile_number} cache_reuse_percent must be between 0 and 1000",
                 path
             );
         }
@@ -478,9 +481,11 @@ fn push_cache_reuse_violation(
     match (actual, reference) {
         (Some(actual), Some(reference)) => {
             let drop = reference.saturating_sub(actual);
-            if drop > allowed_drop_points {
+            if drop > allowed_drop_points.saturating_mul(10) {
                 violations.push(format!(
-                    "cache reuse dropped from {reference}% to {actual}%, exceeding the allowed {allowed_drop_points}-point drop"
+                    "cache reuse dropped from {}.{}% to {}.{}%, exceeding the allowed {allowed_drop_points}-point drop",
+                    reference / 10, reference % 10,
+                    actual / 10, actual % 10,
                 ));
             }
         }
@@ -522,7 +527,9 @@ pub(crate) fn aggregate_cache_reuse_percent(tasks: &[TaskReport]) -> Option<u64>
                 )
             },
         );
-    read_tokens.saturating_mul(100).checked_div(measured_tokens)
+    read_tokens
+        .saturating_mul(1000)
+        .checked_div(measured_tokens)
 }
 
 #[cfg(test)]
@@ -556,7 +563,7 @@ mod tests {
             cost_micros: Some(40),
             tokens_per_dollar: Some(2_500_000.0),
             duration_ms: 25,
-            cache_reuse_percent: Some(60),
+            cache_reuse_percent: Some(600),
             repair_turns: 2,
             baseline: None,
             output_dir: "out".to_string(),
@@ -619,7 +626,7 @@ allowed_score_drop_percent = 5.0
 total_tokens = 90
 cost_micros = 30
 duration_ms = 20
-cache_reuse_percent = 65
+cache_reuse_percent = 650
 repair_turns = 1
 "#,
         )
@@ -633,7 +640,7 @@ repair_turns = 1
         assert_eq!(comparison.deltas.total_tokens, 10);
         assert_eq!(comparison.deltas.cost_micros, Some(10));
         assert_eq!(comparison.deltas.duration_ms, 5);
-        assert_eq!(comparison.deltas.cache_reuse_percent, Some(-5));
+        assert_eq!(comparison.deltas.cache_reuse_percent, Some(-50));
         assert_eq!(comparison.deltas.repair_turns, 1);
         assert_eq!(comparison.violations.len(), 1);
     }
@@ -660,7 +667,7 @@ allowed_repair_turn_increase = 1
 total_tokens = 100
 cost_micros = 40
 duration_ms = 25
-cache_reuse_percent = 60
+cache_reuse_percent = 600
 repair_turns = 2
 "#,
         )
@@ -670,7 +677,7 @@ repair_turns = 2
         actual.usage.total_tokens = 106;
         actual.cost_micros = Some(45);
         actual.duration_ms = 31;
-        actual.cache_reuse_percent = Some(54);
+        actual.cache_reuse_percent = Some(540);
         actual.repair_turns = 4;
 
         let comparison = baseline.compare(&actual).unwrap();
@@ -681,7 +688,7 @@ repair_turns = 2
                 "total tokens grew from 100 to 106, exceeding the allowed 5% growth",
                 "cost grew from 40 to 45, exceeding the allowed 10% growth",
                 "duration grew from 25 to 31, exceeding the allowed 20% growth",
-                "cache reuse dropped from 60% to 54%, exceeding the allowed 5-point drop",
+                "cache reuse dropped from 60.0% to 54.0%, exceeding the allowed 5-point drop",
                 "repair turns increased from 2 to 4, exceeding the allowed increase of 1",
             ]
         );
@@ -709,7 +716,7 @@ allowed_repair_turn_increase = 1
 total_tokens = 100
 cost_micros = 40
 duration_ms = 25
-cache_reuse_percent = 60
+cache_reuse_percent = 600
 repair_turns = 2
 "#,
         )
@@ -719,7 +726,7 @@ repair_turns = 2
         actual.usage.total_tokens = 105;
         actual.cost_micros = Some(44);
         actual.duration_ms = 30;
-        actual.cache_reuse_percent = Some(55);
+        actual.cache_reuse_percent = Some(550);
         actual.repair_turns = 3;
 
         let comparison = baseline.compare(&actual).unwrap();
@@ -778,7 +785,7 @@ allowed_cache_reuse_drop_points = 5
 total_tokens = 100
 cost_micros = 40
 duration_ms = 25
-cache_reuse_percent = 60
+cache_reuse_percent = 600
 repair_turns = 2
 "#,
         )

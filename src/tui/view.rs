@@ -1254,7 +1254,7 @@ mod tests {
 
         let text = buffer_text(terminal.backend().buffer());
         assert!(
-            text.contains("cache 25%"),
+            text.contains("cache 25.0%"),
             "/ctx should render last-turn input cache hit rate"
         );
         assert!(

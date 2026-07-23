@@ -301,7 +301,13 @@ impl Tool for GrepTool {
                 let mut read_paths: Vec<PathBuf> = Vec::new();
                 let mut truncated = false;
                 'roots: for (walk_root, display_base, glob_base, gitignore) in &walk_roots {
-                    for file in search::walk_project_files(walk_root, display_base) {
+                    for file in search::walk_project_files(
+                        walk_root,
+                        display_base,
+                        gitignore.as_ref(),
+                        respect_gitignore,
+                        display_base,
+                    ) {
                         let relative_path = file.relative;
                         let glob_path = file
                             .absolute

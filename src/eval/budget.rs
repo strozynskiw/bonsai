@@ -262,7 +262,9 @@ fn post_warmup_cache_percent(turns: &[UsageTurnReport], warmup_turns: usize) -> 
         read_tokens = read_tokens.saturating_add(turn.cache_read_input_tokens.unwrap_or(0));
         measured_tokens = measured_tokens.saturating_add(measured);
     }
-    read_tokens.saturating_mul(100).checked_div(measured_tokens)
+    read_tokens
+        .saturating_mul(1000)
+        .checked_div(measured_tokens)
 }
 
 #[cfg(test)]

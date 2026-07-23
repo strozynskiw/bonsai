@@ -422,7 +422,7 @@ impl InputCacheUsage {
 
     pub fn hit_rate_percent(self) -> Option<u64> {
         self.read_tokens
-            .saturating_mul(100)
+            .saturating_mul(1000)
             .checked_div(self.total_input_tokens)
     }
 }
