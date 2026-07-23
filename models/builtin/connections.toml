@@ -199,9 +199,10 @@ default_model = "mimo/mimo-v2.5-pro"
 default_endpoint_path = "chat/completions"
 # A local heuristic counter avoids a remote token-count dependency.
 default_token_counter = "heuristic"
-# Prompt caching over MiMo's Anthropic endpoint is undocumented and unverified,
-# so no `cache_control` breakpoints are sent (prompt_cache defaults off). Enable
-# it here once a warm request is confirmed to return `cache_read_input_tokens`.
+# MiMo's openai-chat endpoint honors prompt_cache_key — verified live on the
+# Coding Plan endpoint (98,304 cache_read_input_tokens/turn, partial hit ~84%→66%)
+# and implied on the pay-as-you-go endpoint.
+prompt_cache = true
 
 [[connections]]
 id = "mimo-coding-plan"
@@ -220,6 +221,10 @@ base_url_env = "MIMO_CODING_PLAN_BASE_URL"
 default_model = "mimo-coding-plan/mimo-v2.5-pro"
 default_endpoint_path = "chat/completions"
 default_token_counter = "heuristic"
+# Same MiMo serving stack as the pay-as-you-go endpoint — prompt_cache_key is
+# honored (verified live on the Coding Plan endpoint: 98,304
+# cache_read_input_tokens/turn, partial hit ~84%→66% on a growing session).
+prompt_cache = true
 
 [[connections]]
 id = "openrouter"
