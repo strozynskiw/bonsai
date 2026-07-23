@@ -488,6 +488,7 @@ pub(crate) fn security_review_prompt(scope: ReviewScope, diff: &CapturedDiff) ->
 /// full tool set and the whole conversation in context.
 pub(crate) fn self_review_prompt(
     diff: &CapturedDiff,
+    request: Option<&str>,
     typed_paths: &[String],
     bash_window_paths: &[String],
     unscoped_mutation: bool,
@@ -496,12 +497,20 @@ pub(crate) fn self_review_prompt(
         diff,
         "\n\nDiff body was truncated; use read/grep to inspect the affected files.",
     );
+    let request_section = match request {
+        Some(request) if !request.trim().is_empty() => {
+            let request = truncate_review_request(request.trim(), MAX_REVIEW_REQUEST_BYTES);
+            format!("Original request:\n{request}\n\n")
+        }
+        _ => String::new(),
+    };
     let attribution_section =
         self_review_attribution_section(typed_paths, bash_window_paths, unscoped_mutation);
 
     format!(
-        "Self-review before finishing. Below is a baseline-scoped diff ({command}).\n\n{attribution_section}Changed files:\n{stat}\n\nDiff ({command}):\n{diff_body}{truncation_note}{untracked}\n\nCritically review only changes that plausibly belong to the user's original request earlier in this conversation:\n- Does that work fully satisfy what was asked, or is anything missing, half-finished, or out of scope?\n- Did it introduce a bug, regression, or broken edge case?\n- Is there leftover debugging output, dead code, or an unresolved TODO you meant to handle?\n\nDo not alter or revert concurrent or unrelated edits. If you find a problem in the requested work, fix it now with the edit/write tools and re-run any relevant check. Do not re-do work that is already correct. If the changes correctly and completely satisfy the request, reply with a one-line confirmation and stop.",
+        "Self-review before finishing. Below is a baseline-scoped diff ({command}).\n\n{request_section}{attribution_section}Changed files:\n{stat}\n\nDiff ({command}):\n{diff_body}{truncation_note}{untracked}\n\nCritically review only changes that plausibly belong to the user's original request earlier in this conversation:\n- Does that work fully satisfy what was asked, or is anything missing, half-finished, or out of scope?\n- Did it introduce a bug, regression, or broken edge case?\n- Is there leftover debugging output, dead code, or an unresolved TODO you meant to handle?\n\nDo not alter or revert concurrent or unrelated edits. If you find a problem in the requested work, fix it now with the edit/write tools and re-run any relevant check. Do not re-do work that is already correct. If the changes correctly and completely satisfy the request, reply with a one-line confirmation and stop.",
         command = diff.command,
+        request_section = request_section,
         attribution_section = attribution_section,
         stat = sections.stat,
         diff_body = sections.diff_body,
@@ -900,7 +909,7 @@ mod tests {
             truncated: false,
         };
 
-        let prompt = self_review_prompt(&diff, &[], &[], false);
+        let prompt = self_review_prompt(&diff, None, &[], &[], false);
 
         assert!(prompt.contains("git diff HEAD"), "{prompt}");
         assert!(prompt.contains("+let x = 2;"), "{prompt}");
@@ -1134,7 +1143,7 @@ mod tests {
         };
         diff.redact_secrets();
 
-        let prompt = self_review_prompt(&diff, &[], &[], false);
+        let prompt = self_review_prompt(&diff, None, &[], &[], false);
 
         assert!(!prompt.contains(&token), "{prompt}");
         assert!(prompt.contains("[REDACTED:OpenAI API key]"), "{prompt}");
@@ -1151,7 +1160,7 @@ mod tests {
         };
         let bash = vec!["src/concurrent.rs".to_string()];
 
-        let bash_prompt = self_review_prompt(&diff, &[], &bash, false);
+        let bash_prompt = self_review_prompt(&diff, None, &[], &bash, false);
         assert!(
             bash_prompt.contains("foreground-Bash window"),
             "{bash_prompt}"
@@ -1161,7 +1170,7 @@ mod tests {
             "{bash_prompt}"
         );
 
-        let unscoped_prompt = self_review_prompt(&diff, &[], &[], true);
+        let unscoped_prompt = self_review_prompt(&diff, None, &[], &[], true);
         assert!(
             unscoped_prompt.contains("attribution is unavailable"),
             "{unscoped_prompt}"

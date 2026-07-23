@@ -394,7 +394,7 @@ impl Agent {
                 UsageTotals::default(),
                 "",
             );
-            return self.fall_back_to_in_conversation_self_review(diff, attribution);
+            return self.fall_back_to_in_conversation_self_review(diff, request, attribution);
         };
 
         let task = review_subagent_prompt(
@@ -508,7 +508,7 @@ impl Agent {
                     error = %format!("{err:#}"),
                     "self-review subagent failed; falling back to in-conversation pass"
                 );
-                self.fall_back_to_in_conversation_self_review(diff, attribution)
+                self.fall_back_to_in_conversation_self_review(diff, request, attribution)
             }
         }
     }
@@ -570,10 +570,12 @@ impl Agent {
     fn fall_back_to_in_conversation_self_review(
         &mut self,
         diff: &CapturedDiff,
+        request: Option<&str>,
         attribution: &SelfReviewAttribution,
     ) -> bool {
         self.push_harness_note(&self_review_prompt(
             diff,
+            request,
             attribution.typed_paths(),
             attribution.bash_window_paths(),
             attribution.has_unscoped_mutation(),
