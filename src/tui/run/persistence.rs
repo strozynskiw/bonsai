@@ -766,6 +766,7 @@ pub(in crate::tui) async fn open_saved_plan(
                 return open_saved_plan_clean(plan_id, app, deps, state).await;
             };
             let storage = deps.storage;
+            let agent = deps.agent.clone();
             resume_session(source_session_id, app, deps, state).await?;
             if app.current_session_id == Some(source_session_id) {
                 storage
@@ -774,6 +775,11 @@ pub(in crate::tui) async fn open_saved_plan(
                 app.reduce(AppAction::SetActiveSavedPlan(Some(plan_id)));
             }
             app.reduce(AppAction::SetView(View::Plan));
+            {
+                let mut agent = agent.lock().await;
+                agent.set_mode(AgentMode::Planning);
+                app.latest_context_report = Some(agent.context_report());
+            }
             Ok(())
         }
     }
@@ -829,6 +835,7 @@ pub(in crate::tui::run) async fn open_saved_plan_clean(
         let mut agent = deps.agent.lock().await;
         agent.set_conversation_cache_key(&conversation_cache_key);
         agent.clear().await;
+        agent.set_mode(AgentMode::Planning);
         app.latest_context_report = Some(agent.context_report());
     }
     deps.todo_store.lock().await.clear();
