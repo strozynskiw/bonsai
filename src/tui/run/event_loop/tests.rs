@@ -2073,6 +2073,115 @@ async fn running_sessions_command_opens_picker() {
 }
 
 #[tokio::test]
+async fn session_picker_delete_end_to_end() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, current_id) = storage_with_active_session(temp_dir.path()).await;
+    // Create a second session to delete
+    let session_to_delete = storage
+        .start_session(
+            temp_dir.path(),
+            "anthropic",
+            "claude-sonnet-4-5",
+            ReasoningSelection::default(),
+        )
+        .await
+        .unwrap();
+    // End the session so it's forgettable (not live)
+    storage
+        .mark_session_status(session_to_delete, crate::storage::SessionStatus::Completed)
+        .await
+        .unwrap();
+
+    let mut current_session_id = current_id;
+    let mut signatures = zero_signatures();
+    let mut state = PersistenceCommandState {
+        current_session_id: &mut current_session_id,
+        signatures: &mut signatures,
+    };
+    let session_store = Arc::new(Mutex::new(SessionStore::default()));
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx.clone());
+    let yolo_mode = crate::yolo::YoloMode::new();
+
+    // Open the session picker
+    let mut app = app();
+    let handled = handle_running_slash_command(
+        "/sessions",
+        &mut app,
+        PersistenceCommandDeps {
+            storage: &storage,
+            agent: test_agent(Box::new(CompleteProvider)),
+            memory: None,
+            session_store: session_store.clone(),
+            registry: Arc::new(ProviderRegistry::default_registry()),
+            model_catalog: test_model_catalog(),
+            todo_store: Arc::new(Mutex::new(crate::todo::TodoStore::new())),
+            plan_store: Arc::new(Mutex::new(crate::plan::PlanDoc::default())),
+            project_root: temp_dir.path(),
+            active_session_id: Arc::new(Mutex::new(Some(current_id))),
+        },
+        &yolo_mode,
+        &mut state,
+    )
+    .await;
+    assert!(handled);
+    // Picker shows 1 session (current active is filtered out)
+    assert!(matches!(
+        app.modal,
+        Some(ModalKind::SessionPicker { ref sessions, cursor: 0 }) if sessions.len() == 1
+    ));
+
+    // Simulate Delete keypress: dispatch SessionPickerDeleteSelected
+    let result = handle_runtime_action(
+        AppAction::SessionPickerDeleteSelected,
+        &mut app,
+        &mut tasks,
+        runtime_action_deps(
+            &storage,
+            temp_dir.path(),
+            current_id,
+            session_store.clone(),
+            runtime_tx.clone(),
+        ),
+        &mut state,
+    )
+    .await;
+    assert!(matches!(result, RuntimeActionResult::Handled));
+
+    // Confirm modal should be open
+    assert!(
+        matches!(app.modal, Some(ModalKind::SessionDeleteConfirm { .. })),
+        "expected SessionDeleteConfirm modal, got {:?}",
+        app.modal
+    );
+
+    // Simulate Enter/Y: dispatch SessionDeleteConfirmSubmit
+    let result = handle_runtime_action(
+        AppAction::SessionDeleteConfirmSubmit,
+        &mut app,
+        &mut tasks,
+        runtime_action_deps(
+            &storage,
+            temp_dir.path(),
+            current_id,
+            session_store,
+            runtime_tx,
+        ),
+        &mut state,
+    )
+    .await;
+    assert!(matches!(result, RuntimeActionResult::Handled));
+
+    // Picker refreshed with only the current session
+    let (sessions_after, cursor_after) = match &app.modal {
+        Some(ModalKind::SessionPicker { sessions, cursor }) => (sessions.clone(), *cursor),
+        other => panic!("expected SessionPicker after delete, got {other:?}"),
+    };
+    assert_eq!(sessions_after.len(), 0, "deleted session should be gone");
+    assert_eq!(cursor_after, 0);
+}
+
+#[tokio::test]
 async fn running_compact_command_is_blocked_without_mutation() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))

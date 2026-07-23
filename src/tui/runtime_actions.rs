@@ -348,6 +348,9 @@ pub(super) async fn handle_runtime_action(
         AppAction::SessionPickerSubmit => {
             submit_session_picker(app, deps, state).await;
         }
+        AppAction::SessionPickerDeleteSelected => {
+            open_selected_session_delete_confirm(app);
+        }
         AppAction::PlanPickerSubmit => {
             open_selected_plan_choice(app);
         }
@@ -383,6 +386,9 @@ pub(super) async fn handle_runtime_action(
         }
         AppAction::PlanDeleteConfirmSubmit => {
             submit_plan_delete_confirm(app, deps).await;
+        }
+        AppAction::SessionDeleteConfirmSubmit => {
+            submit_session_delete_confirm(app, deps).await;
         }
         AppAction::PlanDiscardConfirmSubmit => {
             submit_plan_discard_confirm(app, deps).await;
@@ -3488,6 +3494,101 @@ async fn submit_plan_delete_confirm(app: &mut AppState, deps: RuntimeActionDeps<
         delete_saved_plan_from_picker(app, deps.storage, deps.session_project_root, plan).await
     {
         push_command_message(app, CommandOutputKind::Error, &format!("{err:#}"));
+    }
+}
+
+fn open_selected_session_delete_confirm(app: &mut AppState) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+    // Guard: don't allow deleting the currently active session.
+    if Some(session.id) == app.current_session_id {
+        push_command_message(
+            app,
+            CommandOutputKind::Error,
+            "Cannot delete the active session.",
+        );
+        return;
+    }
+    app.reduce(AppAction::OpenModal(ModalKind::SessionDeleteConfirm {
+        session,
+    }));
+}
+
+async fn submit_session_delete_confirm(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
+    let Some(ModalKind::SessionDeleteConfirm { session }) = app.modal.clone() else {
+        return;
+    };
+    match deps
+        .storage
+        .forget_session(deps.session_project_root, session.id)
+        .await
+    {
+        Ok(crate::storage::ForgetSessionOutcome::Forgotten) => {
+            if Some(session.id) == app.current_session_id {
+                app.current_session_id = None;
+            }
+            // Refresh the session picker list, removing the deleted session
+            // and excluding the active session.
+            match deps
+                .storage
+                .recent_sessions_for_project(deps.session_project_root, 20)
+                .await
+            {
+                Ok(sessions) => {
+                    let active_id = *deps.active_session_id.lock().await;
+                    let sessions: Vec<_> = sessions
+                        .into_iter()
+                        .filter(|s| Some(s.id) != active_id)
+                        .collect();
+                    app.reduce(AppAction::OpenModal(ModalKind::SessionPicker {
+                        sessions,
+                        cursor: 0,
+                    }));
+                    push_command_message(
+                        app,
+                        CommandOutputKind::Status,
+                        &format!("Deleted session \"{}\".", session.name),
+                    );
+                }
+                Err(err) => {
+                    app.reduce(AppAction::CloseModal);
+                    push_command_message(
+                        app,
+                        CommandOutputKind::Error,
+                        &format!("Session deleted but failed to refresh picker: {err:#}"),
+                    );
+                }
+            }
+        }
+        Ok(crate::storage::ForgetSessionOutcome::Live) => {
+            app.reduce(AppAction::CloseModal);
+            push_command_message(
+                app,
+                CommandOutputKind::Error,
+                "Cannot delete a live session with an active heartbeat.",
+            );
+        }
+        Ok(crate::storage::ForgetSessionOutcome::NotFound) => {
+            app.reduce(AppAction::CloseModal);
+            push_command_message(
+                app,
+                CommandOutputKind::Error,
+                &format!("Session #{} not found.", session.id),
+            );
+        }
+        Ok(crate::storage::ForgetSessionOutcome::DifferentProject) => {
+            app.reduce(AppAction::CloseModal);
+            push_command_message(
+                app,
+                CommandOutputKind::Error,
+                "Session belongs to a different project.",
+            );
+        }
+        Err(err) => {
+            app.reduce(AppAction::CloseModal);
+            push_command_message(app, CommandOutputKind::Error, &format!("{err:#}"));
+        }
     }
 }
 

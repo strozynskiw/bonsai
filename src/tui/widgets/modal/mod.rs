@@ -170,6 +170,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         }
         ModalKind::StartPlanChoice { cursor } => render_start_plan_choice(f, modal, *cursor),
         ModalKind::PlanDeleteConfirm { plan } => render_plan_delete_confirm(f, modal, plan),
+        ModalKind::SessionDeleteConfirm { session } => {
+            render_session_delete_confirm(f, modal, session)
+        }
         ModalKind::PlanDiscardConfirm {
             saved_plan_id,
             title,

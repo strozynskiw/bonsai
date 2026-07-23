@@ -229,7 +229,7 @@ fn insert_plan_tools(
         ToolFactoryKey::PlanReplaceDraft,
         Arc::new(PlanReplaceDraftTool::new(
             plan_store.clone(),
-            session_title.storage,
+            session_title.storage.clone(),
             session_title.active_session_id,
         )),
     );

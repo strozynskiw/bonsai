@@ -13,6 +13,7 @@ pub(super) fn render_session_picker(
             ("Up/Down", "move"),
             ("PgUp/PgDn", "page"),
             ("Enter", "resume"),
+            ("Del", "delete"),
             ("Esc", "close"),
         ]),
     ];
@@ -205,6 +206,43 @@ pub(super) fn render_plan_delete_confirm(
             Line::from(""),
             Line::from(Span::styled(
                 "The source and execution session transcripts stay on disk.",
+                theme::dim(),
+            )),
+        ])
+        .style(theme::panel())
+        .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(footer_hint_line(&[
+            ("Enter/Y", "delete"),
+            ("Esc/N", "cancel"),
+        ])),
+        chunks[1],
+    );
+}
+
+pub(super) fn render_session_delete_confirm(
+    f: &mut Frame,
+    area: Rect,
+    session: &crate::storage::SessionSummary,
+) {
+    let panel = theme::frame("Delete Session", true).style(theme::panel());
+    let inner = panel.inner(area);
+    f.render_widget(panel, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("Delete session \"{}\"?", session.name),
+                theme::body(theme::palette().text),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "The session transcript and all its data are permanently deleted.",
                 theme::dim(),
             )),
         ])

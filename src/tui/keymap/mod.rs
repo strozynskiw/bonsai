@@ -134,6 +134,10 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         return map_plan_delete_confirm_key(key);
     }
 
+    if matches!(app.modal, Some(ModalKind::SessionDeleteConfirm { .. })) {
+        return map_session_delete_confirm_key(key);
+    }
+
     if matches!(app.modal, Some(ModalKind::PlanDiscardConfirm { .. })) {
         return map_plan_discard_confirm_key(key);
     }
@@ -1146,6 +1150,30 @@ mod tests {
         }
     }
 
+    fn session_summary(id: i64, name: &str) -> crate::storage::SessionSummary {
+        crate::storage::SessionSummary {
+            id: crate::storage::SessionId::from_raw(id),
+            project_path: "/tmp/project".to_string(),
+            name: name.to_string(),
+            summary: String::new(),
+            provider_id: "codex".to_string(),
+            model: "test-model".to_string(),
+            reasoning: crate::provider::ReasoningSelection::default(),
+            status: crate::storage::SessionStatus::Active,
+            terminal_reason: None,
+            updated_at_ms: 1_000,
+            message_count: 1,
+            prompt_token_count: 0,
+            completion_token_count: 0,
+            cache_read_input_token_count: 0,
+            cache_creation_input_token_count: 0,
+            cache_measured_input_token_count: 0,
+            cost_micros: 0,
+            no_cache_cost_micros: 0,
+            source_plan_id: None,
+        }
+    }
+
     fn context_report() -> crate::agent::ContextReport {
         crate::agent::ContextReport {
             budget_tokens: 120_000,
@@ -2004,6 +2032,59 @@ mod tests {
             down,
             KeyIntent::Action(AppAction::StartPlanChoiceMove(1))
         ));
+    }
+
+    #[test]
+    fn session_picker_keys_resume_and_delete() {
+        let mut app = app();
+        app.modal = Some(ModalKind::SessionPicker {
+            sessions: vec![session_summary(1, "Test session")],
+            cursor: 0,
+        });
+
+        let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
+        assert!(matches!(
+            enter,
+            KeyIntent::Action(AppAction::SessionPickerSubmit)
+        ));
+
+        let delete = map_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), &app);
+        assert!(matches!(
+            delete,
+            KeyIntent::Action(AppAction::SessionPickerDeleteSelected)
+        ));
+    }
+
+    #[test]
+    fn session_delete_confirm_keys_submit_or_cancel() {
+        let mut app = app();
+        app.modal = Some(ModalKind::SessionDeleteConfirm {
+            session: session_summary(1, "Test session"),
+        });
+
+        for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
+            let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
+            assert!(
+                matches!(
+                    intent,
+                    KeyIntent::Action(AppAction::SessionDeleteConfirmSubmit)
+                ),
+                "{code:?} should confirm"
+            );
+        }
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('N'),
+            KeyCode::Char('q'),
+            KeyCode::Char('Q'),
+            KeyCode::Esc,
+        ] {
+            let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
+            assert!(
+                matches!(intent, KeyIntent::Action(AppAction::CloseModal)),
+                "{code:?} should cancel"
+            );
+        }
     }
 
     #[test]

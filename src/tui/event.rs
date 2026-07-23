@@ -104,6 +104,9 @@ pub enum ModalKind {
     PlanDeleteConfirm {
         plan: crate::storage::SavedPlanSummary,
     },
+    SessionDeleteConfirm {
+        session: crate::storage::SessionSummary,
+    },
     /// `/discard` confirm — throwing away the canvas plan would also delete its
     /// saved library record, which is irreversible. Only opened when the canvas
     /// plan is linked to a saved record; an unsaved canvas is cleared without a
@@ -1214,6 +1217,8 @@ pub enum AppAction {
     ModelPickerSubmit,
     SessionPickerMove(i16),
     SessionPickerSubmit,
+    SessionPickerDeleteSelected,
+    SessionDeleteConfirmSubmit,
     PlanPickerInputChar(char),
     PlanPickerInputBackspace,
     PlanPickerMove(i16),

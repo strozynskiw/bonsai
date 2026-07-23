@@ -61,6 +61,9 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         ModalKind::PlanDeleteConfirm { .. } => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }
+        ModalKind::SessionDeleteConfirm { .. } => {
+            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
+        }
         ModalKind::PlanDiscardConfirm { .. } => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }

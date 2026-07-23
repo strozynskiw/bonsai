@@ -262,8 +262,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *cursor = move_index(*cursor, delta, max);
             }
         }
-        AppAction::SessionPickerSubmit => {
-            // Runtime effect: `tui::runtime_actions` restores the snapshot.
+        AppAction::SessionPickerSubmit | AppAction::SessionPickerDeleteSelected => {
+            // Runtime effect: `tui::runtime_actions` owns storage-backed
+            // session picker transitions.
         }
         AppAction::PlanPickerInputChar(ch) => {
             if let Some(ModalKind::PlanPicker { query, cursor, .. }) = &mut app.modal {
@@ -306,7 +307,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         }
         AppAction::PlanOpenChoiceSubmit
         | AppAction::StartPlanChoiceSubmit
-        | AppAction::PlanDeleteConfirmSubmit => {
+        | AppAction::PlanDeleteConfirmSubmit
+        | AppAction::SessionDeleteConfirmSubmit => {
             // Runtime effect: `tui::runtime_actions` owns storage-backed
             // plan open/delete operations.
         }

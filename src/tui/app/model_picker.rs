@@ -126,6 +126,18 @@ impl ModelPickerPane {
 }
 
 impl AppState {
+    pub(crate) fn selected_session(&self) -> Option<crate::storage::SessionSummary> {
+        let Some(ModalKind::SessionPicker {
+            sessions, cursor, ..
+        }) = self.modal.as_ref()
+        else {
+            return None;
+        };
+        sessions
+            .get((*cursor).min(sessions.len().saturating_sub(1)))
+            .cloned()
+    }
+
     pub(crate) fn selected_saved_plan(&self) -> Option<crate::storage::SavedPlanSummary> {
         let Some(ModalKind::PlanPicker {
             plans,

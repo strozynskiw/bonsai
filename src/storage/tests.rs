@@ -2337,6 +2337,49 @@ async fn forget_session_rejects_target_from_another_project() {
 }
 
 #[tokio::test]
+async fn forget_session_removes_from_recent_list_for_picker_refresh() {
+    let fixture = TestStorage::new().await;
+    let session_a = fixture.start_session().await;
+    let session_b = fixture
+        .storage
+        .start_session(
+            fixture.project_path(),
+            "codex",
+            "gpt-5",
+            ReasoningSelection::default(),
+        )
+        .await
+        .unwrap();
+
+    // Both sessions in recent list
+    let recent = fixture
+        .storage
+        .recent_sessions_for_project(fixture.project_path(), 20)
+        .await
+        .unwrap();
+    assert_eq!(recent.len(), 2);
+
+    // Delete session_a
+    assert_eq!(
+        fixture
+            .storage
+            .forget_session(fixture.project_path(), session_a)
+            .await
+            .unwrap(),
+        ForgetSessionOutcome::Forgotten
+    );
+
+    // session_a gone from recent list, session_b remains
+    let recent = fixture
+        .storage
+        .recent_sessions_for_project(fixture.project_path(), 20)
+        .await
+        .unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].id, session_b);
+}
+
+#[tokio::test]
 async fn session_summary_persists_as_title() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))

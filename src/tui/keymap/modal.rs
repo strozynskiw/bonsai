@@ -627,6 +627,7 @@ pub(super) fn map_session_picker_key(key: KeyEvent) -> KeyIntent {
         // q mirrors Esc — close the picker without selecting a session.
         KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
         KeyCode::Enter => KeyIntent::Action(AppAction::SessionPickerSubmit),
+        KeyCode::Delete => KeyIntent::Action(AppAction::SessionPickerDeleteSelected),
         KeyCode::Up => KeyIntent::Action(AppAction::SessionPickerMove(-1)),
         KeyCode::Down => KeyIntent::Action(AppAction::SessionPickerMove(1)),
         KeyCode::PageUp => KeyIntent::Action(AppAction::SessionPickerMove(-8)),
@@ -691,6 +692,20 @@ pub(super) fn map_plan_delete_confirm_key(key: KeyEvent) -> KeyIntent {
         KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
             KeyIntent::Action(AppAction::PlanDeleteConfirmSubmit)
+        }
+        _ => KeyIntent::Noop,
+    }
+}
+
+pub(super) fn map_session_delete_confirm_key(key: KeyEvent) -> KeyIntent {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            KeyIntent::Action(AppAction::CloseModal)
+        }
+        // q mirrors Esc — close the confirm prompt without deleting the session.
+        KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyIntent::Action(AppAction::SessionDeleteConfirmSubmit)
         }
         _ => KeyIntent::Noop,
     }
