@@ -16,9 +16,10 @@
 # 5.2), with the chain-of-thought returned in `reasoning_content`. That wire
 # shape is exactly what bonsai's `zai-thinking` codec emits (toggle + effort
 # together), so reuse it rather than add a duplicate DeepSeek-specific codec.
-# `minimal` is rejected (400), so it is not offered. reasoning_content is NOT
-# echoed back on later turns (reasoning_content_echo stays off on the connection)
-# because the direct API does not accept it as input. Legacy deepseek-chat /
+# `minimal` is rejected (400), so it is not offered. reasoning_content IS echoed
+# back on assistant tool-call messages (the direct API requires it; plain
+# assistant messages accept-but-ignore it — see the connection's
+# reasoning_content_echo flag). Legacy deepseek-chat /
 # deepseek-reasoner deprecate 2026-07-24 in favor of these v4 names.
 
 [[targets]]

@@ -304,11 +304,10 @@ prompt_cache = true
 # only; every other connection leaves this unset (= TransportDefault) and is
 # unaffected. See models/builtin/deepseek.toml.
 prompt_cache_policy = "rolling-history"
-# NOTE — deliberate divergence from the OpenCode gateway's DeepSeek adapter
-# (see the `opencode` connection above): that gateway REQUIRES reasoning_content
-# echoed back on assistant tool-call messages, but the DIRECT api.deepseek.com
-# does not accept reasoning_content as input, so reasoning_content_echo is
-# omitted (false) here. Do not copy the gateway's flag onto this connection.
+# The direct API REQUIRES reasoning_content echoed back on assistant messages
+# that carry tool_calls (docs: guides/thinking_mode#tool-calls); without it the
+# API 400s. Plain assistant messages without tool calls ignore the field.
+reasoning_content_echo = true
 
 [[connections]]
 id = "qwencloud"
