@@ -16,12 +16,14 @@ impl Agent {
             .map(|evidence| evidence.refresh_freshness());
         futures::future::join_all(refreshes).await;
         let refreshes = self
+            .read_evidence
             .mention_read_evidence
             .values_mut()
             .flat_map(|evidence| evidence.iter_mut())
             .map(|evidence| evidence.refresh_freshness());
         futures::future::join_all(refreshes).await;
         let refreshes = self
+            .read_evidence
             .delegated_read_evidence
             .iter_mut()
             .map(|delegated| delegated.evidence.refresh_freshness());
@@ -154,7 +156,7 @@ impl Agent {
                 evidence_index.insert(call_id, ReadProvenance::ParentVisible, evidence);
             }
             if let Some(message_id) = self.message_ids.get(index)
-                && let Some(evidence) = self.mention_read_evidence.get(message_id)
+                && let Some(evidence) = self.read_evidence.mention_read_evidence.get(message_id)
             {
                 for (evidence_index_in_message, evidence) in evidence.iter().enumerate() {
                     evidence_index.insert(
@@ -165,7 +167,7 @@ impl Agent {
                 }
             }
         }
-        for delegated in &self.delegated_read_evidence {
+        for delegated in &self.read_evidence.delegated_read_evidence {
             evidence_index.insert_delegated(delegated);
         }
         evidence_index
@@ -188,7 +190,7 @@ impl Agent {
                 ordered_evidence.push(evidence);
             }
             if let Some(message_id) = self.message_ids.get(index)
-                && let Some(evidence) = self.mention_read_evidence.get(message_id)
+                && let Some(evidence) = self.read_evidence.mention_read_evidence.get(message_id)
             {
                 ordered_evidence.extend(evidence);
             }

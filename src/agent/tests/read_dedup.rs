@@ -708,7 +708,7 @@ async fn deduped_reread_is_compact_and_keeps_target_fresh() {
         !call_2.contains("fn a() {}"),
         "fresh duplicate bytes should be omitted from the compact result: {call_2}",
     );
-    let admission = agent.inspection_events.get("call-2").unwrap();
+    let admission = agent.read_evidence.inspection_events.get("call-2").unwrap();
     assert_eq!(admission.outcome, InspectionOutcome::Reused);
     assert_eq!(admission.reason, InspectionReason::FreshVisibleCoverage);
     assert_eq!(admission.requested_chars, FOO_RENDERED.chars().count());
@@ -773,11 +773,11 @@ async fn repeat_after_compact_reuse_returns_real_bytes_and_keeps_sibling_read() 
     assert!(redundant.1.contains("fn foo() {}"), "{}", redundant.1);
     assert!(useful.1.contains("fn bar() {}"), "{}", useful.1);
     assert_eq!(
-        agent.inspection_events["call-3"].outcome,
+        agent.read_evidence.inspection_events["call-3"].outcome,
         InspectionOutcome::Executed
     );
     assert_eq!(
-        agent.inspection_events["call-3"].reason,
+        agent.read_evidence.inspection_events["call-3"].reason,
         InspectionReason::RepeatedFreshReuse
     );
 }
@@ -825,11 +825,11 @@ async fn range_shifting_after_compact_reuse_returns_real_bytes() {
             .is_some_and(|(_, content)| content.contains("2: fn b() {}"))
     );
     assert_eq!(
-        agent.inspection_events["call-3"].outcome,
+        agent.read_evidence.inspection_events["call-3"].outcome,
         InspectionOutcome::Executed
     );
     assert_eq!(
-        agent.inspection_events["call-3"].reason,
+        agent.read_evidence.inspection_events["call-3"].reason,
         InspectionReason::RepeatedFreshReuse
     );
 }
@@ -892,7 +892,7 @@ async fn explicit_default_offset_after_truncated_reuse_returns_real_bytes() {
             })
     );
     assert_eq!(
-        agent.inspection_events["call-3"].reason,
+        agent.read_evidence.inspection_events["call-3"].reason,
         InspectionReason::RepeatedFreshReuse
     );
 }
@@ -942,11 +942,11 @@ async fn repeated_read_region_after_compact_pointer_returns_real_bytes() {
             })
     );
     assert_eq!(
-        agent.inspection_events["call-3"].outcome,
+        agent.read_evidence.inspection_events["call-3"].outcome,
         InspectionOutcome::Executed
     );
     assert_eq!(
-        agent.inspection_events["call-3"].reason,
+        agent.read_evidence.inspection_events["call-3"].reason,
         InspectionReason::RepeatedFreshReuse
     );
 }
@@ -1067,7 +1067,7 @@ async fn repeated_bash_file_read_returns_real_bytes_then_stops() {
     assert!(tools[3].1.contains("repeated read storm detected"));
     assert!(tools.iter().all(|(id, _)| id != "call-5"));
     assert_eq!(
-        agent.inspection_events["call-3"].reason,
+        agent.read_evidence.inspection_events["call-3"].reason,
         InspectionReason::RepeatedFreshReuse
     );
 }

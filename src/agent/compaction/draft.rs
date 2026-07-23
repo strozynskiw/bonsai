@@ -13,7 +13,8 @@ impl Agent {
         tool_call: &ToolCall,
     ) -> Option<String> {
         let current = self.tool_context_details.get(&tool_call.id)?;
-        self.inspection_events
+        self.read_evidence
+            .inspection_events
             .iter()
             .find_map(|(reuse_call_id, admission)| {
                 if admission.outcome != InspectionOutcome::Reused
@@ -729,22 +730,25 @@ impl Agent {
     }
 
     fn git_inspection_was_reused(&self, key: &str, target_call_id: &str) -> bool {
-        self.inspection_events.iter().any(|(call_id, admission)| {
-            admission.outcome == InspectionOutcome::Reused
-                && admission.reuse_target_tool_call_id.as_deref() == Some(target_call_id)
-                && self
-                    .tool_context_details
-                    .get(call_id)
-                    .and_then(git_inspection_key)
-                    .as_deref()
-                    == Some(key)
-                && self.messages.iter().enumerate().any(|(index, message)| {
-                    tool_message_call_id(message).as_deref() == Some(call_id)
-                        && !self.message_has_control(index, message, |state| {
-                            state.stubbed || state.drop_next_turn
-                        })
-                })
-        })
+        self.read_evidence
+            .inspection_events
+            .iter()
+            .any(|(call_id, admission)| {
+                admission.outcome == InspectionOutcome::Reused
+                    && admission.reuse_target_tool_call_id.as_deref() == Some(target_call_id)
+                    && self
+                        .tool_context_details
+                        .get(call_id)
+                        .and_then(git_inspection_key)
+                        .as_deref()
+                        == Some(key)
+                    && self.messages.iter().enumerate().any(|(index, message)| {
+                        tool_message_call_id(message).as_deref() == Some(call_id)
+                            && !self.message_has_control(index, message, |state| {
+                                state.stubbed || state.drop_next_turn
+                            })
+                    })
+            })
     }
 }
 

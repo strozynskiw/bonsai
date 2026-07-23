@@ -51,11 +51,12 @@ impl Agent {
 
     pub(crate) fn import_delegated_read_evidence(&mut self, evidence: &[DelegatedReadEvidence]) {
         let mut known = self
+            .read_evidence
             .delegated_read_evidence
             .iter()
             .map(|entry| (entry.subtask_id.clone(), entry.source_id.clone()))
             .collect::<HashSet<_>>();
-        self.delegated_read_evidence.extend(
+        self.read_evidence.delegated_read_evidence.extend(
             evidence
                 .iter()
                 .filter(|entry| known.insert((entry.subtask_id.clone(), entry.source_id.clone())))
@@ -81,7 +82,7 @@ impl Agent {
                 && let Some(evidence) = detail.read_evidence.as_ref()
             {
                 let returned_chars = evidence.observation().visible_chars();
-                let admission = self.inspection_events.get(&call_id);
+                let admission = self.read_evidence.inspection_events.get(&call_id);
                 records.push(ReadEvidenceRecord {
                     source_id: format!("tool:{call_id}"),
                     provenance: ReadProvenance::ParentVisible,
@@ -111,7 +112,7 @@ impl Agent {
                 });
             }
 
-            if let Some(evidence) = self.mention_read_evidence.get(message_id) {
+            if let Some(evidence) = self.read_evidence.mention_read_evidence.get(message_id) {
                 for (mention_index, evidence) in evidence.iter().enumerate() {
                     let returned_chars = evidence.observation().visible_chars();
                     records.push(ReadEvidenceRecord {
@@ -146,7 +147,7 @@ impl Agent {
             let Some(message_id) = self.message_ids.get(index) else {
                 continue;
             };
-            let Some(admission) = self.inspection_events.get(&call_id) else {
+            let Some(admission) = self.read_evidence.inspection_events.get(&call_id) else {
                 continue;
             };
             let Some(detail) = self.tool_context_details.get(&call_id) else {
@@ -233,7 +234,8 @@ impl Agent {
                     );
                 }
                 ReadProvenance::MentionVisible => {
-                    self.mention_read_evidence
+                    self.read_evidence
+                        .mention_read_evidence
                         .entry(record.target_message_id)
                         .or_default()
                         .push(record.evidence);
@@ -275,7 +277,8 @@ impl Agent {
                     },
                 );
             }
-            self.inspection_events
+            self.read_evidence
+                .inspection_events
                 .insert(record.call_id, record.admission);
         }
     }

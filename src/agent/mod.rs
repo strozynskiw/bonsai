@@ -298,6 +298,17 @@ pub(crate) struct VerificationState {
     pub(crate) after_edit_verification_injected: bool,
 }
 
+/// Read evidence maps (inspections, mentions, delegation) populated during
+/// tool execution and cleared together in `reset_transient_state`.
+/// Four fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+#[derive(Debug)]
+pub(crate) struct ReadEvidenceMap {
+    pub(crate) inspection_events: HashMap<String, ReadAdmissionMetadata>,
+    pub(crate) mention_read_evidence: HashMap<String, Vec<ReadEvidence>>,
+    pub(crate) delegated_read_evidence: Vec<DelegatedReadEvidence>,
+    pub(crate) delegated_overlap_advised: HashSet<String>,
+}
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     /// One-shot delegated-run backup. Present only for subagents with a
@@ -380,10 +391,7 @@ pub struct Agent {
     last_background_status_report: Option<String>,
     last_terminal_status_report: Option<String>,
     tool_context_details: HashMap<String, ToolContextDetail>,
-    inspection_events: HashMap<String, ReadAdmissionMetadata>,
-    mention_read_evidence: HashMap<String, Vec<ReadEvidence>>,
-    delegated_read_evidence: Vec<DelegatedReadEvidence>,
-    delegated_overlap_advised: HashSet<String>,
+    read_evidence: ReadEvidenceMap,
     next_subagent_launch_group_id: u64,
     context_controls: HashMap<String, ContextControlState>,
     summary_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
@@ -1020,8 +1028,8 @@ impl Agent {
         self.message_ids = vec![format_context_message_id(0)];
         self.next_message_id = 1;
         self.advisories.last_volatile_context_message = None;
-        self.inspection_events.clear();
-        self.mention_read_evidence.clear();
+        self.read_evidence.inspection_events.clear();
+        self.read_evidence.mention_read_evidence.clear();
         self.last_retryable_turn = false;
     }
 
@@ -1104,8 +1112,8 @@ impl Agent {
         self.caches.last_prompt_estimate = None;
         self.caches.last_sent_prompt_estimate = None;
         self.tool_context_details.clear();
-        self.inspection_events.clear();
-        self.mention_read_evidence.clear();
+        self.read_evidence.inspection_events.clear();
+        self.read_evidence.mention_read_evidence.clear();
     }
 
     fn normalize_project_state_cache_strategy(&mut self, reason: ProjectStateNormalization) {

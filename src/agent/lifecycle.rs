@@ -41,10 +41,10 @@ impl Agent {
         self.advisories.read_coverage_advisory.clear();
         self.advisories.subagent_status_advisory.clear();
         self.tool_context_details.clear();
-        self.inspection_events.clear();
-        self.mention_read_evidence.clear();
-        self.delegated_read_evidence.clear();
-        self.delegated_overlap_advised.clear();
+        self.read_evidence.inspection_events.clear();
+        self.read_evidence.mention_read_evidence.clear();
+        self.read_evidence.delegated_read_evidence.clear();
+        self.read_evidence.delegated_overlap_advised.clear();
         self.context_controls.clear();
         self.summary_sources.clear();
         self.compaction_events.clear();

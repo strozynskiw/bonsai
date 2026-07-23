@@ -294,7 +294,7 @@ async fn resume_restores_typed_reuse_target_without_parsing_pointer_text() {
     );
     assert!(restored.read_evidence.is_none());
     assert_eq!(
-        agent.inspection_events["call-read-2"].outcome,
+        agent.read_evidence.inspection_events["call-read-2"].outcome,
         InspectionOutcome::Reused
     );
 }

@@ -34,7 +34,8 @@ impl Agent {
             self.push_message(user_message_with_images(&expansion.text, &input.images))
         };
         if !expansion.read_evidence.is_empty() {
-            self.mention_read_evidence
+            self.read_evidence
+                .mention_read_evidence
                 .insert(message_id, expansion.read_evidence);
         }
         Ok(())

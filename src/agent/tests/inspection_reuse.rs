@@ -139,18 +139,18 @@ async fn repeated_unchanged_git_diff_stops_after_full_reuse_and_one_rejection() 
     );
     assert_eq!(executed.lock().await.len(), 2);
     assert_eq!(
-        agent.inspection_events["call-1"].outcome,
+        agent.read_evidence.inspection_events["call-1"].outcome,
         InspectionOutcome::Executed
     );
     assert_eq!(
-        agent.inspection_events["call-2"].outcome,
+        agent.read_evidence.inspection_events["call-2"].outcome,
         InspectionOutcome::Reused
     );
     assert_eq!(
-        agent.inspection_events["call-3"].reason,
+        agent.read_evidence.inspection_events["call-3"].reason,
         InspectionReason::ToolFailed
     );
-    assert!(agent.inspection_events["call-2"].avoided_chars > 0);
+    assert!(agent.read_evidence.inspection_events["call-2"].avoided_chars > 0);
 }
 
 #[tokio::test]

@@ -1343,7 +1343,8 @@ impl Agent {
         if let Some(metadata) = admission_metadata {
             self.usage
                 .record_inspection(&self.execution_lane, &metadata);
-            self.inspection_events
+            self.read_evidence
+                .inspection_events
                 .insert(tool_call.id.clone(), metadata);
         }
 
@@ -1507,6 +1508,7 @@ impl Agent {
             }
         }
         for evidence in self
+            .read_evidence
             .mention_read_evidence
             .values_mut()
             .flat_map(|entries| entries.iter_mut())
@@ -2140,6 +2142,7 @@ impl Agent {
                 continue;
             };
             let mut subtasks = self
+                .read_evidence
                 .delegated_read_evidence
                 .iter()
                 .filter(|delegated| {
@@ -2156,7 +2159,11 @@ impl Agent {
             subtasks.sort_unstable();
             subtasks.dedup();
             let advice_key = format!("{}:{}", canonical_path.display(), subtasks.join(","));
-            if !self.delegated_overlap_advised.insert(advice_key) {
+            if !self
+                .read_evidence
+                .delegated_overlap_advised
+                .insert(advice_key)
+            {
                 continue;
             }
             self.usage
@@ -2185,40 +2192,43 @@ impl Agent {
         {
             return true;
         }
-        self.inspection_events.iter().any(|(call_id, admission)| {
-            if admission.outcome != InspectionOutcome::Reused {
-                return false;
-            }
-            if !self.tool_result_is_live(call_id) {
-                return false;
-            }
-            let Some(prior_detail) = self.tool_context_details.get(call_id) else {
-                return false;
-            };
-            if prior_detail.name != tool_call.name
-                || normalize_tool_call_arguments_json(&prior_detail.arguments)
-                    != normalize_tool_call_arguments_json(&tool_call.arguments)
-            {
-                return false;
-            }
-            let Some(target_call_id) = admission.reuse_target_tool_call_id.as_deref() else {
-                return false;
-            };
-            if !self.tool_result_is_live(target_call_id) {
-                return false;
-            }
-            if tool_call.name == "bash" {
-                // Bash read details do not carry typed ReadEvidence. The prior
-                // Reused event itself proves that this exact clean cat/head/tail
-                // call matched a live full result; execution has already
-                // produced current bytes, so return them on the explicit retry.
-                return true;
-            }
-            self.tool_context_details
-                .get(target_call_id)
-                .and_then(|detail| detail.read_evidence.as_ref())
-                .is_some_and(ReadEvidence::observation_is_current)
-        })
+        self.read_evidence
+            .inspection_events
+            .iter()
+            .any(|(call_id, admission)| {
+                if admission.outcome != InspectionOutcome::Reused {
+                    return false;
+                }
+                if !self.tool_result_is_live(call_id) {
+                    return false;
+                }
+                let Some(prior_detail) = self.tool_context_details.get(call_id) else {
+                    return false;
+                };
+                if prior_detail.name != tool_call.name
+                    || normalize_tool_call_arguments_json(&prior_detail.arguments)
+                        != normalize_tool_call_arguments_json(&tool_call.arguments)
+                {
+                    return false;
+                }
+                let Some(target_call_id) = admission.reuse_target_tool_call_id.as_deref() else {
+                    return false;
+                };
+                if !self.tool_result_is_live(target_call_id) {
+                    return false;
+                }
+                if tool_call.name == "bash" {
+                    // Bash read details do not carry typed ReadEvidence. The prior
+                    // Reused event itself proves that this exact clean cat/head/tail
+                    // call matched a live full result; execution has already
+                    // produced current bytes, so return them on the explicit retry.
+                    return true;
+                }
+                self.tool_context_details
+                    .get(target_call_id)
+                    .and_then(|detail| detail.read_evidence.as_ref())
+                    .is_some_and(ReadEvidence::observation_is_current)
+            })
     }
 
     fn tool_result_is_live(&self, call_id: &str) -> bool {

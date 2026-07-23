@@ -159,7 +159,7 @@ impl Agent {
             project_context: self.project_context.as_ref(),
             prompt_estimator: &self.prompt_estimator,
             tool_context_details: &self.tool_context_details,
-            mention_read_evidence: &self.mention_read_evidence,
+            mention_read_evidence: &self.read_evidence.mention_read_evidence,
             summary_source_counts: &summary_source_counts,
             message_inclusions: &message_inclusions,
         });
