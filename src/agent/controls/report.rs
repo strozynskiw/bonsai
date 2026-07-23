@@ -112,7 +112,7 @@ impl Agent {
         if mode == self.mode
             && messages.len() == self.messages.len()
             && pending_messages.is_empty()
-            && let Some(last_estimate) = &self.last_prompt_estimate
+            && let Some(last_estimate) = &self.caches.last_prompt_estimate
         {
             estimate = last_estimate.clone();
         }
@@ -165,6 +165,7 @@ impl Agent {
         });
         add_framing_adjustment(&mut ledger, estimate.input_tokens, &estimate);
         let payload_preview = self
+            .caches
             .last_perf_report
             .as_ref()
             .and_then(|report| report.prompt.request_preview.clone());
@@ -178,7 +179,7 @@ impl Agent {
             estimate.tool_schema_tokens,
         );
         ContextReport {
-            budget_tokens: self.context_budget_tokens,
+            budget_tokens: self.budget.context_budget_tokens,
             entries,
             ledger,
             estimate_source: estimate.source,
@@ -208,7 +209,7 @@ impl Agent {
     }
 
     pub(super) fn context_reconciliation(&self) -> Option<ContextUsageReconciliation> {
-        let estimate = self.last_sent_prompt_estimate.as_ref()?;
+        let estimate = self.caches.last_sent_prompt_estimate.as_ref()?;
         let usage = self.usage.last_usage?;
         Some(ContextUsageReconciliation {
             estimated_prompt_tokens: estimate.input_tokens,

@@ -110,7 +110,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             self.agent.subagent_runner.clone(),
             self.cancellation_token.clone(),
         );
-        let max_iterations = self.agent.max_iterations;
+        let max_iterations = self.agent.budget.max_iterations;
 
         for _ in 0..max_iterations {
             self.state.begin_turn();
@@ -171,7 +171,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             self.agent.set_planning_advisory(None);
         }
 
-        self.agent.last_perf_report = None;
+        self.agent.caches.last_perf_report = None;
         let deferred_sink = DeferredAssistantSink::new(self.sink.clone());
         let model_sink: SharedSink = deferred_sink.clone();
         let response = match self

@@ -318,8 +318,8 @@ impl Agent {
         self.record_context_rewrite(ContextRewriteKind::Episode, before_tokens, after_tokens);
         self.pending_context_rewrite
             .record_episode_evictions(&evicted_seqs);
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
         sink.compaction_status(&episode_eviction_status(
             &evictions,
             before_tokens.saturating_sub(after_tokens),

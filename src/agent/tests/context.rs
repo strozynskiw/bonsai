@@ -1336,7 +1336,7 @@ async fn context_report_rows_keep_report_estimator_source_after_preflight_count(
         .unwrap();
     agent.prompt_estimator =
         PromptEstimator::for_tests("claude-test", TokenCounterKind::AnthropicCountTokens, None);
-    agent.last_prompt_estimate = Some(PromptEstimate {
+    agent.caches.last_prompt_estimate = Some(PromptEstimate {
         input_tokens: 10_000,
         source: TokenCounterKind::AnthropicCountTokens,
         confidence: EstimateConfidence::High,

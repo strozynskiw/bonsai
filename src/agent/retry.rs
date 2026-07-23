@@ -30,7 +30,7 @@ impl RetryBackoff {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct GenerationBudget {
+pub(crate) struct GenerationBudget {
     /// Optional inactivity deadline: the longest a single attempt may stream
     /// **without producing any output** before it is abandoned. Reset by every
     /// streamed delta, so a still-working generation is never cut off. `None`
@@ -264,13 +264,13 @@ impl Agent {
     pub(super) fn session_budget_exhaustion(
         &self,
     ) -> Option<crate::run_budget::RunBudgetExhaustion> {
-        if let Some(limit) = self.max_session_turns {
+        if let Some(limit) = self.budget.max_session_turns {
             let used = self.usage.session_turn_count();
             if used >= limit {
                 return Some(crate::run_budget::RunBudgetExhaustion::SessionTurns { limit, used });
             }
         }
-        if let Some(limit_chars) = self.max_session_output_chars {
+        if let Some(limit_chars) = self.budget.max_session_output_chars {
             let used_chars = self.usage.session_output_chars();
             if used_chars >= limit_chars {
                 return Some(crate::run_budget::RunBudgetExhaustion::SessionOutput {
@@ -280,7 +280,7 @@ impl Agent {
             }
         }
         if let (Some(limit_micros), Some(used_micros)) = (
-            self.max_session_cost_micros,
+            self.budget.max_session_cost_micros,
             self.usage.exact_session_cost_micros(),
         ) && used_micros >= limit_micros
         {
@@ -294,9 +294,9 @@ impl Agent {
 
     pub(super) fn generation_budget(&self) -> GenerationBudget {
         GenerationBudget::for_context(
-            self.context_budget_tokens,
-            self.max_generation_duration,
-            self.max_streamed_chars,
+            self.budget.context_budget_tokens,
+            self.budget.max_generation_duration,
+            self.budget.max_streamed_chars,
         )
     }
 
@@ -334,7 +334,7 @@ impl Agent {
             ));
         }
         let base_budget = self.generation_budget();
-        let mut session_output_remaining = self.max_session_output_chars.map(|limit| {
+        let mut session_output_remaining = self.budget.max_session_output_chars.map(|limit| {
             (
                 limit,
                 limit.saturating_sub(self.usage.session_output_chars()),

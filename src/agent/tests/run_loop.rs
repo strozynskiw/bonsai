@@ -1984,6 +1984,7 @@ async fn perf_report_records_last_model_call() {
         .unwrap();
 
     let report = agent
+        .caches
         .last_perf_report
         .as_ref()
         .expect("run should record perf report");
@@ -2057,7 +2058,7 @@ async fn failed_provider_call_replaces_stale_perf_with_failed_attempt() {
         .await
         .unwrap();
     assert!(
-        agent.last_perf_report.is_some(),
+        agent.caches.last_perf_report.is_some(),
         "successful run should record perf data"
     );
 
@@ -2068,7 +2069,7 @@ async fn failed_provider_call_replaces_stale_perf_with_failed_attempt() {
 
     assert!(format!("{err:#}").contains("provider unavailable"));
     assert!(
-        agent.last_perf_report.is_some(),
+        agent.caches.last_perf_report.is_some(),
         "failed provider call should retain its own attempt diagnostics"
     );
     let attempts = &agent.usage_turns().last().unwrap().provider_attempts;

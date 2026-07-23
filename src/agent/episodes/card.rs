@@ -267,7 +267,7 @@ impl Agent {
             local_reusable_prefix_percent: None,
             cacheable_prefix_tokens: None,
             volatile_tail_tokens: None,
-            context_window_tokens: Some(self.context_budget_tokens),
+            context_window_tokens: Some(self.budget.context_budget_tokens),
             rewrite: PendingContextRewrite::default(),
             created_at_ms: crate::util::time::now_ms(),
             latency_ms: None,

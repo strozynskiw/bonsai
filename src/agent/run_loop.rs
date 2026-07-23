@@ -493,7 +493,7 @@ impl Agent {
                     attempts: attempts.clone(),
                     generation_budget: self.generation_budget(),
                 };
-                self.last_perf_report = Some(self.build_perf_report(
+                self.caches.last_perf_report = Some(self.build_perf_report(
                     preflight,
                     provider,
                     tool_schema,
@@ -561,7 +561,7 @@ impl Agent {
             attempts: attempts.clone(),
             generation_budget: self.generation_budget(),
         };
-        self.last_perf_report =
+        self.caches.last_perf_report =
             Some(self.build_perf_report(preflight, provider, tool_schema, &request_messages));
         self.clear_drop_next_turn_controls();
 
@@ -685,7 +685,7 @@ impl Agent {
                     &mut interrupted_mid_tools,
                     &self.hooks,
                     self.tool_origin.clone(),
-                    self.max_tool_duration,
+                    self.budget.max_tool_duration,
                 )
                 .await
             };

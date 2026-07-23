@@ -209,7 +209,7 @@ impl Agent {
         }
         self.reindex_message_controls(&old_to_new);
         self.reindex_summary_sources(&old_to_new);
-        self.last_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
         true
     }
 }

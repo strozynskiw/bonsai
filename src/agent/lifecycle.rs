@@ -38,8 +38,8 @@ impl Agent {
         self.last_background_status_report = None;
         self.last_terminal_status_report = None;
         self.pending_peer_delivery_receipts.clear();
-        self.read_coverage_advisory.clear();
-        self.subagent_status_advisory.clear();
+        self.advisories.read_coverage_advisory.clear();
+        self.advisories.subagent_status_advisory.clear();
         self.tool_context_details.clear();
         self.inspection_events.clear();
         self.mention_read_evidence.clear();
@@ -49,10 +49,10 @@ impl Agent {
         self.summary_sources.clear();
         self.compaction_events.clear();
         self.pending_context_rewrite = PendingContextRewrite::default();
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
-        self.last_perf_report = None;
-        self.previous_request_body = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
+        self.caches.last_perf_report = None;
+        self.caches.previous_request_body = None;
         self.run_start_dirty_paths = None;
         self.rebuild_project_system_context();
     }
@@ -187,13 +187,13 @@ impl Agent {
     pub(crate) fn session_budget_usage(&self) -> crate::run_budget::SessionBudgetUsage {
         crate::run_budget::SessionBudgetUsage {
             turns: self.usage.session_turn_count(),
-            turn_limit: self.max_session_turns,
+            turn_limit: self.budget.max_session_turns,
             output_chars: self.usage.session_output_chars(),
-            output_char_limit: self.max_session_output_chars,
+            output_char_limit: self.budget.max_session_output_chars,
             active_run_ms: 0,
-            active_limit_seconds: self.max_session_active_seconds,
+            active_limit_seconds: self.budget.max_session_active_seconds,
             exact_cost_micros: self.usage.exact_session_cost_micros(),
-            cost_limit_micros: self.max_session_cost_micros,
+            cost_limit_micros: self.budget.max_session_cost_micros,
         }
     }
 
@@ -212,7 +212,7 @@ impl Agent {
     pub(crate) fn set_execution_lane(&mut self, lane: ExecutionLane) {
         if self.execution_lane != lane {
             self.execution_lane = lane;
-            self.previous_request_body = None;
+            self.caches.previous_request_body = None;
         }
     }
 
@@ -440,10 +440,10 @@ impl Agent {
         self.set_context_budget_tokens(context_budget_tokens);
         self.prompt_estimator = prompt_estimator;
         self.clear_tool_schema_cache();
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
-        self.last_perf_report = None;
-        self.previous_request_body = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
+        self.caches.last_perf_report = None;
+        self.caches.previous_request_body = None;
         self.cached_models.clear();
     }
 
@@ -493,14 +493,14 @@ impl Agent {
     pub fn set_prompt_estimator(&mut self, prompt_estimator: PromptEstimator) {
         self.prompt_estimator = prompt_estimator;
         self.clear_tool_schema_cache();
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
-        self.last_perf_report = None;
-        self.previous_request_body = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
+        self.caches.last_perf_report = None;
+        self.caches.previous_request_body = None;
     }
 
     pub fn set_context_budget_tokens(&mut self, context_budget_tokens: usize) {
-        self.context_budget_tokens = context_budget_tokens.max(1);
+        self.budget.context_budget_tokens = context_budget_tokens.max(1);
         self.refresh_effective_smol_profile();
     }
 }

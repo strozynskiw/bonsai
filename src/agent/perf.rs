@@ -235,6 +235,7 @@ impl Agent {
         request_messages: &[ChatCompletionRequestMessage],
     ) -> PerfReport {
         let estimate = self
+            .caches
             .last_sent_prompt_estimate
             .clone()
             .unwrap_or_else(|| PromptEstimate::heuristic(0, 0, TokenCounterKind::Heuristic));
@@ -256,7 +257,7 @@ impl Agent {
             .map(|key| short_hash_bytes(key.as_bytes()));
         let local_reusable_prefix_percent = request_body
             .as_deref()
-            .zip(self.previous_request_body.as_deref())
+            .zip(self.caches.previous_request_body.as_deref())
             .map(|(current, previous)| {
                 let reusable_bytes = common_prefix_len(current, previous);
                 reusable_bytes
@@ -269,7 +270,7 @@ impl Agent {
         // `prompt_tokens * common_bytes / body_bytes` estimate; it produced
         // plausible-looking but materially false cache-token totals.
         let local_reusable_prefix_tokens = None;
-        self.previous_request_body = request_body;
+        self.caches.previous_request_body = request_body;
         let (request_message_tokens, _) = self
             .prompt_estimator
             .estimate_messages_for_report_with_tool_schema_tokens(request_messages, 0);
@@ -312,7 +313,10 @@ impl Agent {
     }
 
     pub(crate) fn perf_report_text(&self) -> String {
-        let mut report = format_perf_report(self.last_perf_report.as_ref(), &self.context_report());
+        let mut report = format_perf_report(
+            self.caches.last_perf_report.as_ref(),
+            &self.context_report(),
+        );
         if !self.self_review_runs.is_empty() {
             let findings = self
                 .self_review_runs

@@ -30,7 +30,7 @@ async fn errors_when_max_iterations_are_exhausted() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.max_iterations = 2;
+    agent.budget.max_iterations = 2;
     let result = agent
         .run("hello", CancellationToken::new(), Arc::new(StdoutSink))
         .await;

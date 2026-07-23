@@ -250,6 +250,44 @@ struct ToolRegistrySet {
     read_only: Arc<ToolRegistry>,
 }
 
+/// Run-time limits set once at construction or tuned via [`Agent::set_run_budget`].
+/// Nine fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionBudget {
+    pub(crate) max_iterations: usize,
+    pub(crate) max_generation_duration: Option<Duration>,
+    pub(crate) max_streamed_chars: Option<usize>,
+    pub(crate) max_tool_duration: Option<Duration>,
+    pub(crate) max_session_turns: Option<usize>,
+    pub(crate) max_session_output_chars: Option<usize>,
+    pub(crate) max_session_active_seconds: Option<u64>,
+    pub(crate) max_session_cost_micros: Option<u64>,
+    pub(crate) context_budget_tokens: usize,
+}
+
+/// Volatile advisory strings rendered into the uncached project-context tail.
+/// Five fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+#[derive(Debug, Clone)]
+pub(crate) struct Advisories {
+    pub(crate) repair_advisory: String,
+    pub(crate) read_coverage_advisory: String,
+    pub(crate) planning_advisory: String,
+    pub(crate) subagent_status_advisory: String,
+    pub(crate) last_volatile_context_message: Option<String>,
+}
+
+/// Cached prompt estimates, performance snapshots, and provider-cache warnings
+/// that are invalidated across turns/mode-switches.
+/// Five fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+#[derive(Debug, Clone)]
+pub(crate) struct PerfCaches {
+    pub(crate) last_prompt_estimate: Option<PromptEstimate>,
+    pub(crate) last_sent_prompt_estimate: Option<PromptEstimate>,
+    pub(crate) last_perf_report: Option<PerfReport>,
+    pub(crate) previous_request_body: Option<Vec<u8>>,
+    pub(crate) cache_warning_lanes: HashSet<(ExecutionLaneKind, String)>,
+}
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     /// One-shot delegated-run backup. Present only for subagents with a
@@ -286,7 +324,7 @@ pub struct Agent {
     lsp_hub: Option<Arc<LspHub>>,
     todo_store: Option<SharedTodoStore>,
     messages: Vec<ChatCompletionRequestMessage>,
-    max_iterations: usize,
+    budget: SessionBudget,
     cached_models: Vec<String>,
     transcript_logger: Option<Arc<TranscriptLogger>>,
     /// Project-context block (cwd, git, steering files) appended to the persona
@@ -297,22 +335,7 @@ pub struct Agent {
     system_prompt_suffix: Option<String>,
     /// Structured version of `system_context`, when constructed by runtime.
     project_context: Option<ProjectContextSnapshot>,
-    /// Compact volatile hint for the next concrete repair step after a failed
-    /// tool result. Rendered into the uncached project-context tail.
-    repair_advisory: String,
-    /// Fresh parent-visible file ranges retained in live context. Derived from
-    /// immutable read observations and rendered in the volatile request tail.
-    read_coverage_advisory: String,
-    /// Compact volatile hint for planning mode when enough research has run
-    /// without updating the plan canvas. Rendered into the uncached tail so the
-    /// next model call can self-correct before a hard tool rejection is needed.
-    planning_advisory: String,
-    /// Compact status for detached subagents still running. Rendered only in the
-    /// volatile request tail; detailed activity remains in the `/subtasks` UI.
-    subagent_status_advisory: String,
-    /// Exact text of the latest append-only volatile context message. `None`
-    /// means this context has not emitted one yet.
-    last_volatile_context_message: Option<String>,
+    advisories: Advisories,
     /// Workspace root used to validate and expand live `@path` mentions.
     project_root: PathBuf,
     /// When set, the volatile project state (git status) is recomputed at the
@@ -343,26 +366,7 @@ pub struct Agent {
     next_message_id: u64,
     prompt_estimator: PromptEstimator,
     tool_schema_cache: StdMutex<HashMap<ToolSchemaCacheKey, ToolSchemaPayload>>,
-    last_prompt_estimate: Option<PromptEstimate>,
-    last_sent_prompt_estimate: Option<PromptEstimate>,
-    last_perf_report: Option<PerfReport>,
-    previous_request_body: Option<Vec<u8>>,
-    cache_warning_lanes: HashSet<(ExecutionLaneKind, String)>,
-    context_budget_tokens: usize,
-    /// Optional user-facing provider-call wall-time ceiling. `None` preserves
-    /// the environment/default generation policy.
-    max_generation_duration: Option<Duration>,
-    /// Optional user-facing combined reasoning + assistant streamed-char cap.
-    /// `None` preserves the environment/context-derived generation policy.
-    max_streamed_chars: Option<usize>,
-    /// Optional wall-time ceiling for each individual tool execution.
-    max_tool_duration: Option<Duration>,
-    /// Optional provider-turn ceiling consumed from the persisted session ledger.
-    max_session_turns: Option<usize>,
-    /// Optional streamed-output ceiling consumed across every persisted attempt.
-    max_session_output_chars: Option<usize>,
-    max_session_active_seconds: Option<u64>,
-    max_session_cost_micros: Option<u64>,
+    caches: PerfCaches,
     last_background_status_report: Option<String>,
     last_terminal_status_report: Option<String>,
     tool_context_details: HashMap<String, ToolContextDetail>,
@@ -513,7 +517,7 @@ impl Agent {
     /// model can synthesize already-collected evidence without extending the
     /// tool loop.
     pub(crate) fn restrict_to_conclusion_turn(&mut self) {
-        self.max_iterations = 1;
+        self.budget.max_iterations = 1;
         self.tool_registry = Arc::new(ToolRegistry::new());
         self.refresh_project_info_runtime();
         self.clear_tool_schema_cache();
@@ -522,14 +526,14 @@ impl Agent {
     /// Replace every user-facing run limit. Unset fields restore the normal
     /// agent defaults rather than inventing an implicit budget.
     pub(crate) fn set_run_budget(&mut self, budget: crate::run_budget::RunBudget) {
-        self.max_iterations = budget.max_turns.unwrap_or(DEFAULT_MAX_ITERATIONS);
-        self.max_generation_duration = budget.max_generation_duration();
-        self.max_streamed_chars = budget.max_output_chars;
-        self.max_tool_duration = budget.max_tool_duration();
-        self.max_session_turns = budget.max_session_turns;
-        self.max_session_output_chars = budget.max_session_output_chars;
-        self.max_session_active_seconds = budget.max_session_active_seconds;
-        self.max_session_cost_micros = budget.max_session_cost_micros;
+        self.budget.max_iterations = budget.max_turns.unwrap_or(DEFAULT_MAX_ITERATIONS);
+        self.budget.max_generation_duration = budget.max_generation_duration();
+        self.budget.max_streamed_chars = budget.max_output_chars;
+        self.budget.max_tool_duration = budget.max_tool_duration();
+        self.budget.max_session_turns = budget.max_session_turns;
+        self.budget.max_session_output_chars = budget.max_session_output_chars;
+        self.budget.max_session_active_seconds = budget.max_session_active_seconds;
+        self.budget.max_session_cost_micros = budget.max_session_cost_micros;
     }
 
     /// Set the timing policy used between retryable provider attempts.
@@ -603,8 +607,9 @@ impl Agent {
         effective_reasoning: ReasoningSelection,
     ) {
         let pricing = self.prompt_estimator.pricing();
-        let prompt_estimate = self.last_sent_prompt_estimate.clone();
+        let prompt_estimate = self.caches.last_sent_prompt_estimate.clone();
         let (cacheable_prefix_tokens, volatile_tail_tokens) = self
+            .caches
             .last_perf_report
             .as_ref()
             .map(|report| {
@@ -621,6 +626,7 @@ impl Agent {
             tool_schema_hash,
             tool_schema_names,
         ) = self
+            .caches
             .last_perf_report
             .as_ref()
             .map(|report| {
@@ -634,11 +640,13 @@ impl Agent {
             })
             .unwrap_or((None, None, None, None, Vec::new()));
         let prefix_hash = self
+            .caches
             .last_perf_report
             .as_ref()
             .map(|report| report.cache.prefix_hash.clone())
             .filter(|hash| !hash.is_empty());
         let (latency_ms, ttft_ms) = self
+            .caches
             .last_perf_report
             .as_ref()
             .map(|report| {
@@ -675,20 +683,23 @@ impl Agent {
             request_body_hash,
             cache_mechanism,
             cache_route_fingerprint: self
+                .caches
                 .last_perf_report
                 .as_ref()
                 .and_then(|report| report.cache.route_fingerprint.clone()),
             local_reusable_prefix_tokens: self
+                .caches
                 .last_perf_report
                 .as_ref()
                 .and_then(|report| report.cache.local_reusable_prefix_tokens),
             local_reusable_prefix_percent: self
+                .caches
                 .last_perf_report
                 .as_ref()
                 .and_then(|report| report.cache.local_reusable_prefix_percent),
             cacheable_prefix_tokens,
             volatile_tail_tokens,
-            context_window_tokens: Some(self.context_budget_tokens),
+            context_window_tokens: Some(self.budget.context_budget_tokens),
             rewrite: self.pending_context_rewrite.take(),
             created_at_ms: crate::util::time::now_ms(),
             latency_ms,
@@ -734,7 +745,7 @@ impl Agent {
             return None;
         }
         let key = (lane.kind, lane.id.clone());
-        if !self.cache_warning_lanes.insert(key) {
+        if !self.caches.cache_warning_lanes.insert(key) {
             return None;
         }
         Some(format!(
@@ -804,10 +815,10 @@ impl Agent {
             return append_volatile_advisories(
                 context.render_smol(),
                 &[
-                    &self.repair_advisory,
-                    &self.read_coverage_advisory,
-                    &self.planning_advisory,
-                    &self.subagent_status_advisory,
+                    &self.advisories.repair_advisory,
+                    &self.advisories.read_coverage_advisory,
+                    &self.advisories.planning_advisory,
+                    &self.advisories.subagent_status_advisory,
                 ],
             );
         }
@@ -855,8 +866,8 @@ impl Agent {
             self.refresh_project_info_runtime();
         }
         self.clear_tool_schema_cache();
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
         true
     }
 
@@ -880,7 +891,7 @@ impl Agent {
     }
 
     pub(crate) const fn smol_profile(&self) -> crate::smol::SmolProfile {
-        crate::smol::SmolProfile::resolve(self.smol_preference, self.context_budget_tokens)
+        crate::smol::SmolProfile::resolve(self.smol_preference, self.budget.context_budget_tokens)
     }
 
     fn active_tool_schema(&self) -> ToolSchemaPayload {
@@ -985,7 +996,7 @@ impl Agent {
         let id = self.next_context_message_id();
         self.messages.push(message);
         self.message_ids.push(id.clone());
-        self.last_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
         id
     }
 
@@ -1005,7 +1016,7 @@ impl Agent {
         self.messages = vec![system];
         self.message_ids = vec![format_context_message_id(0)];
         self.next_message_id = 1;
-        self.last_volatile_context_message = None;
+        self.advisories.last_volatile_context_message = None;
         self.inspection_events.clear();
         self.mention_read_evidence.clear();
         self.last_retryable_turn = false;
@@ -1028,8 +1039,8 @@ impl Agent {
     pub(crate) fn refresh_system_context_message(&mut self) {
         let message = self.active_system_message();
         self.set_system_context_message(message);
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
     }
 
     fn normalize_message_ids(
@@ -1081,14 +1092,14 @@ impl Agent {
         self.messages = messages;
         self.message_ids = message_ids;
         self.next_message_id = next_message_id;
-        self.last_volatile_context_message = self
+        self.advisories.last_volatile_context_message = self
             .messages
             .iter()
             .rev()
             .find(|message| is_project_state_message(message))
             .and_then(try_message_content_string);
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
         self.tool_context_details.clear();
         self.inspection_events.clear();
         self.mention_read_evidence.clear();
@@ -1115,7 +1126,7 @@ impl Agent {
             }
             self.messages = retained_messages;
             self.message_ids = retained_ids;
-            self.last_volatile_context_message = None;
+            self.advisories.last_volatile_context_message = None;
             if removed_project_state || reason == ProjectStateNormalization::ProviderSwitch {
                 self.rebuild_project_system_context();
             }
@@ -1134,7 +1145,7 @@ impl Agent {
         // provider embed git/read state in message zero. Only a provider/model
         // with an explicit append-only policy converts that row.
         self.rebuild_project_system_context();
-        self.last_volatile_context_message = None;
+        self.advisories.last_volatile_context_message = None;
     }
 
     pub(crate) fn context_message_snapshot(&self) -> ContextMessageSnapshot {
@@ -1223,7 +1234,7 @@ impl Agent {
             self.system_message_for_mode(mode)
         };
         self.set_system_context_message(system_message);
-        self.last_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
         Some(old)
     }
 
@@ -1268,7 +1279,7 @@ impl Agent {
             system_message_from_prompt(&prompt, &self.system_context)
         };
         self.set_system_context_message(system_message);
-        self.last_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
     }
 
     /// Scope a custom persona's tools by its declared `tools:`. `None` keeps the
@@ -1407,7 +1418,7 @@ impl Agent {
     }
 
     pub(in crate::agent) fn has_repair_advisory(&self) -> bool {
-        !self.repair_advisory.is_empty()
+        !self.advisories.repair_advisory.is_empty()
     }
 
     /// Normalize `advisory` into a harness note and write it to `field`,
@@ -1425,13 +1436,13 @@ impl Agent {
     }
 
     pub(in crate::agent) fn set_repair_advisory(&mut self, advisory: Option<String>) {
-        if Self::apply_advisory(&mut self.repair_advisory, advisory) {
+        if Self::apply_advisory(&mut self.advisories.repair_advisory, advisory) {
             self.rebuild_project_system_context();
         }
     }
 
     pub(in crate::agent) fn set_planning_advisory(&mut self, advisory: Option<String>) {
-        if Self::apply_advisory(&mut self.planning_advisory, advisory) {
+        if Self::apply_advisory(&mut self.advisories.planning_advisory, advisory) {
             self.rebuild_project_system_context();
         }
     }
@@ -1440,7 +1451,7 @@ impl Agent {
         &mut self,
         advisory: Option<String>,
     ) -> bool {
-        let changed = Self::apply_advisory(&mut self.subagent_status_advisory, advisory);
+        let changed = Self::apply_advisory(&mut self.advisories.subagent_status_advisory, advisory);
         if changed {
             self.rebuild_project_system_context();
         }
@@ -1460,10 +1471,10 @@ impl Agent {
             append_volatile_advisories(
                 context.render(),
                 &[
-                    &self.repair_advisory,
-                    &self.read_coverage_advisory,
-                    &self.planning_advisory,
-                    &self.subagent_status_advisory,
+                    &self.advisories.repair_advisory,
+                    &self.advisories.read_coverage_advisory,
+                    &self.advisories.planning_advisory,
+                    &self.advisories.subagent_status_advisory,
                 ],
             )
         };
@@ -1481,8 +1492,8 @@ impl Agent {
         // message too; skipping this replacement silently destroys cache
         // stability after resume or a provider switch.
         self.set_system_context_message(message);
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
     }
 
     /// Append the current volatile project snapshot when it differs from the
@@ -1504,20 +1515,23 @@ impl Agent {
         let volatile = append_volatile_advisories(
             context.volatile_tail(),
             &[
-                &self.repair_advisory,
-                &self.read_coverage_advisory,
-                &self.planning_advisory,
-                &self.subagent_status_advisory,
+                &self.advisories.repair_advisory,
+                &self.advisories.read_coverage_advisory,
+                &self.advisories.planning_advisory,
+                &self.advisories.subagent_status_advisory,
             ],
         );
         let next = if volatile.trim().is_empty() {
-            self.last_volatile_context_message.as_ref().map(|_| {
-                format!(
-                    "{}\n\n{}",
-                    crate::context::PROJECT_STATE_UPDATE_PREFIX,
-                    crate::context::PROJECT_STATE_CLEARED_BODY
-                )
-            })
+            self.advisories
+                .last_volatile_context_message
+                .as_ref()
+                .map(|_| {
+                    format!(
+                        "{}\n\n{}",
+                        crate::context::PROJECT_STATE_UPDATE_PREFIX,
+                        crate::context::PROJECT_STATE_CLEARED_BODY
+                    )
+                })
         } else {
             Some(format!(
                 "{}\n\n{volatile}",
@@ -1527,12 +1541,12 @@ impl Agent {
         let Some(next) = next else {
             return false;
         };
-        if self.last_volatile_context_message.as_deref() == Some(next.as_str()) {
+        if self.advisories.last_volatile_context_message.as_deref() == Some(next.as_str()) {
             return false;
         }
 
         self.push_message(project_state_message(&next));
-        self.last_volatile_context_message = Some(next);
+        self.advisories.last_volatile_context_message = Some(next);
         true
     }
 

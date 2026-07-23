@@ -243,9 +243,9 @@ impl Agent {
         let still_over_budget = estimate
             .input_tokens
             .saturating_add(self.output_reserve_tokens())
-            > self.context_budget_tokens;
-        self.last_prompt_estimate = Some(estimate.clone());
-        self.last_sent_prompt_estimate = Some(estimate.clone());
+            > self.budget.context_budget_tokens;
+        self.caches.last_prompt_estimate = Some(estimate.clone());
+        self.caches.last_sent_prompt_estimate = Some(estimate.clone());
         self.emit_context_updated(sink);
 
         if still_over_budget {
@@ -253,7 +253,7 @@ impl Agent {
                 "prompt estimate {} + reserve {} exceeds context window {} ({}, {})",
                 estimate.input_tokens,
                 self.output_reserve_tokens(),
-                self.context_budget_tokens,
+                self.budget.context_budget_tokens,
                 estimate.source.label(),
                 estimate.confidence.label()
             );
@@ -298,10 +298,11 @@ impl Agent {
     /// to the full budget on windows too small to carry the reserve.
     fn usable_window_fraction_tokens(&self, percent: usize) -> usize {
         let usable_input_tokens = self
+            .budget
             .context_budget_tokens
             .saturating_sub(self.output_reserve_tokens());
         let basis = if usable_input_tokens == 0 {
-            self.context_budget_tokens
+            self.budget.context_budget_tokens
         } else {
             usable_input_tokens
         };
@@ -471,8 +472,8 @@ impl Agent {
         self.message_ids = candidate.message_ids;
         self.context_controls = candidate.controls;
         self.summary_sources = candidate.summary_sources;
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
 
         self.compaction_events.push(CompactionEvent {
             seq: event_seq,
@@ -515,14 +516,16 @@ impl Agent {
             COMPACTION_TARGET_PERCENT
         };
         let pct_target = self
+            .budget
             .context_budget_tokens
             .saturating_mul(percent)
             .checked_div(100)
-            .unwrap_or(self.context_budget_tokens);
+            .unwrap_or(self.budget.context_budget_tokens);
         // Never aim above the input budget the output reserve leaves free, or on
         // small windows compaction couldn't bring the prompt back under the limit
         // (input + reserve <= window) and the run would bail despite compacting.
         let budget_safe = self
+            .budget
             .context_budget_tokens
             .saturating_sub(self.output_reserve_tokens());
         pct_target.min(budget_safe).max(1)
@@ -532,7 +535,8 @@ impl Agent {
         if !self.smol_applies_to_active_persona() {
             return DEFAULT_OUTPUT_RESERVE_TOKENS;
         }
-        self.context_budget_tokens
+        self.budget
+            .context_budget_tokens
             .checked_div(8)
             .unwrap_or(0)
             .clamp(512, 2_000)

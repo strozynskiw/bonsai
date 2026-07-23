@@ -700,6 +700,30 @@ impl StreamedResponse {
     }
 }
 
+/// Build and serialize a provider request body, shared across all wire
+/// transports so their stream loops focus on protocol differences.
+///
+/// Every `chat_stream_with_options` opens with this identical prologue:
+/// authorize → build the request body → capture a wire preview → serialize
+/// to JSON. The three steps are provider-specific methods; the error mapping
+/// and diagnostics capture are identical.
+pub(crate) fn serialize_request_body(
+    provider_label: &str,
+    authorize: impl FnOnce() -> Result<()>,
+    build_body: impl FnOnce() -> Result<serde_json::Value>,
+    preview_from: impl FnOnce(serde_json::Value) -> ProviderRequestPreview,
+    diagnostics_slot: &std::sync::Mutex<Option<ProviderRequestDiagnostics>>,
+) -> ProviderResult<Vec<u8>> {
+    authorize().map_err(|error| ProviderFailure::configuration(error.to_string()))?;
+    let body = build_body().map_err(|error| ProviderFailure::configuration(error.to_string()))?;
+    let preview = preview_from(body);
+    ProviderRequestDiagnostics::capture(preview, diagnostics_slot).map_err(|error| {
+        ProviderFailure::configuration(format!(
+            "Failed to serialize {provider_label} request body: {error}"
+        ))
+    })
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Select the provider's project-state cache representation.

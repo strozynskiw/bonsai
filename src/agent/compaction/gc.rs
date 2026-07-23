@@ -92,8 +92,8 @@ impl Agent {
 
         self.prune_context_controls_to_current_messages();
         if changed > 0 {
-            self.last_prompt_estimate = None;
-            self.last_sent_prompt_estimate = None;
+            self.caches.last_prompt_estimate = None;
+            self.caches.last_sent_prompt_estimate = None;
             self.record_context_rewrite(
                 ContextRewriteKind::Gc,
                 plan.before_tokens,
@@ -205,7 +205,7 @@ impl Agent {
         if plan
             .before_tokens
             .saturating_add(DEFAULT_OUTPUT_RESERVE_TOKENS)
-            > self.context_budget_tokens
+            > self.budget.context_budget_tokens
         {
             return true;
         }
@@ -264,8 +264,8 @@ impl Agent {
         }
 
         self.context_controls.retain(|_id, state| state.is_active());
-        self.last_prompt_estimate = None;
-        self.last_sent_prompt_estimate = None;
+        self.caches.last_prompt_estimate = None;
+        self.caches.last_sent_prompt_estimate = None;
         // Restoring bytes grows the prompt (saved = 0), but it is still a
         // mid-history mutation the cache-diagnostics need to see attributed.
         self.record_context_rewrite(ContextRewriteKind::Gc, 0, 0);

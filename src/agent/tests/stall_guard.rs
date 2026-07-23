@@ -106,7 +106,7 @@ async fn stall_guard_keeps_long_exploration_run_alive_with_persistent_nudges() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.max_iterations = exploration_turns + 2;
+    agent.budget.max_iterations = exploration_turns + 2;
     let sink = Arc::new(CaptureSink::default());
 
     let result = agent
@@ -183,7 +183,7 @@ async fn stall_guard_resets_on_progress_making_bash_turn() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.max_iterations = IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS * 2;
+    agent.budget.max_iterations = IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS * 2;
 
     let result = agent
         .run(
@@ -227,7 +227,7 @@ async fn stall_guard_inactive_for_planning_persona() {
     )
     .unwrap();
     agent.set_mode(AgentMode::Planning);
-    agent.max_iterations = research_turns + 2;
+    agent.budget.max_iterations = research_turns + 2;
 
     let result = agent
         .run(
@@ -267,7 +267,7 @@ async fn stall_guard_inactive_for_subagent_lane() {
     )
     .unwrap();
     agent.set_execution_lane(ExecutionLane::subagent("sub-1"));
-    agent.max_iterations = research_turns + 2;
+    agent.budget.max_iterations = research_turns + 2;
 
     let result = agent
         .run(

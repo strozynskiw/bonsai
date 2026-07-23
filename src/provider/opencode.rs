@@ -605,24 +605,19 @@ impl Provider for OpenAiCompatibleProvider {
         cancellation_token: CancellationToken,
         sink: SharedSink,
     ) -> crate::provider::ProviderResult<StreamedResponse> {
-        self.ensure_authorized()
-            .map_err(|error| crate::provider::ProviderFailure::configuration(error.to_string()))?;
-
-        let body = self
-            .request_body_with_reasoning(
-                messages,
-                tools,
-                options.reasoning.unwrap_or(self.reasoning),
-            )
-            .map_err(|error| crate::provider::ProviderFailure::configuration(error.to_string()))?;
-        let request_preview = self.request_preview_from_body(body);
-        let serialized_body =
-            ProviderRequestDiagnostics::capture(request_preview, &self.last_request_diagnostics)
-                .map_err(|error| {
-                    crate::provider::ProviderFailure::configuration(format!(
-                        "Failed to serialize OpenAI-compatible request body: {error}"
-                    ))
-                })?;
+        let serialized_body = crate::provider::serialize_request_body(
+            "OpenAI-compatible",
+            || self.ensure_authorized(),
+            || {
+                self.request_body_with_reasoning(
+                    messages,
+                    tools,
+                    options.reasoning.unwrap_or(self.reasoning),
+                )
+            },
+            |body| self.request_preview_from_body(body),
+            &self.last_request_diagnostics,
+        )?;
 
         let mut builder = self
             .http

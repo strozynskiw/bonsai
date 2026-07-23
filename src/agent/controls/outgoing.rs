@@ -126,9 +126,9 @@ impl Agent {
         if stale_changed {
             context.stale_read_advisory = advisory;
         }
-        let coverage_changed = self.read_coverage_advisory != coverage;
+        let coverage_changed = self.advisories.read_coverage_advisory != coverage;
         if coverage_changed {
-            self.read_coverage_advisory = coverage;
+            self.advisories.read_coverage_advisory = coverage;
         }
         if stale_changed || coverage_changed {
             self.rebuild_project_system_context();
