@@ -43,8 +43,6 @@ async-trait = "0.1"
 futures = "0.3.33"
 dotenvy = "0.15.7"
 tiktoken-rs = { version = "0.12.0", default-features = false }
-# Pinned to the same minor as model2vec-rs's dependency so the optional
-# memory-embeddings feature doesn't compile a second copy of this heavy crate.
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
 base64 = "0.22.1"
 blake3 = "1"
@@ -89,7 +87,7 @@ serde_yaml_ng = "0.10.0"
 # load-bearing: defaults pull the C oniguruma regex backend AND a second HTTP
 # stack (hf-hub/ureq) — we use tokenizers' pure-Rust fancy-regex and download
 # model files ourselves with the in-tree reqwest.
-model2vec-rs = { version = "0.2.1", optional = true, default-features = false, features = ["fancy-regex"] }
+model2vec-rs = { version = "0.2.1", default-features = false, features = ["fancy-regex"] }
 png = "0.18.1"
 # MCP client (M5.2). client + stdio child-process transport + Streamable HTTP
 # over the reqwest we already ship. rmcp has renamed transport features
@@ -100,12 +98,6 @@ uuid = { version = "1.23.4", features = ["v7"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
-
-[features]
-default = ["memory-embeddings"]
-# Hybrid memory retrieval: BM25 + static embeddings. Without this feature (or
-# with BONSAI_MEMORY_EMBEDDINGS=off) recall degrades to BM25-only.
-memory-embeddings = ["dep:model2vec-rs"]
 
 [dev-dependencies]
 wiremock = "0.6.5"

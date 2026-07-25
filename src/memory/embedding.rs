@@ -54,17 +54,9 @@ pub(crate) fn default_embedder(home_dir: &std::path::Path) -> std::sync::Arc<dyn
     if opted_out || home_dir.as_os_str().is_empty() {
         return std::sync::Arc::new(NoopEmbedder);
     }
-    #[cfg(feature = "memory-embeddings")]
-    {
-        std::sync::Arc::new(model2vec::Model2VecEmbedder::new(home_dir))
-    }
-    #[cfg(not(feature = "memory-embeddings"))]
-    {
-        std::sync::Arc::new(NoopEmbedder)
-    }
+    std::sync::Arc::new(model2vec::Model2VecEmbedder::new(home_dir))
 }
 
-#[cfg(feature = "memory-embeddings")]
 mod model2vec {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -141,12 +133,7 @@ mod model2vec {
                 let resolved = match load(&inner.model_dir).await {
                     Ok(model) => State::Ready(Arc::new(model)),
                     Err(err) => {
-                        // One warning per process; retried next session because
-                        // the state is per-process.
-                        tracing::warn!(
-                            error = %format!("{err:#}"),
-                            "memory embeddings unavailable; recall stays BM25-only"
-                        );
+                        tracing::warn!(%err, "memory embeddings unavailable; recall stays BM25-only");
                         State::Unavailable
                     }
                 };
