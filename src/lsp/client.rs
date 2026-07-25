@@ -400,8 +400,10 @@ fn spawn_reader(
                     Some(error) => Err(PendingResponseError::Server(parse_server_error(error))),
                     None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                 };
-                if let Some(tx) = connection.lock().await.pending.remove(&id) {
-                    let _ = tx.send(result);
+                if let Some(tx) = connection.lock().await.pending.remove(&id)
+                    && let Err(_err) = tx.send(result)
+                {
+                    tracing::debug!("LSP pending request waiter dropped");
                 }
                 continue;
             }
@@ -438,7 +440,9 @@ fn spawn_reader(
             std::mem::take(&mut connection.pending)
         };
         for (_, responder) in pending {
-            let _ = responder.send(Err(PendingResponseError::Transport(reason.clone())));
+            if let Err(_err) = responder.send(Err(PendingResponseError::Transport(reason.clone()))) {
+                tracing::debug!("LSP drain responder dropped on transport death");
+            }
         }
     })
 }

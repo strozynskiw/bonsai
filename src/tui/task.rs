@@ -1090,11 +1090,13 @@ impl TaskController {
         }
 
         let active = self.active.take()?;
-        if let Err(err) = active.handle.await {
-            let _ = self.sender.send(RuntimeEvent::TaskPanicked(UiError::new(
+        if let Err(err) = active.handle.await
+            && let Err(send_err) = self.sender.send(RuntimeEvent::TaskPanicked(UiError::new(
                 "Task panicked",
                 format!("task panicked: {}", err),
-            )));
+            )))
+        {
+            tracing::warn!(%send_err, "failed to deliver task-panicked event");
         }
         Some(active.kind)
     }

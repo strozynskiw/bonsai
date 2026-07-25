@@ -333,7 +333,9 @@ async fn terminate_shell_hook(
     let _ = child.start_kill();
 
     let grace_deadline = tokio::time::Instant::now() + HOOK_TERMINATION_GRACE;
-    let _ = tokio::time::timeout_at(grace_deadline, child.wait()).await;
+    if let Err(err) = tokio::time::timeout_at(grace_deadline, child.wait()).await {
+        tracing::debug!(%err, "hook process did not terminate within grace period");
+    }
     tokio::time::sleep_until(grace_deadline).await;
 
     #[cfg(unix)]
@@ -341,7 +343,9 @@ async fn terminate_shell_hook(
         crate::process_group::force_kill_group(pid);
     }
     crate::process_group::force_kill(child).await;
-    let _ = tokio::time::timeout(HOOK_REAP_TIMEOUT, child.wait()).await;
+    if let Err(err) = tokio::time::timeout(HOOK_REAP_TIMEOUT, child.wait()).await {
+        tracing::debug!(%err, "hook process not reaped within wait timeout");
+    }
 }
 
 fn capture_diagnostic(label: &str, capture: &BoundedPipeCapture) -> String {

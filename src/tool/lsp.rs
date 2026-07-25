@@ -473,7 +473,7 @@ impl Tool for RenameSymbolTool {
             .iter()
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
-        let _ = self.hub.sync_after_files_changed(&paths).await;
+        self.hub.sync_after_files_changed(&paths).await?;
         Ok(ToolOutput::Edit { summary, diff })
     }
 }

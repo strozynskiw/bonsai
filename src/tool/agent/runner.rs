@@ -358,7 +358,11 @@ impl SubagentRunner {
             let subtask_id = subtask_id.clone();
             async move {
                 let _active_run = active_run;
-                let _ = runner.run_registered(spec, subtask_id, token, false).await;
+                let (result, _totals, _turns, _evidence) =
+                    runner.run_registered(spec, subtask_id, token, false).await;
+                if let Err(err) = result {
+                    tracing::error!(%err, "subagent execution failed");
+                }
             }
         });
         subtask_id

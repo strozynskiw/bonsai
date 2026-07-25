@@ -73,14 +73,22 @@ fn probe_bubblewrap(network: NetworkMode) -> bool {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) if started.elapsed() >= PROBE_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
+                if let Err(err) = child.kill() {
+                    tracing::debug!(%err, "sandbox probe child already dead (kill)");
+                }
+                if let Err(err) = child.wait() {
+                    tracing::debug!(%err, "sandbox probe child already reaped (wait)");
+                }
                 return false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                if let Err(err) = child.kill() {
+                    tracing::debug!(%err, "sandbox probe child already dead (kill)");
+                }
+                if let Err(err) = child.wait() {
+                    tracing::debug!(%err, "sandbox probe child already reaped (wait)");
+                }
                 return false;
             }
         }

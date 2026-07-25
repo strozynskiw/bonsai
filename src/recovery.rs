@@ -152,7 +152,9 @@ impl RecoveryWorkspace {
         )
         .await
         {
-            let _ = delete_ref(&repository_path, &baseline_ref).await;
+            if let Err(err) = delete_ref(&repository_path, &baseline_ref).await {
+                tracing::warn!(%err, "failed to clean up baseline ref after worktree creation error");
+            }
             return Err(err.context("Failed to create isolated recovery worktree"));
         }
 
@@ -165,8 +167,12 @@ impl RecoveryWorkspace {
             source_index_tree: &source_index_tree,
         };
         if let Err(err) = storage.insert_recovery_point(new_point).await {
-            let _ = remove_worktree(&repository_path, &worktree_path).await;
-            let _ = delete_ref(&repository_path, &baseline_ref).await;
+            if let Err(err) = remove_worktree(&repository_path, &worktree_path).await {
+                tracing::warn!(%err, "failed to clean up worktree after recovery point insertion error");
+            }
+            if let Err(err) = delete_ref(&repository_path, &baseline_ref).await {
+                tracing::warn!(%err, "failed to clean up baseline ref after recovery point insertion error");
+            }
             return Err(err);
         }
         let execution_path = worktree_path.join(relative_project_path);

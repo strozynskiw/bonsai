@@ -147,8 +147,11 @@ impl HeadlessSink {
     }
 
     fn write_stream_event<T: Serialize>(&self, event: &T) -> Result<()> {
-        if self.format == OutputFormat::StreamJson {
-            self.write_versioned_json_stdout(event)?;
+        if self.format == OutputFormat::StreamJson
+            && let Err(err) = self.write_versioned_json_stdout(event)
+        {
+            tracing::error!(%err, "headless stream event serialization failed");
+            return Err(err);
         }
         Ok(())
     }
