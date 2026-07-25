@@ -70,7 +70,9 @@ impl SubagentProviderConfig {
     #[must_use]
     pub(crate) fn with_active_model_identity(mut self, provider_id: &str, model: &str) -> Self {
         self.active_model_identity = Some(ActiveModelIdentity {
-            provider_id: provider_id.parse().unwrap_or_else(|_| ConnectionId::fallback("unknown")),
+            provider_id: provider_id
+                .parse()
+                .unwrap_or_else(|_| ConnectionId::fallback("unknown")),
             model: model.to_string(),
         });
         self

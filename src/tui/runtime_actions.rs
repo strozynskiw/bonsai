@@ -13,7 +13,7 @@ use crate::interaction::{
     PermissionDecision,
 };
 use crate::memory::entry::MemoryTier;
-use crate::model_catalog::{ModelCatalog, ConnectionId, ModelId};
+use crate::model_catalog::{ConnectionId, ModelCatalog, ModelId};
 use crate::model_resolution::{
     build_provider, build_provider_for_optional_model,
     context_window_for_current_model_with_catalog, prompt_estimator_for_current_model_with_catalog,
@@ -3288,7 +3288,10 @@ async fn assign_model_picker_shortcut(
     };
     let reasoning = app.model_picker_selected_reasoning(&entry);
     let binding = ModelShortcutBinding {
-        provider_id: entry.provider_id.parse().unwrap_or_else(|_| ConnectionId::fallback("unknown")),
+        provider_id: entry
+            .provider_id
+            .parse()
+            .unwrap_or_else(|_| ConnectionId::fallback("unknown")),
         connection_id: entry.connection_id.parse().ok(),
         model_id: entry
             .model_id
@@ -3303,14 +3306,12 @@ async fn assign_model_picker_shortcut(
         // Toggle: pressing a shortcut key on the exact model+reasoning it
         // already points at clears it. Pressing it elsewhere reassigns the key.
         let already_bound = session.model_shortcut_binding(key).is_some_and(|bound| {
-            let provider_id: ConnectionId = entry.provider_id.parse().unwrap_or_else(|_| ConnectionId::fallback("unknown"));
+            let provider_id: ConnectionId = entry
+                .provider_id
+                .parse()
+                .unwrap_or_else(|_| ConnectionId::fallback("unknown"));
             let model_id: Option<ModelId> = entry.model_id.as_deref().and_then(|m| m.parse().ok());
-            bound.matches_selection(
-                &provider_id,
-                &entry.model,
-                model_id.as_ref(),
-                reasoning,
-            )
+            bound.matches_selection(&provider_id, &entry.model, model_id.as_ref(), reasoning)
         });
         if already_bound {
             session.clear_model_shortcut_binding(key);

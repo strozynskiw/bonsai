@@ -37,7 +37,10 @@ pub(crate) fn active_model_identity(
     session_store: &SessionStore,
 ) -> crate::agent::ActiveModelIdentity {
     crate::agent::ActiveModelIdentity {
-        provider_id: session_store.current_kind_id().parse().unwrap_or_else(|_| ConnectionId::fallback("unknown")),
+        provider_id: session_store
+            .current_kind_id()
+            .parse()
+            .unwrap_or_else(|_| ConnectionId::fallback("unknown")),
         model: session_store.current_session().model.clone(),
     }
 }

@@ -106,17 +106,14 @@ impl MemoryRetrieval {
         if !matches!(self.embedder.availability(), EmbedderAvailability::Ready) {
             return false;
         }
-        let cached: HashSet<String> = match self
-            .storage
-            .memory_vectors(self.embedder.model_id())
-            .await
-        {
-            Ok(rows) => rows.into_iter().map(|row| row.content_hash).collect(),
-            Err(err) => {
-                tracing::warn!(%err, "failed to load memory embedding cache");
-                return false;
-            }
-        };
+        let cached: HashSet<String> =
+            match self.storage.memory_vectors(self.embedder.model_id()).await {
+                Ok(rows) => rows.into_iter().map(|row| row.content_hash).collect(),
+                Err(err) => {
+                    tracing::warn!(%err, "failed to load memory embedding cache");
+                    return false;
+                }
+            };
         let missing: Vec<&MemoryEntry> = entries
             .iter()
             .filter(|entry| !cached.contains(&entry.content_hash))

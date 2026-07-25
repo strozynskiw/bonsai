@@ -1,4 +1,6 @@
-use crate::model_catalog::{ModelCatalog, ModelFeature, ConnectionId, ModelId, connection_id_for_provider_id};
+use crate::model_catalog::{
+    ConnectionId, ModelCatalog, ModelFeature, ModelId, connection_id_for_provider_id,
+};
 use crate::model_resolution::{
     normalize_reasoning_for_provider_model, resolved_model_for_provider_model,
 };
@@ -133,9 +135,13 @@ impl ModelOption {
                 discouraged_reasoning: resolved.discouraged_efforts.clone(),
                 supported_reasoning,
                 shortcut_bindings: session_store.model_shortcuts_for_selection(
-                    &provider_id.parse().unwrap_or_else(|_| ConnectionId::fallback("unknown")),
+                    &provider_id
+                        .parse()
+                        .unwrap_or_else(|_| ConnectionId::fallback("unknown")),
                     &model,
-                    Some(&canonical_model.parse().unwrap_or_else(|_| ModelId::fallback(&ConnectionId::fallback(provider_id)))),
+                    Some(&canonical_model.parse().unwrap_or_else(|_| {
+                        ModelId::fallback(&ConnectionId::fallback(provider_id))
+                    })),
                 ),
                 parameter_preview,
                 pricing,
@@ -144,8 +150,13 @@ impl ModelOption {
             };
         }
 
-        let shortcut_bindings =
-            session_store.model_shortcuts_for_selection(&provider_id.parse().unwrap_or_else(|_| ConnectionId::fallback("unknown")), &model, None);
+        let shortcut_bindings = session_store.model_shortcuts_for_selection(
+            &provider_id
+                .parse()
+                .unwrap_or_else(|_| ConnectionId::fallback("unknown")),
+            &model,
+            None,
+        );
         let capabilities = metadata.capabilities_for_model(&model);
         let live = catalog
             .zip(connection_id_for_provider_id(provider_id))
