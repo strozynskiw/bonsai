@@ -1460,7 +1460,7 @@ mod tests {
             fixture.project_root.clone(),
         )
         .active_model_identity(ActiveModelIdentity {
-            provider_id: "primary-provider".to_string(),
+            provider_id: "primary-provider".parse().unwrap(),
             model: "primary-model".to_string(),
         })
         .build()

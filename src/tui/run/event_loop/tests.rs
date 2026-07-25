@@ -2858,7 +2858,7 @@ async fn model_picker_shortcut_key_persists_and_toggles_selection() {
         let binding = session
             .model_shortcut_binding(key)
             .expect("shortcut key should persist selected model");
-        assert_eq!(binding.provider_id, "codex");
+        assert_eq!(binding.provider_id.as_str(), "codex");
         assert_eq!(binding.model, selected_model);
     }
     let Some(ModalKind::ModelPicker { entries }) = &app.modal else {

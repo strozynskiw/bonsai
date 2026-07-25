@@ -3,6 +3,7 @@
 //! from the crate's `agent` module via `pub use`.
 
 use super::*;
+use crate::model_catalog::ConnectionId;
 use crate::storage::SessionId;
 
 /// An image attached to a user turn, already encoded and ready to become an
@@ -308,7 +309,7 @@ pub struct UsageTotals {
 /// [`UsageTurn`] can be attributed to the model that produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ActiveModelIdentity {
-    pub provider_id: String,
+    pub provider_id: ConnectionId,
     pub model: String,
 }
 

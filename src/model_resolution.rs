@@ -37,7 +37,7 @@ pub(crate) fn active_model_identity(
     session_store: &SessionStore,
 ) -> crate::agent::ActiveModelIdentity {
     crate::agent::ActiveModelIdentity {
-        provider_id: session_store.current_kind_id().to_string(),
+        provider_id: session_store.current_kind_id().parse().unwrap_or_else(|_| ConnectionId::fallback("unknown")),
         model: session_store.current_session().model.clone(),
     }
 }
@@ -312,7 +312,7 @@ fn try_run_config_for_override(
                         session_store,
                         catalog,
                         SubagentModelSelection {
-                            provider_id: &selection.provider_id,
+                            provider_id: selection.provider_id.as_str(),
                             connection_id: selection.connection_id.as_ref(),
                             model_id: selection.model_id.as_ref(),
                             model: &selection.model,
@@ -1271,7 +1271,7 @@ mod tests {
             std::collections::BTreeMap::from([(
                 shortcut_key,
                 crate::model_role::ModelShortcutBinding {
-                    provider_id: "local-openai".to_string(),
+                    provider_id: "local-openai".parse().unwrap(),
                     connection_id: Some(connection_id.clone()),
                     model_id: Some(mini_model_id),
                     model: "local/mini".to_string(),
@@ -1289,7 +1289,7 @@ mod tests {
         assert_eq!(
             base.active_model_identity,
             Some(crate::agent::ActiveModelIdentity {
-                provider_id: "local-openai".to_string(),
+                provider_id: "local-openai".parse().unwrap(),
                 model: "local/qwen3-coder".to_string(),
             })
         );
@@ -1305,7 +1305,7 @@ mod tests {
         assert_eq!(
             overridden.active_model_identity,
             Some(crate::agent::ActiveModelIdentity {
-                provider_id: "local-openai".to_string(),
+                provider_id: "local-openai".parse().unwrap(),
                 model: "local/mini".to_string(),
             })
         );
@@ -1344,7 +1344,7 @@ mod tests {
         store.set_model_shortcut_binding(
             shortcut_key,
             crate::model_role::ModelShortcutBinding {
-                provider_id: "local-openai".to_string(),
+                provider_id: "local-openai".parse().unwrap(),
                 connection_id: Some(connection_id.clone()),
                 model_id: Some(qwen_model_id),
                 model: "local/qwen3-coder".to_string(),

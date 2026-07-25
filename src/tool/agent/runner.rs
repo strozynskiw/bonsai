@@ -14,6 +14,7 @@ use crate::agent::{
     ActiveModelIdentity, Agent, AgentRunResult, ExecutionLane, ExecutionLaneKind, UsageTotals,
     UsageTurn,
 };
+use crate::model_catalog::ConnectionId;
 use crate::output::SharedSink;
 use crate::provider::{PromptEstimator, Provider};
 use crate::self_review::SelfReviewMode;
@@ -69,7 +70,7 @@ impl SubagentProviderConfig {
     #[must_use]
     pub(crate) fn with_active_model_identity(mut self, provider_id: &str, model: &str) -> Self {
         self.active_model_identity = Some(ActiveModelIdentity {
-            provider_id: provider_id.to_string(),
+            provider_id: provider_id.parse().unwrap_or_else(|_| ConnectionId::fallback("unknown")),
             model: model.to_string(),
         });
         self

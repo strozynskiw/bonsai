@@ -93,7 +93,7 @@ impl LegacyModelRole {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ModelShortcutBinding {
-    pub(crate) provider_id: String,
+    pub(crate) provider_id: ConnectionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) connection_id: Option<ConnectionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,24 +106,24 @@ pub(crate) struct ModelShortcutBinding {
 impl ModelShortcutBinding {
     pub(crate) fn matches_model(
         &self,
-        provider_id: &str,
+        provider_id: &ConnectionId,
         model: &str,
-        model_id: Option<&str>,
+        model_id: Option<&ModelId>,
     ) -> bool {
         let same_model = self.model == model
             || self
                 .model_id
                 .as_ref()
                 .zip(model_id)
-                .is_some_and(|(bound, selected)| bound.as_str() == selected);
-        self.provider_id == provider_id && same_model
+                .is_some_and(|(bound, selected)| bound == selected);
+        self.provider_id == *provider_id && same_model
     }
 
     pub(crate) fn matches_selection(
         &self,
-        provider_id: &str,
+        provider_id: &ConnectionId,
         model: &str,
-        model_id: Option<&str>,
+        model_id: Option<&ModelId>,
         reasoning: ReasoningSelection,
     ) -> bool {
         self.matches_model(provider_id, model, model_id) && self.reasoning == reasoning
@@ -143,7 +143,7 @@ impl ModelShortcutBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelShortcutSelection {
     pub(crate) key: ModelShortcutKey,
-    pub(crate) provider_id: String,
+    pub(crate) provider_id: ConnectionId,
     pub(crate) connection_id: Option<ConnectionId>,
     pub(crate) model_id: Option<ModelId>,
     pub(crate) model: String,
@@ -167,7 +167,7 @@ fn selection_from_binding(
     key: ModelShortcutKey,
     binding: &ModelShortcutBinding,
 ) -> Option<ModelShortcutSelection> {
-    let factory = registry.lookup(&binding.provider_id)?;
+    let factory = registry.lookup(binding.provider_id.as_str())?;
     let metadata = factory.metadata();
     let resolved = binding
         .connection_id
@@ -175,7 +175,7 @@ fn selection_from_binding(
         .zip(binding.model_id.as_ref())
         .and_then(|(connection_id, model_id)| catalog?.resolve(connection_id, model_id).ok())
         .or_else(|| {
-            let connection_id = binding.provider_id.parse::<ConnectionId>().ok()?;
+            let connection_id = binding.provider_id.clone();
             catalog?.resolve_connection_model(&connection_id, &binding.model)
         });
     if let Some(resolved) = resolved {
@@ -201,14 +201,14 @@ fn selection_from_binding(
 
 fn selection_from_resolved(
     key: ModelShortcutKey,
-    provider_id: &str,
+    provider_id: &ConnectionId,
     model: String,
     resolved: &ResolvedModel,
     reasoning: ReasoningSelection,
 ) -> ModelShortcutSelection {
     ModelShortcutSelection {
         key,
-        provider_id: provider_id.to_string(),
+        provider_id: provider_id.clone(),
         connection_id: Some(resolved.connection_id.clone()),
         model_id: Some(resolved.model_id.clone()),
         model,

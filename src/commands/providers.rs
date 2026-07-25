@@ -28,7 +28,7 @@ pub(crate) struct ResolvedModelSelection {
 impl From<&ModelShortcutSelection> for ResolvedModelSelection {
     fn from(selection: &ModelShortcutSelection) -> Self {
         Self {
-            provider_id: selection.provider_id.clone(),
+            provider_id: selection.provider_id.as_str().to_string(),
             connection_id: selection.connection_id.clone(),
             model_id: selection.model_id.clone(),
             model: selection.model.clone(),

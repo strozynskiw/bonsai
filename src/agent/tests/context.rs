@@ -67,7 +67,7 @@ async fn provider_switch_normalizes_state_without_cross_provider_cache_regressio
         200_000,
         PromptEstimator::default(),
         crate::agent::ActiveModelIdentity {
-            provider_id: "opencode".to_string(),
+            provider_id: "opencode".parse().unwrap(),
             model: "qwen3-coder".to_string(),
         },
     );
@@ -84,7 +84,7 @@ async fn provider_switch_normalizes_state_without_cross_provider_cache_regressio
         200_000,
         PromptEstimator::default(),
         crate::agent::ActiveModelIdentity {
-            provider_id: "codex".to_string(),
+            provider_id: "codex".parse().unwrap(),
             model: "gpt-5.6-sol".to_string(),
         },
     );

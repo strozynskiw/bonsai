@@ -1696,7 +1696,7 @@ async fn model_shortcut_commands_accept_bare_and_model_forms_only() {
     store.set_model_shortcut_binding(
         key,
         crate::model_role::ModelShortcutBinding {
-            provider_id: "opencode".to_string(),
+            provider_id: "opencode".parse().unwrap(),
             connection_id: None,
             model_id: None,
             model: "beta".to_string(),

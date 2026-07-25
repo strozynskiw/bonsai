@@ -303,7 +303,7 @@ impl SessionStore {
         key: ModelShortcutKey,
         binding: ModelShortcutBinding,
     ) {
-        self.ensure_provider(&binding.provider_id);
+        self.ensure_provider(binding.provider_id.as_str());
         self.model_shortcuts.retain(|existing_key, existing| {
             *existing_key == key || !binding_matches_binding(existing, &binding)
         });
@@ -319,9 +319,9 @@ impl SessionStore {
 
     pub(crate) fn model_shortcuts_for_selection(
         &self,
-        provider_id: &str,
+        provider_id: &ConnectionId,
         model: &str,
-        model_id: Option<&str>,
+        model_id: Option<&ModelId>,
     ) -> Vec<(ModelShortcutKey, ReasoningSelection)> {
         self.model_shortcuts
             .iter()
@@ -436,7 +436,7 @@ mod tests {
 
     fn shortcut_binding(provider_id: &str, model: &str) -> ModelShortcutBinding {
         ModelShortcutBinding {
-            provider_id: provider_id.to_string(),
+            provider_id: provider_id.parse().unwrap(),
             connection_id: None,
             model_id: None,
             model: model.to_string(),
@@ -495,7 +495,7 @@ mod tests {
             .model_shortcut_binding(key)
             .expect("shortcut should be bound");
         assert!(held.matches_selection(
-            "codex",
+            &"codex".parse().unwrap(),
             "gpt-5.5",
             None,
             crate::provider::ReasoningSelection::default()
@@ -516,17 +516,17 @@ mod tests {
 
         // A different model does not hold the shortcut, so the key would reassign
         // rather than clear.
-        assert!(!binding.matches_model("codex", "gpt-5.4-mini", None));
+        assert!(!binding.matches_model(&"codex".parse().unwrap(), "gpt-5.4-mini", None));
         // Model-row badges still match by model, but exact toggles include reasoning.
-        assert!(binding.matches_model("codex", "gpt-5.5", None));
+        assert!(binding.matches_model(&"codex".parse().unwrap(), "gpt-5.5", None));
         assert!(!binding.matches_selection(
-            "codex",
+            &"codex".parse().unwrap(),
             "gpt-5.5",
             None,
             crate::provider::ReasoningSelection::High
         ));
         // Wrong provider, same model string, still not a match.
-        assert!(!binding.matches_model("anthropic", "gpt-5.5", None));
+        assert!(!binding.matches_model(&"anthropic".parse().unwrap(), "gpt-5.5", None));
     }
 
     #[test]

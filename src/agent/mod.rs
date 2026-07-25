@@ -685,7 +685,7 @@ impl Agent {
             provider_id: self
                 .active_model_identity
                 .as_ref()
-                .map(|identity| identity.provider_id.clone()),
+                .map(|identity| identity.provider_id.as_str().to_string()),
             model: self
                 .active_model_identity
                 .as_ref()

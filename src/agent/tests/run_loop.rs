@@ -3223,7 +3223,7 @@ async fn usage_turns_keep_the_model_identity_active_when_each_turn_ran() {
         fixture.project_root,
     )
     .active_model_identity(crate::agent::ActiveModelIdentity {
-        provider_id: "anthropic".to_string(),
+        provider_id: "anthropic".parse().unwrap(),
         model: "claude-sonnet".to_string(),
     })
     .build()
@@ -3235,7 +3235,7 @@ async fn usage_turns_keep_the_model_identity_active_when_each_turn_ran() {
         200_000,
         PromptEstimator::default(),
         crate::agent::ActiveModelIdentity {
-            provider_id: "codex".to_string(),
+            provider_id: "codex".parse().unwrap(),
             model: "gpt-5-codex".to_string(),
         },
     );
@@ -3264,7 +3264,7 @@ async fn switching_provider_preserves_conversation_history() {
         fixture.project_root,
     )
     .active_model_identity(crate::agent::ActiveModelIdentity {
-        provider_id: "anthropic".to_string(),
+        provider_id: "anthropic".parse().unwrap(),
         model: "claude-sonnet".to_string(),
     })
     .build()
@@ -3284,7 +3284,7 @@ async fn switching_provider_preserves_conversation_history() {
         200_000,
         PromptEstimator::default(),
         crate::agent::ActiveModelIdentity {
-            provider_id: "codex".to_string(),
+            provider_id: "codex".parse().unwrap(),
             model: "gpt-5-codex".to_string(),
         },
     );
@@ -3319,7 +3319,7 @@ async fn switching_provider_reuses_the_persisted_conversation_cache_key() {
         200_000,
         PromptEstimator::default(),
         crate::agent::ActiveModelIdentity {
-            provider_id: "codex".to_string(),
+            provider_id: "codex".parse().unwrap(),
             model: "gpt-5-codex".to_string(),
         },
     );
