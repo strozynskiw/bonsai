@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -13,7 +13,9 @@ pub(crate) struct Clipboard {
 impl Clipboard {
     pub(crate) fn system() -> Self {
         Self {
-            sink: Arc::new(SystemClipboard),
+            sink: Arc::new(SystemClipboard {
+                handle: Mutex::new(None),
+            }),
         }
     }
 
@@ -67,32 +69,48 @@ pub(crate) trait ClipboardSink: std::fmt::Debug + Send + Sync {
     }
 }
 
-#[derive(Debug)]
-struct SystemClipboard;
+/// A process-lifetime `arboard::Clipboard` handle. On Wayland the
+/// clipboard is a pull model (the data offer dies when the handle is
+/// dropped), so the handle must outlive every clipboard operation.
+struct SystemClipboard {
+    handle: Mutex<Option<arboard::Clipboard>>,
+}
+
+impl std::fmt::Debug for SystemClipboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemClipboard").finish_non_exhaustive()
+    }
+}
+
+impl SystemClipboard {
+    fn with_handle<T>(&self, f: impl FnOnce(&mut arboard::Clipboard) -> Result<T>) -> Result<T> {
+        let mut guard = self.handle.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(arboard::Clipboard::new().context("Failed to access system clipboard")?);
+        }
+        f(guard.as_mut().unwrap())
+    }
+}
 
 impl ClipboardSink for SystemClipboard {
     fn set_text(&self, text: &str) -> Result<()> {
-        let mut clipboard =
-            arboard::Clipboard::new().context("Failed to access system clipboard")?;
-        clipboard
-            .set_text(text.to_string())
-            .context("Failed to write to system clipboard")
+        self.with_handle(|clipboard| {
+            clipboard
+                .set_text(text.to_string())
+                .context("Failed to write to system clipboard")
+        })
     }
 
     fn get_text(&self) -> Result<Option<String>> {
-        let mut clipboard =
-            arboard::Clipboard::new().context("Failed to access system clipboard")?;
-        match clipboard.get_text() {
+        self.with_handle(|clipboard| match clipboard.get_text() {
             Ok(text) => Ok(Some(text)),
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
             Err(err) => Err(err).context("Failed to read text from system clipboard"),
-        }
+        })
     }
 
     fn get_image(&self) -> Result<Option<ClipboardImage>> {
-        let mut clipboard =
-            arboard::Clipboard::new().context("Failed to access system clipboard")?;
-        match clipboard.get_image() {
+        self.with_handle(|clipboard| match clipboard.get_image() {
             Ok(image) => Ok(Some(ClipboardImage {
                 width: image.width,
                 height: image.height,
@@ -100,7 +118,7 @@ impl ClipboardSink for SystemClipboard {
             })),
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
             Err(err) => Err(err).context("Failed to read image from system clipboard"),
-        }
+        })
     }
 }
 
@@ -443,5 +461,28 @@ mod tests {
         assert!(body.contains("read"));
         assert!(body.contains("call-1"));
         assert!(!is_text_item(&group));
+    }
+
+    /// `SystemClipboard::with_handle` caches the `arboard::Clipboard` for
+    /// the instance lifetime — critical on Wayland where the data offer
+    /// is tied to the handle's lifetime. A `set_text` → `get_text`
+    /// round-trip proves both operations share the cached handle.
+    #[test]
+    #[ignore = "requires a display (Wayland/X11/macOS) to connect to clipboard"]
+    fn with_handle_caches_instance() {
+        let sc = SystemClipboard {
+            handle: Mutex::new(None),
+        };
+        // Write through the cached handle.
+        sc.with_handle(|cb| {
+            cb.set_text("bonsai clipboard test".to_string())
+                .context("set")
+        })
+        .expect("set_text should succeed");
+        // Read back through the same cached handle.
+        let text = sc
+            .with_handle(|cb| cb.get_text().context("get"))
+            .expect("get_text should succeed");
+        assert_eq!(text, Some("bonsai clipboard test".to_string()));
     }
 }
