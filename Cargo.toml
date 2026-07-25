@@ -102,9 +102,10 @@ uuid = { version = "1.23.4", features = ["v7"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [features]
-default = ["memory-embeddings"]
-# Hybrid memory retrieval: BM25 + static embeddings. Without this feature (or
-# with BONSAI_MEMORY_EMBEDDINGS=off) recall degrades to BM25-only.
+default = []
+# Hybrid memory retrieval: BM25 + static embeddings (opt-in).
+# Enable with `--features memory-embeddings` or `BONSAI_MEMORY_EMBEDDINGS=1`.
+# Without this feature recall degrades to BM25-only.
 memory-embeddings = ["dep:model2vec-rs"]
 
 [dev-dependencies]
