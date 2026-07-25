@@ -80,7 +80,7 @@ impl MemoryRetrieval {
                 .sync_memory_entries(self.project_id, &entries)
                 .await
             {
-                tracing::warn!(error = %format!("{err:#}"), "memory shadow sync failed; will retry next turn");
+                tracing::warn!(%err, "memory shadow sync failed; will retry next turn");
                 return; // fingerprint not recorded => retried next turn
             }
             *self.embeddings_complete.lock().expect("memory embed lock") = false;
@@ -113,7 +113,7 @@ impl MemoryRetrieval {
         {
             Ok(rows) => rows.into_iter().map(|row| row.content_hash).collect(),
             Err(err) => {
-                tracing::warn!(error = %format!("{err:#}"), "failed to load memory embedding cache");
+                tracing::warn!(%err, "failed to load memory embedding cache");
                 return false;
             }
         };
@@ -128,7 +128,7 @@ impl MemoryRetrieval {
         let vectors = match self.embedder.encode(&texts) {
             Ok(vectors) => vectors,
             Err(err) => {
-                tracing::warn!(error = %format!("{err:#}"), "memory embedding encode failed");
+                tracing::warn!(%err, "memory embedding encode failed");
                 return false;
             }
         };
@@ -138,7 +138,7 @@ impl MemoryRetrieval {
                 .upsert_memory_embedding(&entry.content_hash, self.embedder.model_id(), &vector)
                 .await
             {
-                tracing::warn!(error = %format!("{err:#}"), "failed to cache memory embedding");
+                tracing::warn!(%err, "failed to cache memory embedding");
                 return false;
             }
         }
@@ -177,7 +177,7 @@ impl MemoryRetrieval {
                     }
                 }
                 Err(err) => {
-                    tracing::warn!(error = %format!("{err:#}"), "memory BM25 query failed; skipping recall lane");
+                    tracing::warn!(%err, "memory BM25 query failed; skipping recall lane");
                 }
             }
         }
@@ -242,14 +242,14 @@ impl MemoryRetrieval {
             Ok(mut vectors) if !vectors.is_empty() => vectors.remove(0),
             Ok(_) => return Vec::new(),
             Err(err) => {
-                tracing::warn!(error = %format!("{err:#}"), "memory query embedding failed; BM25-only this turn");
+                tracing::warn!(%err, "memory query embedding failed; BM25-only this turn");
                 return Vec::new();
             }
         };
         let rows = match self.storage.memory_vectors(self.embedder.model_id()).await {
             Ok(rows) => rows,
             Err(err) => {
-                tracing::warn!(error = %format!("{err:#}"), "memory embedding lookup failed; BM25-only this turn");
+                tracing::warn!(%err, "memory embedding lookup failed; BM25-only this turn");
                 return Vec::new();
             }
         };

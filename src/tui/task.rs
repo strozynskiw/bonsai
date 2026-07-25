@@ -174,7 +174,7 @@ pub(crate) async fn apply_persona_model(
     drop(session);
     tracing::info!(persona = ?persona, model = %model, "applied persona model");
     if let Err(err) = snapshot.save_async().await {
-        tracing::warn!(error = %format!("{err:#}"), "failed to persist persona model switch");
+        tracing::warn!(%err, "failed to persist persona model switch");
     }
     Some(ProviderRunSelection {
         provider: snapshot.provider_label().to_string(),

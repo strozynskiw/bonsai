@@ -281,7 +281,7 @@ impl Drop for WorkspaceLockGuard {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Err(err) = storage.release_workspace_lock(id).await {
-                    tracing::debug!(lock_id = id, error = %format!("{err:#}"), "workspace lock release failed");
+                    tracing::debug!(lock_id = id, %err, "workspace lock release failed");
                 }
             });
         }

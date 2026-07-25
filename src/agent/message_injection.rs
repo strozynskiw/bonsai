@@ -224,7 +224,7 @@ impl Agent {
         let deliveries = match bus.claim_agent_undelivered().await {
             Ok(deliveries) => deliveries,
             Err(err) => {
-                tracing::debug!(error = %format!("{err:#}"), "peer message claim failed");
+                tracing::debug!(%err, "peer message claim failed");
                 return false;
             }
         };

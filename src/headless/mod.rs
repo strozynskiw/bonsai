@@ -845,7 +845,7 @@ async fn fire_headless_wake_subscriptions(peer_bus: &crate::peer::PeerBus) {
         }
         Ok(_) => {}
         Err(err) => {
-            tracing::debug!(error = %format!("{err:#}"), "headless wake-subscription firing failed");
+            tracing::debug!(%err, "headless wake-subscription firing failed");
         }
     }
 }

@@ -123,7 +123,7 @@ impl MemoryService {
             .delete_memory_entry(self.project_id, entry.tier, name)
             .await
         {
-            tracing::warn!(error = %format!("{err:#}"), "failed to delete memory shadow row");
+            tracing::warn!(%err, "failed to delete memory shadow row");
         }
         Ok(path)
     }
@@ -152,7 +152,7 @@ impl MemoryService {
             .sync_memory_entries(self.project_id, &self.store.enabled_entries())
             .await
         {
-            tracing::warn!(error = %format!("{err:#}"), "failed to sync memory shadow after enable toggle");
+            tracing::warn!(%err, "failed to sync memory shadow after enable toggle");
         }
         Ok(written.entry.path)
     }
@@ -169,7 +169,7 @@ impl MemoryService {
             .delete_memory_entry(self.project_id, tier, name)
             .await
         {
-            tracing::warn!(error = %format!("{err:#}"), "failed to delete memory shadow row");
+            tracing::warn!(%err, "failed to delete memory shadow row");
         }
         Ok(path)
     }

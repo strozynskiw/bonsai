@@ -238,7 +238,7 @@ impl Agent {
         let block = match render_peer_status(&bus).await {
             Ok(block) => block,
             Err(err) => {
-                tracing::debug!(error = %format!("{err:#}"), "peer status render failed");
+                tracing::debug!(%err, "peer status render failed");
                 return;
             }
         };

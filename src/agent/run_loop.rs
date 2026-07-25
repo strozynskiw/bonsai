@@ -1615,7 +1615,7 @@ impl Agent {
             "\n====================\n[{ts}] request\nmessages = {messages:#?}\ntools = {tools:#?}\n",
             ts = unix_timestamp_secs(),
         )) {
-            tracing::warn!(error = %format!("{err:#}"), "transcript log_request failed");
+            tracing::warn!(%err, "transcript log_request failed");
         }
     }
 
@@ -1630,7 +1630,7 @@ impl Agent {
             content = response.content.as_str(),
             tool_calls = response.tool_calls,
         )) {
-            tracing::warn!(error = %format!("{err:#}"), "transcript log_response failed");
+            tracing::warn!(%err, "transcript log_response failed");
         }
     }
 

@@ -44,7 +44,7 @@ pub fn spawn_heartbeat_writer(
             };
             let is_busy = busy.load(std::sync::atomic::Ordering::Relaxed);
             if let Err(err) = storage.record_session_heartbeat(session_id, is_busy).await {
-                tracing::warn!(error = %format!("{err:#}"), "session heartbeat failed");
+                tracing::warn!(%err, "session heartbeat failed");
             }
         }
     })

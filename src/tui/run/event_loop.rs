@@ -1537,7 +1537,7 @@ fn spawn_peer_watcher(
                 }
                 Ok(_) => idle_ticks.clear(),
                 Err(err) => {
-                    tracing::debug!(error = %format!("{err:#}"), "wake relationship read failed");
+                    tracing::debug!(%err, "wake relationship read failed");
                 }
             }
             match peer_bus.claim_ui_undelivered().await {
@@ -1551,7 +1551,7 @@ fn spawn_peer_watcher(
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    tracing::debug!(error = %format!("{err:#}"), "peer watcher poll failed");
+                    tracing::debug!(%err, "peer watcher poll failed");
                 }
             }
             // Presence snapshot for the `/peers` view.
@@ -1698,7 +1698,7 @@ async fn maybe_start_peer_wake(
     let durable_messages = match peer_bus.pending_agent_messages_by_id(&message_ids).await {
         Ok(messages) => messages,
         Err(err) => {
-            tracing::debug!(error = %format!("{err:#}"), "peer wake inbox read failed");
+            tracing::debug!(%err, "peer wake inbox read failed");
             return false;
         }
     };
@@ -2015,7 +2015,7 @@ async fn drain_runtime_events_for_frame(
                         }
                         Ok(_) => {}
                         Err(err) => {
-                            tracing::debug!(error = %format!("{err:#}"), "wake-subscription firing failed");
+                            tracing::debug!(%err, "wake-subscription firing failed");
                         }
                     }
                 });
@@ -2162,7 +2162,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         let storage = storage.clone();
         tokio::spawn(async move {
             if let Err(err) = storage.purge_stale_peer_state().await {
-                tracing::debug!(error = %format!("{err:#}"), "peer message purge failed");
+                tracing::debug!(%err, "peer message purge failed");
             }
         });
     }
@@ -2589,7 +2589,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                     .record_session_file_changes(session_id, &changed_files)
                     .await
                 {
-                    tracing::debug!(error = %format!("{err:#}"), "file-change ledger write failed");
+                    tracing::debug!(%err, "file-change ledger write failed");
                 }
             });
         }

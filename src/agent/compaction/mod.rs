@@ -409,7 +409,7 @@ impl Agent {
                                 && !request.cancellation_token.is_cancelled()
                                 && !is_compaction_cancelled(&err) =>
                         {
-                            tracing::debug!(error = %format!("{err:#}"), "provider compaction summary failed; using deterministic fallback");
+                            tracing::debug!(%err, "provider compaction summary failed; using deterministic fallback");
                             summary_source = CompactionSummarySource::Deterministic;
                             Some(deterministic_summary)
                         }
