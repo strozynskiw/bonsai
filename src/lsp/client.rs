@@ -440,7 +440,8 @@ fn spawn_reader(
             std::mem::take(&mut connection.pending)
         };
         for (_, responder) in pending {
-            if let Err(_err) = responder.send(Err(PendingResponseError::Transport(reason.clone()))) {
+            if let Err(_err) = responder.send(Err(PendingResponseError::Transport(reason.clone())))
+            {
                 tracing::debug!("LSP drain responder dropped on transport death");
             }
         }

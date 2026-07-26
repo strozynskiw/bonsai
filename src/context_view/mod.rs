@@ -867,8 +867,8 @@ fn system_context_children(
         return Vec::new();
     }
 
-    let mut children = vec![ctx
-        .leaf(
+    let mut children = vec![
+        ctx.leaf(
             format!("{id}-persona"),
             ContextNodeKind::Persona,
             Some(ContextRole::System),
@@ -880,7 +880,8 @@ fn system_context_children(
             ContextSourceKind::SystemPrompt,
             "persona",
             "runtime persona",
-        )])];
+        )]),
+    ];
     let Some(project_text) = system_project_context_text(system_text, persona) else {
         return children;
     };
@@ -918,8 +919,8 @@ fn system_context_children(
         return children;
     }
 
-    let mut project_children = vec![ctx
-        .leaf(
+    let mut project_children = vec![
+        ctx.leaf(
             format!("{id}-project-env"),
             ContextNodeKind::ProjectEnvironment,
             Some(ContextRole::System),
@@ -932,7 +933,8 @@ fn system_context_children(
             "project-environment",
             "project context snapshot",
         )
-        .with_detail("environment")])];
+        .with_detail("environment")]),
+    ];
     if !context.steering_files.is_empty() {
         let instructions =
             "## Project instructions\nFollow these steering files (most specific first):";
