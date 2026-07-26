@@ -14,8 +14,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
+use strsim::normalized_levenshtein;
 
 use crate::diff::{FileDiff, build_deleted_file_diff, build_file_diff};
+use crate::tool::edit_recovery;
 use crate::tool::file_mutation::{
     FileMutationAction, FileMutationContext, FileWriteRequest, ParentDirs, ResolvedMutationPath,
     WriteContentContext, WritePrecondition, file_mutation_tool_ctors,
@@ -265,12 +267,38 @@ fn parse_patch(input: &str) -> Result<Vec<PatchOp>> {
 // Hunk application
 // ---------------------------------------------------------------------------
 
-fn apply_hunks(original: &str, hunks: &[Hunk], path: &str) -> Result<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HunkMatchKind {
+    Exact,
+    TrailingWhitespace,
+    Indentation,
+    FuzzyEdit(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HunkMatch {
+    start: usize,
+    kind: HunkMatchKind,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AppliedHunks {
+    content: String,
+    relaxed_matches: Vec<String>,
+}
+
+fn apply_hunks(
+    original: &str,
+    hunks: &[Hunk],
+    path: &str,
+    allow_fuzzy_edit_fallback: bool,
+) -> Result<AppliedHunks> {
     let had_trailing_newline = original.ends_with('\n') || original.is_empty();
     let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
     let mut cursor = 0usize;
+    let mut relaxed_matches = Vec::new();
 
-    for hunk in hunks {
+    for (hunk_index, hunk) in hunks.iter().enumerate() {
         if let Some(locator) = &hunk.locator
             && let Some(pos) = lines[cursor..]
                 .iter()
@@ -287,47 +315,221 @@ fn apply_hunks(original: &str, hunks: &[Hunk], path: &str) -> Result<String> {
                 HunkLine::Add(_) => None,
             })
             .collect();
-        let new: Vec<String> = hunk
-            .lines
-            .iter()
-            .filter_map(|l| match l {
-                HunkLine::Context(s) | HunkLine::Add(s) => Some(s.clone()),
-                HunkLine::Remove(_) => None,
-            })
-            .collect();
-
         if old.is_empty() {
             // Pure addition with no anchor: append at end of file.
-            lines.extend(new);
+            lines.extend(hunk_new_lines(hunk));
             cursor = lines.len();
             continue;
         }
 
-        let at = find_block(&lines, cursor, &old).ok_or_else(|| {
-            anyhow::anyhow!(
-                "apply_patch: a hunk for '{path}' does not match the file. First expected line: \
-                 {:?}. The context/removed lines must match the file exactly (whitespace \
-                 included). Re-read the region and resend the hunk, or use the edit tool for \
-                 this change.",
-                old.first().copied().unwrap_or_default()
-            )
+        let matched = find_block(
+            &lines,
+            cursor,
+            &old,
+            allow_fuzzy_edit_fallback && hunks.len() == 1,
+        )
+        .ok_or_else(|| {
+            hunk_mismatch_error(&lines, cursor, &old, path, hunk_index.saturating_add(1))
         })?;
-        lines.splice(at..at + old.len(), new.iter().cloned());
-        cursor = at + new.len();
+        let actual = &lines[matched.start..matched.start + old.len()];
+        let new = match matched.kind {
+            HunkMatchKind::Exact => hunk_new_lines(hunk),
+            HunkMatchKind::TrailingWhitespace
+            | HunkMatchKind::Indentation
+            | HunkMatchKind::FuzzyEdit(_) => relaxed_hunk_new_lines(hunk, actual, matched.kind),
+        };
+        if matched.kind != HunkMatchKind::Exact {
+            let note = match matched.kind {
+                HunkMatchKind::TrailingWhitespace => format!(
+                    "hunk {} matched modulo trailing whitespace at lines {}-{}",
+                    hunk_index.saturating_add(1),
+                    matched.start.saturating_add(1),
+                    matched.start.saturating_add(old.len())
+                ),
+                HunkMatchKind::Indentation => format!(
+                    "hunk {} matched modulo indentation at lines {}-{}",
+                    hunk_index.saturating_add(1),
+                    matched.start.saturating_add(1),
+                    matched.start.saturating_add(old.len())
+                ),
+                HunkMatchKind::FuzzyEdit(similarity) => {
+                    format!(
+                        "hunk {} used edit-style fuzzy fallback at lines {}-{} ({similarity}% similar)",
+                        hunk_index.saturating_add(1),
+                        matched.start.saturating_add(1),
+                        matched.start.saturating_add(old.len())
+                    )
+                }
+                HunkMatchKind::Exact => unreachable!("filtered above"),
+            };
+            relaxed_matches.push(note);
+        }
+        lines.splice(
+            matched.start..matched.start + old.len(),
+            new.iter().cloned(),
+        );
+        cursor = matched.start + new.len();
     }
 
     let mut result = lines.join("\n");
     if had_trailing_newline && !result.is_empty() {
         result.push('\n');
     }
-    Ok(result)
+    Ok(AppliedHunks {
+        content: result,
+        relaxed_matches,
+    })
 }
 
-/// First position at or after `from` where `block` matches `lines`, comparing
-/// exactly first and falling back to trailing-whitespace-insensitive.
-fn find_block(lines: &[String], from: usize, block: &[&str]) -> Option<usize> {
-    let exact = window_position(lines, from, block, |a, b| a == b);
-    exact.or_else(|| window_position(lines, from, block, |a, b| a.trim_end() == b.trim_end()))
+fn hunk_new_lines(hunk: &Hunk) -> Vec<String> {
+    hunk.lines
+        .iter()
+        .filter_map(|line| match line {
+            HunkLine::Context(text) | HunkLine::Add(text) => Some(text.clone()),
+            HunkLine::Remove(_) => None,
+        })
+        .collect()
+}
+
+/// Preserve the file's real context bytes when a relaxed match fires. Added
+/// lines inherit an indentation mapping only when the hunk's old lines prove a
+/// unique expected-prefix -> actual-prefix relationship.
+fn relaxed_hunk_new_lines(hunk: &Hunk, actual: &[String], kind: HunkMatchKind) -> Vec<String> {
+    let indentation = if kind == HunkMatchKind::Indentation {
+        indentation_mappings(hunk, actual)
+    } else {
+        Vec::new()
+    };
+    let mut old_index = 0usize;
+    let mut new = Vec::new();
+    for line in &hunk.lines {
+        match line {
+            HunkLine::Context(_) => {
+                if let Some(actual_line) = actual.get(old_index) {
+                    new.push(actual_line.clone());
+                }
+                old_index = old_index.saturating_add(1);
+            }
+            HunkLine::Remove(_) => {
+                old_index = old_index.saturating_add(1);
+            }
+            HunkLine::Add(text) => {
+                let expected = leading_whitespace(text);
+                let adjusted = indentation
+                    .iter()
+                    .find(|(from, _to)| *from == expected)
+                    .map_or_else(
+                        || text.clone(),
+                        |(_from, to)| format!("{to}{}", &text[expected.len()..]),
+                    );
+                new.push(adjusted);
+            }
+        }
+    }
+    new
+}
+
+fn indentation_mappings<'hunk, 'actual>(
+    hunk: &'hunk Hunk,
+    actual: &'actual [String],
+) -> Vec<(&'hunk str, &'actual str)> {
+    let mut mappings = Vec::new();
+    let mut ambiguous = Vec::new();
+    for (expected, actual) in hunk
+        .lines
+        .iter()
+        .filter_map(|line| match line {
+            HunkLine::Context(text) | HunkLine::Remove(text) => Some(text.as_str()),
+            HunkLine::Add(_) => None,
+        })
+        .zip(actual)
+    {
+        if expected.trim().is_empty() || actual.trim().is_empty() {
+            continue;
+        }
+        let mapping = (leading_whitespace(expected), leading_whitespace(actual));
+        if ambiguous.contains(&mapping.0) || mappings.contains(&mapping) {
+            continue;
+        }
+        if let Some(index) = mappings
+            .iter()
+            .position(|(from, to)| *from == mapping.0 && *to != mapping.1)
+        {
+            mappings.remove(index);
+            ambiguous.push(mapping.0);
+        } else {
+            mappings.push(mapping);
+        }
+    }
+    mappings
+}
+
+fn leading_whitespace(text: &str) -> &str {
+    let first_non_whitespace = text
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+        .unwrap_or(text.len());
+    &text[..first_non_whitespace]
+}
+
+/// First position at or after `from` where `block` matches `lines`. Exact
+/// matching wins, then trailing-whitespace drift, then a unique
+/// indentation-only match. The uniqueness requirement is the edit tool's
+/// conservative fallback rule: never auto-apply an ambiguous fuzzy guess.
+fn find_block(
+    lines: &[String],
+    from: usize,
+    block: &[&str],
+    allow_fuzzy_edit_fallback: bool,
+) -> Option<HunkMatch> {
+    if let Some(start) = window_position(lines, from, block, |a, b| a == b)
+        .first()
+        .copied()
+    {
+        return Some(HunkMatch {
+            start,
+            kind: HunkMatchKind::Exact,
+        });
+    }
+    if let Some(start) = window_position(lines, from, block, |a, b| a.trim_end() == b.trim_end())
+        .first()
+        .copied()
+    {
+        return Some(HunkMatch {
+            start,
+            kind: HunkMatchKind::TrailingWhitespace,
+        });
+    }
+    let indentation = window_position(lines, from, block, |a, b| a.trim() == b.trim());
+    if let [start] = indentation.as_slice() {
+        return Some(HunkMatch {
+            start: *start,
+            kind: HunkMatchKind::Indentation,
+        });
+    }
+    if !allow_fuzzy_edit_fallback || lines.len() < block.len() {
+        return None;
+    }
+    let expected = block.join("\n");
+    let mut candidates = (0..=lines.len() - block.len())
+        .map(|start| {
+            let actual = lines[start..start + block.len()].join("\n");
+            (start, normalized_levenshtein(&actual, &expected))
+        })
+        .filter(|(_, score)| *score >= 0.85)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let (start, score) = *candidates.first()?;
+    if candidates
+        .get(1)
+        .is_some_and(|(_, runner_up)| score - runner_up < 0.05)
+    {
+        return None;
+    }
+    Some(HunkMatch {
+        start,
+        kind: HunkMatchKind::FuzzyEdit((score * 100.0).round() as u8),
+    })
 }
 
 fn window_position(
@@ -335,12 +537,49 @@ fn window_position(
     from: usize,
     block: &[&str],
     eq: impl Fn(&str, &str) -> bool,
-) -> Option<usize> {
+) -> Vec<usize> {
     if block.is_empty() || lines.len() < block.len() {
-        return None;
+        return Vec::new();
     }
     (from..=lines.len() - block.len())
-        .find(|&start| (0..block.len()).all(|i| eq(&lines[start + i], block[i])))
+        .filter(|&start| (0..block.len()).all(|i| eq(&lines[start + i], block[i])))
+        .collect()
+}
+
+fn hunk_mismatch_error(
+    lines: &[String],
+    expected_start: usize,
+    old: &[&str],
+    path: &str,
+    hunk_number: usize,
+) -> anyhow::Error {
+    const MAX_ACTUAL_LINES: usize = 12;
+    let start = expected_start.min(lines.len());
+    let end = start
+        .saturating_add(old.len().max(1))
+        .min(lines.len())
+        .min(start.saturating_add(MAX_ACTUAL_LINES));
+    let actual = if start == end {
+        "(expected range is past EOF)".to_string()
+    } else {
+        lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, line)| format!("{:>5}: {line}", start + offset + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let current = lines.join("\n");
+    let expected = old.join("\n");
+    let nearest = edit_recovery::nearest_match_hint(&current, &expected)
+        .map(|hint| format!("\n{hint}"))
+        .unwrap_or_default();
+    anyhow::anyhow!(
+        "apply_patch: hunk {hunk_number} for '{path}' does not match the file. First expected \
+         line: {:?}.\nActual file content near the expected range:\n{actual}{nearest}\nRe-read the \
+         indicated range and resend the hunk, or use the edit tool with the exact on-disk text.",
+        old.first().copied().unwrap_or_default()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -450,14 +689,10 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply one patch that creates, updates, moves, or deletes SEVERAL files in a single call \
-         — the fastest way to land a multi-file change or a greenfield burst of new files. Format \
-         (V4A): '*** Begin Patch', then per file '*** Add File: <path>' with '+' content lines, \
-         '*** Update File: <path>' with @@ hunks (' ' context, '-' removed, '+' added lines, \
-         optionally '*** Move to: <path>'), or '*** Delete File: <path>', then '*** End Patch'. \
-         The patch applies atomically: if any hunk fails to match, nothing is written. Updated \
-         files must be read first. For a single targeted replacement the edit tool is still the \
-         better fit."
+        "Atomically create or change several already-understood files with a V4A patch. Use \
+         '*** Begin Patch', per-file Add/Update/Delete sections with +/-/context lines, then \
+         '*** End Patch'. Reserve this for new-file creation or multi-file changes whose existing \
+         targets were read in the current turn; use edit for a targeted single-file replacement."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -488,6 +723,8 @@ impl Tool for ApplyPatchTool {
         };
         let args: ApplyPatchArgs = parse_args("apply_patch", args)?;
         let ops = parse_patch(&args.input)?;
+        let allow_fuzzy_edit_fallback =
+            matches!(ops.as_slice(), [PatchOp::Update { hunks, .. }] if hunks.len() == 1);
 
         {
             let mut seen = std::collections::HashSet::new();
@@ -576,7 +813,13 @@ impl Tool for ApplyPatchTool {
                         );
                     };
                     let old_content = guard.read_existing_content(&canonical, path).await?;
-                    let new_content = apply_hunks(&old_content, hunks, path)?;
+                    let applied =
+                        apply_hunks(&old_content, hunks, path, allow_fuzzy_edit_fallback)?;
+                    let new_content = applied.content;
+                    if !applied.relaxed_matches.is_empty() {
+                        summary_lines
+                            .push(format!("~ {path} ({})", applied.relaxed_matches.join("; ")));
+                    }
 
                     if let Some(dest) = move_to {
                         let write_guard = self.ctx.guard(FileMutationAction::Write);
@@ -1149,7 +1392,7 @@ mod tests {
         let fixture = TestFixture::new();
         let ok = fixture.create_file("a.txt", "alpha\n");
         mark_read(&fixture, &ok).await;
-        let bad = fixture.create_file("b.txt", "real content\n");
+        let bad = fixture.create_file("b.txt", "content that is almost there\n");
         mark_read(&fixture, &bad).await;
         let tool = tool(&fixture);
         let patch = "*** Begin Patch\n\
@@ -1166,9 +1409,93 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not match the file"), "{err}");
+        assert!(
+            err.contains("Actual file content near the expected range"),
+            "{err}"
+        );
+        assert!(err.contains("Closest match"), "{err}");
         // Atomicity: the matching first hunk must not have been written.
         assert_eq!(std::fs::read_to_string(ok).unwrap(), "alpha\n");
-        assert_eq!(std::fs::read_to_string(bad).unwrap(), "real content\n");
+        assert_eq!(
+            std::fs::read_to_string(bad).unwrap(),
+            "content that is almost there\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn unique_indentation_drift_uses_edit_style_fallback_and_reports_it() {
+        let fixture = TestFixture::new();
+        let file = fixture.create_file(
+            "src/main.rs",
+            "fn main() {\n        old();\n        keep();\n}\n",
+        );
+        mark_read(&fixture, &file).await;
+        let tool = tool(&fixture);
+        let patch = "*** Begin Patch\n\
+                     *** Update File: src/main.rs\n\
+                     -    old();\n\
+                     +    new();\n\
+                          keep();\n\
+                     *** End Patch";
+
+        let output = tool.execute(json!({ "input": patch })).await.unwrap();
+
+        assert!(
+            output
+                .rendered_summary()
+                .contains("matched modulo indentation"),
+            "{}",
+            output.rendered_summary()
+        );
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "fn main() {\n        new();\n        keep();\n}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_file_patch_uses_unique_fuzzy_edit_fallback() {
+        let fixture = TestFixture::new();
+        let file = fixture.create_file(
+            "src/lib.rs",
+            "fn load() {\n    let value = service.fetch_one(&self.pool)?;\n    save(value);\n}\n",
+        );
+        mark_read(&fixture, &file).await;
+        let tool = tool(&fixture);
+        let patch = "*** Begin Patch\n\
+                     *** Update File: src/lib.rs\n\
+                     -    let value = service.fetch_one(&pool)?;\n\
+                     -    save(value);\n\
+                     +    let value = service.fetch_optional(&self.pool)?;\n\
+                     +    save(value);\n\
+                     *** End Patch";
+
+        let output = tool.execute(json!({ "input": patch })).await.unwrap();
+
+        assert!(
+            output
+                .rendered_summary()
+                .contains("edit-style fuzzy fallback"),
+            "{}",
+            output.rendered_summary()
+        );
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "fn load() {\n    let value = service.fetch_optional(&self.pool)?;\n    save(value);\n}\n"
+        );
+    }
+
+    #[test]
+    fn ambiguous_indentation_drift_is_not_auto_applied() {
+        let lines = vec![
+            "    old();".to_string(),
+            "    keep();".to_string(),
+            "        old();".to_string(),
+            "        keep();".to_string(),
+        ];
+        let block = ["old();", "keep();"];
+
+        assert_eq!(find_block(&lines, 0, &block, false), None);
     }
 
     #[tokio::test]

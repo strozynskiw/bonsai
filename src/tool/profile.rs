@@ -181,7 +181,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "write",
         SelfAuthorized,
         PathScoped,
-        [2, ABSENT, 1, ABSENT, 12],
+        [12, ABSENT, 1, ABSENT, 12],
         [false; 5],
         Standard,
     ),
@@ -191,7 +191,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "apply_patch",
         SelfAuthorized,
         Serialized,
-        [3, ABSENT, ABSENT, ABSENT, 13],
+        [13, ABSENT, ABSENT, ABSENT, 13],
         [false; 5],
         Standard,
     ),
@@ -201,7 +201,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "edit",
         SelfAuthorized,
         PathScoped,
-        [4, ABSENT, 2, ABSENT, 14],
+        [14, ABSENT, 2, ABSENT, 14],
         [false; 5],
         Standard,
     ),
@@ -211,7 +211,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "bash",
         SelfAuthorized,
         Serialized,
-        [5, ABSENT, 3, ABSENT, 15],
+        [15, ABSENT, 3, ABSENT, 15],
         [false; 5],
         Standard,
     ),
@@ -221,7 +221,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "terminal",
         LocalState,
         Serialized,
-        [6, ABSENT, 4, ABSENT, 16],
+        [16, ABSENT, 4, ABSENT, 16],
         [false; 5],
         Standard,
     ),
@@ -231,7 +231,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "glob",
         ReadOnly,
         PathScoped,
-        [7, 2, ABSENT, 2, 2],
+        [2, 2, ABSENT, 2, 2],
         [false; 5],
         Standard,
     ),
@@ -241,7 +241,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "grep",
         ReadOnly,
         PathScoped,
-        [8, 3, ABSENT, 3, 3],
+        [3, 3, ABSENT, 3, 3],
         [false; 5],
         Standard,
     ),
@@ -251,7 +251,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "symbol_search",
         ReadOnly,
         PathScoped,
-        [9, 4, ABSENT, 4, 4],
+        [4, 4, ABSENT, 4, 4],
         [false; 5],
         Standard,
     ),
@@ -261,7 +261,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "definition",
         ReadOnly,
         PathScoped,
-        [10, 5, ABSENT, 5, 5],
+        [5, 5, ABSENT, 5, 5],
         [false; 5],
         Standard,
     ),
@@ -271,7 +271,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "references",
         ReadOnly,
         PathScoped,
-        [11, 6, ABSENT, 6, 6],
+        [6, 6, ABSENT, 6, 6],
         [false; 5],
         Standard,
     ),
@@ -281,7 +281,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "hover",
         ReadOnly,
         PathScoped,
-        [12, 7, ABSENT, 7, 7],
+        [7, 7, ABSENT, 7, 7],
         [false; 5],
         Standard,
     ),
@@ -291,7 +291,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "workspace_symbol",
         ReadOnly,
         PathScoped,
-        [13, 8, ABSENT, 8, 8],
+        [8, 8, ABSENT, 8, 8],
         [false; 5],
         Standard,
     ),
@@ -301,7 +301,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "rename_symbol",
         SelfAuthorized,
         Serialized,
-        [14, ABSENT, ABSENT, ABSENT, 17],
+        [17, ABSENT, ABSENT, ABSENT, 17],
         [false; 5],
         Standard,
     ),
@@ -311,7 +311,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "git",
         ReadOnly,
         AlwaysSafe,
-        [15, 9, ABSENT, 9, 9],
+        [9, 9, ABSENT, 9, 9],
         [false; 5],
         Standard,
     ),
@@ -321,7 +321,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "read_region",
         ReadOnly,
         PathScoped,
-        [16, 10, ABSENT, 10, 10],
+        [10, 10, ABSENT, 10, 10],
         [false; 5],
         Standard,
     ),
@@ -331,7 +331,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         "read_symbol",
         ReadOnly,
         PathScoped,
-        [17, 11, ABSENT, 11, 11],
+        [11, 11, ABSENT, 11, 11],
         [false; 5],
         Standard,
     ),
@@ -455,7 +455,7 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         SelfAuthorized,
         AlwaysSafe,
         [28, 32, ABSENT, ABSENT, ABSENT],
-        [false; 5],
+        [true, true, false, false, false],
         Standard,
     ),
     descriptor(
@@ -682,5 +682,23 @@ mod tests {
                 assert!(profile_names.insert(descriptor.name));
             }
         }
+    }
+
+    #[test]
+    fn coding_and_sub_lanes_share_the_read_only_schema_prefix() {
+        let names = |profile| {
+            descriptors_for(profile, Standard)
+                .into_iter()
+                .map(|descriptor| descriptor.name)
+                .collect::<Vec<_>>()
+        };
+        let coding = names(ToolProfile::Coding);
+        let planning = names(ToolProfile::Planning);
+        let builtin_subagent = names(ToolProfile::BuiltinSubagent);
+        let custom_subagent = names(ToolProfile::CustomSubagent);
+
+        assert_eq!(&coding[..12], &planning[..12]);
+        assert_eq!(&coding[..12], builtin_subagent.as_slice());
+        assert_eq!(&coding[..12], &custom_subagent[..12]);
     }
 }

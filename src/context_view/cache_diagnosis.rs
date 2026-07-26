@@ -167,7 +167,52 @@ pub(crate) fn last_turn_verdict(report: &ContextReport) -> Option<String> {
         }
         TurnCacheAssessment::NoUsage => unreachable!("filtered above"),
     };
+    if let Some((expected, actual)) = consecutive_cache_regression(report) {
+        return Some(format!(
+            "CACHE ALERT — 2 consecutive misses (expected ~{expected}%, read {actual}%) · {verdict}"
+        ));
+    }
     Some(verdict)
+}
+
+fn consecutive_cache_regression(report: &ContextReport) -> Option<(u64, u64)> {
+    const WINDOW: usize = 2;
+    const REGRESSION_GAP_PERCENT: u64 = 10;
+
+    let latest = report.usage_turns.iter().rev().find(|turn| {
+        turn.status == UsageTurnStatus::Reported
+            && turn.expected_cacheable_percent.is_some()
+            && turn.actual_cache_read_percent.is_some()
+    })?;
+    let samples = report
+        .usage_turns
+        .iter()
+        .rev()
+        .filter(|turn| {
+            turn.lane_kind == latest.lane_kind
+                && turn.lane_id == latest.lane_id
+                && turn.status == UsageTurnStatus::Reported
+                && turn.rewrite_kind == ContextRewriteKind::None
+        })
+        .filter_map(|turn| {
+            Some((
+                turn.expected_cacheable_percent?,
+                turn.actual_cache_read_percent?,
+            ))
+        })
+        .take(WINDOW)
+        .collect::<Vec<_>>();
+    if samples.len() != WINDOW
+        || !samples
+            .iter()
+            .all(|(expected, actual)| *actual < expected.saturating_sub(REGRESSION_GAP_PERCENT))
+    {
+        return None;
+    }
+    Some((
+        samples.iter().map(|sample| sample.0).sum::<u64>() / WINDOW as u64,
+        samples.iter().map(|sample| sample.1).sum::<u64>() / WINDOW as u64,
+    ))
 }
 
 fn diagnose_turn(
@@ -735,6 +780,40 @@ mod tests {
         let verdict = last_turn_verdict(&report).unwrap();
         assert!(verdict.starts_with("cache cold last turn"), "{verdict}");
         assert!(!verdict.contains("BROKE"), "{verdict}");
+    }
+
+    #[test]
+    fn ctx_alerts_after_two_consecutive_expected_cache_regressions() {
+        let mut first = turn(1, Some(900), Some(1_000));
+        first.expected_cacheable_percent = Some(90);
+        first.actual_cache_read_percent = Some(75);
+        let mut second = turn(2, Some(800), Some(1_000));
+        second.expected_cacheable_percent = Some(92);
+        second.actual_cache_read_percent = Some(70);
+        let report = report_with(vec![first, second], Vec::new());
+
+        let verdict = last_turn_verdict(&report).unwrap();
+
+        assert!(verdict.starts_with("CACHE ALERT"), "{verdict}");
+        assert!(verdict.contains("2 consecutive misses"), "{verdict}");
+        assert!(verdict.contains("expected ~91%"), "{verdict}");
+        assert!(verdict.contains("read 72%"), "{verdict}");
+    }
+
+    #[test]
+    fn ctx_does_not_alert_for_a_single_cache_regression() {
+        let mut first = turn(1, Some(900), Some(1_000));
+        first.expected_cacheable_percent = Some(90);
+        first.actual_cache_read_percent = Some(88);
+        let mut second = turn(2, Some(800), Some(1_000));
+        second.expected_cacheable_percent = Some(92);
+        second.actual_cache_read_percent = Some(70);
+        let report = report_with(vec![first, second], Vec::new());
+
+        assert!(
+            !last_turn_verdict(&report).unwrap().contains("CACHE ALERT"),
+            "one bad turn is not a regression streak"
+        );
     }
 
     #[test]

@@ -209,6 +209,20 @@ fn format_entries(entries: &[DiagEntry]) -> String {
     out.trim_end().to_string()
 }
 
+pub(crate) fn format_cargo_json_for_bash(stdout: &str, stderr: &str) -> String {
+    let entries = parse_cargo_output(stdout, DiagnosticKind::All);
+    if entries.is_empty() {
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            "No diagnostics found.".to_string()
+        } else {
+            format!("No compiler diagnostics found.\n\ncargo output:\n{stderr}")
+        }
+    } else {
+        format_entries(&entries)
+    }
+}
+
 #[async_trait]
 impl Tool for DiagnosticsTool {
     fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {

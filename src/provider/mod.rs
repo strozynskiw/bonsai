@@ -510,14 +510,17 @@ pub(crate) fn codex_routing_thread_id(conversation_key: &str) -> String {
 /// while sending different prefixes collide on one cache route — forensics
 /// measured the planning lane at 0% cache hits over five turns while
 /// the coding lane ran at 50%. Suffixing the key with a fingerprint of the
-/// lane's byte-stable instructions gives each lane its own stable route while
-/// staying identical across that lane's turns. Deliberate — don't simplify
-/// back to one key per conversation.
+/// lane's byte-stable persona gives each lane its own stable route while letting
+/// parent/subagent lanes with the same persona share a warm route even when
+/// their project-context tails advertise different tool scopes.
 pub(crate) fn lane_scoped_cache_key(conversation_key: &str, lane_instructions: &str) -> String {
     if lane_instructions.is_empty() {
         return conversation_key.to_string();
     }
-    let lane = blake3::hash(lane_instructions.as_bytes()).to_hex();
+    let stable_persona = lane_instructions
+        .split_once("\n\n# Project context")
+        .map_or(lane_instructions, |(persona, _)| persona);
+    let lane = blake3::hash(stable_persona.as_bytes()).to_hex();
     format!("{conversation_key}-{}", &lane[..8])
 }
 
@@ -570,6 +573,20 @@ mod cache_key_tests {
     #[test]
     fn lane_scoped_cache_key_without_instructions_falls_back_to_conversation_key() {
         assert_eq!(lane_scoped_cache_key("bonsai-abc", ""), "bonsai-abc");
+    }
+
+    #[test]
+    fn lane_cache_route_ignores_project_context_tail() {
+        let parent = lane_scoped_cache_key(
+            "bonsai-abc",
+            "coding persona\n\n# Project context\nparent tools",
+        );
+        let subagent = lane_scoped_cache_key(
+            "bonsai-abc",
+            "coding persona\n\n# Project context\nread-only tools",
+        );
+
+        assert_eq!(parent, subagent);
     }
 }
 

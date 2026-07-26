@@ -36,6 +36,9 @@ pub(crate) struct ReviewBaseline {
 /// any non-documentation new file, cross the bar regardless of the selected
 /// self-review mode.
 pub(crate) const SELF_REVIEW_MIN_CHANGED_LINES: usize = 12;
+/// Automatic reviews are expensive and low-yield on small routine diffs.
+/// Explicit `on`/`ask` modes retain the lower general eligibility threshold.
+pub(crate) const SELF_REVIEW_AUTO_MIN_CHANGED_LINES: usize = 80;
 
 impl CapturedDiff {
     fn redact_secrets(&mut self) {
@@ -64,6 +67,17 @@ impl CapturedDiff {
     /// pass in any mode.
     pub(crate) fn is_below_review_threshold(&self) -> bool {
         self.is_documentation_only() || self.is_tiny_tracked_edit()
+    }
+
+    /// Auto mode skips routine diffs below 80 changed lines, but always keeps
+    /// the lower general threshold for security/provider/sandbox/migration
+    /// boundaries where a small change can carry disproportionate risk.
+    pub(crate) fn is_below_auto_review_threshold(&self) -> bool {
+        if self.touches_auto_review_risk_path() {
+            return false;
+        }
+        self.is_below_review_threshold()
+            || self.changed_line_count() < SELF_REVIEW_AUTO_MIN_CHANGED_LINES
     }
 
     fn is_tiny_tracked_edit(&self) -> bool {
@@ -108,12 +122,31 @@ impl CapturedDiff {
         }
         files
     }
+
+    fn touches_auto_review_risk_path(&self) -> bool {
+        self.tracked_files()
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(self.untracked.iter().map(String::as_str))
+            .any(is_auto_review_risk_path)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiffFile {
     path: String,
     is_new: bool,
+}
+
+fn is_auto_review_risk_path(path: &str) -> bool {
+    let normalized = path.trim_matches('"').replace('\\', "/");
+    normalized == "src/permissions.rs"
+        || normalized.starts_with("src/provider/")
+        || normalized == "src/sandbox.rs"
+        || normalized.starts_with("src/sandbox/")
+        || normalized == "src/storage/mod.rs"
+        || normalized.starts_with("migrations/")
+        || normalized.starts_with("src/storage/migrations/")
 }
 
 fn diff_git_file(line: &str) -> Option<DiffFile> {
@@ -1001,6 +1034,43 @@ mod tests {
             truncated: false,
         };
         assert!(!mixed.is_below_review_threshold());
+    }
+
+    #[test]
+    fn auto_review_uses_large_diff_or_risk_path_gate() {
+        let routine = CapturedDiff {
+            command: "git diff HEAD".to_string(),
+            stat: " src/tui/view.rs | 20 ++++++++++----------".to_string(),
+            diff_body: format!(
+                "diff --git a/src/tui/view.rs b/src/tui/view.rs\n--- a/src/tui/view.rs\n+++ b/src/tui/view.rs\n{}",
+                (0..20)
+                    .map(|index| format!("+routine_{index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            untracked: Vec::new(),
+            truncated: false,
+        };
+        assert!(!routine.is_below_review_threshold());
+        assert!(routine.is_below_auto_review_threshold());
+
+        let risky = CapturedDiff {
+            command: "git diff HEAD".to_string(),
+            stat: " src/permissions.rs | 12 ++++++".to_string(),
+            diff_body: "diff --git a/src/permissions.rs b/src/permissions.rs\n--- a/src/permissions.rs\n+++ b/src/permissions.rs\n+small but risky".to_string(),
+            untracked: Vec::new(),
+            truncated: false,
+        };
+        assert!(!risky.is_below_auto_review_threshold());
+
+        let large = CapturedDiff {
+            diff_body: (0..SELF_REVIEW_AUTO_MIN_CHANGED_LINES)
+                .map(|index| format!("+changed_{index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ..routine
+        };
+        assert!(!large.is_below_auto_review_threshold());
     }
 
     #[test]

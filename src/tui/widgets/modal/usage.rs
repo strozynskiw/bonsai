@@ -122,11 +122,22 @@ fn activity_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'s
     }
     lines.push(Line::from(stats));
     if dashboard.self_review.runs > 0 {
+        let rebuttal_rate = dashboard
+            .self_review
+            .rebutted
+            .saturating_mul(100)
+            .checked_div(dashboard.self_review.runs)
+            .unwrap_or(0);
+        let calibration = if rebuttal_rate > 50 {
+            " · review prompt needs calibration"
+        } else {
+            ""
+        };
         lines.push(Line::from(vec![
             Span::styled(" Self-review ", theme::muted()),
             Span::styled(
                 format!(
-                    "{} runs · {} catches · {} fixed · {} rebutted · {} findings · {}",
+                    "{} runs · {} catches · {} fixed · {} rebutted ({rebuttal_rate}%) · {} findings · {}{calibration}",
                     dashboard.self_review.runs,
                     dashboard.self_review.runs_with_findings,
                     dashboard.self_review.fixed,

@@ -47,6 +47,7 @@ struct TurnPolicies {
     read_storm: ReadStormGuard,
     repeated_failure: RepeatedFailureGuard,
     single_call_streak: SingleCallStreakGuard,
+    serial_delegation: SerialDelegationGuard,
     implementation_stall: ImplementationStallGuard,
     empty_response_nudges: usize,
 }
@@ -58,6 +59,7 @@ impl TurnPolicies {
         self.read_storm.reset();
         self.repeated_failure.reset();
         self.single_call_streak = SingleCallStreakGuard::default();
+        self.serial_delegation = SerialDelegationGuard::default();
         self.implementation_stall.reset();
         self.empty_response_nudges = 0;
     }
@@ -70,6 +72,7 @@ impl TurnPolicies {
             self.repeated_inspection.reset();
             self.read_storm.reset();
             self.single_call_streak = SingleCallStreakGuard::default();
+            self.serial_delegation = SerialDelegationGuard::default();
             self.implementation_stall.reset();
             self.empty_response_nudges = 0;
         }
@@ -350,6 +353,21 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             &response,
         )?;
         let batching_hint = policies.single_call_streak.hint_for(&response.tool_calls);
+        let serial_delegation_hint =
+            policies
+                .serial_delegation
+                .hint_for(is_serial_read_only_delegation(
+                    &response.tool_calls,
+                    &self.tool_registry,
+                ));
+        // A hook, peer, or editor can change a file after request preflight
+        // while the model is responding. Probe again at the reuse decision.
+        self.agent.refresh_read_evidence_freshness().await;
+        let precomputed_read = self.agent.preexecution_read_reuses(&response.tool_calls);
+        let precomputed_read_delta = self.agent.preexecution_read_deltas(&response.tool_calls);
+        let auto_background = self
+            .agent
+            .auto_background_verification_calls(&response.tool_calls);
 
         self.agent.push_message(build_assistant_message(&response)?);
         self.agent.emit_context_updated(&self.sink);
@@ -361,6 +379,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 &response.tool_calls,
                 &self.tool_registry,
                 ToolRejections {
+                    precomputed_read,
+                    precomputed_read_delta,
+                    auto_background,
                     planning_research: planning_research_rejection,
                     delegated_read: delegated_read_rejections,
                     repeated_inspection: repeated_inspection_rejection,
@@ -440,6 +461,15 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 self.sink.status(IMPLEMENTATION_STALL_STATUS_MESSAGE);
             }
             self.agent.push_harness_note(&nudge.note);
+            self.agent.emit_context_updated(&self.sink);
+        } else if let Some(hint) = serial_delegation_hint {
+            tracing::info!(
+                target: "bonsai::guard",
+                guard = "serial_delegation",
+                action = "nudge",
+                "guard nudged model to fan out delegations"
+            );
+            self.agent.push_harness_note(hint);
             self.agent.emit_context_updated(&self.sink);
         } else if let Some(hint) = batching_hint {
             tracing::info!(

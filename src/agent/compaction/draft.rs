@@ -402,12 +402,16 @@ impl Agent {
     }
 
     pub(in crate::agent) fn read_reuse_target_indices(&self) -> HashSet<usize> {
-        let target_call_ids = self
+        let mut target_call_ids = self
             .tool_context_details
             .values()
             .filter_map(read_reuse_target_call_id)
             .map(str::to_string)
             .collect::<HashSet<_>>();
+        for message in &self.messages {
+            let content = message_content_string(message);
+            target_call_ids.extend(reused_read_source_call_ids(&content));
+        }
         if target_call_ids.is_empty() {
             return HashSet::new();
         }
@@ -422,6 +426,55 @@ impl Agent {
             })
             .collect()
     }
+
+    pub(in crate::agent) fn read_reuse_target_referenced_outside_span(
+        &self,
+        target_index: usize,
+        span_start: usize,
+        span_end: usize,
+    ) -> bool {
+        let Some(target_call_id) = self
+            .messages
+            .get(target_index)
+            .and_then(tool_message_call_id)
+        else {
+            return false;
+        };
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index < span_start || *index > span_end)
+            .any(|(_index, message)| {
+                let mut sources = reused_read_source_call_ids(&message_content_string(message));
+                if let Some(pointer_call_id) = tool_message_call_id(message)
+                    && let Some(source) = self
+                        .tool_context_details
+                        .get(&pointer_call_id)
+                        .and_then(|detail| detail.reuse_target_call_id.as_ref())
+                {
+                    sources.push(source.clone());
+                }
+                sources.contains(&target_call_id)
+            })
+    }
+}
+
+fn reused_read_source_call_ids(content: &str) -> Vec<String> {
+    if !content.starts_with(REUSED_READ_MARKER) && !content.starts_with(PARTIAL_READ_REUSE_MARKER) {
+        return Vec::new();
+    }
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("source_calls: "))
+        .map(|calls| {
+            calls
+                .split(',')
+                .map(str::trim)
+                .filter(|call| !call.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Typed displayed window used by compaction supersession. The narrow legacy
@@ -617,7 +670,293 @@ pub(in crate::agent) struct ReadReuse {
     pub(in crate::agent) pointer: String,
 }
 
+#[derive(Debug, Clone)]
+pub(in crate::agent) struct PrecomputedReadReuse {
+    pub(in crate::agent) pointer: String,
+    pub(in crate::agent) target_call_ids: Vec<String>,
+    pub(in crate::agent) requested_chars: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::agent) struct PrecomputedReadDelta {
+    pub(in crate::agent) arguments: serde_json::Value,
+    pub(in crate::agent) prefix: String,
+    pub(in crate::agent) target_call_ids: Vec<String>,
+    pub(in crate::agent) avoided_chars: usize,
+}
+
 impl Agent {
+    /// Resolve fresh read coverage before dispatch. Unlike post-execution
+    /// dedup, this avoids both filesystem work and returned bytes. Coverage is
+    /// interval-based: adjacent/overlapping live observations may jointly
+    /// satisfy one request.
+    pub(in crate::agent) fn preexecution_read_reuses(
+        &self,
+        tool_calls: &[ToolCall],
+    ) -> HashMap<String, PrecomputedReadReuse> {
+        let records = self.read_evidence_snapshot();
+        let mut reuses = HashMap::new();
+        for tool_call in tool_calls {
+            if self.read_follows_compact_reuse(tool_call) {
+                continue;
+            }
+            let Some(requested) = requested_read_interval(tool_call, &self.project_root, &records)
+            else {
+                continue;
+            };
+            if self.live_read_reuse_pointer_covers(&requested, &records) {
+                continue;
+            }
+            let mut observations = records
+                .iter()
+                .filter(|record| {
+                    record.provenance == crate::tool::read_evidence::ReadProvenance::ParentVisible
+                        && record.target_live
+                        && !record.target_stubbed
+                        && record.evidence.observation_is_current()
+                        && record.evidence.observation().canonical_path()
+                            == requested.canonical_path
+                })
+                .filter_map(|record| {
+                    let call_id = record.target_tool_call_id.as_ref()?;
+                    let window = record.evidence.observation().window();
+                    Some(VisibleReadInterval {
+                        call_id: call_id.clone(),
+                        start: window.start_line,
+                        end: window.end_line?,
+                        visible_chars: record.evidence.observation().visible_chars(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            observations.sort_unstable_by_key(|observation| observation.start);
+            if observations.is_empty() {
+                continue;
+            }
+
+            let mut cursor = requested.start;
+            let mut source_calls = Vec::new();
+            let mut fallback_chars = 0usize;
+            for observation in &observations {
+                if observation.end < cursor || observation.start > requested.end {
+                    continue;
+                }
+                if observation.start > cursor {
+                    break;
+                }
+                if !source_calls.contains(&observation.call_id) {
+                    source_calls.push(observation.call_id.clone());
+                    fallback_chars = fallback_chars.saturating_add(observation.visible_chars);
+                }
+                cursor = cursor.max(observation.end.saturating_add(1));
+                if cursor > requested.end {
+                    break;
+                }
+            }
+            if cursor <= requested.end || source_calls.is_empty() {
+                continue;
+            }
+
+            let source_list = source_calls.join(", ");
+            let continuation = requested
+                .total_lines
+                .filter(|total| requested.end < *total)
+                .map(|total| {
+                    format!(
+                        " To inspect unseen lines {}-{total}, continue with offset={} and a narrower limit; do not restart at offset=1 unless the stale-files notice requires it.",
+                        requested.end.saturating_add(1),
+                        requested.end.saturating_add(1),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    " Do not re-read unless the stale-files notice requires it.".to_string()
+                });
+            let pointer = format!(
+                "{REUSED_READ_MARKER} {} lines {}-{} — fresh unchanged coverage is already visible across tool(s) {source_list}.{continuation}\nsource_calls: {source_list}",
+                requested.display_path, requested.start, requested.end,
+            );
+            let requested_chars = visible_chars_for_interval(
+                &self.messages,
+                &source_calls,
+                requested.start,
+                requested.end,
+            )
+            .unwrap_or(fallback_chars);
+            reuses.insert(
+                tool_call.id.clone(),
+                PrecomputedReadReuse {
+                    pointer,
+                    target_call_ids: source_calls,
+                    requested_chars,
+                },
+            );
+        }
+        reuses
+    }
+
+    /// For a partially covered request with one contiguous gap, execute only
+    /// that gap and prefix the result with the already-visible ranges. More
+    /// complex multi-gap shapes fall back to the ordinary full read rather
+    /// than issuing hidden fan-out.
+    pub(in crate::agent) fn preexecution_read_deltas(
+        &self,
+        tool_calls: &[ToolCall],
+    ) -> HashMap<String, PrecomputedReadDelta> {
+        let records = self.read_evidence_snapshot();
+        let mut deltas = HashMap::new();
+        for tool_call in tool_calls {
+            if self.read_follows_compact_reuse(tool_call) {
+                continue;
+            }
+            if records.iter().any(|record| {
+                record.provenance == crate::tool::read_evidence::ReadProvenance::ParentVisible
+                    && record.target_live
+                    && !record.target_stubbed
+                    && record.evidence.observation_is_current()
+                    && record
+                        .target_tool_call_id
+                        .as_deref()
+                        .and_then(|call_id| self.tool_context_details.get(call_id))
+                        .is_some_and(|detail| {
+                            detail.name == tool_call.name
+                                && crate::util::tool_args::normalize_tool_call_arguments_json(
+                                    &detail.arguments,
+                                ) == crate::util::tool_args::normalize_tool_call_arguments_json(
+                                    &tool_call.arguments,
+                                )
+                        })
+            }) {
+                // Preserve the ordinary post-execution comparison for an
+                // identical request. This is especially important for
+                // char-truncated reads: their compact pointer carries the
+                // canonical continuation offset, whereas silently turning the
+                // same request into a delta would discard that guidance.
+                continue;
+            }
+            let Some(requested) = requested_read_interval(tool_call, &self.project_root, &records)
+            else {
+                continue;
+            };
+            if self.live_read_reuse_pointer_covers(&requested, &records) {
+                continue;
+            }
+            let mut observations = records
+                .iter()
+                .filter(|record| {
+                    record.provenance == crate::tool::read_evidence::ReadProvenance::ParentVisible
+                        && record.target_live
+                        && !record.target_stubbed
+                        && record.evidence.observation_is_current()
+                        && record.evidence.observation().canonical_path()
+                            == requested.canonical_path
+                })
+                .filter_map(|record| {
+                    let call_id = record.target_tool_call_id.as_ref()?;
+                    let window = record.evidence.observation().window();
+                    Some(VisibleReadInterval {
+                        call_id: call_id.clone(),
+                        start: window.start_line,
+                        end: window.end_line?,
+                        visible_chars: record.evidence.observation().visible_chars(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            observations.sort_unstable_by_key(|observation| observation.start);
+            let merged = merged_visible_intervals(&observations);
+            let uncovered = uncovered_intervals(requested.start, requested.end, &merged);
+            let [uncovered] = uncovered.as_slice() else {
+                continue;
+            };
+            if uncovered.start == requested.start && uncovered.end == requested.end {
+                continue;
+            }
+            let mut source_calls = observations
+                .iter()
+                .filter(|observation| {
+                    observation.start <= requested.end && observation.end >= requested.start
+                })
+                .map(|observation| observation.call_id.clone())
+                .collect::<Vec<_>>();
+            source_calls.dedup();
+            if source_calls.is_empty() {
+                continue;
+            }
+            let Some(arguments) = delta_read_arguments(tool_call, uncovered.start, uncovered.end)
+            else {
+                continue;
+            };
+            let covered = merged
+                .iter()
+                .filter_map(|range| {
+                    let start = range.start.max(requested.start);
+                    let end = range.end.min(requested.end);
+                    (start <= end).then(|| format!("{start}-{end}"))
+                })
+                .collect::<Vec<_>>();
+            let source_list = source_calls.join(", ");
+            let prefix = format!(
+                "{PARTIAL_READ_REUSE_MARKER} {}: kept lines {} from tool(s) {source_list}; newly read lines {}-{} follow.\nsource_calls: {source_list}",
+                requested.display_path,
+                covered.join(", "),
+                uncovered.start,
+                uncovered.end,
+            );
+            let avoided_chars = visible_chars_for_interval(
+                &self.messages,
+                &source_calls,
+                requested.start,
+                requested.end,
+            )
+            .unwrap_or(0);
+            deltas.insert(
+                tool_call.id.clone(),
+                PrecomputedReadDelta {
+                    arguments,
+                    prefix,
+                    target_call_ids: source_calls,
+                    avoided_chars,
+                },
+            );
+        }
+        deltas
+    }
+
+    fn live_read_reuse_pointer_covers(
+        &self,
+        requested: &RequestedReadInterval,
+        records: &[crate::tool::read_evidence::ReadEvidenceRecord],
+    ) -> bool {
+        self.messages.iter().enumerate().any(|(index, message)| {
+            if self.message_has_control(index, message, |state| {
+                state.stubbed || state.drop_next_turn
+            }) {
+                return false;
+            }
+            let Some(call_id) = tool_message_call_id(message) else {
+                return false;
+            };
+            let Some(detail) = self.tool_context_details.get(&call_id) else {
+                return false;
+            };
+            if detail.reuse_target_call_id.is_none()
+                || !matches!(detail.name.as_str(), "read" | "read_region")
+            {
+                return false;
+            }
+            let pointer_call = ToolCall {
+                id: call_id,
+                name: detail.name.clone(),
+                arguments: detail.arguments.clone(),
+            };
+            requested_read_interval(&pointer_call, &self.project_root, records).is_some_and(
+                |pointer| {
+                    pointer.canonical_path == requested.canonical_path
+                        && pointer.start <= requested.start
+                        && pointer.end >= requested.end
+                },
+            )
+        })
+    }
+
     /// Decide whether a completed read must append its real bytes or can point
     /// at fresh, still-live parent-visible coverage. The tool always executes
     /// first, so this policy compares current output/evidence and never reuses
@@ -749,6 +1088,212 @@ impl Agent {
                             })
                     })
             })
+    }
+}
+
+#[derive(Debug)]
+struct RequestedReadInterval {
+    canonical_path: PathBuf,
+    display_path: String,
+    start: usize,
+    end: usize,
+    total_lines: Option<usize>,
+}
+
+#[derive(Debug)]
+struct VisibleReadInterval {
+    call_id: String,
+    start: usize,
+    end: usize,
+    visible_chars: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CoverageRange {
+    start: usize,
+    end: usize,
+}
+
+impl CoverageRange {
+    const fn new(start: usize, end: usize) -> Option<Self> {
+        if start == 0 || end < start {
+            None
+        } else {
+            Some(Self { start, end })
+        }
+    }
+}
+
+fn merged_visible_intervals(observations: &[VisibleReadInterval]) -> Vec<CoverageRange> {
+    let mut merged = Vec::<CoverageRange>::new();
+    for observation in observations {
+        let Some(range) = CoverageRange::new(observation.start, observation.end) else {
+            continue;
+        };
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end.saturating_add(1)
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
+fn uncovered_intervals(start: usize, end: usize, covered: &[CoverageRange]) -> Vec<CoverageRange> {
+    let mut uncovered = Vec::new();
+    let mut cursor = start;
+    for range in covered {
+        if range.end < cursor || range.start > end {
+            continue;
+        }
+        if range.start > cursor
+            && let Some(gap) = CoverageRange::new(cursor, range.start.saturating_sub(1).min(end))
+        {
+            uncovered.push(gap);
+        }
+        cursor = cursor.max(range.end.saturating_add(1));
+        if cursor > end {
+            break;
+        }
+    }
+    if cursor <= end
+        && let Some(gap) = CoverageRange::new(cursor, end)
+    {
+        uncovered.push(gap);
+    }
+    uncovered
+}
+
+fn delta_read_arguments(
+    tool_call: &ToolCall,
+    start: usize,
+    end: usize,
+) -> Option<serde_json::Value> {
+    let mut args = serde_json::from_str::<serde_json::Value>(&tool_call.arguments).ok()?;
+    let object = args.as_object_mut()?;
+    if tool_call.name == "read_region" {
+        object.insert("start_line".to_string(), serde_json::json!(start));
+        object.insert("end_line".to_string(), serde_json::json!(end));
+    } else if tool_call.name == "read" {
+        object.remove("start_line");
+        object.remove("end_line");
+        object.insert("offset".to_string(), serde_json::json!(start));
+        object.insert(
+            "limit".to_string(),
+            serde_json::json!(end.saturating_sub(start).saturating_add(1)),
+        );
+    } else {
+        return None;
+    }
+    Some(args)
+}
+
+fn requested_read_interval(
+    tool_call: &ToolCall,
+    project_root: &Path,
+    records: &[crate::tool::read_evidence::ReadEvidenceRecord],
+) -> Option<RequestedReadInterval> {
+    if !matches!(tool_call.name.as_str(), "read" | "read_region") {
+        return None;
+    }
+    let args = serde_json::from_str::<serde_json::Value>(&tool_call.arguments).ok()?;
+    if args.get("depth").is_some() {
+        return None;
+    }
+    let display_path = args.get("path")?.as_str()?.to_string();
+    let resolved = crate::tool::ProjectPathResolver::new(project_root)
+        .resolve_existing(&display_path)
+        .ok()?;
+    if !resolved.canonical_path().is_file() {
+        return None;
+    }
+    let canonical_path = resolved.canonical_path().to_path_buf();
+    let (start, mut end) = if tool_call.name == "read_region" {
+        (
+            value_as_usize(args.get("start_line")?)?,
+            value_as_usize(args.get("end_line")?)?,
+        )
+    } else {
+        let start = args
+            .get("offset")
+            .or_else(|| args.get("start_line"))
+            .and_then(value_as_usize)
+            .unwrap_or(1);
+        let end = if let Some(end) = args.get("end_line").and_then(value_as_usize) {
+            end
+        } else {
+            let limit = args.get("limit").and_then(value_as_usize).unwrap_or(1_000);
+            start.saturating_add(limit.saturating_sub(1))
+        };
+        (start, end)
+    };
+    if start == 0 || end < start {
+        return None;
+    }
+    let total_lines = records
+        .iter()
+        .filter(|record| {
+            record.evidence.observation().canonical_path() == canonical_path
+                && record.evidence.observation_is_current()
+        })
+        .filter_map(|record| record.evidence.observation().window().total_lines)
+        .next();
+    if let Some(total_lines) = total_lines {
+        end = end.min(total_lines);
+    }
+    (end >= start).then_some(RequestedReadInterval {
+        canonical_path,
+        display_path,
+        start,
+        end,
+        total_lines,
+    })
+}
+
+fn value_as_usize(value: &serde_json::Value) -> Option<usize> {
+    value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .or_else(|| value.as_str()?.trim().parse().ok())
+}
+
+fn visible_chars_for_interval(
+    messages: &[ChatCompletionRequestMessage],
+    source_calls: &[String],
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let mut visible = BTreeMap::new();
+    for message in messages {
+        let Some(call_id) = tool_message_call_id(message) else {
+            continue;
+        };
+        if !source_calls.contains(&call_id) {
+            continue;
+        }
+        for line in message_content_string(message).lines() {
+            let Some((number, _content)) = line.split_once(": ") else {
+                continue;
+            };
+            let Ok(number) = number.trim().parse::<usize>() else {
+                continue;
+            };
+            if (start..=end).contains(&number) {
+                visible.entry(number).or_insert_with(|| line.to_string());
+            }
+        }
+    }
+    if visible.is_empty() {
+        None
+    } else {
+        Some(
+            visible
+                .values()
+                .map(|line| line.chars().count().saturating_add(1))
+                .sum(),
+        )
     }
 }
 
@@ -894,7 +1439,7 @@ fn truncated_read_continuation(
     signature: &ReadSignature,
     rendered: &str,
 ) -> Option<(usize, usize)> {
-    if !rendered.contains("[Truncated:") {
+    if !rendered.contains("[Truncated:") && !rendered.contains("[File truncated.") {
         return None;
     }
     let ReadSignature::StructuredRead(snapshot) = signature else {

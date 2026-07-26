@@ -222,7 +222,7 @@ impl Tool for ReferencesTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: ReferencesArgs = parse_args("references", args)?;
-        let locations = self
+        let locations = match self
             .hub
             .references(
                 &args.path,
@@ -230,12 +230,47 @@ impl Tool for ReferencesTool {
                 args.character,
                 args.include_declaration,
             )
-            .await?;
+            .await
+        {
+            Ok(locations) => locations,
+            Err(error) if likely_warming_error(&error) => {
+                return Ok(ToolOutput::Text(
+                    "Language server is still warming; retry references in 3s. Use grep meanwhile if the result is urgent."
+                        .to_string(),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if locations.is_empty() {
+            return Ok(ToolOutput::Text(
+                "No references found. If this is the server's first request, it may still be indexing; retry in 3s or use grep."
+                    .to_string(),
+            ));
+        }
         Ok(ToolOutput::Text(cap_text(
             format_locations(self.hub.project_root(), &locations, "No references found."),
             MAX_OUTPUT_CHARS,
             "Use query/path filters or read the referenced files.",
         )))
+    }
+}
+
+fn likely_warming_error(error: &lsp::LspError) -> bool {
+    match error {
+        lsp::LspError::Protocol(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("timed out")
+                || message.contains("cancelled")
+                || message.contains("not initialized")
+                || message.contains("server is not ready")
+        }
+        lsp::LspError::Server(error) => {
+            let message = error.message.to_ascii_lowercase();
+            message.contains("not initialized")
+                || message.contains("not ready")
+                || message.contains("indexing")
+        }
+        _ => false,
     }
 }
 
@@ -540,4 +575,22 @@ fn rename_summary(files: &[crate::lsp::EditedFile], new_name: &str) -> String {
         out.push_str("\nDiff preview shows the first changed file.");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_warmup_classifier_is_narrow() {
+        assert!(likely_warming_error(&lsp::LspError::Protocol(
+            "request timed out while rust-analyzer indexed".to_string()
+        )));
+        assert!(likely_warming_error(&lsp::LspError::Protocol(
+            "server is not ready".to_string()
+        )));
+        assert!(!likely_warming_error(&lsp::LspError::Protocol(
+            "invalid params: line out of range".to_string()
+        )));
+    }
 }

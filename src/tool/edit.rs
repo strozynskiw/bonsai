@@ -390,7 +390,8 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing exact text; read the file first. For one change, give `old_string` (exact text to find) and `new_string` (replacement); for several, give an `edits` array of {old_string, new_string} regions applied atomically. Set `replace_all` to replace every occurrence. Use empty new_string to delete content. To insert or append text, anchor on an existing line: include it in old_string and repeat it plus your new text in new_string. To create a new file, use the write tool."
+        "Replace exact text in a previously read file. Use old_string/new_string for one change \
+or edits for atomic multiple changes; empty new_string deletes. Use write for new files."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -402,26 +403,20 @@ impl Tool for EditTool {
                 ),
                 (
                     "old_string",
-                    string_property(
-                        "The exact existing text to find and replace; required for a single edit unless you use `edits`. Leave empty only to create a new file. Ignored when `edits` is provided.",
-                    ),
+                    string_property("Exact existing text; required unless edits is provided"),
                 ),
                 (
                     "new_string",
-                    string_property(
-                        "The replacement text; required for a single edit unless you use `edits`. Leave empty to delete the old_string from the file. Ignored when `edits` is provided.",
-                    ),
+                    string_property("Replacement text; empty deletes the match"),
                 ),
                 (
                     "replace_all",
-                    boolean_property(
-                        "Replace all occurrences of old_string (default: false, replaces only the first). Ignored when `edits` is provided.",
-                    ),
+                    boolean_property("Replace every occurrence (default false)"),
                 ),
                 (
                     "edits",
                     array_property(
-                        "Multiple find/replace regions applied in order, atomically. Each region is an object {old_string, new_string}; it may also be written as a single \"old -> new\" string. When provided, the top-level old_string/new_string/replace_all are ignored.",
+                        "Atomic ordered {old_string,new_string} replacements",
                         object(
                             [
                                 (

@@ -88,9 +88,8 @@ impl Agent {
     }
 
     /// Arm the active episode when a successful `todowrite` leaves no pending
-    /// work. This is deliberately an arm-only signal in v1: it annotates the
-    /// eventual card and leaves boundary selection to title changes or hard
-    /// resets.
+    /// work. Closing waits until preflight, after the result has been appended
+    /// and the whole assistant/tool group is known to be complete.
     pub(in crate::agent) async fn observe_todowrite_result(&mut self) {
         if self.episode_store.is_none() {
             return;
@@ -112,6 +111,149 @@ impl Agent {
         }
         if let Some(mut ledger) = self.episode_ledger() {
             ledger.mark_active_completable();
+        }
+    }
+
+    /// Close an episode whose todo list reached a terminal state. The final
+    /// todowrite group remains part of the closed span, so its card and archive
+    /// contain the evidence that work completed. No successor opens until a
+    /// later human turn starts a new task.
+    pub(in crate::agent) fn apply_episode_completion_boundary(&mut self) {
+        let active = self
+            .episode_ledger()
+            .and_then(|ledger| ledger.active().cloned());
+        let Some(active) = active.filter(|episode| episode.is_completable()) else {
+            return;
+        };
+        let Some(start_index) = self
+            .message_ids
+            .iter()
+            .position(|id| id == active.start_stable_id())
+        else {
+            return;
+        };
+        let groups = compaction::message_groups(&self.messages);
+        let Some(last_group) = groups.last() else {
+            return;
+        };
+        if !message_group_is_complete(&self.messages, last_group)
+            || last_group.indices.last().copied() != self.messages.len().checked_sub(1)
+        {
+            return;
+        }
+        let Some(end_index) = last_group.indices.last().copied() else {
+            return;
+        };
+        if end_index < start_index {
+            return;
+        }
+        let end_stable_id = self.message_ids[end_index].clone();
+        let files_touched = files_touched_in_span(&self.messages[start_index..=end_index]);
+        let now = crate::util::time::now_ms();
+        if let Some(mut ledger) = self.episode_ledger()
+            && let Some(seq) = ledger.close_active(
+                crate::episode::EpisodeCloseReason::TodoComplete,
+                end_stable_id,
+                now,
+            )
+        {
+            ledger.set_closed_files_touched(seq, files_touched);
+        }
+    }
+
+    /// Roll a long active episode before it can consume the full session. The
+    /// oldest complete groups close once they exceed 25% of the usable input
+    /// window; the latest K groups stay live in a same-title successor. A live
+    /// read-reuse pointer into the candidate span defers the boundary because
+    /// evicting its target would make the pointer invalid.
+    pub(in crate::agent) fn apply_episode_size_boundary(
+        &mut self,
+        tool_schema: &ToolSchemaPayload,
+    ) {
+        let active = self
+            .episode_ledger()
+            .and_then(|ledger| ledger.active().cloned());
+        let Some(active) = active else {
+            return;
+        };
+        let Some(start_index) = self
+            .message_ids
+            .iter()
+            .position(|id| id == active.start_stable_id())
+        else {
+            return;
+        };
+        let groups = compaction::message_groups(&self.messages)
+            .into_iter()
+            .filter(|group| {
+                group
+                    .indices
+                    .first()
+                    .is_some_and(|index| *index >= start_index)
+                    && message_group_is_complete(&self.messages, group)
+            })
+            .collect::<Vec<_>>();
+        let minimum_groups =
+            EPISODE_MIN_CLOSED_GROUPS.saturating_add(EPISODE_SIZE_PROTECTED_TAIL_GROUPS);
+        if groups.len() < minimum_groups {
+            return;
+        }
+        let boundary_group = groups.len() - EPISODE_SIZE_PROTECTED_TAIL_GROUPS;
+        let Some(boundary) = groups[boundary_group].indices.first().copied() else {
+            return;
+        };
+        if boundary <= start_index {
+            return;
+        }
+        let pointer_targets = self.read_reuse_target_indices();
+        if pointer_targets.iter().any(|index| {
+            *index >= start_index
+                && *index < boundary
+                && self.read_reuse_target_referenced_outside_span(*index, start_index, boundary - 1)
+        }) {
+            return;
+        }
+        let message_ids = self.message_ids_for_messages(self.messages.len());
+        let (message_tokens, _estimate) = self.payload_message_token_estimate(
+            &self.messages,
+            &message_ids,
+            &self.context_controls,
+            tool_schema,
+        );
+        let span_tokens = message_tokens[start_index..boundary]
+            .iter()
+            .copied()
+            .sum::<usize>();
+        let usable_tokens = self
+            .budget
+            .context_budget_tokens
+            .saturating_sub(self.output_reserve_tokens())
+            .max(1);
+        let trigger_tokens = usable_tokens
+            .saturating_mul(EPISODE_SIZE_TRIGGER_PERCENT)
+            .checked_div(100)
+            .unwrap_or(usable_tokens)
+            .max(1);
+        if span_tokens < trigger_tokens {
+            return;
+        }
+
+        let end_index = boundary - 1;
+        let end_stable_id = self.message_ids[end_index].clone();
+        let successor_start_id = self.message_ids[boundary].clone();
+        let files_touched = files_touched_in_span(&self.messages[start_index..boundary]);
+        let title = active.title().to_string();
+        let goal = active.goal().to_string();
+        let now = crate::util::time::now_ms();
+        if let Some(mut ledger) = self.episode_ledger()
+            && let Some(seq) = ledger.close_active(
+                crate::episode::EpisodeCloseReason::SizePressure,
+                end_stable_id,
+                now,
+            )
+        {
+            ledger.set_closed_files_touched(seq, files_touched);
+            ledger.open_episode(successor_start_id, title, goal, now);
         }
     }
 
@@ -325,4 +467,17 @@ impl Agent {
 /// arm a close.
 fn titles_equivalent(current: &str, next: &str) -> bool {
     current.trim().to_lowercase() == next.trim().to_lowercase()
+}
+
+fn message_group_is_complete(
+    messages: &[ChatCompletionRequestMessage],
+    group: &compaction::types::MessageGroup,
+) -> bool {
+    let Some(first) = group.indices.first().copied() else {
+        return false;
+    };
+    let calls = assistant_tool_calls(&messages[first])
+        .map(|calls| calls.len())
+        .unwrap_or(0);
+    calls == 0 || group.indices.len() == calls.saturating_add(1)
 }

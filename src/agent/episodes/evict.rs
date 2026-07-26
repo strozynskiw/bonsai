@@ -21,6 +21,9 @@ struct EpisodeEviction {
     end: usize,
     /// Estimated payload tokens the span currently costs.
     span_tokens: usize,
+    /// A size-triggered close already chose a cache-breaking lane boundary;
+    /// deferring it through the generic economics guard would mean "never".
+    size_boundary: bool,
 }
 
 fn estimated_episode_savings(eviction: &EpisodeEviction) -> usize {
@@ -71,6 +74,8 @@ impl Agent {
                         && matches!(
                             episode.close_reason(),
                             Some(EpisodeCloseReason::TitleChange)
+                                | Some(EpisodeCloseReason::TodoComplete)
+                                | Some(EpisodeCloseReason::SizePressure)
                                 | Some(EpisodeCloseReason::Manual)
                         )
                 })
@@ -128,6 +133,7 @@ impl Agent {
             let span_tokens: usize = message_tokens[eviction.start..=eviction.end].iter().sum();
             evictions.push(EpisodeEviction {
                 span_tokens,
+                size_boundary: episode.close_reason() == Some(EpisodeCloseReason::SizePressure),
                 ..eviction
             });
         }
@@ -158,7 +164,11 @@ impl Agent {
         match pass {
             EpisodeEvictionPass::CloseTime => {
                 evictions.retain(|eviction| {
-                    clears_episode_rewrite_guard(estimated_episode_savings(eviction), before_tokens)
+                    eviction.size_boundary
+                        || clears_episode_rewrite_guard(
+                            estimated_episode_savings(eviction),
+                            before_tokens,
+                        )
                 });
             }
             EpisodeEvictionPass::Pressure => {
@@ -359,7 +369,9 @@ impl Agent {
             if self.message_has_control(index, message, |state| state.pinned) {
                 return None;
             }
-            if pointer_targets.contains(&index) {
+            if pointer_targets.contains(&index)
+                && self.read_reuse_target_referenced_outside_span(index, start, end)
+            {
                 return None;
             }
         }
@@ -394,6 +406,7 @@ impl Agent {
             start,
             end,
             span_tokens: 0,
+            size_boundary: false,
         })
     }
 }

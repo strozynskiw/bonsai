@@ -153,6 +153,20 @@ pub enum ToolOutput {
         text: String,
         evidence: ReadEvidence,
     },
+    /// A structured read skipped before execution because fresh, live prior
+    /// outputs already cover the requested interval.
+    ReadReuse {
+        text: String,
+        target_call_ids: Vec<String>,
+        requested_chars: usize,
+    },
+    /// A structured read executed only for one uncovered interval.
+    ReadDelta {
+        text: String,
+        evidence: ReadEvidence,
+        target_call_ids: Vec<String>,
+        avoided_chars: usize,
+    },
     TextWithUsage {
         text: String,
         status: ToolExecutionStatus,
@@ -245,6 +259,8 @@ impl ToolOutput {
         match self {
             Self::Text(text) => text,
             Self::Read { text, .. } => text,
+            Self::ReadReuse { text, .. } => text,
+            Self::ReadDelta { text, .. } => text,
             Self::TextWithUsage { text, .. } => text,
             Self::TrustedContext { summary, .. } => summary,
             // The framed content *is* what the model sees; there is no separate
@@ -267,6 +283,8 @@ impl ToolOutput {
         match self {
             Self::Text(text) => crate::redact::redact_in_place(text),
             Self::Read { text, .. } => crate::redact::redact_in_place(text),
+            Self::ReadReuse { text, .. } => crate::redact::redact_in_place(text),
+            Self::ReadDelta { text, .. } => crate::redact::redact_in_place(text),
             Self::TextWithUsage { text, .. } => crate::redact::redact_in_place(text),
             Self::TrustedContext { summary, content } => {
                 crate::redact::redact_in_place(summary);

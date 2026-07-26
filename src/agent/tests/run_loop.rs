@@ -262,6 +262,10 @@ struct WriteCapableDelegationTool {
 
 #[async_trait::async_trait]
 impl Tool for BackgroundSubagentTool {
+    fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {
+        crate::tool::ToolEffectPolicy::Delegated
+    }
+
     fn name(&self) -> &str {
         "agent"
     }
@@ -1050,11 +1054,11 @@ async fn self_review_auto_runs_for_larger_diff() {
     // A multi-line rewrite crosses the size threshold, so `auto` runs the
     // reviewer pass at the default autonomy — one extra model call, critique
     // injected.
-    let large = "fn big() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    \
-                 let d = 4;\n    let e = 5;\n    let f = 6;\n    let g = 7;\n    \
-                 let h = 8;\n    let i = 9;\n    let j = 10;\n    let k = 11;\n}\n";
+    let large = (0..80)
+        .map(|index| format!("fn changed_{index}() {{}}\n"))
+        .collect::<String>();
     let provider = MockProvider::new(vec![
-        write_file_response("call-1", "lib.rs", large),
+        write_file_response("call-1", "lib.rs", &large),
         finished_response("first pass"),
         finished_response("looks good"),
     ]);
@@ -3446,7 +3450,7 @@ async fn cache_warning_is_lane_local_and_fires_once() {
     .unwrap();
     let lane = crate::agent::ExecutionLane::parent("session-42");
     agent.set_execution_lane(lane.clone());
-    for _ in 0..5 {
+    for _ in 0..3 {
         agent.usage.record(
             Some(crate::provider::TokenUsage {
                 prompt_tokens: 1_000,
@@ -3467,7 +3471,7 @@ async fn cache_warning_is_lane_local_and_fires_once() {
 
     let warning = agent.new_cache_warning().unwrap();
     assert!(warning.contains("parent:session-42"), "{warning}");
-    assert!(warning.contains("reusable ~90%"), "{warning}");
+    assert!(warning.contains("expected ~90%"), "{warning}");
     assert!(agent.new_cache_warning().is_none());
 }
 

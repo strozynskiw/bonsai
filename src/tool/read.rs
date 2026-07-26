@@ -135,7 +135,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file or directory from the project. Returns file contents with line numbers, directory listings, or base64-encoded images. A first window of up to 100 lines may expand to a small whole file; use read_region when the exact range matters."
+        "Read a project file, directory, or image. Text is line-numbered; use read_region when an exact range matters."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -143,22 +143,16 @@ impl Tool for ReadTool {
             [
                 (
                     "path",
-                    path_property(
-                        "File or directory path relative to project root, or absolute path inside it",
-                    ),
+                    path_property("Project-relative path or in-project absolute path"),
                 ),
                 (
                     "offset",
-                    bounded_integer_property(
-                        "Line number to start reading from (1-indexed, default: 1)",
-                        Some(1),
-                        None,
-                    ),
+                    bounded_integer_property("1-based start line (default 1)", Some(1), None),
                 ),
                 (
                     "limit",
                     bounded_integer_property(
-                        "Maximum number of lines to read (default: 1000)",
+                        "Maximum lines (default 1000)",
                         Some(1),
                         Some(MAX_READ_LINES as i64),
                     ),
@@ -166,7 +160,7 @@ impl Tool for ReadTool {
                 (
                     "depth",
                     bounded_integer_property(
-                        "When reading a directory, return a tree to this depth instead of the flat listing (1-6)",
+                        "Optional directory-tree depth (1-6)",
                         Some(1),
                         Some(MAX_TREE_DEPTH as i64),
                     ),

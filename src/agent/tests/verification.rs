@@ -783,6 +783,52 @@ async fn post_edit_ask_skips_without_an_interactive_surface() {
 }
 
 #[tokio::test]
+async fn stale_verification_rearms_at_the_next_edit_quiet_point_even_when_policy_is_off() {
+    let fixture = TestFixture::new();
+    std::fs::write(
+        fixture.project_root.join("Cargo.toml"),
+        "[package]\nname='verify'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    let mut agent = verification_agent_with_policy(&fixture, VerifyAfterEdit::Off);
+    let check = crate::provider::ToolCall {
+        id: "call-initial-check".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test"}"#.to_string(),
+    };
+    agent
+        .record_verification_tool_result(
+            &check,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    assert_eq!(
+        agent.verification_runs().last().unwrap().status,
+        VerificationRunStatus::Passed
+    );
+
+    agent.note_typed_verification_worthy_mutation(vec!["src.rs".to_string()]);
+    assert_eq!(
+        agent.verification_runs().last().unwrap().status,
+        VerificationRunStatus::Stale
+    );
+
+    let sink: SharedSink = Arc::new(StdoutSink);
+    assert!(
+        agent
+            .maybe_verify_after_edit(&sink, CancellationToken::new())
+            .await,
+        "a stale run is a pending obligation independent of the default post-edit policy"
+    );
+    assert_eq!(agent.verification_runs().len(), 2);
+    assert_eq!(
+        agent.verification_runs().last().unwrap().status,
+        VerificationRunStatus::Running
+    );
+}
+
+#[tokio::test]
 async fn coding_run_executes_post_edit_verification_before_completing() {
     let fixture = TestFixture::new();
     init_repo(&fixture.project_root);

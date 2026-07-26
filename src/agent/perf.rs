@@ -317,6 +317,13 @@ impl Agent {
             self.caches.last_perf_report.as_ref(),
             &self.context_report(),
         );
+        if let Some((groups, median, singles, maximum)) =
+            delegation_width_summary(&self.usage.usage_turns)
+        {
+            report.push_str(&format!(
+                "\ndelegation       {groups} launch groups | median width {median} | width=1 repeated {singles} groups | max {maximum}"
+            ));
+        }
         if !self.self_review_runs.is_empty() {
             let findings = self
                 .self_review_runs
@@ -333,13 +340,44 @@ impl Agent {
                 .iter()
                 .filter(|run| run.disposition == Some(SelfReviewDisposition::Rebutted))
                 .count();
+            let rebuttal_rate = rebutted.saturating_mul(100) / self.self_review_runs.len();
+            let calibration = if rebuttal_rate > 50 {
+                " | ALERT: tighten reviewer prompt"
+            } else {
+                ""
+            };
             report.push_str(&format!(
-                "\nself-review      {} runs | {findings} findings | {fixed} fixed | {rebutted} rebutted",
-                self.self_review_runs.len()
+                "\nself-review      {} runs | {findings} findings | {fixed} fixed | {rebutted} rebutted ({rebuttal_rate}%){calibration}",
+                self.self_review_runs.len(),
             ));
         }
         report
     }
+}
+
+fn delegation_width_summary(turns: &[UsageTurn]) -> Option<(usize, usize, usize, usize)> {
+    let mut groups = std::collections::BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+    for turn in turns {
+        let (Some(group), Some(parent_call)) = (
+            turn.launch_group_id.as_deref(),
+            turn.parent_tool_call_id.as_deref(),
+        ) else {
+            continue;
+        };
+        groups.entry(group).or_default().insert(parent_call);
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    let mut widths = groups
+        .values()
+        .map(std::collections::BTreeSet::len)
+        .collect::<Vec<_>>();
+    widths.sort_unstable();
+    let median = widths[(widths.len() - 1) / 2];
+    let singles = widths.iter().filter(|width| **width == 1).count();
+    let maximum = widths.last().copied().unwrap_or(1);
+    Some((widths.len(), median, singles, maximum))
 }
 
 fn format_perf_report(report: Option<&PerfReport>, context: &ContextReport) -> String {

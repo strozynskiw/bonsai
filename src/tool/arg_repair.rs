@@ -56,6 +56,9 @@ pub(crate) enum RepairAction {
     /// (e.g. `start_line`/`end_line` → `offset`/`limit` on `read`, a
     /// convention models import from `read_region` and other harnesses).
     MappedAliasField,
+    /// A prose-only `description` field not declared by a closed schema was
+    /// discarded. Models often attach this call annotation to `bash`.
+    DroppedDescriptiveField,
 }
 
 impl std::fmt::Display for RepairNote {
@@ -68,6 +71,7 @@ impl std::fmt::Display for RepairNote {
             RepairAction::UnwrappedMarkdownLink => "unwrapped markdown link around path",
             RepairAction::CanonicalizedEnumCase => "canonicalized enum value case",
             RepairAction::MappedAliasField => "mapped alias onto its canonical field",
+            RepairAction::DroppedDescriptiveField => "dropped undeclared descriptive metadata",
         };
         write!(f, "{}: {}", self.field, action)
     }
@@ -119,6 +123,21 @@ fn repair_object(
         .flatten()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
+
+    if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false)
+        && !properties.contains_key("description")
+        && object.get("description").is_some_and(Value::is_string)
+    {
+        object.remove("description");
+        notes.push(RepairNote {
+            field: if path.is_empty() {
+                "description".to_string()
+            } else {
+                format!("{path}.description")
+            },
+            action: RepairAction::DroppedDescriptiveField,
+        });
+    }
 
     // Fill a schema-declared `path` from the alias names other harnesses train
     // models on: `file_path` is Claude Code's canonical name, `file`/`filename`
@@ -490,6 +509,45 @@ mod tests {
 
         assert_eq!(out, json!({"path": null}));
         assert_eq!(notes, ["note: dropped null for optional field"]);
+    }
+
+    #[test]
+    fn drops_undeclared_description_from_closed_tool_schema() {
+        let schema = closed_object(
+            [("command", string_property("Shell command"))],
+            &["command"],
+        );
+
+        let (out, notes) = repaired(
+            &schema,
+            json!({"command": "cargo check", "description": "Check the crate"}),
+        );
+
+        assert_eq!(out, json!({"command": "cargo check"}));
+        assert_eq!(
+            notes,
+            ["description: dropped undeclared descriptive metadata"]
+        );
+    }
+
+    #[test]
+    fn preserves_declared_or_non_string_description_fields() {
+        let declared = closed_object(
+            [("description", string_property("Required description"))],
+            &["description"],
+        );
+        let (out, notes) = repaired(&declared, json!({"description": "keep"}));
+        assert_eq!(out, json!({"description": "keep"}));
+        assert!(notes.is_empty());
+
+        let closed = closed_object(
+            [("command", string_property("Shell command"))],
+            &["command"],
+        );
+        let args = json!({"command": "true", "description": {"unsafe": "shape"}});
+        let (out, notes) = repaired(&closed, args.clone());
+        assert_eq!(out, args);
+        assert!(notes.is_empty());
     }
 
     #[test]

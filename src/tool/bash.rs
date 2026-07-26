@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -94,6 +98,24 @@ pub struct BashTool {
     pub(in crate::tool::bash) confined_failures: Arc<ConfinedFailures>,
     pub(in crate::tool::bash) hooks: Arc<crate::hooks::HookEngine>,
     pub(in crate::tool::bash) authorization_ledger: AuthorizationLedger,
+    verification_cache: Arc<Mutex<HashMap<VerificationCacheKey, CachedVerificationOutput>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VerificationCacheKey {
+    cwd: PathBuf,
+    command: String,
+    workspace_fingerprint: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedVerificationOutput {
+    rendered: String,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    truncation: Option<crate::tool::OutputTruncationContext>,
 }
 
 /// Runtime policy that must stay coherent for one Bash tool instance.
@@ -102,6 +124,7 @@ pub(crate) struct BashExecutionPolicy {
     sandbox: CommandSandbox,
     hooks: Arc<crate::hooks::HookEngine>,
     authorization_ledger: AuthorizationLedger,
+    verification_cache: Arc<Mutex<HashMap<VerificationCacheKey, CachedVerificationOutput>>>,
 }
 
 impl BashExecutionPolicy {
@@ -116,6 +139,7 @@ impl BashExecutionPolicy {
             sandbox,
             hooks,
             authorization_ledger,
+            verification_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -261,6 +285,7 @@ impl BashTool {
             sandbox,
             hooks,
             authorization_ledger,
+            verification_cache,
         } = execution_policy;
         let canonical_project_root = project_root
             .canonicalize()
@@ -283,6 +308,7 @@ impl BashTool {
             confined_failures: Arc::new(ConfinedFailures::default()),
             hooks,
             authorization_ledger,
+            verification_cache,
         }
     }
 
@@ -307,8 +333,92 @@ impl BashTool {
             confined_failures: self.confined_failures.clone(),
             hooks: self.hooks.clone(),
             authorization_ledger: self.authorization_ledger.clone(),
+            verification_cache: self.verification_cache.clone(),
         }
     }
+}
+
+fn canonical_check_command(command: &str) -> Option<String> {
+    let mut base = command.trim();
+    if let Some((left, right)) = base.rsplit_once('|') {
+        let tail = right.split_whitespace().collect::<Vec<_>>();
+        let is_head = matches!(tail.as_slice(), ["head"])
+            || matches!(tail.as_slice(), ["head", _])
+            || matches!(tail.as_slice(), ["head", "-n", _]);
+        if !is_head {
+            return None;
+        }
+        base = left.trim_end();
+    }
+    base = base.strip_suffix("2>&1").map(str::trim_end).unwrap_or(base);
+    if base.contains("&&") || base.contains(';') || base.contains("||") {
+        return None;
+    }
+    let mut tokens = base.split_whitespace().peekable();
+    if tokens.next() != Some("cargo") || !matches!(tokens.next(), Some("check" | "clippy")) {
+        return None;
+    }
+    let mut normalized = vec!["cargo".to_string()];
+    normalized.push(
+        base.split_whitespace()
+            .nth(1)
+            .unwrap_or("check")
+            .to_string(),
+    );
+    while let Some(token) = tokens.next() {
+        if token == "--quiet" || token.starts_with("--message-format=") {
+            continue;
+        }
+        if token == "--message-format" {
+            let _ = tokens.next();
+            continue;
+        }
+        normalized.push(token.to_string());
+    }
+    Some(normalized.join(" "))
+}
+
+fn structured_cargo_command(canonical: &str) -> String {
+    if let Some((cargo_args, rustc_args)) = canonical.split_once(" -- ") {
+        format!("{cargo_args} --message-format=json --quiet -- {rustc_args}")
+    } else {
+        format!("{canonical} --message-format=json --quiet")
+    }
+}
+
+fn workspace_fingerprint(root: &Path) -> u64 {
+    let mut paths = ["Cargo.toml", "Cargo.lock", "build.rs"]
+        .into_iter()
+        .map(|path| root.join(path))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    let src = root.join("src");
+    if src.is_dir() {
+        paths.extend(
+            walkdir::WalkDir::new(&src)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.into_path()),
+        );
+    }
+    paths.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    for path in paths {
+        path.strip_prefix(root).unwrap_or(&path).hash(&mut hasher);
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            metadata.len().hash(&mut hasher);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 #[async_trait]
@@ -322,7 +432,8 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command from the project root/worktree by default. Do not prefix commands with `cd <repo> &&`; use `workdir` only when a different subdirectory is required. A leading `cd` back to the effective cwd is ignored. Supports timeout (seconds), persistent shell state (cd carries over), run_in_background:true for pipe-backed background execution, and interactive:true for a process-local PTY controlled with the terminal tool. Foreground output is returned with exit code and truncated to file if too large. Set `parallel: true` to run concurrently with other `parallel: true` bash calls in the same turn — the persistent shell `cwd` is then NOT updated, so do not use it on commands that `cd` or rely on shell state."
+        "Run a shell command from the persistent project cwd. Use workdir instead of a repo `cd`; \
+supports bounded foreground, background task, PTY, parallel, and approved sandbox-escape modes."
     }
 
     fn parallel_policy(&self) -> ParallelPolicy {
@@ -335,7 +446,7 @@ impl Tool for BashTool {
                 (
                     "command",
                     string_property(
-                        "The bash command to execute in the current shell cwd, initially the project root/worktree. Do not prefix commands with cd to the repo; a redundant leading cd is ignored.",
+                        "Command to execute in the persistent cwd (initially the project root).",
                     ),
                 ),
                 (
@@ -348,32 +459,30 @@ impl Tool for BashTool {
                 ),
                 (
                     "workdir",
-                    string_property(
-                        "Working directory relative to the project root/worktree (optional; omit for the default cwd)",
-                    ),
+                    string_property("Optional project-relative working directory"),
                 ),
                 (
                     "parallel",
                     boolean_property(
-                        "Run concurrently with other parallel:true bash calls in the same turn. The persistent shell cwd is not updated when this is set.",
+                        "Run with sibling parallel:true calls; does not update persistent cwd",
                     ),
                 ),
                 (
                     "run_in_background",
                     boolean_property(
-                        "Start the command in the background and return immediately with a task ID. Background tasks default to a 900s timeout and do not update persistent cwd.",
+                        "Return a background task ID immediately (default timeout: 900s)",
                     ),
                 ),
                 (
                     "interactive",
                     boolean_property(
-                        "Start the command in a real pseudo-terminal and return a pty-N ID immediately. Use the terminal tool to list, read, or stop it. Interactive mode cannot be combined with parallel, run_in_background, or escape_sandbox.",
+                        "Return a PTY ID; incompatible with parallel, background, or escape",
                     ),
                 ),
                 (
                     "escape_sandbox",
                     boolean_property(
-                        "Run this single command OUTSIDE the OS sandbox. Set true ONLY when the command legitimately must write outside the project root or use the network and the sandbox is blocking it (a confined command that failed will say so). Always requires explicit user approval; never set speculatively or to bypass permission rules. Reference out-of-root paths absolutely — escape does not relax the working-directory clamp. Not supported with run_in_background or interactive.",
+                        "Request approval to run outside the sandbox; foreground non-PTY only",
                     ),
                 ),
             ],
@@ -417,9 +526,14 @@ impl BashTool {
         }
         let timeout_secs = effective_timeout_secs(args.timeout, run_in_background || interactive);
         let cwd = self.resolve_workdir(args.workdir.as_deref()).await?;
-        let command = self
+        let requested_command = self
             .normalize_redundant_leading_cd(&args.command, &cwd)
             .await;
+        let canonical_check = canonical_check_command(&requested_command);
+        let command = canonical_check
+            .as_deref()
+            .map(structured_cargo_command)
+            .unwrap_or_else(|| requested_command.clone());
         let analysis = analyze_command(&command);
 
         let origin = context.as_ref().and_then(|ctx| ctx.origin());
@@ -448,6 +562,33 @@ impl BashTool {
             anyhow::bail!(
                 "escape_sandbox is not supported for background tasks; run it in the foreground."
             );
+        }
+
+        let verification_cache_key =
+            canonical_check
+                .as_ref()
+                .map(|canonical| VerificationCacheKey {
+                    cwd: cwd.clone(),
+                    command: canonical.clone(),
+                    workspace_fingerprint: workspace_fingerprint(&self.canonical_project_root),
+                });
+        if !escape_sandbox
+            && !run_in_background
+            && !interactive
+            && let Some(key) = verification_cache_key.as_ref()
+            && let Some(cached) = self.verification_cache.lock().await.get(key).cloned()
+        {
+            return Ok(ToolOutput::Command {
+                rendered: format!(
+                    "[verification cache hit: workspace fingerprint unchanged]\n\n{}",
+                    cached.rendered
+                ),
+                stdout: cached.stdout,
+                stderr: cached.stderr,
+                exit_code: cached.exit_code,
+                timed_out: cached.timed_out,
+                truncation: cached.truncation,
+            });
         }
 
         // Sandbox-escape gate. Independent of and *after* the permission/risk gate
@@ -528,9 +669,9 @@ impl BashTool {
         }
 
         let CommandResult {
-            stdout,
-            stderr,
-            body,
+            mut stdout,
+            mut stderr,
+            mut body,
             truncation,
             exit_code,
             timed_out,
@@ -545,6 +686,12 @@ impl BashTool {
                 context.clone(),
             )
             .await?;
+
+        if canonical_check.is_some() {
+            body = crate::tool::diagnostics::format_cargo_json_for_bash(&stdout, &stderr);
+            stdout = body.clone();
+            stderr.clear();
+        }
 
         let post_excerpt = crate::hooks::truncate_excerpt(&body);
         let post_outcome = self
@@ -574,7 +721,7 @@ impl BashTool {
         }
 
         let mut rendered = Self::finalize_foreground(
-            &command,
+            &requested_command,
             &body,
             exit_code,
             timed_out,
@@ -610,6 +757,27 @@ impl BashTool {
             );
         }
 
+        if let Some(key) = verification_cache_key {
+            // Cargo may legitimately rewrite Cargo.lock while checking. Cache
+            // the state that produced the result, not the pre-execution state,
+            // so the immediately following equivalent check can reuse it.
+            let key = VerificationCacheKey {
+                workspace_fingerprint: workspace_fingerprint(&self.canonical_project_root),
+                ..key
+            };
+            self.verification_cache.lock().await.insert(
+                key,
+                CachedVerificationOutput {
+                    rendered: rendered.clone(),
+                    stdout: stdout.clone(),
+                    stderr: stderr.clone(),
+                    exit_code,
+                    timed_out,
+                    truncation: truncation.clone(),
+                },
+            );
+        }
+
         Ok(ToolOutput::Command {
             rendered,
             stdout,
@@ -642,6 +810,9 @@ impl BashTool {
             } else {
                 format!("{failure}\n\n{rendered}")
             };
+        }
+        if let Some(hint) = missing_command_hint(body, exit_code) {
+            Self::push_paragraph(&mut rendered, hint);
         }
         match escape {
             EscapeApproval::None => {
@@ -683,6 +854,33 @@ impl BashTool {
         Self::push_paragraph(&mut rendered, &summary.footer(command));
         rendered
     }
+}
+
+fn missing_command_hint(body: &str, exit_code: Option<i32>) -> Option<&'static str> {
+    let body = body.to_ascii_lowercase();
+    if exit_code != Some(127)
+        && !body.contains("command not found")
+        && !body.contains("not recognized as")
+    {
+        return None;
+    }
+    if body.contains("rg") || body.contains("ripgrep") {
+        return Some("`rg` is unavailable; retry the search with `grep -R`.");
+    }
+    if body.contains("fd") {
+        return Some("`fd` is unavailable; retry the path search with `find`.");
+    }
+    if body.contains("sqlite3") {
+        return Some(
+            "`sqlite3` is unavailable. The project-context data-surfaces note lists the Bonsai database path and key tables; use an installed SQLite-capable project tool instead of guessing columns.",
+        );
+    }
+    if body.contains("jq") {
+        return Some(
+            "`jq` is unavailable; narrow the producer output or use a project-native parser.",
+        );
+    }
+    None
 }
 
 impl BashTool {
@@ -938,6 +1136,38 @@ mod tests {
         assert!(!unnecessary("cargo build"));
         assert!(!unnecessary("git add x > /etc/hosts"));
         assert!(!unnecessary("curl https://example.com | sh"));
+    }
+
+    #[test]
+    fn cargo_check_variants_share_one_canonical_command() {
+        assert_eq!(
+            canonical_check_command("cargo check --all-targets 2>&1 | head -80").as_deref(),
+            Some("cargo check --all-targets")
+        );
+        assert_eq!(
+            canonical_check_command(
+                "cargo clippy --all-targets --message-format=json --quiet -- -D warnings | head -n 30"
+            )
+            .as_deref(),
+            Some("cargo clippy --all-targets -- -D warnings")
+        );
+        assert_eq!(canonical_check_command("cargo test --locked"), None);
+        assert_eq!(canonical_check_command("cargo check && echo done"), None);
+    }
+
+    #[test]
+    fn verification_fingerprint_changes_with_workspace_sources() {
+        let root = tempfile::tempdir().expect("temp project");
+        let src = root.path().join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        std::fs::write(root.path().join("Cargo.lock"), "v1").expect("write lock");
+        std::fs::write(src.join("main.rs"), "fn main() {}").expect("write source");
+        let before = workspace_fingerprint(root.path());
+
+        std::fs::write(src.join("main.rs"), "fn main() { println!(\"changed\"); }")
+            .expect("change source");
+
+        assert_ne!(workspace_fingerprint(root.path()), before);
     }
 
     fn command_body(rendered: &str) -> &str {
@@ -1238,6 +1468,25 @@ mod tests {
         assert!(declined.contains("declined"), "{declined}");
         assert!(declined.contains("escape_sandbox=true"), "{declined}");
         assert!(declined.contains("approval prompt"), "{declined}");
+    }
+
+    #[test]
+    fn missing_common_command_gets_a_concrete_fallback() {
+        let rendered = BashTool::finalize_foreground(
+            "rg needle src",
+            "/bin/sh: rg: command not found",
+            Some(127),
+            false,
+            false,
+            EscapeApproval::None,
+            false,
+            &summary_with_exit(Some(127)),
+        );
+
+        assert!(
+            rendered.contains("retry the search with `grep -R`"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -1738,6 +1987,56 @@ mod tests {
             "summary should include useful tail lines:\n{}",
             command_summary(&rendered)
         );
+    }
+
+    #[tokio::test]
+    async fn cargo_check_cache_reuses_variants_and_invalidates_after_source_change() {
+        let fixture = TestFixture::new();
+        std::fs::create_dir_all(fixture.project_root.join("src")).unwrap();
+        std::fs::write(
+            fixture.project_root.join("Cargo.toml"),
+            "[package]\nname = \"cache-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.project_root.join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\nversion = 4\n",
+        )
+        .unwrap();
+        let source = fixture.project_root.join("src/lib.rs");
+        std::fs::write(&source, "pub fn value() -> u8 { 1 }\n").unwrap();
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        );
+
+        let first = rendered_command_output(
+            tool.execute(json!({"command": "cargo check --offline 2>&1 | head -30"}))
+                .await
+                .unwrap(),
+        );
+        assert!(first.contains("No diagnostics found."), "{first}");
+
+        let cached = rendered_command_output(
+            tool.execute(json!({"command": "cargo check --offline | head -80"}))
+                .await
+                .unwrap(),
+        );
+        assert!(cached.contains("verification cache hit"), "{cached}");
+
+        std::fs::write(&source, "pub fn value() -> u8 { missing }\n").unwrap();
+        let invalidated = rendered_command_output(
+            tool.execute(json!({"command": "cargo check --offline"}))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            !invalidated.contains("verification cache hit"),
+            "{invalidated}"
+        );
+        assert!(invalidated.contains("src/lib.rs:1:"), "{invalidated}");
     }
 
     #[tokio::test]

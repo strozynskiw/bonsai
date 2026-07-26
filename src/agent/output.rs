@@ -82,6 +82,8 @@ pub(super) fn tool_context_detail(tool_call: &ToolCall, output: &ToolOutput) -> 
         },
         ToolOutput::Text(_)
         | ToolOutput::Read { .. }
+        | ToolOutput::ReadReuse { .. }
+        | ToolOutput::ReadDelta { .. }
         | ToolOutput::TextWithUsage { .. }
         | ToolOutput::WaitStarted { .. } => ToolContextResult::Text {
             rendered: rendered_summary,
@@ -125,11 +127,21 @@ pub(super) fn tool_context_detail(tool_call: &ToolCall, output: &ToolOutput) -> 
         name: tool_call.name.clone(),
         arguments: compact_tool_arguments_for_context(&tool_call.name, &tool_call.arguments),
         read_evidence: match output {
-            ToolOutput::Read { evidence, .. } => Some(evidence.clone()),
+            ToolOutput::Read { evidence, .. } | ToolOutput::ReadDelta { evidence, .. } => {
+                Some(evidence.clone())
+            }
             _ => None,
         },
         result,
-        reuse_target_call_id: None,
+        reuse_target_call_id: match output {
+            ToolOutput::ReadReuse {
+                target_call_ids, ..
+            }
+            | ToolOutput::ReadDelta {
+                target_call_ids, ..
+            } => target_call_ids.first().cloned(),
+            _ => None,
+        },
     }
 }
 

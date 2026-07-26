@@ -99,25 +99,6 @@ fn read_window_response(
     })
 }
 
-fn read_limit_response(
-    id: &str,
-    path: &str,
-    limit: usize,
-) -> crate::provider::ProviderResult<StreamedResponse> {
-    Ok(StreamedResponse {
-        tool_calls: vec![test_tool_call(
-            id,
-            "read",
-            &serde_json::json!({
-                "path": path,
-                "limit": limit,
-            })
-            .to_string(),
-        )],
-        ..StreamedResponse::default()
-    })
-}
-
 fn read_region_response(
     id: &str,
     path: &str,
@@ -132,6 +113,25 @@ fn read_region_response(
                 "path": path,
                 "start_line": start_line,
                 "end_line": end_line,
+            })
+            .to_string(),
+        )],
+        ..StreamedResponse::default()
+    })
+}
+
+fn read_limit_response(
+    id: &str,
+    path: &str,
+    limit: usize,
+) -> crate::provider::ProviderResult<StreamedResponse> {
+    Ok(StreamedResponse {
+        tool_calls: vec![test_tool_call(
+            id,
+            "read",
+            &serde_json::json!({
+                "path": path,
+                "limit": limit,
             })
             .to_string(),
         )],
@@ -656,6 +656,108 @@ async fn unchanged_reread_appends_pointer_and_keeps_prior_full() {
 }
 
 #[tokio::test]
+async fn adjacent_live_windows_jointly_satisfy_a_read_before_execution() {
+    let fixture = TestFixture::new();
+    let body = (1..=160)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    fixture.create_file("foo.rs", &body);
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![
+            read_region_response("call-1", "foo.rs", 1, 20),
+            read_region_response("call-2", "foo.rs", 21, 40),
+            read_region_response("call-3", "foo.rs", 10, 30),
+            finish_response("done"),
+        ])),
+        read_registry(&fixture),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+
+    agent
+        .run(
+            "read overlapping windows",
+            CancellationToken::new(),
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .unwrap();
+
+    let third = tool_messages(&agent.messages)
+        .into_iter()
+        .find(|(id, _)| id == "call-3")
+        .map(|(_, content)| content)
+        .unwrap();
+    assert!(
+        third.starts_with(crate::agent::REUSED_READ_MARKER),
+        "{third}"
+    );
+    assert!(third.contains("source_calls: call-1, call-2"), "{third}");
+    let event = &agent.read_evidence.inspection_events["call-3"];
+    assert_eq!(event.outcome, InspectionOutcome::Reused);
+    assert!(event.avoided_chars > 0);
+}
+
+#[tokio::test]
+async fn partially_covered_read_executes_only_the_uncovered_delta() {
+    let fixture = TestFixture::new();
+    let body = (1..=160)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    fixture.create_file("foo.rs", &body);
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![
+            read_region_response("call-1", "foo.rs", 1, 20),
+            read_region_response("call-2", "foo.rs", 10, 30),
+            finish_response("done"),
+        ])),
+        read_registry(&fixture),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+
+    agent
+        .run(
+            "extend the first window",
+            CancellationToken::new(),
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .unwrap();
+
+    let second = tool_messages(&agent.messages)
+        .into_iter()
+        .find(|(id, _)| id == "call-2")
+        .map(|(_, content)| content)
+        .unwrap();
+    assert!(
+        second.starts_with(crate::agent::PARTIAL_READ_REUSE_MARKER),
+        "{second}"
+    );
+    assert!(second.contains("kept lines 10-20"), "{second}");
+    assert!(second.contains("21: line 21"), "{second}");
+    assert!(second.contains("30: line 30"), "{second}");
+    assert!(!second.contains("10: line 10"), "{second}");
+    let evidence = agent.tool_context_details["call-2"]
+        .read_evidence
+        .as_ref()
+        .unwrap();
+    assert_eq!(evidence.window().start_line, 21);
+    assert_eq!(evidence.window().end_line, Some(30));
+    let event = &agent.read_evidence.inspection_events["call-2"];
+    assert_eq!(event.outcome, InspectionOutcome::Reused);
+    assert!(event.avoided_chars > 0);
+}
+
+#[tokio::test]
 async fn deduped_reread_is_compact_and_keeps_target_fresh() {
     let fixture = TestFixture::new();
     fixture.create_file("foo.rs", "fn a() {}\nfn b() {}\n");
@@ -872,15 +974,16 @@ async fn explicit_default_offset_after_truncated_reuse_returns_real_bytes() {
         .unwrap();
 
     let tools = tool_messages(&agent.messages);
+    let second = tools
+        .iter()
+        .find(|(id, _)| id == "call-2")
+        .map(|(_, content)| content)
+        .expect("call-2 result");
     assert!(
-        tools
-            .iter()
-            .find(|(id, _)| id == "call-2")
-            .is_some_and(|(_, content)| {
-                content.starts_with(crate::agent::REUSED_READ_MARKER)
-                    && content.contains("continue with offset=")
-                    && content.contains("do not restart at offset=1")
-            })
+        second.starts_with(crate::agent::REUSED_READ_MARKER)
+            && second.contains("continue with offset=")
+            && second.contains("do not restart at offset=1"),
+        "{second}"
     );
     assert!(
         tools

@@ -296,7 +296,7 @@ async fn steering_does_not_close_active_episode() {
 }
 
 #[tokio::test]
-async fn completed_or_cancelled_todos_arm_episode_without_closing_it() {
+async fn completed_or_cancelled_todos_close_at_the_next_complete_group_boundary() {
     let (mut agent, store, _fixture) = episode_agent();
     push_user_turn(&mut agent, "finish the task list");
     let todo_store = Arc::new(tokio::sync::Mutex::new(crate::todo::TodoStore::new()));
@@ -322,11 +322,68 @@ async fn completed_or_cancelled_todos_arm_episode_without_closing_it() {
             status: crate::todo::TodoStatus::Cancelled,
         },
     ]);
+    agent.push_message(assistant_tool_call_message(
+        "call-todo",
+        "todowrite",
+        r#"{"todos":[{"content":"implemented","status":"completed"}]}"#,
+    ));
     agent.observe_todowrite_result().await;
+    assert_eq!(
+        episodes_of(&store)[0].status(),
+        EpisodeStatus::Active,
+        "the boundary waits for the result that completes the group"
+    );
+    agent.push_message(tool_result_message("call-todo", "Todo list updated"));
+    agent.apply_episode_completion_boundary();
 
     let episode = &episodes_of(&store)[0];
     assert!(episode.is_completable());
-    assert_eq!(episode.status(), EpisodeStatus::Active, "arm-only in v1");
+    assert_eq!(episode.status(), EpisodeStatus::Closed);
+    assert_eq!(
+        episode.close_reason(),
+        Some(EpisodeCloseReason::TodoComplete)
+    );
+    assert_eq!(
+        episode.end_stable_id(),
+        agent.message_ids.last().map(String::as_str)
+    );
+}
+
+#[tokio::test]
+async fn size_pressure_rolls_a_long_episode_and_keeps_the_latest_groups_live() {
+    let (mut agent, store, _fixture) = episode_agent();
+    agent.set_context_budget_tokens(32_000);
+    push_user_turn(&mut agent, "long-running task");
+    set_title(&mut agent, "call-title", "Long task");
+    push_bulky_tool_group(&mut agent, "call-old-1", "src/old-a.rs", 12_000);
+    push_bulky_tool_group(&mut agent, "call-old-2", "src/old-b.rs", 12_000);
+    push_tool_group(&mut agent, "call-tail-1", "src/tail-a.rs");
+    push_tool_group(&mut agent, "call-tail-2", "src/tail-b.rs");
+    push_tool_group(&mut agent, "call-tail-3", "src/tail-c.rs");
+    let expected_successor_start = agent.message_ids[8].clone();
+
+    let tool_schema = agent.active_tool_schema();
+    agent.apply_episode_size_boundary(&tool_schema);
+
+    let episodes = episodes_of(&store);
+    assert_eq!(episodes.len(), 2);
+    assert_eq!(episodes[0].status(), EpisodeStatus::Closed);
+    assert_eq!(
+        episodes[0].close_reason(),
+        Some(EpisodeCloseReason::SizePressure)
+    );
+    assert_eq!(
+        episodes[0].files_touched(),
+        vec!["src/old-a.rs".to_string(), "src/old-b.rs".to_string()]
+    );
+    assert_eq!(episodes[1].status(), EpisodeStatus::Active);
+    assert_eq!(episodes[1].title(), "Long task");
+    assert_eq!(episodes[1].goal(), "long-running task");
+    assert_eq!(
+        episodes[1].start_stable_id(),
+        expected_successor_start,
+        "the protected tail starts the successor episode"
+    );
 }
 
 #[tokio::test]
@@ -1214,9 +1271,18 @@ async fn pinned_row_defers_the_whole_episode() {
 }
 
 #[tokio::test]
-async fn read_reuse_pointer_target_defers_the_whole_episode() {
+async fn outside_read_reuse_pointer_target_defers_the_whole_episode() {
     let (mut agent, store, _fixture) = episode_agent_with_responses(vec![]);
     close_bulky_episode(&mut agent, 20_000);
+    agent.push_message(assistant_tool_call_message(
+        "reuse-call",
+        "read",
+        r#"{"path":"src/a.rs"}"#,
+    ));
+    agent.push_message(tool_result_message(
+        "reuse-call",
+        "[reused previous read] src/a.rs\nsource_calls: call-a1",
+    ));
     agent.tool_context_details.insert(
         "reuse-call".to_string(),
         ToolContextDetail {
@@ -1240,8 +1306,57 @@ async fn read_reuse_pointer_target_defers_the_whole_episode() {
         .await
         .unwrap();
 
-    assert_eq!(evicted, 0, "pointer targets are never amputated");
+    assert_eq!(
+        evicted, 0,
+        "a live pointer outside the span must keep its target"
+    );
     assert_eq!(episodes_of(&store)[0].status(), EpisodeStatus::Closed);
+}
+
+#[tokio::test]
+async fn pointer_archived_with_its_target_does_not_block_episode_eviction() {
+    let (mut agent, store, _fixture) =
+        episode_agent_with_responses(vec![card_response("## Episode card\n- Outcome: done")]);
+    push_user_turn(&mut agent, "work on topic A");
+    set_title(&mut agent, "call-ta", "Topic A");
+    push_bulky_tool_group(&mut agent, "call-a1", "src/a.rs", 20_000);
+    agent.push_message(assistant_tool_call_message(
+        "reuse-call",
+        "read",
+        r#"{"path":"src/a.rs"}"#,
+    ));
+    agent.push_message(tool_result_message(
+        "reuse-call",
+        "[reused previous read] src/a.rs\nsource_calls: call-a1",
+    ));
+    agent.tool_context_details.insert(
+        "reuse-call".to_string(),
+        ToolContextDetail {
+            call_id: "reuse-call".to_string(),
+            name: "read".to_string(),
+            arguments: r#"{"path":"src/a.rs"}"#.to_string(),
+            read_evidence: None,
+            result: ToolContextResult::Text {
+                rendered: "reused earlier read".to_string(),
+            },
+            reuse_target_call_id: Some("call-a1".to_string()),
+        },
+    );
+    push_bulky_tool_group(&mut agent, "call-a2", "src/b.rs", 20_000);
+    push_user_turn(&mut agent, "now switch to topic B");
+    set_title(&mut agent, "call-tb", "Topic B");
+
+    let evicted = agent
+        .apply_episode_evictions(
+            &capture_sink(),
+            CancellationToken::new(),
+            EpisodeEvictionPass::CloseTime,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(evicted, 1);
+    assert_eq!(episodes_of(&store)[0].status(), EpisodeStatus::Evicted);
 }
 
 #[tokio::test]

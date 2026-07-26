@@ -134,6 +134,7 @@ impl Agent {
         }
         record.status = VerificationRunStatus::Stale;
         record.observed_final_workspace = Some(false);
+        self.verification.after_edit_verification_injected = false;
         for path in paths {
             if !record.workspace_changes_after_last_check.contains(path) {
                 record.workspace_changes_after_last_check.push(path.clone());
@@ -158,12 +159,20 @@ impl Agent {
         self.verification.after_edit_verification_pending = false;
         self.verification.after_edit_verification_injected = true;
         let policy = self.config.verification.after_edit;
-        if policy == VerifyAfterEdit::Off {
+        let stale_kind = self
+            .verification
+            .verification_runs
+            .last()
+            .filter(|run| run.status == VerificationRunStatus::Stale)
+            .map(|run| run.kind);
+        if policy == VerifyAfterEdit::Off && stale_kind.is_none() {
             return false;
         }
 
         let profile = VerificationProfile::resolve(&self.project_root, &self.config.verification);
-        let kind = if !profile.tests.is_empty() {
+        let kind = if let Some(kind) = stale_kind {
+            kind
+        } else if !profile.tests.is_empty() {
             VerificationKind::Test
         } else if !profile.builds.is_empty() {
             VerificationKind::Build
@@ -184,6 +193,7 @@ impl Agent {
         };
 
         if policy == VerifyAfterEdit::Ask
+            && stale_kind.is_none()
             && !self
                 .confirm_after_edit_verification(kind, cancellation_token)
                 .await
@@ -191,8 +201,13 @@ impl Agent {
             return false;
         }
 
+        let label = if stale_kind.is_some() {
+            "Stale verification repair"
+        } else {
+            "Post-edit verification"
+        };
         sink.status(&format!(
-            "Post-edit verification: running the configured {} profile…",
+            "{label}: running the configured {} profile…",
             kind.label()
         ));
         self.arm_verification_record(kind, &workflow.checks);
@@ -270,7 +285,9 @@ impl Agent {
         if tool_call.name != "bash"
             || matches!(
                 status,
-                ToolExecutionStatus::Skipped | ToolExecutionStatus::Interrupted
+                ToolExecutionStatus::Skipped
+                    | ToolExecutionStatus::Interrupted
+                    | ToolExecutionStatus::Started
             )
         {
             return;

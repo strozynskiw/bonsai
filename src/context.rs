@@ -354,6 +354,15 @@ fn project_environment_lines(root: &Path) -> Vec<String> {
     if let Some(kind) = project_type(root) {
         env.push(format!("- project: {kind}"));
     }
+    if let Ok(paths) = crate::storage::BonsaiPaths::discover() {
+        env.push(format!(
+            "- local data: {} (key tables: sessions, usage_turns, tool_calls, inspection_events, verification_runs, self_review_runs, episodes)",
+            paths.db_path().display()
+        ));
+    }
+    if root.join("ROADMAP.md").is_file() {
+        env.push(format!("- roadmap: {}", root.join("ROADMAP.md").display()));
+    }
     env
 }
 
@@ -547,6 +556,8 @@ mod tests {
         assert!(context.contains("## Environment"));
         assert!(context.contains("cwd:"));
         assert!(context.contains("platform:"));
+        assert!(context.contains("local data:"));
+        assert!(context.contains("usage_turns"));
     }
 
     #[test]

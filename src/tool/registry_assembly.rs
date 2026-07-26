@@ -638,7 +638,9 @@ pub(crate) fn build_tool_registries(
     coding_instances.insert(ToolFactoryKey::WebFetch, webfetch_tool.clone());
     // WebSearch follows WebFetch so existing prompt prefixes remain stable. It
     // shares WebFetch's network authorization and never enters SMOL.
-    coding_instances.insert(ToolFactoryKey::WebSearch, websearch_tool.clone());
+    if websearch_tool.is_configured() {
+        coding_instances.insert(ToolFactoryKey::WebSearch, websearch_tool.clone());
+    }
     let recall_tool = episode_store.as_ref().map(|episode_store| {
         Arc::new(crate::tool::RecallTool::new(
             episode_store.clone(),
@@ -714,7 +716,9 @@ pub(crate) fn build_tool_registries(
     }
     insert_plan_tools(&mut planning_instances, plan_store, session_title);
     planning_instances.insert(ToolFactoryKey::WebFetch, webfetch_tool);
-    planning_instances.insert(ToolFactoryKey::WebSearch, websearch_tool);
+    if websearch_tool.is_configured() {
+        planning_instances.insert(ToolFactoryKey::WebSearch, websearch_tool);
+    }
     if let Some(memory_write_tool) = memory_write_tool {
         planning_instances.insert(ToolFactoryKey::MemoryWrite, memory_write_tool);
     }
@@ -955,75 +959,77 @@ mod tests {
             episode_store: None,
         });
 
-        assert_eq!(
-            coding.names().collect::<Vec<_>>(),
-            [
-                "project_info",
-                "read",
-                "write",
-                "apply_patch",
-                "edit",
-                "bash",
-                "terminal",
-                "glob",
-                "grep",
-                "symbol_search",
-                "definition",
-                "references",
-                "hover",
-                "workspace_symbol",
-                "rename_symbol",
-                "git",
-                "read_region",
-                "read_symbol",
-                "skill",
-                "diagnostics",
-                "todowrite",
-                "set_session_title",
-                "tasks",
-                "question",
-                "webfetch",
-                "websearch",
-                "enter_plan_mode",
-            ]
-        );
-        assert_eq!(
-            planning.names().collect::<Vec<_>>(),
-            [
-                "project_info",
-                "read",
-                "glob",
-                "grep",
-                "symbol_search",
-                "definition",
-                "references",
-                "hover",
-                "workspace_symbol",
-                "git",
-                "read_region",
-                "read_symbol",
-                "question",
-                "skill",
-                "plan_replace_draft",
-                "plan_remove_section",
-                "plan_move_section",
-                "plan_patch_section",
-                "plan_remove_phase",
-                "plan_move_phase",
-                "plan_insert_task",
-                "plan_update_task",
-                "plan_remove_task",
-                "plan_check_task",
-                "plan_uncheck_task",
-                "plan_add_question",
-                "plan_remove_question",
-                "plan_add_finding",
-                "plan_associate_finding",
-                "plan_resolve_finding",
-                "webfetch",
-                "websearch",
-            ]
-        );
+        let websearch_configured = coding.get("websearch").is_some();
+        let mut expected_coding = vec![
+            "project_info",
+            "read",
+            "glob",
+            "grep",
+            "symbol_search",
+            "definition",
+            "references",
+            "hover",
+            "workspace_symbol",
+            "git",
+            "read_region",
+            "read_symbol",
+            "write",
+            "apply_patch",
+            "edit",
+            "bash",
+            "terminal",
+            "rename_symbol",
+            "skill",
+            "diagnostics",
+            "todowrite",
+            "set_session_title",
+            "tasks",
+            "question",
+            "webfetch",
+            "enter_plan_mode",
+        ];
+        if websearch_configured {
+            expected_coding.insert(expected_coding.len() - 1, "websearch");
+        }
+        assert_eq!(coding.names().collect::<Vec<_>>(), expected_coding);
+
+        let mut expected_planning = vec![
+            "project_info",
+            "read",
+            "glob",
+            "grep",
+            "symbol_search",
+            "definition",
+            "references",
+            "hover",
+            "workspace_symbol",
+            "git",
+            "read_region",
+            "read_symbol",
+            "question",
+            "skill",
+            "plan_replace_draft",
+            "plan_remove_section",
+            "plan_move_section",
+            "plan_patch_section",
+            "plan_remove_phase",
+            "plan_move_phase",
+            "plan_insert_task",
+            "plan_update_task",
+            "plan_remove_task",
+            "plan_check_task",
+            "plan_uncheck_task",
+            "plan_add_question",
+            "plan_remove_question",
+            "plan_add_finding",
+            "plan_associate_finding",
+            "plan_resolve_finding",
+            "webfetch",
+        ];
+        if websearch_configured {
+            expected_planning.push("websearch");
+        }
+        assert_eq!(planning.names().collect::<Vec<_>>(), expected_planning);
         assert_eq!(
             smol.names().collect::<Vec<_>>(),
             [
@@ -1094,7 +1100,6 @@ mod tests {
             "question",
             "skill",
             "webfetch",
-            "websearch",
         ] {
             assert!(
                 planning.get(tool).is_some(),
@@ -1109,6 +1114,11 @@ mod tests {
         for tool in ["webfetch", "websearch"] {
             assert!(smol.get(tool).is_none(), "SMOL registry must omit {tool}");
         }
+        assert_eq!(
+            planning.get("websearch").is_some(),
+            websearch_configured,
+            "coding and planning must agree on websearch availability"
+        );
 
         let tool = "diagnostics";
         assert!(

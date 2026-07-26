@@ -268,7 +268,8 @@ impl Agent {
             return false;
         }
 
-        let wants_prompt = match self.self_review.mode().decision(self.approval_level()) {
+        let review_mode = self.self_review.mode();
+        let wants_prompt = match review_mode.decision(self.approval_level()) {
             SelfReviewDecision::Skip => {
                 self.disarm_self_review();
                 return false;
@@ -331,10 +332,15 @@ impl Agent {
             return false;
         };
 
-        // A typo or one-line tweak is never worth a fresh reviewer round-trip.
-        // This is an eligibility gate, not a mode preference: `on` and `ask`
-        // still skip trivial diffs rather than spending a review turn or prompt.
-        if diff.is_below_review_threshold() {
+        // Explicit `on`/`ask` modes retain the lower general eligibility bar.
+        // Auto mode uses the higher cost gate, except that a small edit on a
+        // high-risk boundary is still review-worthy.
+        let below_review_threshold = if review_mode == SelfReviewMode::Auto {
+            diff.is_below_auto_review_threshold()
+        } else {
+            diff.is_below_review_threshold()
+        };
+        if below_review_threshold {
             self.disarm_self_review();
             return false;
         }

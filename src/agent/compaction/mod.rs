@@ -17,7 +17,9 @@ mod summary;
 // test module can construct a `CompactionDraft` to unit-test summary rendering.
 pub(in crate::agent) mod types;
 
-pub(in crate::agent) use draft::ReadAdmission;
+pub(in crate::agent) use draft::{
+    PrecomputedReadDelta, PrecomputedReadReuse, ReadAdmission, ReadReuse,
+};
 use helpers::*;
 pub(in crate::agent) use helpers::{
     CompactionCancelled, is_compaction_cancelled, message_groups, next_queued_messages,
@@ -167,6 +169,8 @@ impl Agent {
         // advisories are computed against the post-eviction rows and never
         // point into a removed span.
         self.apply_pending_episode_title_signal();
+        self.apply_episode_completion_boundary();
+        self.apply_episode_size_boundary(tool_schema);
         self.apply_episode_evictions(
             sink,
             cancellation_token.clone(),
@@ -531,7 +535,7 @@ impl Agent {
         pct_target.min(budget_safe).max(1)
     }
 
-    fn output_reserve_tokens(&self) -> usize {
+    pub(super) fn output_reserve_tokens(&self) -> usize {
         let budget = self.budget.context_budget_tokens;
         if self.smol_applies_to_active_persona() {
             return budget.checked_div(8).unwrap_or(0).clamp(512, 2_000);

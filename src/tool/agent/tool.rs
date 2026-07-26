@@ -423,26 +423,13 @@ impl Tool for AgentTool {
     fn description(&self) -> &str {
         match self.resolution {
             AgentResolution::CustomAndBuiltin => {
-                "Delegate a scoped sub-task to a subagent and get back only its final \
-conclusion, keeping your own context lean. The available subagents (built-in plus any the project \
-defines) are listed in the Subagents index in the system prompt. Built-in subagents are read-only; \
-custom agents can use only the tools granted by their frontmatter. To cover a big task from several \
-angles at once — e.g. scanning the codebase for bugs — make multiple `agent` calls to read-only \
-subagents in the SAME turn, each with a distinct, non-overlapping scope: they run in parallel and \
-you resume once all of them finish. For broad read-only review/explore/research/security sweeps, prefer \
-`run_in_background: true` and end your turn after launching them so your own prompt prefix stays \
-cache-warm; background subagents report back when done. Do not use background mode for mutating \
-custom agents. Subagents inherit the current project root; do not delegate work that requires an \
-existing path outside it."
+                "Delegate one scoped project task and return its conclusion. Names are in the \
+Subagents index. Batch independent read-only calls in one turn; use background mode for broad \
+read-only scans. Custom agents receive only their declared tools. All paths must stay in-project."
             }
             AgentResolution::BuiltinOnly => {
-                "Delegate a scoped sub-task to a built-in read-only subagent and get back only its final \
-conclusion, keeping your own context lean. Only the built-in explore, research, review, and security-review agents \
-are available through this tool. Make several calls in one turn (each a distinct scope) to run them \
-in parallel and resume when all finish. For broad review/explore/research/security sweeps, prefer \
-`run_in_background: true` and end your turn after launching them so your own prompt prefix stays \
-cache-warm; the built-in subagents report back when done. Built-in subagents inherit the current \
-project root and cannot inspect existing paths outside it."
+                "Delegate one scoped project task to a built-in read-only subagent. Batch independent \
+calls in one turn; use background mode for broad scans. All paths must stay in-project."
             }
         }
     }

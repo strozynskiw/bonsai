@@ -84,6 +84,12 @@ struct QueuedMessageState<'state, 'receiver> {
     cancelled_ids: &'state mut HashSet<u64>,
 }
 
+struct ToolResultBatchContext<'state, 'group> {
+    trusted_contexts: &'state mut Vec<String>,
+    successful_rust_edits: &'state mut Vec<PathBuf>,
+    launch_group_id: Option<&'group str>,
+}
+
 impl QueuedMessageState<'_, '_> {
     fn next(&mut self) -> Vec<QueuedUserMessage> {
         next_queued_messages(self.receiver, self.pending, self.cancelled_ids)
@@ -612,8 +618,11 @@ impl Agent {
                 result,
                 status,
                 sink,
-                trusted_contexts,
-                &mut skipped_rust_edits,
+                ToolResultBatchContext {
+                    trusted_contexts,
+                    successful_rust_edits: &mut skipped_rust_edits,
+                    launch_group_id: None,
+                },
             )
             .await?;
         }
@@ -650,7 +659,19 @@ impl Agent {
         );
         let mut batches = planned_batches.into_iter().peekable();
         let mut trusted_contexts = Vec::new();
-        let mut detached_launch_group_id: Option<String> = None;
+        let launch_group_id = tool_calls
+            .iter()
+            .any(|tool_call| {
+                tool_registry.get(&tool_call.name).is_some_and(|tool| {
+                    tool.effect_policy() == crate::tool::ToolEffectPolicy::Delegated
+                })
+            })
+            .then(|| {
+                let id = format!("group-{}", self.next_subagent_launch_group_id);
+                self.next_subagent_launch_group_id =
+                    self.next_subagent_launch_group_id.saturating_add(1);
+                id
+            });
         while let Some(batch) = batches.next() {
             let foreground_bash = batch.iter().any(foreground_bash_call);
             let diagnostic_baseline = if foreground_bash && self.lsp_hub.is_some() {
@@ -736,21 +757,15 @@ impl Agent {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            if !detached_subagents.is_empty() {
-                let launch_group_id = detached_launch_group_id.get_or_insert_with(|| {
-                    let id = format!("group-{}", self.next_subagent_launch_group_id);
-                    self.next_subagent_launch_group_id =
-                        self.next_subagent_launch_group_id.saturating_add(1);
-                    id
-                });
-                if let Some(runner) = &self.subagent_runner {
-                    for (subtask_id, tool_call_id) in detached_subagents {
-                        let _ = runner.subagents().attach_tool_call_in_group(
-                            subtask_id,
-                            tool_call_id,
-                            Some(launch_group_id.clone()),
-                        );
-                    }
+            if !detached_subagents.is_empty()
+                && let Some(runner) = &self.subagent_runner
+            {
+                for (subtask_id, tool_call_id) in detached_subagents {
+                    let _ = runner.subagents().attach_tool_call_in_group(
+                        subtask_id,
+                        tool_call_id,
+                        launch_group_id.clone(),
+                    );
                 }
             }
             for (tool_call, result, status) in results {
@@ -765,8 +780,11 @@ impl Agent {
                     result,
                     status,
                     sink,
-                    &mut trusted_contexts,
-                    &mut successful_rust_edits,
+                    ToolResultBatchContext {
+                        trusted_contexts: &mut trusted_contexts,
+                        successful_rust_edits: &mut successful_rust_edits,
+                        launch_group_id: launch_group_id.as_deref(),
+                    },
                 )
                 .await?;
             }
@@ -932,6 +950,16 @@ impl Agent {
         let mut executed_hook_name: Option<String> = None;
 
         let (mut result, status) = 'call: {
+            if let Some(reuse) = tool_rejections.precomputed_read.get(&tool_call.id) {
+                break 'call (
+                    ToolOutput::ReadReuse {
+                        text: reuse.pointer.clone(),
+                        target_call_ids: reuse.target_call_ids.clone(),
+                        requested_chars: reuse.requested_chars,
+                    },
+                    crate::output::ToolExecutionStatus::Succeeded,
+                );
+            }
             if let Some(message) = tool_rejections.message_for(&tool_call) {
                 break 'call (
                     ToolOutput::Text(message),
@@ -963,6 +991,17 @@ impl Agent {
                         );
                     }
                 };
+            if let Some(delta) = tool_rejections.precomputed_read_delta.get(&tool_call.id) {
+                args = delta.arguments.clone();
+            }
+            if tool_rejections.auto_background.contains(&tool_call.id)
+                && let Some(object) = args.as_object_mut()
+            {
+                object.insert(
+                    "run_in_background".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
             match effect_policy {
                 crate::tool::ToolEffectPolicy::LocalState => {
                     tool_registry
@@ -1039,7 +1078,25 @@ impl Agent {
                 None => execution.await,
             };
             match execution_result {
-                Ok(result) => {
+                Ok(mut result) => {
+                    if let Some(delta) = tool_rejections.precomputed_read_delta.get(&tool_call.id) {
+                        result = match result {
+                            ToolOutput::Read { text, evidence } => ToolOutput::ReadDelta {
+                                text: format!("{}\n{}", delta.prefix, text),
+                                evidence,
+                                target_call_ids: delta.target_call_ids.clone(),
+                                avoided_chars: delta.avoided_chars,
+                            },
+                            other => other,
+                        };
+                    }
+                    if tool_rejections.auto_background.contains(&tool_call.id)
+                        && let ToolOutput::BackgroundTaskStarted { message, .. } = &mut result
+                    {
+                        *message = format!(
+                            "Auto-promoted known slow verification to background execution. {message}"
+                        );
+                    }
                     let status = result.execution_status();
                     (result, status)
                 }
@@ -1184,8 +1241,7 @@ impl Agent {
         result: ToolOutput,
         status: crate::output::ToolExecutionStatus,
         sink: &SharedSink,
-        trusted_contexts: &mut Vec<String>,
-        successful_rust_edits: &mut Vec<PathBuf>,
+        batch: ToolResultBatchContext<'_, '_>,
     ) -> Result<()> {
         let success = status.is_success();
         // Episode title signal: successful title-bearing tools are observed
@@ -1206,7 +1262,7 @@ impl Agent {
         if let Some(usage_turns) = result.usage_turns() {
             let mut attributed = usage_turns.to_vec();
             for turn in &mut attributed {
-                turn.attach_parent_context(&tool_call.id, None);
+                turn.attach_parent_context(&tool_call.id, batch.launch_group_id);
             }
             self.absorb_usage_turns(&attributed);
         }
@@ -1228,7 +1284,7 @@ impl Agent {
             )
             && let ToolOutput::TrustedContext { content, .. } = &result
         {
-            trusted_contexts.push(content.clone());
+            batch.trusted_contexts.push(content.clone());
             // Record a model-invoked skill load so the skills manager can mark it.
             if tool_call.name == "skill"
                 && let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
@@ -1245,7 +1301,9 @@ impl Agent {
                 .await;
         }
         if success && is_mutation_tool(&tool_call.name) {
-            successful_rust_edits.extend(self.resolve_rust_mutation_paths(&tool_call).await);
+            batch
+                .successful_rust_edits
+                .extend(self.resolve_rust_mutation_paths(&tool_call).await);
             self.rebaseline_read_evidence_for_mutation(&tool_call).await;
         }
         // Feed one typed post-execution effect into verification and review.
@@ -1295,7 +1353,30 @@ impl Agent {
             success,
         )
         .unwrap_or_else(|| rendered_summary.clone());
-        let typed_read = matches!(&result, ToolOutput::Read { .. });
+        let typed_read = matches!(
+            &result,
+            ToolOutput::Read { .. } | ToolOutput::ReadDelta { .. }
+        );
+        let partial_read_avoided = match &result {
+            ToolOutput::ReadDelta { avoided_chars, .. } => Some(*avoided_chars),
+            _ => None,
+        };
+        let precomputed_read = match &result {
+            ToolOutput::ReadReuse {
+                text,
+                target_call_ids,
+                requested_chars,
+            } => target_call_ids.first().map(|target_call_id| {
+                (
+                    ReadReuse {
+                        target_call_id: target_call_id.clone(),
+                        pointer: text.clone(),
+                    },
+                    *requested_chars,
+                )
+            }),
+            _ => None,
+        };
         let structured_read_name = structured_file_read_tool(&tool_call.name);
         let repeated_fresh_reuse = success
             && (structured_read_name || tool_call.name == "bash")
@@ -1310,7 +1391,12 @@ impl Agent {
                         .map(str::to_string)
                 })
                 .is_some_and(|op| matches!(op.as_str(), "diff" | "show"));
-        let admission = if repeated_fresh_reuse {
+        let admission = if let Some((reuse, _requested_chars)) = &precomputed_read {
+            ReadAdmission::Reuse(ReadReuse {
+                target_call_id: reuse.target_call_id.clone(),
+                pointer: reuse.pointer.clone(),
+            })
+        } else if repeated_fresh_reuse {
             // A compact pointer is useful once. If the model explicitly asks
             // again, honor that request with real bytes instead of trapping it
             // in a denied-read loop. The repeated-inspection and
@@ -1323,7 +1409,10 @@ impl Agent {
         } else {
             ReadAdmission::Execute(InspectionReason::NotReusable)
         };
-        let requested_chars = model_rendered_summary.chars().count();
+        let requested_chars = precomputed_read
+            .as_ref()
+            .map(|(_reuse, requested_chars)| *requested_chars)
+            .unwrap_or_else(|| model_rendered_summary.chars().count());
         let record_admission = typed_read
             || structured_read_name
             || git_inspection
@@ -1332,7 +1421,7 @@ impl Agent {
                 admission,
                 ReadAdmission::Reuse(_) | ReadAdmission::Reject(_)
             );
-        let (model_content, admission_metadata) = self.apply_read_admission(
+        let (model_content, mut admission_metadata) = self.apply_read_admission(
             admission,
             &tool_call,
             model_rendered_summary,
@@ -1340,6 +1429,20 @@ impl Agent {
             record_admission,
             sink,
         );
+        if let (Some(avoided_chars), Some(metadata)) =
+            (partial_read_avoided, admission_metadata.as_mut())
+        {
+            metadata.outcome = InspectionOutcome::Reused;
+            metadata.reason = InspectionReason::FreshVisibleCoverage;
+            metadata.requested_chars = metadata.returned_chars.saturating_add(avoided_chars);
+            metadata.avoided_chars = avoided_chars;
+            metadata.reuse_target_tool_call_id = match &result {
+                ToolOutput::ReadDelta {
+                    target_call_ids, ..
+                } => target_call_ids.first().cloned(),
+                _ => None,
+            };
+        }
         if let Some(metadata) = admission_metadata {
             self.usage
                 .record_inspection(&self.execution_lane, &metadata);
@@ -2088,6 +2191,13 @@ type PlanningResearchAction = GuardAction<String>;
 
 #[derive(Debug, Clone, Default)]
 struct ToolRejections {
+    /// Fresh interval coverage resolved before execution. These calls return a
+    /// successful compact pointer without touching the filesystem again.
+    precomputed_read: HashMap<String, PrecomputedReadReuse>,
+    /// Partially covered reads rewritten to their one uncovered interval.
+    precomputed_read_delta: HashMap<String, PrecomputedReadDelta>,
+    /// Known slow ad-hoc verification calls promoted off the foreground lane.
+    auto_background: HashSet<String>,
     planning_research: Option<String>,
     /// One-time guidance for broad parent reads that duplicate full-file work
     /// just completed by a child. A retry executes normally so the parent can
@@ -2130,6 +2240,21 @@ impl ToolRejections {
 }
 
 impl Agent {
+    fn auto_background_verification_calls(&self, tool_calls: &[ToolCall]) -> HashSet<String> {
+        if self.verification.active_verification.is_some() {
+            return HashSet::new();
+        }
+        tool_calls
+            .iter()
+            .filter(|call| call.name == "bash")
+            .filter_map(|call| {
+                let value = serde_json::from_str::<serde_json::Value>(&call.arguments).ok()?;
+                let command = value.get("command")?.as_str()?;
+                known_slow_verification(command).then(|| call.id.clone())
+            })
+            .collect()
+    }
+
     pub(in crate::agent) fn delegated_read_rejections(
         &mut self,
         tool_calls: &[ToolCall],
@@ -2185,11 +2310,14 @@ impl Agent {
         rejections
     }
 
-    fn read_follows_compact_reuse(&self, tool_call: &ToolCall) -> bool {
+    pub(in crate::agent) fn read_follows_compact_reuse(&self, tool_call: &ToolCall) -> bool {
         if self
             .current_covering_compact_reuse_target(tool_call)
             .is_some()
         {
+            return true;
+        }
+        if self.most_recent_live_structured_read_is_reuse(tool_call) {
             return true;
         }
         self.read_evidence
@@ -2228,6 +2356,50 @@ impl Agent {
                     .get(target_call_id)
                     .and_then(|detail| detail.read_evidence.as_ref())
                     .is_some_and(ReadEvidence::observation_is_current)
+            })
+    }
+
+    fn most_recent_live_structured_read_is_reuse(&self, tool_call: &ToolCall) -> bool {
+        if !structured_file_read_tool(&tool_call.name) {
+            return false;
+        }
+        let Some((requested_target, _path)) = file_read_target(tool_call) else {
+            return false;
+        };
+        self.messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, message)| {
+                let call_id = tool_message_call_id(message)?;
+                if self.message_has_control(index, message, |state| {
+                    state.stubbed || state.drop_next_turn
+                }) {
+                    return None;
+                }
+                let detail = self.tool_context_details.get(&call_id)?;
+                if !structured_file_read_tool(&detail.name) {
+                    return None;
+                }
+                let prior = ToolCall {
+                    id: call_id,
+                    name: detail.name.clone(),
+                    arguments: detail.arguments.clone(),
+                };
+                let (target, _path) = file_read_target(&prior)?;
+                (target == requested_target).then_some(detail)
+            })
+            .next()
+            .is_some_and(|detail| {
+                let Some(target_call_id) = detail.reuse_target_call_id.as_deref() else {
+                    return false;
+                };
+                self.tool_result_is_live(target_call_id)
+                    && self
+                        .tool_context_details
+                        .get(target_call_id)
+                        .and_then(|target| target.read_evidence.as_ref())
+                        .is_some_and(ReadEvidence::observation_is_current)
             })
     }
 
@@ -2272,6 +2444,15 @@ impl Agent {
         }
         versions
     }
+}
+
+fn known_slow_verification(command: &str) -> bool {
+    let normalized = command.split_whitespace().collect::<Vec<_>>();
+    matches!(normalized.as_slice(), ["cargo", "test", ..])
+        || (matches!(normalized.as_slice(), ["cargo", "clippy", ..])
+            && normalized.contains(&"--all-targets"))
+        || (matches!(normalized.as_slice(), ["cargo", "build", ..])
+            && normalized.contains(&"--release"))
 }
 
 fn broad_read_target(tool_call: &ToolCall, project_root: &Path) -> Option<(PathBuf, String)> {
@@ -2750,6 +2931,43 @@ type RepeatedInspectionAction = GuardAction<String>;
 struct SingleCallStreakGuard {
     streak: usize,
     hints_emitted: usize,
+}
+
+const SERIAL_DELEGATION_NUDGE: &str =
+    "the previous delegation was serial — batch remaining scans in one call.";
+
+#[derive(Default)]
+struct SerialDelegationGuard {
+    turn: usize,
+    last_read_only_turn: Option<usize>,
+}
+
+impl SerialDelegationGuard {
+    fn hint_for(&mut self, serial_read_only_delegation: bool) -> Option<&'static str> {
+        self.turn = self.turn.saturating_add(1);
+        if !serial_read_only_delegation {
+            return None;
+        }
+        let hint = self
+            .last_read_only_turn
+            .is_some_and(|previous| self.turn.saturating_sub(previous) <= 3)
+            .then_some(SERIAL_DELEGATION_NUDGE);
+        self.last_read_only_turn = Some(self.turn);
+        hint
+    }
+}
+
+fn is_serial_read_only_delegation(tool_calls: &[ToolCall], tool_registry: &ToolRegistry) -> bool {
+    let [tool_call] = tool_calls else {
+        return false;
+    };
+    let Ok(arguments) = serde_json::from_str(&tool_call.arguments) else {
+        return false;
+    };
+    tool_registry
+        .get(&tool_call.name)
+        .and_then(|tool| tool.delegation_is_read_only(&arguments))
+        == Some(true)
 }
 
 impl SingleCallStreakGuard {
@@ -3320,6 +3538,24 @@ mod tests {
                 "the hard hint cap must suppress further reminders"
             );
         }
+    }
+
+    #[test]
+    fn serial_delegation_guard_nudges_on_second_nearby_scan() {
+        let mut guard = SerialDelegationGuard::default();
+
+        assert_eq!(guard.hint_for(true), None);
+        assert_eq!(guard.hint_for(false), None);
+        assert_eq!(guard.hint_for(true), Some(SERIAL_DELEGATION_NUDGE));
+
+        assert_eq!(guard.hint_for(false), None);
+        assert_eq!(guard.hint_for(false), None);
+        assert_eq!(guard.hint_for(false), None);
+        assert_eq!(
+            guard.hint_for(true),
+            None,
+            "a delegation outside the three-turn window starts a new sequence"
+        );
     }
 
     #[test]
@@ -3979,5 +4215,17 @@ mod tests {
             crate::subagent::SubagentStatus::Running,
             "an uncancelled run exit must not stop running subagents"
         );
+    }
+
+    #[test]
+    fn only_known_slow_verification_commands_auto_background() {
+        assert!(known_slow_verification("cargo test --locked"));
+        assert!(known_slow_verification(
+            "cargo clippy --all-targets --all-features -- -D warnings"
+        ));
+        assert!(known_slow_verification("cargo build --release --locked"));
+        assert!(!known_slow_verification("cargo check --locked"));
+        assert!(!known_slow_verification("cargo clippy -p small"));
+        assert!(!known_slow_verification("cargo build"));
     }
 }

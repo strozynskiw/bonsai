@@ -190,7 +190,12 @@ impl Agent {
                 if episode.status() == EpisodeStatus::Closed
                     && matches!(
                         episode.close_reason(),
-                        Some(EpisodeCloseReason::TitleChange | EpisodeCloseReason::Manual)
+                        Some(
+                            EpisodeCloseReason::TitleChange
+                                | EpisodeCloseReason::TodoComplete
+                                | EpisodeCloseReason::SizePressure
+                                | EpisodeCloseReason::Manual
+                        )
                     )
                     && !repaired_active.contains(&episode.seq())
                 {

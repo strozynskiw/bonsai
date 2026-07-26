@@ -181,7 +181,7 @@ id = "multi_compaction_context_health"
 fixture = "fixtures/tiny_project"
 prompt = "Keep the task intact across repeated context compactions, reject elided content, and finish the README edit."
 mock_context_window_tokens = 48000
-min_compactions = 2
+min_episode_evictions = 2
 
 [tasks.budgets]
 max_logical_turns = 20

@@ -77,12 +77,16 @@ crate::impl_db_enum!(EpisodeStatus {
 #[serde(rename_all = "snake_case")]
 pub enum EpisodeCloseReason {
     TitleChange,
+    TodoComplete,
+    SizePressure,
     HardBoundary,
     Manual,
 }
 
 crate::impl_db_enum!(EpisodeCloseReason {
     TitleChange => "title_change",
+    TodoComplete => "todo_complete",
+    SizePressure => "size_pressure",
     HardBoundary => "hard_boundary",
     Manual => "manual",
 } else Manual);
@@ -118,8 +122,8 @@ pub struct Episode {
     /// Estimator delta of the evict rewrite.
     evicted_tokens: Option<usize>,
     recall_count: usize,
-    /// Armed by a todowrite where every item is completed/cancelled. Card
-    /// annotation + future close heuristic; never closes by itself in v1.
+    /// Armed by a todowrite where every item is completed/cancelled. The next
+    /// complete-group preflight closes the episode at this natural boundary.
     completable: bool,
     /// Populated at evict; the recall tool's source. Empty while live.
     archive: Vec<ArchivedEpisodeItem>,
@@ -652,6 +656,8 @@ mod tests {
     fn episode_close_reason_db_strings_roundtrip() {
         for (reason, db) in [
             (EpisodeCloseReason::TitleChange, "title_change"),
+            (EpisodeCloseReason::TodoComplete, "todo_complete"),
+            (EpisodeCloseReason::SizePressure, "size_pressure"),
             (EpisodeCloseReason::HardBoundary, "hard_boundary"),
             (EpisodeCloseReason::Manual, "manual"),
         ] {
