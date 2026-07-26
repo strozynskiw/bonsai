@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use futures::FutureExt as _;
+
 use crate::model_catalog::ModelCatalog;
 use crate::provider::ProviderRegistry;
 use crate::session::SessionStore;
@@ -128,14 +130,21 @@ fn refresh_live_model_caches_at_startup(
     catalog: Arc<ModelCatalog>,
 ) {
     tokio::spawn(async move {
-        tokio::join!(
-            refresh_active_codex_cache_schema(&registry, &session_store, &catalog),
-            crate::commands::refresh_stale_authorized_provider_models(
-                &registry,
-                &session_store,
-                &catalog,
-            ),
-        );
+        if let Err(panic) = std::panic::AssertUnwindSafe(async {
+            tokio::join!(
+                refresh_active_codex_cache_schema(&registry, &session_store, &catalog),
+                crate::commands::refresh_stale_authorized_provider_models(
+                    &registry,
+                    &session_store,
+                    &catalog,
+                ),
+            );
+        })
+        .catch_unwind()
+        .await
+        {
+            tracing::error!(?panic, "model cache refresh panicked");
+        }
     });
 }
 

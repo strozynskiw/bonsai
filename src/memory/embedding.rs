@@ -62,6 +62,7 @@ mod model2vec {
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Context, Result};
+    use futures::FutureExt as _;
     use model2vec_rs::model::StaticModel;
 
     use super::{Embedder, EmbedderAvailability};
@@ -130,14 +131,21 @@ mod model2vec {
             drop(state);
             let inner = self.inner.clone();
             tokio::spawn(async move {
-                let resolved = match load(&inner.model_dir).await {
-                    Ok(model) => State::Ready(Arc::new(model)),
-                    Err(err) => {
-                        tracing::warn!(%err, "memory embeddings unavailable; recall stays BM25-only");
-                        State::Unavailable
-                    }
-                };
-                *inner.state.lock().expect("embedder state lock") = resolved;
+                if let Err(panic) = std::panic::AssertUnwindSafe(async {
+                    let resolved = match load(&inner.model_dir).await {
+                        Ok(model) => State::Ready(Arc::new(model)),
+                        Err(err) => {
+                            tracing::warn!(%err, "memory embeddings unavailable; recall stays BM25-only");
+                            State::Unavailable
+                        }
+                    };
+                    *inner.state.lock().expect("embedder state lock") = resolved;
+                })
+                .catch_unwind()
+                .await
+                {
+                    tracing::error!(?panic, "embedder model load panicked");
+                }
             });
         }
     }

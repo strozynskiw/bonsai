@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use futures::FutureExt as _;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::agent::{Agent, ContextControlAction};
@@ -109,6 +110,17 @@ impl RuntimeActionDeps<'_> {
             active_session_id: self.active_session_id.clone(),
         }
     }
+}
+
+/// Spawn a fire-and-forget future, logging any panic instead of silently
+/// swallowing it. Use for short-lived dispatch spawns whose handles are not
+/// tracked.
+fn spawn_panicked(future: impl std::future::Future<Output = ()> + Send + 'static) {
+    tokio::spawn(async move {
+        if let Err(panic) = std::panic::AssertUnwindSafe(future).catch_unwind().await {
+            tracing::error!(?panic, "runtime action panicked");
+        }
+    });
 }
 
 pub(super) enum RuntimeActionResult {
@@ -1092,7 +1104,7 @@ fn respond_to_prompt_decision(
         command,
         at: std::time::Instant::now(),
     });
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         if let Err(err) = interaction
             .respond(request_id, InteractionOutcome::Permission(decision))
             .await
@@ -1162,7 +1174,7 @@ fn respond_to_sandbox_escalation(
         );
     }
 
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         if let Err(err) = interaction
             .respond(request_id, InteractionOutcome::SandboxEscalation(decision))
             .await
@@ -1202,7 +1214,7 @@ fn respond_to_question_submit(app: &mut AppState, interaction: Arc<InteractionSe
     } else {
         InteractionAnswer::Choices(vec![cursor])
     };
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         if let Err(err) = interaction
             .respond(request_id, InteractionOutcome::Question(Some(answer)))
             .await
@@ -1219,7 +1231,7 @@ fn respond_to_question_cancel(app: &mut AppState, interaction: Arc<InteractionSe
 
     app.modal = None;
     app.focus = Focus::Input;
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         if let Err(err) = interaction
             .respond(request_id, InteractionOutcome::Question(None))
             .await
@@ -1388,7 +1400,7 @@ async fn submit_api_key_prompt(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
     let model_catalog = deps.model_catalog;
     let agent = deps.agent;
     let sender = deps.runtime_sender;
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         let result = async {
             // Canonical lock order: session_store before agent (see `task.rs`).
             let mut session = session_store.lock().await;
@@ -1648,7 +1660,7 @@ fn start_local_model_fetch(
     }
     state.mark_fetch_started(request_id);
     let request = state.clone();
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         let result = crate::tui::local_model_wizard::fetch_wizard_models(&request)
             .await
             .map_err(|err| {
@@ -1695,7 +1707,7 @@ fn start_local_model_commit(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     app.reduce(AppAction::CloseModal);
     app.reduce(AppAction::SetTaskState(TaskState::Command));
     let generation = app.command_generation();
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         let result = async {
             let report = if editing_existing {
                 crate::model_catalog::replace_local_catalog_entry(&home_dir, catalog_input)?
@@ -2157,7 +2169,7 @@ fn start_provider_mutation(
     app.reduce(AppAction::CloseModal);
     app.reduce(AppAction::SetTaskState(TaskState::Command));
     let generation = app.command_generation();
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         let result = async {
             let status = match &mutation {
                 ProviderMutation::Remove(id) => {
@@ -2909,7 +2921,7 @@ fn start_agent_composer_generate(app: &mut AppState, deps: RuntimeActionDeps<'_>
     let session_store = deps.session_store.clone();
     let catalog = deps.model_catalog.clone();
     let sender = deps.runtime_sender.clone();
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         let result =
             generate_agent_prompt(&registry, &session_store, &catalog, model, system, user)
                 .await
@@ -3179,7 +3191,7 @@ async fn start_refresh(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     let catalog = deps.model_catalog.clone();
     let sender = deps.runtime_sender.clone();
 
-    tokio::spawn(async move {
+    spawn_panicked(async move {
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let mut futures = FuturesUnordered::<
@@ -4489,15 +4501,26 @@ mod tests {
         let requester = {
             let service = service.clone();
             tokio::spawn(async move {
-                service
-                    .request(|request_id| {
-                        crate::interaction::InteractionRequest::SandboxEscalation {
-                            request_id,
-                            command: "rm -rf target".to_string(),
-                            origin: None,
-                        }
-                    })
-                    .await
+                match std::panic::AssertUnwindSafe(async {
+                    service
+                        .request(|request_id| {
+                            crate::interaction::InteractionRequest::SandboxEscalation {
+                                request_id,
+                                command: "rm -rf target".to_string(),
+                                origin: None,
+                            }
+                        })
+                        .await
+                })
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "sandbox escalation requester panicked");
+                        Err(crate::interaction::InteractionStatus::Cancelled)
+                    }
+                }
             })
         };
         let request = rx.recv().await.expect("escalation request reaches the UI");
@@ -4576,21 +4599,32 @@ mod tests {
         let requester = {
             let service = service.clone();
             tokio::spawn(async move {
-                service
-                    .request(
-                        |request_id| crate::interaction::InteractionRequest::Question {
-                            request_id,
-                            prompt: "pick".to_string(),
-                            header: None,
-                            options: vec![
-                                crate::interaction::QuestionOption::new("a", ""),
-                                crate::interaction::QuestionOption::new("b", ""),
-                            ],
-                            multiple: true,
-                            origin: None,
-                        },
-                    )
-                    .await
+                match std::panic::AssertUnwindSafe(async {
+                    service
+                        .request(
+                            |request_id| crate::interaction::InteractionRequest::Question {
+                                request_id,
+                                prompt: "pick".to_string(),
+                                header: None,
+                                options: vec![
+                                    crate::interaction::QuestionOption::new("a", ""),
+                                    crate::interaction::QuestionOption::new("b", ""),
+                                ],
+                                multiple: true,
+                                origin: None,
+                            },
+                        )
+                        .await
+                })
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "question requester panicked");
+                        Err(crate::interaction::InteractionStatus::Cancelled)
+                    }
+                }
             })
         };
         let request = rx.recv().await.expect("question reaches the UI");

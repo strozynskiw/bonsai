@@ -22,6 +22,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use futures::FutureExt as _;
 use glob::Pattern;
 
 pub(crate) use crate::config::HookEvent;
@@ -399,44 +400,52 @@ impl HookEngine {
                 let source = *source;
                 let pattern = pattern.clone();
                 tokio::spawn(async move {
-                    let detail = format!(
-                        "{} · {}",
-                        def.event.wire_name(),
-                        action_kind_label(&def.action)
-                    );
-                    match trust::authorize(&def, source, &pattern, &permissions, &interaction).await
-                    {
-                        trust::TrustOutcome::Trusted => {
-                            extensions.upsert(ExtensionStatus {
-                                id: extension_id,
-                                source,
-                                capabilities: crate::config::DeclaredCapabilities::default(),
-                                state: ExtensionState::Enabled,
-                                detail,
-                                tools: Vec::new(),
-                            });
-                            hooks
-                                .write()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .push(PreparedHook {
-                                    def,
+                    if let Err(panic) = std::panic::AssertUnwindSafe(async {
+                        let detail = format!(
+                            "{} · {}",
+                            def.event.wire_name(),
+                            action_kind_label(&def.action)
+                        );
+                        match trust::authorize(&def, source, &pattern, &permissions, &interaction)
+                            .await
+                        {
+                            trust::TrustOutcome::Trusted => {
+                                extensions.upsert(ExtensionStatus {
+                                    id: extension_id,
                                     source,
-                                    tool_matcher,
-                                    path_matcher,
+                                    capabilities: crate::config::DeclaredCapabilities::default(),
+                                    state: ExtensionState::Enabled,
+                                    detail,
+                                    tools: Vec::new(),
                                 });
+                                hooks
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .push(PreparedHook {
+                                        def,
+                                        source,
+                                        tool_matcher,
+                                        path_matcher,
+                                    });
+                            }
+                            trust::TrustOutcome::Denied => {
+                                extensions.upsert(ExtensionStatus {
+                                    id: extension_id,
+                                    source,
+                                    capabilities: crate::config::DeclaredCapabilities::default(),
+                                    state: ExtensionState::Disabled {
+                                        reason: DisableReason::PermissionDenied,
+                                    },
+                                    detail,
+                                    tools: Vec::new(),
+                                });
+                            }
                         }
-                        trust::TrustOutcome::Denied => {
-                            extensions.upsert(ExtensionStatus {
-                                id: extension_id,
-                                source,
-                                capabilities: crate::config::DeclaredCapabilities::default(),
-                                state: ExtensionState::Disabled {
-                                    reason: DisableReason::PermissionDenied,
-                                },
-                                detail,
-                                tools: Vec::new(),
-                            });
-                        }
+                    })
+                    .catch_unwind()
+                    .await
+                    {
+                        tracing::error!(?panic, "hook broadcast panicked");
                     }
                 });
                 continue;

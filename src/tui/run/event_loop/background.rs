@@ -406,15 +406,22 @@ pub(in crate::tui) fn start_delete_selected_background_task(
     }
     let task_id = task.id.clone();
     tokio::spawn(async move {
-        let result = if task_id.starts_with("pty-") {
-            terminals.remove(&task_id).await.map(|_| ())
-        } else {
-            background_tasks.remove(&task_id).await.map(|_| ())
-        };
-        let error = result
-            .err()
-            .map(|err| UiError::new("Background task removal failed", format!("{err:#}")));
-        let _ = sender.send(RuntimeEvent::BackgroundTaskRemovalFinished { task_id, error });
+        if let Err(panic) = std::panic::AssertUnwindSafe(async {
+            let result = if task_id.starts_with("pty-") {
+                terminals.remove(&task_id).await.map(|_| ())
+            } else {
+                background_tasks.remove(&task_id).await.map(|_| ())
+            };
+            let error = result
+                .err()
+                .map(|err| UiError::new("Background task removal failed", format!("{err:#}")));
+            let _ = sender.send(RuntimeEvent::BackgroundTaskRemovalFinished { task_id, error });
+        })
+        .catch_unwind()
+        .await
+        {
+            tracing::error!(?panic, "background task removal panicked");
+        }
     });
 }
 

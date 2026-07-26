@@ -7,6 +7,8 @@ use super::ctrl_c::{
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use futures::FutureExt as _;
+
 use super::*;
 use background::*;
 pub(in crate::tui) use background::{
@@ -1284,18 +1286,26 @@ fn spawn_repo_map_build(
 ) -> tokio::sync::watch::Receiver<Option<String>> {
     let (map_sender, map_watch) = tokio::sync::watch::channel(None);
     tokio::spawn(async move {
-        match tokio::task::spawn_blocking(move || crate::tool::build_repo_map(&project_root)).await
-        {
-            Ok(map) => {
-                let _ = map_sender.send(Some(map.clone()));
-                if !map.is_empty() {
-                    let _ = runtime_sender.send(RuntimeEvent::RepoMapReady(map));
+        if let Err(panic) = std::panic::AssertUnwindSafe(async {
+            match tokio::task::spawn_blocking(move || crate::tool::build_repo_map(&project_root))
+                .await
+            {
+                Ok(map) => {
+                    let _ = map_sender.send(Some(map.clone()));
+                    if !map.is_empty() {
+                        let _ = runtime_sender.send(RuntimeEvent::RepoMapReady(map));
+                    }
+                }
+                Err(err) => {
+                    let _ = map_sender.send(Some(String::new()));
+                    tracing::warn!(error = %err, "repo map build task failed");
                 }
             }
-            Err(err) => {
-                let _ = map_sender.send(Some(String::new()));
-                tracing::warn!(error = %err, "repo map build task failed");
-            }
+        })
+        .catch_unwind()
+        .await
+        {
+            tracing::error!(?panic, "repo map build panicked");
         }
     });
     map_watch
@@ -1398,8 +1408,9 @@ fn spawn_branch_watcher(
     project_root: std::path::PathBuf,
     initial: Option<String>,
     runtime_sender: mpsc::UnboundedSender<RuntimeEvent>,
+    spawns: &mut tokio::task::JoinSet<()>,
 ) {
-    tokio::spawn(async move {
+    spawns.spawn(async move {
         let mut current = initial;
         let mut ticker = tokio::time::interval(BRANCH_REFRESH_INTERVAL);
         // The first tick fires immediately; drop it so the first real poll
@@ -1476,9 +1487,10 @@ fn expired_wake_targets(
 fn spawn_peer_watcher(
     peer_bus: Arc<crate::peer::PeerBus>,
     runtime_sender: mpsc::UnboundedSender<RuntimeEvent>,
+    spawns: &mut tokio::task::JoinSet<()>,
 ) {
     const PEER_POLL_INTERVAL: Duration = Duration::from_secs(2);
-    tokio::spawn(async move {
+    spawns.spawn(async move {
         let mut ticker = tokio::time::interval(PEER_POLL_INTERVAL);
         ticker.tick().await;
         // Last overview snapshot, so `PeersChanged` fires only on an actual
@@ -1908,6 +1920,7 @@ async fn drain_runtime_events_for_frame(
     pending_peer_wake: &mut Option<PendingPeerWake>,
     pending_peer_wait_recheck: &mut Option<PendingPeerWaitRecheck>,
     repo_map: &mut RepoMapInjector,
+    background_spawns: &mut tokio::task::JoinSet<()>,
     deps: RuntimeEventDrainDeps<'_>,
 ) -> bool {
     let mut changed = false;
@@ -2005,7 +2018,7 @@ async fn drain_runtime_events_for_frame(
             // subscriber. Single-shot claims make a double fire impossible.
             if app.queued_inputs.is_empty() {
                 let bus = deps.peer_bus.clone();
-                tokio::spawn(async move {
+                background_spawns.spawn(async move {
                     match bus.fire_own_wake_subscriptions().await {
                         Ok(requesters) if !requesters.is_empty() => {
                             tracing::debug!(
@@ -2147,20 +2160,30 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
 
     let (ui_sender, mut ui_receiver) = mpsc::unbounded_channel();
     let (runtime_sender, mut runtime_receiver) = mpsc::unbounded_channel();
+    let mut background_spawns = tokio::task::JoinSet::new();
     // Build the repository map off the startup path: a large repo's tree walk
     // must never block the first frame. It is injected into the agent's context
     // via `RuntimeEvent::RepoMapReady` once ready.
     let repo_map_watch = spawn_repo_map_build(project_root.clone(), runtime_sender.clone());
     // Keep the header's branch label in sync with `git checkout`/`switch` made
     // outside the app; the initial value was read once into `branch` above.
-    spawn_branch_watcher(project_root.clone(), branch.clone(), runtime_sender.clone());
+    spawn_branch_watcher(
+        project_root.clone(),
+        branch.clone(),
+        runtime_sender.clone(),
+        &mut background_spawns,
+    );
     // Inter-agent message watcher: claims inbound messages every
     // couple of seconds and surfaces them as blue chat messages.
-    spawn_peer_watcher(peer_bus.clone(), runtime_sender.clone());
+    spawn_peer_watcher(
+        peer_bus.clone(),
+        runtime_sender.clone(),
+        &mut background_spawns,
+    );
     // Boot-time retention for the message bus; failures are non-fatal.
     {
         let storage = storage.clone();
-        tokio::spawn(async move {
+        background_spawns.spawn(async move {
             if let Err(err) = storage.purge_stale_peer_state().await {
                 tracing::debug!(%err, "peer message purge failed");
             }
@@ -2175,7 +2198,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         let bonsai_home = storage.home_dir().to_path_buf();
         let update_config = update_config.clone();
         let update_sender = runtime_sender.clone();
-        tokio::spawn(async move {
+        background_spawns.spawn(async move {
             let outcome = crate::update::run_startup_update(&bonsai_home, &update_config).await;
             tracing::debug!(?outcome, "startup self-update finished");
             if let Some(notice) = crate::update::startup_notice(&outcome) {
@@ -2430,7 +2453,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         model_catalog: model_catalog.clone(),
         custom_agents: app.custom_agents.clone(),
     });
-    let termination_requested = install_termination_signal_handler();
+    let termination_requested = install_termination_signal_handler(&mut background_spawns);
     TtyHangupWatch::spawn_watchdog_thread();
     let mut background_events = background_tasks.subscribe();
     let mut terminal_events = terminals.subscribe();
@@ -2585,11 +2608,18 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             let storage = storage.clone();
             let session_id = current_session_id;
             tokio::spawn(async move {
-                if let Err(err) = storage
-                    .record_session_file_changes(session_id, &changed_files)
-                    .await
+                if let Err(panic) = std::panic::AssertUnwindSafe(async {
+                    if let Err(err) = storage
+                        .record_session_file_changes(session_id, &changed_files)
+                        .await
+                    {
+                        tracing::debug!(%err, "file-change ledger write failed");
+                    }
+                })
+                .catch_unwind()
+                .await
                 {
-                    tracing::debug!(%err, "file-change ledger write failed");
+                    tracing::error!(?panic, "file-change ledger write panicked");
                 }
             });
         }
@@ -2642,6 +2672,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             &mut pending_peer_wake,
             &mut pending_peer_wait_recheck,
             &mut repo_map,
+            &mut background_spawns,
             RuntimeEventDrainDeps {
                 storage: &storage,
                 agent: &agent,
@@ -3197,6 +3228,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         persisted_signatures,
         peer_bus,
         pending_snapshot_flush,
+        background_spawns,
     )
     .await?;
     result
@@ -3231,6 +3263,7 @@ async fn shutdown_tui(
     mut persisted_signatures: PersistedSnapshotSignatures,
     peer_bus: Arc<crate::peer::PeerBus>,
     pending_snapshot_flush: Option<tokio::task::JoinHandle<PersistenceFlushResult>>,
+    mut background_spawns: tokio::task::JoinSet<()>,
 ) -> Result<()> {
     let shutdown_started_at = Instant::now();
     let app_stats = shutdown_app_stats(&app);
@@ -3248,6 +3281,22 @@ async fn shutdown_tui(
         todos = app_stats.todos,
         "TUI shutdown started"
     );
+
+    // Drain all long-lived background spawns before touching any shared
+    // state they might still access (terminal, session, peer bus).
+    background_spawns.abort_all();
+    const BACKGROUND_SPAWNS_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+    let drain_start = Instant::now();
+    while let Ok(Some(result)) = tokio::time::timeout(
+        BACKGROUND_SPAWNS_DRAIN_TIMEOUT.saturating_sub(drain_start.elapsed()),
+        background_spawns.join_next(),
+    )
+    .await
+    {
+        if let Err(err) = result {
+            tracing::error!(%err, "background spawn task panicked during shutdown");
+        }
+    }
 
     // SessionEnd: capped independently of any hook's own configured
     // timeout — shutdown must never hang on a misbehaving hook.
@@ -3573,7 +3622,7 @@ fn accumulate_tool_activity_stats(activity: &ToolActivity, stats: &mut ShutdownA
 /// gated behind the in-app "Ctrl+C again to exit" confirmation, so trapping
 /// `SIGINT` here would let a single Ctrl+C bypass that prompt on any terminal
 /// that leaves `ISIG` enabled.
-fn install_termination_signal_handler() -> Arc<AtomicBool> {
+fn install_termination_signal_handler(spawns: &mut tokio::task::JoinSet<()>) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
@@ -3590,7 +3639,7 @@ fn install_termination_signal_handler() -> Arc<AtomicBool> {
                 Ok(mut stream) => {
                     let flag = flag.clone();
                     let first_signal_at = first_signal_at.clone();
-                    tokio::spawn(async move {
+                    spawns.spawn(async move {
                         while stream.recv().await.is_some() {
                             // First catchable signal: request the clean in-loop
                             // shutdown. A repeat after the grace window means
