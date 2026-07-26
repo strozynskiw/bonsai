@@ -3107,8 +3107,6 @@ async fn abrupt_loss_promotes_and_resumes_the_last_committed_snapshot() {
 }
 
 #[tokio::test]
-#[ignore = "flaky: sporadic 'no such table: messages' on the first DELETE in the tx — \
-           possible sqlx/SQLite WAL visibility race under concurrency"]
 async fn transcript_write_failure_preserves_the_last_committed_snapshot() {
     let fixture = TestStorage::new().await;
     let storage = &fixture.storage;
@@ -3129,6 +3127,13 @@ async fn transcript_write_failure_preserves_the_last_committed_snapshot() {
     .execute(&storage.pool)
     .await
     .unwrap();
+    // Force WAL checkpoint so the schema change is visible to every pool
+    // connection — the CREATE TRIGGER is DDL, and other connections may
+    // cache a stale schema under WAL journal mode.
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&storage.pool)
+        .await
+        .unwrap();
 
     let error = storage
         .replace_transcript_snapshot(
