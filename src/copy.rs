@@ -483,6 +483,6 @@ mod tests {
         let text = sc
             .with_handle(|cb| cb.get_text().context("get"))
             .expect("get_text should succeed");
-        assert_eq!(text, Some("bonsai clipboard test".to_string()));
+        assert_eq!(text, "bonsai clipboard test".to_string());
     }
 }
