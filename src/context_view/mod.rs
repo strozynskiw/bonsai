@@ -28,8 +28,8 @@ pub use types::{
     ContextUsageReconciliation, EpisodeReport, UsageTurnReport,
 };
 pub(crate) use types::{
-    ContextTokenMetadata, PendingContextMessage, ToolContextDetail, ToolContextResult,
-    ToolImageContext,
+    ContextTokenMetadata, NodeBuildContext, PendingContextMessage, ToolContextDetail,
+    ToolContextResult, ToolImageContext,
 };
 
 /// A snapshot of everything that fills the context window — the actual entries
@@ -669,45 +669,44 @@ fn message_children(
     inclusion: ContextInclusion,
     message_source: &ContextSourceRef,
 ) -> Vec<ContextNode> {
+    let make_ctx = |inclusion, source| NodeBuildContext {
+        row_metadata: input.row_metadata,
+        estimator: input.prompt_estimator,
+        inclusion,
+        source,
+    };
     match (role, kind) {
-        (ContextRole::System, ContextNodeKind::Persona) if index == 0 => system_context_children(
-            id.as_str(),
-            text,
-            input.persona,
-            input.project_context,
-            input.prompt_estimator,
-            input.row_metadata,
-            message_source.clone(),
-        ),
-        (ContextRole::User, ContextNodeKind::Background) => background_message_children(
-            id.as_str(),
-            text,
-            input.row_metadata,
-            input.prompt_estimator,
-            inclusion,
-            message_source.clone(),
-        ),
-        (ContextRole::User, _) => user_message_children(
-            id.as_str(),
-            message,
-            text,
-            input
-                .mention_read_evidence
-                .get(id.as_str())
-                .map(Vec::as_slice),
-            input.row_metadata,
-            input.prompt_estimator,
-            inclusion,
-            message_source.clone(),
-        ),
-        (ContextRole::Assistant, _) => assistant_message_children(
-            id.as_str(),
-            message,
-            input.row_metadata,
-            input.prompt_estimator,
-            inclusion,
-            message_source.clone(),
-        ),
+        (ContextRole::System, ContextNodeKind::Persona) if index == 0 => {
+            let ctx = make_ctx(ContextInclusion::Included, message_source.clone());
+            system_context_children(
+                id.as_str(),
+                text,
+                input.persona,
+                input.project_context,
+                &ctx,
+            )
+        }
+        (ContextRole::User, ContextNodeKind::Background) => {
+            let ctx = make_ctx(inclusion, message_source.clone());
+            background_message_children(id.as_str(), text, &ctx)
+        }
+        (ContextRole::User, _) => {
+            let ctx = make_ctx(inclusion, message_source.clone());
+            user_message_children(
+                id.as_str(),
+                message,
+                text,
+                input
+                    .mention_read_evidence
+                    .get(id.as_str())
+                    .map(Vec::as_slice),
+                &ctx,
+            )
+        }
+        (ContextRole::Assistant, _) => {
+            let ctx = make_ctx(inclusion, message_source.clone());
+            assistant_message_children(id.as_str(), message, &ctx)
+        }
         _ => Vec::new(),
     }
 }
@@ -862,34 +861,26 @@ fn system_context_children(
     system_text: &str,
     persona: &str,
     project_context: Option<&ProjectContextSnapshot>,
-    estimator: &PromptEstimator,
-    row_metadata: ContextTokenMetadata,
-    message_source: ContextSourceRef,
+    ctx: &NodeBuildContext,
 ) -> Vec<ContextNode> {
     if !system_text.starts_with(persona) {
         return Vec::new();
     }
 
-    let mut children = vec![
-        ContextNode::leaf(
+    let mut children = vec![ctx
+        .leaf(
             format!("{id}-persona"),
             ContextNodeKind::Persona,
-            ContextInclusion::Included,
             Some(ContextRole::System),
             "Persona",
-            estimator.estimate_text_for_report(persona),
+            ctx.estimator.estimate_text_for_report(persona),
             persona,
-            row_metadata,
         )
-        .with_sources([
-            message_source.clone(),
-            ContextSourceRef::new(
-                ContextSourceKind::SystemPrompt,
-                "persona",
-                "runtime persona",
-            ),
-        ]),
-    ];
+        .with_sources([ContextSourceRef::new(
+            ContextSourceKind::SystemPrompt,
+            "persona",
+            "runtime persona",
+        )])];
     let Some(project_text) = system_project_context_text(system_text, persona) else {
         return children;
     };
@@ -898,24 +889,19 @@ fn system_context_children(
     // exclusive branches below (no snapshot, and SMOL/legacy layouts). Build it
     // once here so the two paths cannot drift apart.
     let project_context_leaf = || {
-        ContextNode::leaf(
+        ctx.leaf(
             format!("{id}-project"),
             ContextNodeKind::ProjectEnvironment,
-            ContextInclusion::Included,
             Some(ContextRole::System),
             "Project context",
-            estimator.estimate_text_for_report(project_text),
+            ctx.estimator.estimate_text_for_report(project_text),
             project_text,
-            row_metadata,
         )
-        .with_sources([
-            message_source.clone(),
-            ContextSourceRef::new(
-                ContextSourceKind::ProjectContext,
-                format!("{id}-project"),
-                "project context from system message",
-            ),
-        ])
+        .with_sources([ContextSourceRef::new(
+            ContextSourceKind::ProjectContext,
+            format!("{id}-project"),
+            "project context from system message",
+        )])
     };
 
     let Some(context) = project_context else {
@@ -932,49 +918,38 @@ fn system_context_children(
         return children;
     }
 
-    let mut project_children = vec![
-        ContextNode::leaf(
+    let mut project_children = vec![ctx
+        .leaf(
             format!("{id}-project-env"),
             ContextNodeKind::ProjectEnvironment,
-            ContextInclusion::Included,
             Some(ContextRole::System),
             "Environment",
-            estimator.estimate_text_for_report(&context.environment),
+            ctx.estimator.estimate_text_for_report(&context.environment),
             &context.environment,
-            row_metadata,
         )
-        .with_sources([
-            message_source.clone(),
-            ContextSourceRef::new(
-                ContextSourceKind::ProjectContext,
-                "project-environment",
-                "project context snapshot",
-            )
-            .with_detail("environment"),
-        ]),
-    ];
+        .with_sources([ContextSourceRef::new(
+            ContextSourceKind::ProjectContext,
+            "project-environment",
+            "project context snapshot",
+        )
+        .with_detail("environment")])];
     if !context.steering_files.is_empty() {
         let instructions =
             "## Project instructions\nFollow these steering files (most specific first):";
         project_children.push(
-            ContextNode::leaf(
+            ctx.leaf(
                 format!("{id}-project-instructions"),
                 ContextNodeKind::ProjectInstructions,
-                ContextInclusion::Included,
                 Some(ContextRole::System),
                 "Project instructions",
-                estimator.estimate_text_for_report(instructions),
+                ctx.estimator.estimate_text_for_report(instructions),
                 instructions,
-                row_metadata,
             )
-            .with_sources([
-                message_source.clone(),
-                ContextSourceRef::new(
-                    ContextSourceKind::ProjectContext,
-                    "project-instructions",
-                    "project instructions index",
-                ),
-            ]),
+            .with_sources([ContextSourceRef::new(
+                ContextSourceKind::ProjectContext,
+                "project-instructions",
+                "project instructions index",
+            )]),
         );
     }
     for (index, steering) in context.steering_files.iter().enumerate() {
@@ -985,10 +960,9 @@ fn system_context_children(
             ""
         };
         project_children.push(
-            ContextNode::leaf(
+            ctx.leaf(
                 format!("{id}-steering-{index}"),
                 ContextNodeKind::SteeringFile,
-                ContextInclusion::Included,
                 Some(ContextRole::System),
                 format!(
                     "{} ({}){}",
@@ -996,46 +970,37 @@ fn system_context_children(
                     steering.directory.display(),
                     truncation
                 ),
-                estimator.estimate_text_for_report(&rendered),
+                ctx.estimator.estimate_text_for_report(&rendered),
                 &rendered,
-                row_metadata,
             )
-            .with_sources([
-                message_source.clone(),
-                ContextSourceRef::new(
-                    ContextSourceKind::SteeringFile,
-                    steering
-                        .directory
-                        .join(&steering.name)
-                        .display()
-                        .to_string(),
-                    steering.name.clone(),
-                )
-                .with_detail(steering.directory.display().to_string()),
-            ]),
+            .with_sources([ContextSourceRef::new(
+                ContextSourceKind::SteeringFile,
+                steering
+                    .directory
+                    .join(&steering.name)
+                    .display()
+                    .to_string(),
+                steering.name.clone(),
+            )
+            .with_detail(steering.directory.display().to_string())]),
         );
     }
     let volatile = context.volatile_tail();
     if includes_legacy_volatile_tail && !volatile.is_empty() {
         project_children.push(
-            ContextNode::leaf(
+            ctx.leaf(
                 format!("{id}-project-volatile"),
                 ContextNodeKind::VolatileState,
-                ContextInclusion::Included,
                 Some(ContextRole::System),
                 "Volatile state",
-                estimator.estimate_text_for_report(&volatile),
+                ctx.estimator.estimate_text_for_report(&volatile),
                 &volatile,
-                row_metadata,
             )
-            .with_sources([
-                message_source.clone(),
-                ContextSourceRef::new(
-                    ContextSourceKind::ProjectContext,
-                    "volatile-state",
-                    "volatile project state",
-                ),
-            ]),
+            .with_sources([ContextSourceRef::new(
+                ContextSourceKind::ProjectContext,
+                "volatile-state",
+                "volatile project state",
+            )]),
         );
     }
     let rendered = project_text;
@@ -1044,12 +1009,12 @@ fn system_context_children(
         ContextNode::parent(
             format!("{id}-project"),
             ContextNodeKind::ProjectEnvironment,
-            ContextInclusion::Included,
+            ctx.inclusion,
             Some(ContextRole::System),
             "Project context",
-            estimator.estimate_text_for_report(rendered),
+            ctx.estimator.estimate_text_for_report(rendered),
             rendered,
-            row_metadata,
+            ctx.row_metadata,
             project_children,
         )
         .with_sources(project_sources),
@@ -1183,48 +1148,30 @@ pub(crate) fn tool_result_label(message: &ChatCompletionRequestMessage, fallback
         .unwrap_or_else(|| format!("Tool result {fallback}"))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "pure ledger splitter over loop-local state plus mention sidecar"
-)]
 pub(crate) fn user_message_children(
     id: &str,
     message: &ChatCompletionRequestMessage,
     text: &str,
     mention_read_evidence: Option<&[ReadEvidence]>,
-    row_metadata: ContextTokenMetadata,
-    estimator: &PromptEstimator,
-    inclusion: ContextInclusion,
-    source: ContextSourceRef,
+    ctx: &NodeBuildContext,
 ) -> Vec<ContextNode> {
     let value = serde_json::to_value(message).unwrap_or(serde_json::Value::Null);
     if let Some(parts) = value.get("content").and_then(serde_json::Value::as_array) {
-        return user_content_part_children(
-            id,
-            parts,
-            mention_read_evidence,
-            row_metadata,
-            estimator,
-            inclusion,
-            source,
-        );
+        return user_content_part_children(id, parts, mention_read_evidence, ctx);
     }
 
     const MENTION_MARKER: &str = "# @-mention context";
     let Some(marker_start) = text.find(MENTION_MARKER) else {
         return (!text.trim().is_empty())
             .then(|| {
-                ContextNode::leaf(
+                ctx.leaf(
                     format!("{id}-text"),
                     ContextNodeKind::ChatMessage,
-                    inclusion,
                     Some(ContextRole::User),
                     "Message text",
-                    estimator.estimate_text_for_report(text),
+                    ctx.estimator.estimate_text_for_report(text),
                     text,
-                    row_metadata,
                 )
-                .with_source(source.clone())
             })
             .into_iter()
             .collect();
@@ -1234,19 +1181,14 @@ pub(crate) fn user_message_children(
 
     let mut children = Vec::new();
     if !body.trim().is_empty() {
-        children.push(
-            ContextNode::leaf(
-                format!("{id}-text"),
-                ContextNodeKind::ChatMessage,
-                inclusion,
-                Some(ContextRole::User),
-                "Message text",
-                estimator.estimate_text_for_report(body),
-                body,
-                row_metadata,
-            )
-            .with_source(source.clone()),
-        );
+        children.push(ctx.leaf(
+            format!("{id}-text"),
+            ContextNodeKind::ChatMessage,
+            Some(ContextRole::User),
+            "Message text",
+            ctx.estimator.estimate_text_for_report(body),
+            body,
+        ));
     }
 
     let mention_evidence = mention_read_evidence.unwrap_or_default();
@@ -1259,25 +1201,20 @@ pub(crate) fn user_message_children(
             .filter(|line| !line.is_empty())
             .unwrap_or_else(|| format!("@-mention {}", index + 1));
         children.push(
-            ContextNode::leaf(
+            ctx.leaf(
                 format!("{id}-mention-{index}"),
                 ContextNodeKind::Mention,
-                inclusion,
                 Some(ContextRole::User),
                 label.clone(),
-                estimator.estimate_text_for_report(&section),
+                ctx.estimator.estimate_text_for_report(&section),
                 &section,
-                row_metadata,
             )
-            .with_sources([
-                source.clone(),
-                ContextSourceRef::new(
-                    ContextSourceKind::ContextMessage,
-                    format!("{id}-mention-{index}"),
-                    "expanded @-mention",
-                )
-                .with_detail(label.clone()),
-            ]),
+            .with_sources([ContextSourceRef::new(
+                ContextSourceKind::ContextMessage,
+                format!("{id}-mention-{index}"),
+                "expanded @-mention",
+            )
+            .with_detail(label.clone())]),
         );
         if let Some(evidence) =
             mention_section_read_evidence(&section, mention_evidence, &mut used_evidence)
@@ -1292,7 +1229,7 @@ pub(crate) fn user_message_children(
                 )
                 .with_detail(evidence.observation().display_path().to_string()),
                 evidence,
-                row_metadata,
+                ctx,
             ));
         }
     }
@@ -1324,10 +1261,7 @@ fn user_content_part_children(
     id: &str,
     parts: &[serde_json::Value],
     mention_read_evidence: Option<&[ReadEvidence]>,
-    row_metadata: ContextTokenMetadata,
-    estimator: &PromptEstimator,
-    inclusion: ContextInclusion,
-    source: ContextSourceRef,
+    ctx: &NodeBuildContext,
 ) -> Vec<ContextNode> {
     let mut children = Vec::new();
     for (index, part) in parts.iter().enumerate() {
@@ -1335,23 +1269,18 @@ fn user_content_part_children(
             if text.trim().is_empty() {
                 continue;
             }
-            children.push(
-                ContextNode::leaf(
-                    format!("{id}-text-part-{index}"),
-                    ContextNodeKind::ChatMessage,
-                    inclusion,
-                    Some(ContextRole::User),
-                    if children.is_empty() {
-                        "Message text".to_string()
-                    } else {
-                        format!("Text part {}", index + 1)
-                    },
-                    estimator.estimate_text_for_report(text),
-                    text,
-                    row_metadata,
-                )
-                .with_source(source.clone()),
-            );
+            children.push(ctx.leaf(
+                format!("{id}-text-part-{index}"),
+                ContextNodeKind::ChatMessage,
+                Some(ContextRole::User),
+                if children.is_empty() {
+                    "Message text".to_string()
+                } else {
+                    format!("Text part {}", index + 1)
+                },
+                ctx.estimator.estimate_text_for_report(text),
+                text,
+            ));
             continue;
         }
 
@@ -1372,49 +1301,39 @@ fn user_content_part_children(
                 image_url
             );
             children.push(
-                ContextNode::leaf(
+                ctx.leaf(
                     format!("{id}-image-part-{index}"),
                     ContextNodeKind::Attachment,
-                    inclusion,
                     Some(ContextRole::User),
                     format!("Image attachment {}", index + 1),
-                    estimator.estimate_text_for_report(&text),
+                    ctx.estimator.estimate_text_for_report(&text),
                     &text,
-                    row_metadata,
                 )
-                .with_sources([
-                    source.clone(),
-                    ContextSourceRef::new(
-                        ContextSourceKind::ContextMessage,
-                        format!("{id}-image-part-{index}"),
-                        "user attachment",
-                    )
-                    .with_detail("image_url"),
-                ]),
+                .with_sources([ContextSourceRef::new(
+                    ContextSourceKind::ContextMessage,
+                    format!("{id}-image-part-{index}"),
+                    "user attachment",
+                )
+                .with_detail("image_url")]),
             );
             continue;
         }
 
         let text = serde_json::to_string_pretty(part).unwrap_or_else(|_err| "{}".to_string());
         children.push(
-            ContextNode::leaf(
+            ctx.leaf(
                 format!("{id}-attachment-{index}"),
                 ContextNodeKind::Attachment,
-                inclusion,
                 Some(ContextRole::User),
                 format!("Attachment {}", index + 1),
-                estimator.estimate_text_for_report(&text),
+                ctx.estimator.estimate_text_for_report(&text),
                 &text,
-                row_metadata,
             )
-            .with_sources([
-                source.clone(),
-                ContextSourceRef::new(
-                    ContextSourceKind::ContextMessage,
-                    format!("{id}-attachment-{index}"),
-                    "user attachment",
-                ),
-            ]),
+            .with_sources([ContextSourceRef::new(
+                ContextSourceKind::ContextMessage,
+                format!("{id}-attachment-{index}"),
+                "user attachment",
+            )]),
         );
     }
     if let Some(mention_read_evidence) = mention_read_evidence {
@@ -1429,7 +1348,7 @@ fn user_content_part_children(
                 )
                 .with_detail(evidence.observation().display_path().to_string()),
                 evidence,
-                row_metadata,
+                ctx,
             ));
         }
     }
@@ -1439,10 +1358,7 @@ fn user_content_part_children(
 pub(crate) fn background_message_children(
     id: &str,
     text: &str,
-    row_metadata: ContextTokenMetadata,
-    estimator: &PromptEstimator,
-    inclusion: ContextInclusion,
-    source: ContextSourceRef,
+    ctx: &NodeBuildContext,
 ) -> Vec<ContextNode> {
     let kind = if is_background_status_text(text) {
         ContextNodeKind::TaskStatus
@@ -1455,20 +1371,19 @@ pub(crate) fn background_message_children(
         "Background task output"
     };
     vec![
-        ContextNode::leaf(
+        ctx.leaf(
             format!("{id}-background"),
             kind,
-            inclusion,
             Some(ContextRole::User),
             label,
-            estimator.estimate_text_for_report(text),
+            ctx.estimator.estimate_text_for_report(text),
             text,
-            row_metadata,
         )
-        .with_sources([
-            source,
-            ContextSourceRef::new(ContextSourceKind::BackgroundTask, id, label),
-        ]),
+        .with_sources([ContextSourceRef::new(
+            ContextSourceKind::BackgroundTask,
+            id,
+            label,
+        )]),
     ]
 }
 
@@ -1492,28 +1407,20 @@ fn mention_sections(block: &str) -> Vec<String> {
 pub(crate) fn assistant_message_children(
     id: &str,
     message: &ChatCompletionRequestMessage,
-    row_metadata: ContextTokenMetadata,
-    estimator: &PromptEstimator,
-    inclusion: ContextInclusion,
-    source: ContextSourceRef,
+    ctx: &NodeBuildContext,
 ) -> Vec<ContextNode> {
     let value = serde_json::to_value(message).unwrap_or(serde_json::Value::Null);
     let content = message_content_text(&value);
     let mut children = Vec::new();
     if !content.trim().is_empty() {
-        children.push(
-            ContextNode::leaf(
-                format!("{id}-content"),
-                ContextNodeKind::ChatMessage,
-                inclusion,
-                Some(ContextRole::Assistant),
-                "Assistant content",
-                estimator.estimate_text_for_report(&content),
-                &content,
-                row_metadata,
-            )
-            .with_source(source),
-        );
+        children.push(ctx.leaf(
+            format!("{id}-content"),
+            ContextNodeKind::ChatMessage,
+            Some(ContextRole::Assistant),
+            "Assistant content",
+            ctx.estimator.estimate_text_for_report(&content),
+            &content,
+        ));
     }
     children
 }
@@ -1760,6 +1667,12 @@ fn tool_result_children(
 
     match &detail.result {
         ToolContextResult::Text { rendered } => {
+            let ctx = NodeBuildContext {
+                row_metadata,
+                estimator,
+                inclusion: ContextInclusion::Included,
+                source: source.clone(),
+            };
             let mut children = vec![leaves.model_visible_output(rendered, source)];
             if let Some(evidence) = &detail.read_evidence {
                 children.push(read_freshness_node(
@@ -1767,7 +1680,7 @@ fn tool_result_children(
                     Some(ContextRole::Tool),
                     ContextSourceRef::new(ContextSourceKind::ToolResult, call_id, "read freshness"),
                     evidence,
-                    row_metadata,
+                    &ctx,
                 ));
             }
             children
@@ -1893,7 +1806,7 @@ fn read_freshness_node(
     role: Option<ContextRole>,
     source: ContextSourceRef,
     evidence: &ReadEvidence,
-    row_metadata: ContextTokenMetadata,
+    ctx: &NodeBuildContext,
 ) -> ContextNode {
     let text = evidence.ledger_text();
     ContextNode::leaf(
@@ -1904,7 +1817,7 @@ fn read_freshness_node(
         format!("Read {}", evidence.ledger_label()),
         0,
         &text,
-        row_metadata,
+        ctx.row_metadata,
     )
     .with_source(source)
 }

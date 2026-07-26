@@ -3,7 +3,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentMode, ContextRewriteKind, UsageTurn, UsageTurnStatus};
-use crate::provider::{EstimateConfidence, PromptEstimate, ReasoningSelection, TokenCounterKind};
+use crate::provider::{
+    EstimateConfidence, PromptEstimate, PromptEstimator, ReasoningSelection, TokenCounterKind,
+};
 use crate::tool::{OutputTruncationContext, ReadEvidence};
 
 use super::*;
@@ -670,6 +672,71 @@ impl ContextTokenMetadata {
             source: estimate.source,
             confidence: estimate.confidence,
         }
+    }
+}
+
+/// Group of values that repeat as trailing parameters in every `*_children`
+/// function. Constructed once at the dispatch site and passed by reference
+/// so builders can absorb `inclusion`, `row_metadata`, and the default source.
+#[derive(Debug, Clone)]
+pub(crate) struct NodeBuildContext<'a> {
+    pub(crate) row_metadata: ContextTokenMetadata,
+    pub(crate) estimator: &'a PromptEstimator,
+    pub(crate) inclusion: ContextInclusion,
+    pub(crate) source: ContextSourceRef,
+}
+
+impl<'a> NodeBuildContext<'a> {
+    /// Build a leaf node, absorbing `self.inclusion`, `self.row_metadata`,
+    /// and `self.source`.
+    pub(crate) fn leaf(
+        &self,
+        id: impl Into<ContextNodeId>,
+        kind: ContextNodeKind,
+        role: Option<ContextRole>,
+        label: impl Into<String>,
+        tokens: usize,
+        text: &str,
+    ) -> ContextNode {
+        ContextNode::leaf(
+            id,
+            kind,
+            self.inclusion,
+            role,
+            label,
+            tokens,
+            text,
+            self.row_metadata,
+        )
+        .with_source(self.source.clone())
+    }
+
+    /// Build a parent node, absorbing `self.inclusion`, `self.row_metadata`,
+    /// and `self.source`.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn parent(
+        &self,
+        id: impl Into<ContextNodeId>,
+        kind: ContextNodeKind,
+        role: Option<ContextRole>,
+        label: impl Into<String>,
+        tokens: usize,
+        text: &str,
+        children: Vec<ContextNode>,
+    ) -> ContextNode {
+        ContextNode::parent(
+            id,
+            kind,
+            self.inclusion,
+            role,
+            label,
+            tokens,
+            text,
+            self.row_metadata,
+            children,
+        )
+        .with_source(self.source.clone())
     }
 }
 
