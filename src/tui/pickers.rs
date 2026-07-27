@@ -88,49 +88,22 @@ impl ModelOption {
                 .get(&canonical_model)
                 .or_else(|| provider_session.model_reasoning.get(&model))
                 .copied();
-            // Live server metadata outranks the catalog's static values —
-            // matching the run-target resolution ladder.
-            let live = catalog.and_then(|catalog| {
-                catalog.live_model_for_connection_model(
-                    &resolved.connection_id,
-                    &resolved.remote_model_id,
-                )
-            });
             let reasoning = saved_reasoning
-                .or_else(|| live.as_ref().and_then(|model| model.recommended_reasoning))
                 .or(resolved.recommended_effort)
                 .unwrap_or(provider_session.reasoning);
             let parameter_preview = resolved.parameter_preview_label();
             let pricing = resolved.pricing;
-            let context_window = live
-                .as_ref()
-                .and_then(|model| model.context_window)
-                .or(resolved.context_window);
-            let features = live
-                .as_ref()
-                .filter(|model| !model.features.is_empty())
-                .map(|model| model.features.clone())
-                .unwrap_or_else(|| resolved.features.clone());
-            let supported_reasoning = live
-                .as_ref()
-                .filter(|model| !model.supported_reasoning.is_empty())
-                .map(|model| model.supported_reasoning.clone())
-                .unwrap_or_else(|| resolved.reasoning_selections());
-            let recommended_reasoning = live
-                .as_ref()
-                .and_then(|model| model.recommended_reasoning)
-                .or(resolved.recommended_effort);
+            let context_window = resolved.context_window;
+            let features = resolved.features.clone();
+            let supported_reasoning = resolved.reasoning_selections();
+            let recommended_reasoning = resolved.recommended_effort;
             return Self {
                 provider_id: provider_id.to_string(),
                 connection_id: resolved.connection_id.to_string(),
                 provider_label: provider_label.to_string(),
                 model_id: Some(resolved.model_id.to_string()),
                 model: model.clone(),
-                display_name: live
-                    .as_ref()
-                    .and_then(|model| model.display_name.as_deref())
-                    .unwrap_or(resolved.display_name.as_ref())
-                    .to_string(),
+                display_name: resolved.display_name.to_string(),
                 reasoning: normalize_reasoning_for_provider_model(
                     catalog,
                     provider_id,
@@ -473,6 +446,7 @@ mod tests {
                 display_name: Some("Qwen".into()),
                 metadata_model: None,
                 remote_model: Some("qwen/qwen3.6-35b-a3b".into()),
+                aliases: Vec::new(),
                 recommended: false,
                 recommended_effort: None,
                 discouraged_efforts: Vec::new(),
@@ -490,6 +464,7 @@ mod tests {
                 pricing: None,
                 roles: Vec::new(),
                 pinned: false,
+                pinned_fields: Vec::new(),
             }],
             models_dev: ModelsDevCatalog::default(),
             connection_sources: std::collections::HashMap::new(),
@@ -653,7 +628,7 @@ mod tests {
                     models: vec![
                         crate::model_catalog::AvailableModel::with_metadata(
                             "gpt-5.5",
-                            Some(272_000),
+                            Some(1_000_000),
                             Some("GPT-5.5 (live)".to_string()),
                             vec![crate::model_catalog::ModelFeature::Reasoning],
                         )

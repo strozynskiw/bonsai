@@ -582,9 +582,11 @@ impl ModelCatalog {
             .find_map(|(target_connection_id, model_id, target)| {
                 let target_model = target.model.model();
                 let remote_model = target.remote_model.as_deref().unwrap_or(target_model);
-                (target_model == model || remote_model == model)
-                    .then(|| self.resolve(target_connection_id, model_id).ok())
-                    .flatten()
+                (target_model == model
+                    || remote_model == model
+                    || target.aliases.iter().any(|alias| alias.as_ref() == model))
+                .then(|| self.resolve(target_connection_id, model_id).ok())
+                .flatten()
             })
             .or_else(|| self.resolve_connection_display_name(connection_id, model))
             .or_else(|| self.resolve_shadow_target(connection_id, model))
@@ -653,6 +655,7 @@ impl ModelCatalog {
                 .and_then(|available| available.display_name.clone()),
             metadata_model: metadata_model_override,
             remote_model: Some(remote_model),
+            aliases: Vec::new(),
             recommended: false,
             recommended_effort: None,
             discouraged_efforts: Vec::new(),
@@ -670,6 +673,7 @@ impl ModelCatalog {
             pricing: None,
             roles: Vec::new(),
             pinned: false,
+            pinned_fields: Vec::new(),
         };
         Some(resolve_target(
             connection,
@@ -1193,8 +1197,8 @@ impl ResolvedModel {
 /// Warn once per catalog load about every explicit TOML value that disagrees
 /// with the models.dev row it shadows. Refreshed values outrank unpinned
 /// fallbacks, but the warning keeps the offline catalog from drifting silently.
-/// Targets marked `pinned = true` (deliberate divergences: working windows,
-/// price-tier caps, beta-gated limits) remain authoritative and are skipped.
+/// Targets marked `pinned = true` remain authoritative and are skipped.
+/// `pinned_fields` suppresses only the corresponding field warning.
 fn log_models_dev_drift(
     targets: &HashMap<(ConnectionId, ModelId), TargetSpec>,
     models_dev: &ModelsDevCatalog,
@@ -1210,7 +1214,7 @@ fn log_models_dev_drift(
                 target = %target.model,
                 models_dev = %metadata_id,
                 drift = %mismatches.join("; "),
-                "catalog target drifts from models.dev; update the value or mark it `pinned = true` if deliberate"
+                "catalog target drifts from models.dev; update it or pin the deliberate field"
             );
         }
     }
@@ -1223,17 +1227,20 @@ fn models_dev_drift_lines(target: &TargetSpec, models_dev_model: &ModelsDevModel
         return Vec::new();
     }
     let mut mismatches = Vec::new();
-    if let (Some(toml), Some(live)) = (target.context_window, models_dev_model.context_window)
+    if !target.pins(ModelMetadataField::ContextWindow)
+        && let (Some(toml), Some(live)) = (target.context_window, models_dev_model.context_window)
         && toml != live
     {
         mismatches.push(format!("context_window {toml} vs models.dev {live}"));
     }
-    if let (Some(toml), Some(live)) = (target.output_limit, models_dev_model.output_limit)
+    if !target.pins(ModelMetadataField::OutputLimit)
+        && let (Some(toml), Some(live)) = (target.output_limit, models_dev_model.output_limit)
         && toml != live
     {
         mismatches.push(format!("output_limit {toml} vs models.dev {live}"));
     }
-    if let (Some(toml), Some(live)) = (target.pricing, models_dev_model.pricing)
+    if !target.pins(ModelMetadataField::Pricing)
+        && let (Some(toml), Some(live)) = (target.pricing, models_dev_model.pricing)
         && toml != live
     {
         mismatches.push("pricing differs from models.dev".to_string());
@@ -1386,7 +1393,7 @@ fn resolve_target(
         .clone()
         .unwrap_or_else(|| target.model.model().into());
     let (mut output_limit, mut output_limit_source) = choose_refreshed_metadata(
-        target.pinned,
+        target.pins(ModelMetadataField::OutputLimit),
         target.output_limit,
         None,
         models_dev.and_then(|model| model.output_limit),
@@ -1415,7 +1422,7 @@ fn resolve_target(
     let models_dev_features = models_dev.map(ModelsDevModel::features);
     let catalog_features = (!target.features.is_empty()).then(|| target.features.clone());
     let (features, features_source) = choose_refreshed_metadata(
-        target.pinned,
+        target.pins(ModelMetadataField::Features),
         catalog_features,
         live_features,
         models_dev_features,
@@ -1429,7 +1436,7 @@ fn resolve_target(
     let models_dev_reasoning =
         models_dev.map(|model| model.reasoning_options_for_transport(transport));
     let (reasoning_options, reasoning_source) = choose_refreshed_metadata(
-        target.pinned,
+        target.pins(ModelMetadataField::Reasoning),
         catalog_reasoning,
         live_reasoning,
         models_dev_reasoning,
@@ -1437,19 +1444,19 @@ fn resolve_target(
     let reasoning_options = reasoning_options.unwrap_or_default();
 
     let (context_window, context_window_source) = choose_refreshed_metadata(
-        target.pinned,
+        target.pins(ModelMetadataField::ContextWindow),
         target.context_window,
         live.and_then(|model| model.context_window),
         models_dev.and_then(|model| model.context_window),
     );
     let (pricing, pricing_source) = choose_refreshed_metadata(
-        target.pinned,
+        target.pins(ModelMetadataField::Pricing),
         target.pricing,
         live.and_then(|model| model.pricing),
         models_dev.and_then(|model| model.pricing),
     );
     let (display_name, display_name_source) = choose_refreshed_metadata(
-        target.pinned,
+        target.pins(ModelMetadataField::DisplayName),
         target.display_name.clone(),
         live.and_then(|model| model.display_name.clone()),
         models_dev.map(|model| model.display_name.clone()),
@@ -1484,7 +1491,7 @@ fn resolve_target(
         parameter_preview,
         features,
         recommended: target.recommended,
-        recommended_effort: if target.pinned {
+        recommended_effort: if target.pins(ModelMetadataField::Reasoning) {
             target
                 .recommended_effort
                 .or_else(|| live.and_then(|model| model.recommended_reasoning))
@@ -1576,7 +1583,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 187);
+        assert_eq!(catalog.targets.len(), 186);
         assert!(
             catalog
                 .connections
@@ -1964,15 +1971,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             codex.reasoning_options.as_ref().unwrap(),
-            &vec![
-                ReasoningOption::Toggle,
-                ReasoningOption::Effort(vec![
-                    ReasoningEffort::Low,
-                    ReasoningEffort::Medium,
-                    ReasoningEffort::High,
-                    ReasoningEffort::XHigh,
-                ]),
-            ]
+            &vec![ReasoningOption::Effort(vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+            ])]
         );
         assert_eq!(
             codex.pricing,
@@ -2365,7 +2369,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 187);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 186);
 
         let cases = [
             EquivalenceCase {
@@ -2386,11 +2390,6 @@ default_base_url = "http://localhost:11434/v1"
             EquivalenceCase {
                 connection_id: "codex",
                 model_id: "openai/gpt-5.5",
-                remote_model: "gpt-5.5",
-            },
-            EquivalenceCase {
-                connection_id: "codex",
-                model_id: "openai/gpt-5.5-1m",
                 remote_model: "gpt-5.5",
             },
             EquivalenceCase {
@@ -3115,6 +3114,97 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
+    fn field_pins_preserve_caps_without_freezing_refreshed_prices() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "codex"
+                    display_name = "Codex"
+                    auth = "codex-cache"
+                    transport = "codex-responses"
+                "#,
+            )],
+            &[source(
+                "codex.toml",
+                r#"
+                    [[targets]]
+                    connection = "codex"
+                    model = "openai/gpt-test"
+                    remote_model = "gpt-test"
+                    pinned_fields = ["context-window"]
+                    context_window = 272000
+                    output_limit = 10000
+                    pricing = {
+                        input_micros_per_million = 1000000,
+                        output_micros_per_million = 2000000
+                    }
+                "#,
+            )],
+        )
+        .unwrap()
+        .with_models_dev(
+            parse_models_dev_catalog(
+                "models-dev",
+                r#"{
+                    "openai": {
+                        "models": {
+                            "gpt-test": {
+                                "id": "gpt-test",
+                                "cost": { "input": 3, "output": 4 },
+                                "limit": { "context": 1050000, "output": 30000 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("codex");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability {
+                    models: vec![AvailableModel::with_metadata(
+                        "gpt-test",
+                        Some(400_000),
+                        None,
+                        Vec::new(),
+                    )],
+                    ..LiveModelAvailability::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = catalog
+            .resolve(&connection, &model_id("openai/gpt-test"))
+            .unwrap();
+        assert_eq!(resolved.context_window, Some(272_000));
+        assert_eq!(resolved.output_limit, Some(30_000));
+        assert_eq!(
+            resolved.pricing.unwrap().input_micros_per_million,
+            3_000_000
+        );
+        assert_eq!(
+            resolved.metadata_sources.context_window,
+            Some(ModelMetadataSource::Catalog)
+        );
+        assert_eq!(
+            resolved.metadata_sources.pricing,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+        assert_eq!(
+            resolved.catalog_drift,
+            vec![
+                "output_limit 10000 vs models.dev 30000",
+                "pricing differs from models.dev"
+            ]
+        );
+    }
+
+    #[test]
     fn shadow_target_uses_live_gateway_pricing_when_models_dev_is_silent() {
         // Gateway (OpenRouter-class) model with no target and no models.dev row,
         // but the live listing published a price — step 5's path.
@@ -3295,22 +3385,48 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
-    fn codex_exposes_200k_default_and_1m_variant_of_gpt_5_5() {
+    fn codex_builtin_matches_current_live_working_lineup() {
         let catalog = ModelCatalog::load_builtin().unwrap();
         let codex_id = connection_id("codex");
-
-        let default = catalog
-            .resolve_connection_model(&codex_id, "openai/gpt-5.5")
-            .unwrap();
-        assert_eq!(default.context_window, Some(200_000));
-        assert_eq!(default.remote_model_id.as_ref(), "gpt-5.5");
-
-        let one_million = catalog
+        let connection = catalog.connection(&codex_id).unwrap();
+        assert_eq!(
+            connection.default_model.as_ref().map(ModelId::as_str),
+            Some("openai/gpt-5.6-sol")
+        );
+        assert_eq!(
+            catalog.target_remote_models_for_connection(&codex_id),
+            vec![
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+            ]
+        );
+        for remote_model in [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+        ] {
+            let resolved = catalog
+                .resolve_connection_model(&codex_id, remote_model)
+                .unwrap_or_else(|| panic!("{remote_model} must resolve"));
+            assert_eq!(resolved.context_window, Some(272_000));
+            assert!(
+                !resolved
+                    .reasoning_selections()
+                    .contains(&ReasoningSelection::Off)
+            );
+        }
+        let legacy = catalog
             .resolve_connection_model(&codex_id, "openai/gpt-5.5-1m")
-            .unwrap();
-        assert_eq!(one_million.context_window, Some(1_050_000));
-        // Both variants hit the same wire model; only the working window differs.
-        assert_eq!(one_million.remote_model_id.as_ref(), "gpt-5.5");
+            .expect("legacy 1M selector must route existing sessions safely");
+        assert_eq!(legacy.model_id.as_str(), "openai/gpt-5.5");
+        assert_eq!(legacy.remote_model_id.as_ref(), "gpt-5.5");
     }
 
     #[test]
@@ -3433,8 +3549,8 @@ default_base_url = "http://localhost:11434/v1"
         assert!(resolved.reasoning_options.is_empty());
         assert_eq!(
             resolved.pricing,
-            Some(ModelPricing::new(5_000_000, 30_000_000).with_cache_rates(Some(500_000), None)),
-            "omitted pricing should be inherited"
+            Some(ModelPricing::new(5_000_000, 30_000_000)),
+            "omitted pricing should refresh from models.dev"
         );
     }
 

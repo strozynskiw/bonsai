@@ -558,7 +558,8 @@ mod tests {
         let summary = store.provider_state_summary();
 
         assert!(
-            summary.contains("codex:model=gpt-5.5,credential=none,runtime_key=set,account_id=set")
+            summary
+                .contains("codex:model=gpt-5.6-sol,credential=none,runtime_key=set,account_id=set")
         );
         assert!(!summary.contains("codex-token-secret"));
         assert!(!summary.contains("codex-account-secret"));
@@ -573,7 +574,7 @@ mod tests {
 
         let codex = store.session("codex");
         assert_eq!(codex.base_url, "https://chatgpt.com/backend-api/codex");
-        assert_eq!(codex.model, "gpt-5.5");
+        assert_eq!(codex.model, "gpt-5.6-sol");
 
         let anthropic = store.session("anthropic");
         assert_eq!(anthropic.base_url, "https://api.anthropic.com");

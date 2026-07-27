@@ -67,9 +67,13 @@ transport = "codex-responses"
 default_base_url = "https://chatgpt.com/backend-api/codex"
 model_env = "CODEX_MODEL"
 base_url_env = "CODEX_BASE_URL"
-default_model = "openai/gpt-5.5"
+default_model = "openai/gpt-5.6-sol"
 default_endpoint_path = "responses"
 default_token_counter = "tiktoken"
+# Codex lists bare OpenAI slugs. This lets `/refresh` immediately enrich a new
+# live slug (for example the canonical `gpt-5.6` alias when it reaches Codex)
+# from models.dev before a bundled target is released.
+models_dev_provider = "openai"
 # CodexProvider always sends `prompt_cache_key`; the flag keeps the catalog
 # metadata in parity with the builtin capability declaration.
 prompt_cache = true

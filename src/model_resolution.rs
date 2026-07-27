@@ -426,7 +426,7 @@ fn run_config_for_selected_model(
             &metadata.default_base_url,
             resolved.default_base_url.as_ref(),
         );
-        let target = resolved_run_target_with_live_context(
+        let target = resolved_run_target_with_live_routing(
             catalog,
             selection.provider_id,
             &resolved,
@@ -435,13 +435,8 @@ fn run_config_for_selected_model(
             session.context_window,
         );
         let provider = factory.build_target(&session, &target);
-        let live_context = live_context_window_for_provider_model(
-            catalog,
-            selection.provider_id,
-            resolved.remote_model_id.as_ref(),
-        );
-        let context_budget_tokens = live_context
-            .or(resolved.context_window)
+        let context_budget_tokens = resolved
+            .context_window
             .or(session.context_window)
             .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS) as usize;
         let prompt_estimator = PromptEstimator::from_resolved_model(metadata, &session, &resolved);
@@ -522,7 +517,7 @@ fn run_target_for_current_model_with_catalog_and_reasoning_cap(
             &resolution.metadata.default_base_url,
             resolved.default_base_url.as_ref(),
         );
-        return resolved_run_target_with_live_context(
+        return resolved_run_target_with_live_routing(
             catalog,
             resolution.provider_id,
             resolved,
@@ -565,13 +560,8 @@ struct CurrentModelResolution<'a> {
 impl CurrentModelResolution<'_> {
     fn context_window(&self, catalog: Option<&ModelCatalog>) -> u32 {
         if let Some(resolved) = self.resolved.as_ref() {
-            let live_context = live_context_window_for_provider_model(
-                catalog,
-                self.provider_id,
-                resolved.remote_model_id.as_ref(),
-            );
-            return live_context
-                .or(resolved.context_window)
+            return resolved
+                .context_window
                 .or(self.session.context_window)
                 .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
         }
@@ -643,7 +633,7 @@ fn runtime_base_url(
     }
 }
 
-fn resolved_run_target_with_live_context(
+fn resolved_run_target_with_live_routing(
     catalog: Option<&ModelCatalog>,
     provider_id: &str,
     resolved: &ResolvedModel,
@@ -677,9 +667,6 @@ fn apply_live_run_target_metadata(
     let Some(live) = live_model_for_provider_model(catalog, provider_id, model) else {
         return;
     };
-    if let Some(context_window) = live.context_window {
-        target.context_window = Some(context_window);
-    }
     if !live.supported_reasoning.is_empty() {
         target.reasoning_escalation = target
             .reasoning
@@ -863,6 +850,7 @@ mod tests {
                 display_name: None,
                 metadata_model: None,
                 remote_model: Some("qwen3-coder:latest".into()),
+                aliases: Vec::new(),
                 recommended: true,
                 recommended_effort: None,
                 discouraged_efforts: Vec::new(),
@@ -880,6 +868,7 @@ mod tests {
                 pricing: None,
                 roles: Vec::new(),
                 pinned: false,
+                pinned_fields: Vec::new(),
             }],
             models_dev: crate::model_catalog::ModelsDevCatalog::default(),
             connection_sources: std::collections::HashMap::new(),
@@ -923,6 +912,7 @@ mod tests {
                 display_name: None,
                 metadata_model: None,
                 remote_model: None,
+                aliases: Vec::new(),
                 recommended: true,
                 recommended_effort: None,
                 discouraged_efforts: Vec::new(),
@@ -940,6 +930,7 @@ mod tests {
                 pricing: None,
                 roles: Vec::new(),
                 pinned: false,
+                pinned_fields: Vec::new(),
             }],
             models_dev: crate::model_catalog::ModelsDevCatalog::default(),
             connection_sources: std::collections::HashMap::new(),
@@ -967,6 +958,7 @@ mod tests {
                 display_name: None,
                 metadata_model: None,
                 remote_model: None,
+                aliases: Vec::new(),
                 recommended: is_default,
                 recommended_effort: None,
                 discouraged_efforts: Vec::new(),
@@ -984,6 +976,7 @@ mod tests {
                 pricing: None,
                 roles: Vec::new(),
                 pinned: false,
+                pinned_fields: Vec::new(),
             }
         };
         crate::model_catalog::ModelCatalog::from_spec(crate::model_catalog::CatalogSpec {
@@ -1052,6 +1045,7 @@ mod tests {
                 display_name: None,
                 metadata_model: None,
                 remote_model: None,
+                aliases: Vec::new(),
                 recommended: true,
                 recommended_effort: None,
                 discouraged_efforts: Vec::new(),
@@ -1072,6 +1066,7 @@ mod tests {
                 pricing: None,
                 roles: Vec::new(),
                 pinned: false,
+                pinned_fields: Vec::new(),
             }],
             models_dev: crate::model_catalog::ModelsDevCatalog::default(),
             connection_sources: std::collections::HashMap::new(),
@@ -1200,7 +1195,11 @@ mod tests {
                 &connection_id,
                 crate::model_catalog::LiveModelAvailability {
                     models: vec![{
-                        let mut model = crate::model_catalog::AvailableModel::remote("gpt-5.5")
+                        let mut model =
+                            crate::model_catalog::AvailableModel::remote_with_context_window(
+                                "gpt-5.5",
+                                Some(1_000_000),
+                            )
                             .with_reasoning(
                                 vec![
                                     crate::provider::ReasoningSelection::Low,
@@ -1240,6 +1239,11 @@ mod tests {
             Some(crate::provider::ReasoningSelection::High)
         );
         assert!(target.use_responses_lite);
+        assert_eq!(target.context_window, Some(272_000));
+        assert_eq!(
+            context_window_for_current_model_with_catalog(&registry, &store, Some(&catalog)),
+            272_000
+        );
         assert_eq!(
             build_provider(&registry, &store, Some(&catalog)).reasoning_escalation(),
             Some(crate::provider::ReasoningSelection::High)

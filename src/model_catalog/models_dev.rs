@@ -145,9 +145,14 @@ pub(crate) fn reasoning_options_for_transport(
         .iter()
         .filter_map(|option| match (transport, option) {
             (
-                TransportProtocol::OpenAiChat | TransportProtocol::CodexResponses,
+                TransportProtocol::OpenAiChat,
                 ReasoningOption::Toggle | ReasoningOption::Effort(_),
             ) => Some(option.clone()),
+            // The public OpenAI API accepts `none`, which models.dev converts
+            // to a toggle. ChatGPT-authenticated Codex advertises effort levels
+            // only; omitting the field selects its default rather than turning
+            // reasoning off.
+            (TransportProtocol::CodexResponses, ReasoningOption::Effort(_)) => Some(option.clone()),
             // Efforts are valid on the Anthropic wire under BOTH codecs: the
             // budget-tokens generation maps them to coarse budgets
             // (`reasoning::anthropic_thinking`), and the adaptive generation
@@ -953,6 +958,31 @@ mod tests {
         assert_eq!(tiny.context_window, None);
         assert_eq!(tiny.pricing, None);
         assert!(tiny.features().is_empty());
+    }
+
+    #[test]
+    fn codex_transport_drops_public_api_reasoning_toggle() {
+        let options = vec![
+            ReasoningOption::Toggle,
+            ReasoningOption::Effort(vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ]),
+        ];
+
+        assert_eq!(
+            reasoning_options_for_transport(&options, TransportProtocol::CodexResponses),
+            vec![ReasoningOption::Effort(vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ])]
+        );
+        assert_eq!(
+            reasoning_options_for_transport(&options, TransportProtocol::OpenAiChat),
+            options
+        );
     }
 
     #[test]

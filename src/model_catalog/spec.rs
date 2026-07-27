@@ -344,6 +344,10 @@ pub(crate) struct TargetSpec {
     pub metadata_model: Option<ModelId>,
     #[serde(default)]
     pub remote_model: Option<Box<str>>,
+    /// Alternate persisted or user-facing selectors that resolve to this
+    /// target without appearing as additional models in provider pickers.
+    #[serde(default)]
+    pub aliases: Vec<Box<str>>,
     #[serde(default)]
     pub recommended: bool,
     #[serde(default)]
@@ -383,6 +387,23 @@ pub(crate) struct TargetSpec {
     /// fallbacks so `/refresh` can adopt newer provider/models.dev metadata.
     #[serde(default)]
     pub pinned: bool,
+    /// Narrower alternative to `pinned = true`: only the named metadata fields
+    /// keep their catalog values while every other field can refresh normally.
+    /// This is used for provider-specific working-window caps whose prices and
+    /// capabilities must still track live sources.
+    #[serde(default)]
+    pub pinned_fields: Vec<ModelMetadataField>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ModelMetadataField {
+    DisplayName,
+    ContextWindow,
+    OutputLimit,
+    Pricing,
+    Features,
+    Reasoning,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +418,8 @@ struct RawTargetSpecPatch {
     metadata_model: Option<ModelId>,
     #[serde(default)]
     remote_model: Option<Box<str>>,
+    #[serde(default)]
+    aliases: Option<Vec<Box<str>>>,
     #[serde(default)]
     recommended: Option<bool>,
     #[serde(default)]
@@ -431,6 +454,8 @@ struct RawTargetSpecPatch {
     roles: Option<Vec<LegacyModelRole>>,
     #[serde(default)]
     pinned: Option<bool>,
+    #[serde(default)]
+    pinned_fields: Option<Vec<ModelMetadataField>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,6 +466,7 @@ pub(crate) struct TargetSpecPatch {
     pub display_name: Option<Box<str>>,
     pub metadata_model: Option<ModelId>,
     pub remote_model: Option<Box<str>>,
+    pub aliases: Option<Vec<Box<str>>>,
     pub recommended: Option<bool>,
     pub recommended_effort: Option<ReasoningSelection>,
     pub discouraged_efforts: Option<Vec<ReasoningSelection>>,
@@ -458,6 +484,7 @@ pub(crate) struct TargetSpecPatch {
     pub pricing: Option<ModelPricing>,
     pub roles: Option<Vec<LegacyModelRole>>,
     pub pinned: Option<bool>,
+    pub pinned_fields: Option<Vec<ModelMetadataField>>,
 }
 
 impl<'de> Deserialize<'de> for TargetSpecPatch {
@@ -475,6 +502,7 @@ impl<'de> Deserialize<'de> for TargetSpecPatch {
             display_name: raw.display_name.or(alias_display_name),
             metadata_model: raw.metadata_model,
             remote_model: raw.remote_model,
+            aliases: raw.aliases,
             recommended: raw.recommended,
             recommended_effort: raw.recommended_effort,
             discouraged_efforts: raw.discouraged_efforts,
@@ -492,6 +520,7 @@ impl<'de> Deserialize<'de> for TargetSpecPatch {
             pricing: raw.pricing,
             roles: raw.roles,
             pinned: raw.pinned,
+            pinned_fields: raw.pinned_fields,
         })
     }
 }
@@ -505,6 +534,7 @@ impl TargetSpecPatch {
             display_name: self.display_name,
             metadata_model: self.metadata_model,
             remote_model: self.remote_model,
+            aliases: self.aliases.unwrap_or_default(),
             recommended: self.recommended.unwrap_or(false),
             recommended_effort: self.recommended_effort,
             discouraged_efforts: self.discouraged_efforts.unwrap_or_default(),
@@ -522,11 +552,16 @@ impl TargetSpecPatch {
             pricing: self.pricing,
             roles: self.roles.unwrap_or_default(),
             pinned: self.pinned.unwrap_or(false),
+            pinned_fields: self.pinned_fields.unwrap_or_default(),
         }
     }
 }
 
 impl TargetSpec {
+    pub(crate) fn pins(&self, field: ModelMetadataField) -> bool {
+        self.pinned || self.pinned_fields.contains(&field)
+    }
+
     pub(crate) fn apply_patch(&mut self, patch: TargetSpecPatch) {
         if let Some(enabled) = patch.enabled {
             self.enabled = enabled;
@@ -545,6 +580,9 @@ impl TargetSpec {
         }
         if let Some(remote_model) = patch.remote_model {
             self.remote_model = Some(remote_model);
+        }
+        if let Some(aliases) = patch.aliases {
+            self.aliases = aliases;
         }
         if let Some(recommended) = patch.recommended {
             self.recommended = recommended;
@@ -590,6 +628,9 @@ impl TargetSpec {
         }
         if let Some(pinned) = patch.pinned {
             self.pinned = pinned;
+        }
+        if let Some(pinned_fields) = patch.pinned_fields {
+            self.pinned_fields = pinned_fields;
         }
     }
 }

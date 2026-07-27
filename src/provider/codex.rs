@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -7,6 +8,7 @@ use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool
 use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -33,19 +35,27 @@ use crate::util::tool_args::normalize_tool_call_arguments_json;
 const CODEX_FALLBACK_CLIENT_VERSION: &str = "0.150.0";
 const CODEX_CLIENT_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const CODEX_MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
-const CODEX_FALLBACK_MODELS: [&str; 3] = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+const CODEX_FALLBACK_MODELS: [&str; 6] = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+];
+const CODEX_KEYRING_SERVICE: &str = "Codex Auth";
 static CODEX_CLIENT_VERSION: OnceCell<String> = OnceCell::const_new();
 
 pub static CODEX_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
     ProviderMetadata::new(
         "codex",
         "Codex",
-        "gpt-5.5",
+        "gpt-5.6-sol",
         "https://chatgpt.com/backend-api/codex",
         None,
         Some("CODEX_MODEL"),
         Some("CODEX_BASE_URL"),
-        &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+        &CODEX_FALLBACK_MODELS,
         Protocol::CodexResponses,
         ProviderCapabilities::new(CODEX_REASONING, NO_PARAMETERS)
             .with_prompt_cache()
@@ -53,10 +63,9 @@ pub static CODEX_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         "responses",
     )
     .with_auth_requirement(AuthRequirement::CodexCache)
-    // Fallback only (used when catalog resolution misses); the builtin catalog
-    // targets carry the real windows (200K default, 1M variant). Keep this aligned
-    // with the default target so a miss matches the default model.
-    .with_context_window(200_000)
+    // Fallback only (used when catalog resolution misses). Keep this aligned
+    // with the current Codex working window published by the live catalog.
+    .with_context_window(272_000)
     .with_token_counter(TokenCounterKind::Tiktoken)
 });
 
@@ -88,7 +97,7 @@ impl ProviderFactory for CodexFactory {
             }
         };
         outcome.context(
-            "Codex authorization requires a valid ~/.codex/auth.json. Run `codex login` externally, then retry /authorize codex.",
+            "Codex authorization requires a current Codex CLI login in CODEX_HOME (auth.json or the OS credential store). Run `codex login` externally, then retry /authorize codex.",
         )
     }
 
@@ -903,6 +912,7 @@ fn available_model_from_codex_item(model_id: &str, item: &Value) -> AvailableMod
         .get("context_window")
         .or_else(|| item.get("max_context_window"))
         .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
         .and_then(|value| u32::try_from(value).ok());
     let display_name = item
         .get("display_name")
@@ -1054,25 +1064,70 @@ fn require_codex_account_id(credential: &CodexCredential) -> Result<()> {
     Ok(())
 }
 
-async fn read_codex_auth_credential() -> Result<Option<CodexCredential>> {
-    let auth_path = match directories::BaseDirs::new() {
-        Some(dirs) => dirs.home_dir().join(".codex").join("auth.json"),
-        None => return Ok(None),
+fn codex_home_dir() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".codex")))
+}
+
+async fn read_codex_auth_file(codex_home: &Path) -> Result<Option<CodexCredential>> {
+    let auth_path = codex_home.join("auth.json");
+    let content = match tokio::fs::read_to_string(&auth_path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to read Codex auth cache at {auth_path:?}"));
+        }
     };
-
-    if !auth_path.exists() {
-        return Ok(None);
-    }
-
-    let content = tokio::fs::read_to_string(&auth_path)
-        .await
-        .with_context(|| format!("Failed to read Codex auth cache at {:?}", auth_path))?;
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-
+    let json: Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse Codex auth cache at {auth_path:?}"))?;
     Ok(codex_credential_from_json(&json))
+}
+
+fn codex_keyring_account(codex_home: &Path) -> String {
+    let canonical = codex_home
+        .canonicalize()
+        .unwrap_or_else(|_| codex_home.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let short = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("cli|{short}")
+}
+
+async fn read_codex_auth_keyring(codex_home: &Path) -> Result<Option<CodexCredential>> {
+    let account = codex_keyring_account(codex_home);
+    let serialized = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+        let entry = keyring::Entry::new(CODEX_KEYRING_SERVICE, &account)
+            .context("OS credential store is unavailable for Codex")?;
+        match entry.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(error).context("Failed to load Codex CLI credentials"),
+        }
+    })
+    .await
+    .context("Codex credential-store task failed")??;
+    let Some(serialized) = serialized else {
+        return Ok(None);
+    };
+    let json: Value = serde_json::from_str(&serialized)
+        .context("Failed to parse Codex CLI credentials from the OS credential store")?;
+    Ok(codex_credential_from_json(&json))
+}
+
+async fn read_codex_auth_credential() -> Result<Option<CodexCredential>> {
+    let Some(codex_home) = codex_home_dir() else {
+        return Ok(None);
+    };
+    if let Some(credential) = read_codex_auth_file(&codex_home).await? {
+        return Ok(Some(credential));
+    }
+    read_codex_auth_keyring(&codex_home).await
 }
 
 pub(crate) async fn codex_cached_authorization() -> Result<Option<AuthorizeOutcome>> {
@@ -1244,11 +1299,11 @@ mod tests {
     #[test]
     fn metadata_is_codex() {
         assert_eq!(CODEX_METADATA.id.as_ref(), "codex");
-        assert_eq!(CODEX_METADATA.default_model.as_ref(), "gpt-5.5");
+        assert_eq!(CODEX_METADATA.default_model.as_ref(), "gpt-5.6-sol");
         assert_eq!(CODEX_METADATA.env_var_api_key.as_deref(), None);
         assert_eq!(CODEX_METADATA.auth_requirement, AuthRequirement::CodexCache);
         assert_eq!(CODEX_METADATA.protocol, Protocol::CodexResponses);
-        assert_eq!(CODEX_METADATA.context_window, Some(200_000));
+        assert_eq!(CODEX_METADATA.context_window, Some(272_000));
     }
 
     #[test]
@@ -1276,6 +1331,59 @@ mod tests {
             }
         });
         assert_eq!(find_token_in_json(&value), Some("token-123".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_keyring_account_matches_cli_path_hash_contract() {
+        assert_eq!(
+            codex_keyring_account(Path::new("/tmp/codex-home")),
+            "cli|c790889e29f35b54"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_file_reader_uses_supplied_codex_home() {
+        let codex_home = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            codex_home.path().join("auth.json"),
+            json!({
+                "tokens": {
+                    "access_token": "token-from-custom-home",
+                    "account_id": "account-from-custom-home"
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let credential = read_codex_auth_file(codex_home.path())
+            .await
+            .unwrap()
+            .expect("credential from custom CODEX_HOME");
+        assert_eq!(credential.access_token, "token-from-custom-home");
+        assert_eq!(
+            credential.account_id.as_deref(),
+            Some("account-from-custom-home")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_auth_file_reports_parse_failure() {
+        let codex_home = tempfile::tempdir().unwrap();
+        tokio::fs::write(codex_home.path().join("auth.json"), "{not-json")
+            .await
+            .unwrap();
+
+        let error = read_codex_auth_file(codex_home.path())
+            .await
+            .expect_err("malformed auth cache must not look like logged out");
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to parse Codex auth cache")
+        );
     }
 
     #[test]
@@ -1962,10 +2070,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_model_parser_ignores_zero_context_window() {
+        let model = available_model_from_codex_item(
+            "gpt-zero",
+            &json!({"slug": "gpt-zero", "context_window": 0}),
+        );
+        assert_eq!(model.context_window, None);
+    }
+
+    #[test]
     fn codex_fallback_models_excludes_unsupported_old_default() {
         assert_eq!(
             codex_fallback_models(),
             vec![
+                "gpt-5.6-sol".to_string(),
+                "gpt-5.6-terra".to_string(),
+                "gpt-5.6-luna".to_string(),
                 "gpt-5.5".to_string(),
                 "gpt-5.4".to_string(),
                 "gpt-5.4-mini".to_string()
@@ -2020,6 +2140,9 @@ mod tests {
             .and(path("/models"))
             .and(query_param("client_version", &client_version))
             .and(header("version", &client_version))
+            .and(header("ChatGPT-Account-ID", "codex-account"))
+            .and(header("OAI-Product-Sku", "codex"))
+            .and(header("originator", "codex_cli_rs"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "models": [{"slug": "gpt-new", "visibility": "list"}]
             })))

@@ -642,6 +642,7 @@ mod tests {
                 display_name: None,
                 metadata_model: None,
                 remote_model: Some("qwen3-coder:latest".into()),
+                aliases: Vec::new(),
                 recommended: true,
                 recommended_effort: None,
                 discouraged_efforts: Vec::new(),
@@ -659,6 +660,7 @@ mod tests {
                 pricing: None,
                 roles: Vec::new(),
                 pinned: false,
+                pinned_fields: Vec::new(),
             }],
             models_dev: crate::model_catalog::ModelsDevCatalog::default(),
             connection_sources: std::collections::HashMap::new(),
@@ -1137,7 +1139,7 @@ mod tests {
             ReasoningSelection::from_effort(crate::provider::ReasoningEffort::High)
         );
         assert_eq!(
-            loaded.session("codex").model_reasoning.get("gpt-5.5"),
+            loaded.session("codex").model_reasoning.get("gpt-5.6-sol"),
             Some(&ReasoningSelection::from_effort(
                 crate::provider::ReasoningEffort::High
             ))
