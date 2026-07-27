@@ -1914,6 +1914,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_registry_zen_refresh_uses_live_models_endpoint() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer sk-oc-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{
+                    "data": [
+                        {"id": "claude-opus-5"},
+                        {"id": "ling-3.0-flash-free"}
+                    ]
+                }"#,
+            ))
+            .mount(&server)
+            .await;
+        let catalog =
+            crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
+        let registry = crate::provider::ProviderRegistry::from_catalog(&catalog);
+        let factory = registry
+            .get("opencode-zen")
+            .expect("catalog OpenCode Zen factory");
+        let metadata = factory.metadata();
+        assert_eq!(
+            metadata.default_model.as_ref(),
+            "opencode-zen/claude-sonnet-5"
+        );
+        assert!(metadata.capabilities.supports_prompt_cache);
+        assert!(metadata.capabilities.usage_frame_is_stream_terminal);
+        let session = provider_session("sk-oc-test", &server.uri(), "claude-opus-5");
+
+        let availability = factory.list_available_models(&session).await.unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec![
+                "claude-opus-5".to_string(),
+                "ling-3.0-flash-free".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn chat_stream_splits_inline_think_tags_into_reasoning() {
         use std::sync::Mutex;
         use wiremock::matchers::method;

@@ -1576,7 +1576,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 182);
+        assert_eq!(catalog.targets.len(), 187);
         assert!(
             catalog
                 .connections
@@ -1621,22 +1621,93 @@ mod tests {
         );
         assert_eq!(
             opencode_zen.default_model.as_ref().map(ModelId::as_str),
-            Some("opencode-zen/grok-code")
+            Some("opencode-zen/claude-sonnet-5")
+        );
+        assert_eq!(
+            opencode_zen
+                .models_dev_provider
+                .as_ref()
+                .map(ConnectionId::as_str),
+            Some("opencode")
         );
 
         let opencode_zen_default = catalog
             .targets
             .iter()
-            .find(|target| target.model.as_str() == "opencode-zen/grok-code")
+            .find(|target| target.model.as_str() == "opencode-zen/claude-sonnet-5")
             .unwrap();
         assert_eq!(
             opencode_zen_default
                 .metadata_model
                 .as_ref()
                 .map(ModelId::as_str),
-            Some("opencode/grok-code")
+            Some("opencode/claude-sonnet-5")
         );
         assert!(opencode_zen_default.is_default);
+        assert!(
+            !catalog
+                .targets
+                .iter()
+                .find(|target| target.model.as_str() == "opencode-zen/grok-code")
+                .unwrap()
+                .is_default,
+            "the deprecated and unavailable grok-code target must not be the default"
+        );
+        assert_eq!(
+            catalog
+                .targets
+                .iter()
+                .find(|target| target.model.as_str() == "opencode-zen/gpt-5-nano")
+                .unwrap()
+                .roles,
+            vec![LegacyModelRole::Cheap],
+            "Zen keeps a current low-cost role after retiring grok-code"
+        );
+        for model in [
+            "opencode-zen/claude-opus-5",
+            "opencode-zen/gemini-3.5-flash-lite",
+            "opencode-zen/gemini-3.6-flash",
+            "opencode-zen/laguna-s-2.1-free",
+            "opencode-zen/ling-3.0-flash-free",
+        ] {
+            assert!(
+                catalog
+                    .targets
+                    .iter()
+                    .any(|target| target.model.as_str() == model),
+                "current live Zen model `{model}` must remain available offline"
+            );
+        }
+
+        let deepseek_v4_pro = catalog
+            .targets
+            .iter()
+            .find(|target| target.model.as_str() == "opencode-zen/deepseek-v4-pro")
+            .unwrap();
+        assert!(deepseek_v4_pro.pinned);
+        assert_eq!(
+            deepseek_v4_pro.pricing.unwrap().output_micros_per_million,
+            3_480_000,
+            "the official Zen gateway price overrides inherited metadata"
+        );
+        for (model, context_window) in [
+            ("opencode-zen/claude-sonnet-4-5", 200_000),
+            ("opencode-zen/gemini-3.1-pro", 200_000),
+            ("opencode-zen/gpt-5.4", 272_000),
+            ("opencode-zen/gpt-5.5", 272_000),
+            ("opencode-zen/gpt-5.6-sol", 272_000),
+            ("opencode-zen/gpt-5.6-terra", 272_000),
+            ("opencode-zen/gpt-5.6-luna", 272_000),
+            ("opencode-zen/grok-4.5", 200_000),
+        ] {
+            let target = catalog
+                .targets
+                .iter()
+                .find(|target| target.model.as_str() == model)
+                .unwrap();
+            assert!(target.pinned, "{model} has tier-specific Zen pricing");
+            assert_eq!(target.context_window, Some(context_window), "{model}");
+        }
 
         let glm = catalog
             .targets
@@ -2294,7 +2365,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 182);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 187);
 
         let cases = [
             EquivalenceCase {
@@ -2672,6 +2743,16 @@ default_base_url = "http://localhost:11434/v1"
                     default_base_url = "https://opencode.ai/zen/go/v1"
                     default_endpoint_path = "chat/completions"
                     default_token_counter = "qwen3"
+
+                    [[connections]]
+                    id = "opencode-zen"
+                    display_name = "OpenCode Zen"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    models_dev_provider = "opencode"
+                    default_base_url = "https://opencode.ai/zen/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "tiktoken"
                 "#,
             )],
             &[],
@@ -2695,6 +2776,23 @@ default_base_url = "http://localhost:11434/v1"
                                     "cache_read": 0.035
                                 },
                                 "limit": { "context": 262144, "output": 65536 }
+                            }
+                        }
+                    },
+                    "opencode": {
+                        "models": {
+                            "future-zen": {
+                                "id": "future-zen",
+                                "name": "Future Zen",
+                                "tool_call": true,
+                                "reasoning": true,
+                                "attachment": true,
+                                "cost": {
+                                    "input": 0.3,
+                                    "output": 2.5,
+                                    "cache_read": 0.03
+                                },
+                                "limit": { "context": 1048576, "output": 65536 }
                             }
                         }
                     }
@@ -2738,6 +2836,26 @@ default_base_url = "http://localhost:11434/v1"
         assert!(preview.unverified);
         assert!(preview.pricing.is_none());
         assert!(preview.context_window.is_none());
+
+        let zen = connection_id("opencode-zen");
+        catalog
+            .write_live_availability(
+                &zen,
+                LiveModelAvailability::from_remote_ids(["future-zen".to_string()]),
+            )
+            .unwrap();
+        let future_zen = catalog
+            .resolve_connection_model(&zen, "future-zen")
+            .expect("new Zen models resolve against the opencode namespace");
+        assert!(!future_zen.unverified);
+        assert_eq!(future_zen.model_id.as_str(), "opencode-zen/future-zen");
+        assert_eq!(future_zen.context_window, Some(1_048_576));
+        assert_eq!(future_zen.output_limit, Some(65_536));
+        assert_eq!(
+            future_zen.pricing.unwrap().input_micros_per_million,
+            300_000
+        );
+        assert!(future_zen.features.contains(&ModelFeature::Attachment));
     }
 
     #[test]

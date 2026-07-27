@@ -43,9 +43,13 @@ default_base_url = "https://opencode.ai/zen/v1"
 api_key_env = "OPENCODE_API_KEY"
 model_env = "OPENCODE_ZEN_MODEL"
 base_url_env = "OPENCODE_ZEN_BASE_URL"
-default_model = "opencode-zen/grok-code"
+default_model = "opencode-zen/claude-sonnet-5"
 default_endpoint_path = "chat/completions"
 default_token_counter = "tiktoken"
+# Live model ids are bare (`claude-sonnet-5`), while models.dev stores Zen's
+# gateway metadata under `opencode`. `/refresh` uses this namespace to enrich
+# newly served models with current prices, limits, and capabilities.
+models_dev_provider = "opencode"
 prompt_cache = true
 # Zen's OpenAI- and Anthropic-upstream adapters (gpt-5.x, claude-opus-4-8) stream
 # a complete answer and close without ever sending `finish_reason` or `[DONE]`;

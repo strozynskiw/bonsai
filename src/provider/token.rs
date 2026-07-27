@@ -528,7 +528,7 @@ fn estimate_with_local_tokenizer(
     Ok(PromptEstimate {
         input_tokens,
         source: kind,
-        confidence: EstimateConfidence::High,
+        confidence: local_tokenizer_confidence(kind, model),
         tool_schema_tokens,
     })
 }
@@ -601,7 +601,7 @@ fn estimate_messages_for_report(
                 .map(|message| count_message_with_tokenizer(tokenizer, message))
                 .collect::<Result<Vec<_>>>();
             match message_tokens {
-                Ok(tokens) => (tokens, kind, EstimateConfidence::High),
+                Ok(tokens) => (tokens, kind, local_tokenizer_confidence(kind, model)),
                 Err(err) => {
                     tracing::debug!(
                         counter = kind.label(),
@@ -637,6 +637,33 @@ fn estimate_messages_for_report(
                 EstimateConfidence::Low,
             )
         }
+    }
+}
+
+/// Confidence in a local tokenizer for the selected model family.
+///
+/// Gateway catalogs often use tiktoken as a fast approximation for Claude,
+/// Gemini, Grok, and other non-OpenAI families. Counting still works there,
+/// but presenting the result as exact is misleading. Keep high confidence for
+/// native OpenAI and Qwen 3 families and label every cross-family estimate as
+/// approximate.
+fn local_tokenizer_confidence(kind: TokenCounterKind, model: &str) -> EstimateConfidence {
+    let model = model.to_ascii_lowercase();
+    let native_family = match kind {
+        TokenCounterKind::Tiktoken => {
+            model.starts_with("gpt-")
+                || model.starts_with("o1")
+                || model.starts_with("o3")
+                || model.starts_with("o4")
+                || model.starts_with("text-embedding-")
+        }
+        TokenCounterKind::Qwen3 => model.contains("qwen3"),
+        TokenCounterKind::AnthropicCountTokens | TokenCounterKind::Heuristic => false,
+    };
+    if native_family {
+        EstimateConfidence::High
+    } else {
+        EstimateConfidence::Low
     }
 }
 
@@ -936,7 +963,23 @@ mod tests {
         let estimate = estimate_with_tiktoken("custom-openai-model", &messages, &[], 0)
             .expect("unknown model should still use a BPE fallback");
         assert_eq!(estimate.source, TokenCounterKind::Tiktoken);
+        assert_eq!(estimate.confidence, EstimateConfidence::Low);
         assert!(estimate.input_tokens > 0);
+    }
+
+    #[test]
+    fn gateway_tiktoken_estimates_are_low_confidence_for_non_openai_models() {
+        let messages = vec![ChatCompletionRequestMessage::System(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content("system")
+                .build()
+                .expect("system message should build"),
+        )];
+        let estimate = estimate_with_tiktoken("claude-sonnet-5", &messages, &[], 0)
+            .expect("gateway approximation should still produce a count");
+
+        assert_eq!(estimate.source, TokenCounterKind::Tiktoken);
+        assert_eq!(estimate.confidence, EstimateConfidence::Low);
     }
 
     #[test]

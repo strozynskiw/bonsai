@@ -5,9 +5,8 @@ connection = "opencode-zen"
 model = "opencode-zen/grok-code"
 metadata_model = "opencode/grok-code"
 remote_model = "grok-code"
-default = true
-recommended = true
-roles = ["cheap"]
+# Deprecated by OpenCode and absent from the live Zen listing. Keep the target
+# for saved-session compatibility; a successful live refresh hides it.
 pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
 reasoning_options = []
 
@@ -77,6 +76,76 @@ pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_r
 
 [[targets.reasoning_options]]
 type = "toggle"
+
+# ---------------------------------------------------------------------------
+# Current Zen additions verified against both the live `/models` listing and
+# the models.dev `opencode` namespace on 2026-07-26.
+# ---------------------------------------------------------------------------
+
+[[targets]]
+context_window = 1000000
+output_limit = 128000
+connection = "opencode-zen"
+model = "opencode-zen/claude-opus-5"
+metadata_model = "opencode/claude-opus-5"
+remote_model = "claude-opus-5"
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 25000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+context_window = 1048576
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/gemini-3.5-flash-lite"
+metadata_model = "opencode/gemini-3.5-flash-lite"
+remote_model = "gemini-3.5-flash-lite"
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 2500000, cache_read_micros_per_million = 30000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["minimal", "low", "medium", "high"]
+
+[[targets]]
+context_window = 1048576
+output_limit = 65536
+connection = "opencode-zen"
+model = "opencode-zen/gemini-3.6-flash"
+metadata_model = "opencode/gemini-3.6-flash"
+remote_model = "gemini-3.6-flash"
+pricing = { input_micros_per_million = 1500000, output_micros_per_million = 7500000, cache_read_micros_per_million = 150000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["minimal", "low", "medium", "high"]
+
+[[targets]]
+context_window = 256000
+output_limit = 32000
+connection = "opencode-zen"
+model = "opencode-zen/laguna-s-2.1-free"
+metadata_model = "opencode/laguna-s-2.1-free"
+remote_model = "laguna-s-2.1-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+context_window = 262144
+output_limit = 32768
+connection = "opencode-zen"
+model = "opencode-zen/ling-3.0-flash-free"
+metadata_model = "opencode/ling-3.0-flash-free"
+remote_model = "ling-3.0-flash-free"
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
 
 [[targets]]
 context_window = 200000
@@ -244,12 +313,16 @@ min = 1024
 max = 63999
 
 [[targets]]
-context_window = 1000000
+# Zen bills Claude Sonnet 4.5 at a higher tier above 200K input tokens. Keep
+# the low-tier working window and price together so flat cost accounting stays
+# exact instead of silently undercounting long prompts.
+context_window = 200000
 output_limit = 64000
 connection = "opencode-zen"
 model = "opencode-zen/claude-sonnet-4-5"
 metadata_model = "opencode/claude-sonnet-4-5"
 remote_model = "claude-sonnet-4-5"
+pinned = true
 pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000, cache_write_micros_per_million = 3750000 }
 
 [[targets.reasoning_options]]
@@ -298,7 +371,10 @@ connection = "opencode-zen"
 model = "opencode-zen/deepseek-v4-pro"
 metadata_model = "opencode/deepseek-v4-pro"
 remote_model = "deepseek-v4-pro"
-pricing = { input_micros_per_million = 1740000, output_micros_per_million = 3840000, cache_read_micros_per_million = 145000 }
+# OpenCode's Zen pricing table is authoritative for the gateway and currently
+# differs from the inherited models.dev output rate.
+pinned = true
+pricing = { input_micros_per_million = 1740000, output_micros_per_million = 3480000, cache_read_micros_per_million = 145000 }
 
 [[targets.reasoning_options]]
 type = "toggle"
@@ -334,12 +410,14 @@ type = "effort"
 values = ["low", "high"]
 
 [[targets]]
-context_window = 1048576
+# Gemini 3.1 Pro switches to its high price tier above 200K input tokens.
+context_window = 200000
 output_limit = 65536
 connection = "opencode-zen"
 model = "opencode-zen/gemini-3.1-pro"
 metadata_model = "opencode/gemini-3.1-pro"
 remote_model = "gemini-3.1-pro"
+pinned = true
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
 
 [[targets.reasoning_options]]
@@ -451,6 +529,7 @@ connection = "opencode-zen"
 model = "opencode-zen/gpt-5-nano"
 metadata_model = "opencode/gpt-5-nano"
 remote_model = "gpt-5-nano"
+roles = ["cheap"]
 pricing = { input_micros_per_million = 50000, output_micros_per_million = 400000, cache_read_micros_per_million = 5000 }
 
 [[targets.reasoning_options]]
@@ -548,12 +627,15 @@ type = "effort"
 values = ["low", "medium", "high", "xhigh"]
 
 [[targets]]
-context_window = 1050000
+# Zen's low GPT 5.4 rate applies through 272K input tokens. Pin the working
+# window to that tier boundary so the flat price remains exact.
+context_window = 272000
 output_limit = 128000
 connection = "opencode-zen"
 model = "opencode-zen/gpt-5.4"
 metadata_model = "opencode/gpt-5.4"
 remote_model = "gpt-5.4"
+pinned = true
 pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000 }
 
 [[targets.reasoning_options]]
@@ -609,12 +691,14 @@ type = "effort"
 values = ["medium", "high", "xhigh"]
 
 [[targets]]
-context_window = 1050000
+# Zen's low GPT 5.5 rate applies through 272K input tokens.
+context_window = 272000
 output_limit = 128000
 connection = "opencode-zen"
 model = "opencode-zen/gpt-5.5"
 metadata_model = "opencode/gpt-5.5"
 remote_model = "gpt-5.5"
+pinned = true
 pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000 }
 
 [[targets.reasoning_options]]
@@ -645,6 +729,10 @@ model = "opencode-zen/grok-build-0.1"
 metadata_model = "opencode/grok-build-0.1"
 remote_model = "grok-build-0.1"
 pricing = { input_micros_per_million = 1000000, output_micros_per_million = 2000000, cache_read_micros_per_million = 200000 }
+# The direct xAI API exposes an effort dial, but Zen documents neither
+# reasoning fields nor passthrough guarantees and its own models.dev row
+# intentionally publishes no selectable options. Treat reasoning as always-on
+# rather than sending direct-provider fields the gateway may reject.
 reasoning_options = []
 
 [[targets]]
@@ -684,7 +772,10 @@ connection = "opencode-zen"
 model = "opencode-zen/kimi-k2.5"
 metadata_model = "opencode/kimi-k2.5"
 remote_model = "kimi-k2.5"
-pricing = { input_micros_per_million = 600000, output_micros_per_million = 3000000, cache_read_micros_per_million = 80000 }
+# OpenCode's Zen pricing table currently supersedes models.dev's inherited
+# cache-read price for this gateway target.
+pinned = true
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 3000000, cache_read_micros_per_million = 100000 }
 
 [[targets.reasoning_options]]
 type = "toggle"
@@ -925,6 +1016,8 @@ connection = "opencode-zen"
 model = "opencode-zen/claude-sonnet-5"
 metadata_model = "opencode/claude-sonnet-5"
 remote_model = "claude-sonnet-5"
+default = true
+recommended = true
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 10000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 }
 
 [[targets.reasoning_options]]
@@ -955,12 +1048,14 @@ type = "effort"
 values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 [[targets]]
-context_window = 1050000
+# Zen's low GPT 5.6 rates apply through 272K input tokens.
+context_window = 272000
 output_limit = 128000
 connection = "opencode-zen"
 model = "opencode-zen/gpt-5.6-sol"
 metadata_model = "opencode/gpt-5.6-sol"
 remote_model = "gpt-5.6-sol"
+pinned = true
 pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
 
 [[targets.reasoning_options]]
@@ -971,12 +1066,13 @@ type = "effort"
 values = ["low", "medium", "high", "xhigh"]
 
 [[targets]]
-context_window = 1050000
+context_window = 272000
 output_limit = 128000
 connection = "opencode-zen"
 model = "opencode-zen/gpt-5.6-terra"
 metadata_model = "opencode/gpt-5.6-terra"
 remote_model = "gpt-5.6-terra"
+pinned = true
 pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000, cache_write_micros_per_million = 3125000 }
 
 [[targets.reasoning_options]]
@@ -987,12 +1083,13 @@ type = "effort"
 values = ["low", "medium", "high", "xhigh"]
 
 [[targets]]
-context_window = 1050000
+context_window = 272000
 output_limit = 128000
 connection = "opencode-zen"
 model = "opencode-zen/gpt-5.6-luna"
 metadata_model = "opencode/gpt-5.6-luna"
 remote_model = "gpt-5.6-luna"
+pinned = true
 pricing = { input_micros_per_million = 1000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
 
 [[targets.reasoning_options]]
@@ -1003,13 +1100,18 @@ type = "effort"
 values = ["low", "medium", "high", "xhigh"]
 
 [[targets]]
-context_window = 500000
-output_limit = 500000
+# Zen charges a higher Grok 4.5 tier above 200K input tokens.
+context_window = 200000
+# Match the direct xAI integration's containment cap; Zen otherwise publishes
+# a 500K output ceiling that can turn a tool round into an unbounded reasoning
+# run before the user can recover.
+output_limit = 30000
 connection = "opencode-zen"
 model = "opencode-zen/grok-4.5"
 metadata_model = "opencode/grok-4.5"
 remote_model = "grok-4.5"
-pricing = { input_micros_per_million = 2000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 500000 }
+pinned = true
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 300000 }
 
 [[targets.reasoning_options]]
 type = "toggle"
