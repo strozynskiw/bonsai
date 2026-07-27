@@ -114,6 +114,6 @@ pub(super) fn complete_command_arg_from_state(buffer: &str, app: &AppState) -> O
         }
         _ => return None,
     };
-    crate::commands::complete_from_matches(matches, arg)
+    crate::commands::metadata::complete_from_matches(matches, arg)
         .map(|completion| format!("{cmd} {completion}"))
 }

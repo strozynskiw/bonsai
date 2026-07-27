@@ -10,18 +10,38 @@ use crate::background::BackgroundTaskRegistry;
 use crate::lsp::LspHub;
 use crate::permissions::PermissionManager;
 use crate::storage::Storage;
-use crate::tool::profile::{RegistrationStage, ToolFactoryKey, ToolProfile, descriptors_for};
-use crate::tool::{
-    ActionPolicy, AgentTool, ApplyPatchTool, BashExecutionPolicy, BashRuntimeDeps, BashTool,
-    DefinitionTool, DiagnosticsTool, EditTool, GitTool, GlobTool, GrepTool, HoverTool,
+use crate::tool::apply_patch::ApplyPatchTool;
+use crate::tool::diagnostics::DiagnosticsTool;
+use crate::tool::enter_plan_mode::EnterPlanModeTool;
+use crate::tool::git::GitTool;
+use crate::tool::glob::GlobTool;
+use crate::tool::grep::GrepTool;
+use crate::tool::lsp::{
+    DefinitionTool, HoverTool, ReferencesTool, RenameSymbolTool, WorkspaceSymbolTool,
+};
+use crate::tool::memory_write::MemoryWriteTool;
+use crate::tool::peers::PeersTool;
+use crate::tool::plan::{
     PlanAddFindingTool, PlanAddQuestionTool, PlanAssociateFindingTool, PlanCheckTaskTool,
     PlanInsertTaskTool, PlanMovePhaseTool, PlanMoveSectionTool, PlanPatchSectionTool,
     PlanRemovePhaseTool, PlanRemoveQuestionTool, PlanRemoveSectionTool, PlanRemoveTaskTool,
     PlanReplaceDraftTool, PlanResolveFindingTool, PlanUncheckTaskTool, PlanUpdateTaskTool,
-    ProjectInfoRuntime, ProjectInfoTool, QuestionTool, ReadRegionTool, ReadSymbolTool, ReadTool,
-    ReadTracker, ReferencesTool, RenameSymbolTool, SetSessionTitleTool, SharedActiveSessionId,
-    SkillTool, SubagentRunner, SubagentToolRegistryFactory, SymbolSearchTool, TasksTool,
-    TerminalTool, TodoWriteTool, Tool, ToolRegistry, WorkspaceSymbolTool, WriteTool,
+};
+use crate::tool::profile::{RegistrationStage, ToolFactoryKey, ToolProfile, descriptors_for};
+use crate::tool::question::QuestionTool;
+use crate::tool::recall::RecallTool;
+use crate::tool::set_session_title::SetSessionTitleTool;
+use crate::tool::skill::SkillTool;
+use crate::tool::symbol_search::SymbolSearchTool;
+use crate::tool::tasks::TasksTool;
+use crate::tool::terminal::TerminalTool;
+use crate::tool::todo_write::TodoWriteTool;
+use crate::tool::websearch::WebSearchTool;
+use crate::tool::{
+    ActionPolicy, AgentTool, BashExecutionPolicy, BashRuntimeDeps, BashTool, EditTool,
+    ProjectInfoRuntime, ProjectInfoTool, ReadRegionTool, ReadSymbolTool, ReadTool, ReadTracker,
+    SharedActiveSessionId, SubagentRunner, SubagentToolRegistryFactory, Tool, ToolRegistry,
+    WriteTool,
 };
 
 pub(crate) struct ToolRegistryDeps {
@@ -376,7 +396,7 @@ pub(crate) fn build_tool_registries(
         sandbox.clone(),
         authorization_ledger.clone(),
     ));
-    let websearch_tool = Arc::new(crate::tool::WebSearchTool::new(webfetch_tool.clone()));
+    let websearch_tool = Arc::new(WebSearchTool::new(webfetch_tool.clone()));
 
     // The `agent` tool runs nested subagents. Built-ins use a read-only
     // subset and custom agents scope from the grantable template registry. Both
@@ -579,7 +599,7 @@ pub(crate) fn build_tool_registries(
     coding_instances.insert(ToolFactoryKey::Skill, skill_tool.clone());
     coding_instances.insert(
         ToolFactoryKey::EnterPlanMode,
-        Arc::new(crate::tool::EnterPlanModeTool::new(interaction.clone())),
+        Arc::new(EnterPlanModeTool::new(interaction.clone())),
     );
     if let Some(agent_tool) = &agent_tool {
         coding_instances.insert(ToolFactoryKey::Agent, agent_tool.clone());
@@ -616,10 +636,7 @@ pub(crate) fn build_tool_registries(
     if let Some(peer_bus) = &peer_bus {
         coding_instances.insert(
             ToolFactoryKey::Peers,
-            Arc::new(crate::tool::PeersTool::new(
-                peer_bus.clone(),
-                peer_wake_when_done,
-            )),
+            Arc::new(PeersTool::new(peer_bus.clone(), peer_wake_when_done)),
         );
     }
     coding_instances.insert(ToolFactoryKey::Question, question_tool.clone());
@@ -629,7 +646,7 @@ pub(crate) fn build_tool_registries(
     // to the two memory dirs; the rendered diff is the transparency).
     let memory_write_tool = memory
         .as_ref()
-        .map(|memory| Arc::new(crate::tool::MemoryWriteTool::new(memory.clone())));
+        .map(|memory| Arc::new(MemoryWriteTool::new(memory.clone())));
     if let Some(memory_write_tool) = &memory_write_tool {
         coding_instances.insert(ToolFactoryKey::MemoryWrite, memory_write_tool.clone());
     }
@@ -642,7 +659,7 @@ pub(crate) fn build_tool_registries(
         coding_instances.insert(ToolFactoryKey::WebSearch, websearch_tool.clone());
     }
     let recall_tool = episode_store.as_ref().map(|episode_store| {
-        Arc::new(crate::tool::RecallTool::new(
+        Arc::new(RecallTool::new(
             episode_store.clone(),
             session_title.storage.clone(),
             session_title.active_session_id.clone(),

@@ -1763,7 +1763,16 @@ use run_loop_executor::*;
 use self_review::SelfReviewState;
 use text::*;
 use transcript::*;
-pub use types::*;
+pub(crate) use types::ContextMessageSnapshot;
+pub(crate) use types::MessageProvenance;
+pub use types::{
+    ActiveModelIdentity, AgentRunResult, CompactionMode, CompactionReport, CompactionRequest,
+    CompactionSummaryPolicy, CompactionSummarySource, ContextRewriteKind, ExecutionLane,
+    ExecutionLaneKind, ImageAttachment, PeerWait, ProviderAttemptOutcome, ProviderAttemptReport,
+    QueuedUserMessage, QueuedUserMessageCommand, UsageTotals, UsageTurn, UsageTurnStatus,
+    UserInput, WaitReason,
+};
+use types::{context_message_seq, format_context_message_id};
 use usage_ledger::*;
 
 #[cfg(test)]

@@ -1117,6 +1117,7 @@ mod tests {
     )]
     use super::*;
     use crate::output::{OutputSink, StdoutSink};
+    use crate::provider::minimax_coding_plan::MiniMaxCodingPlanFactory;
     use crate::provider::test_utils::{
         named_user_message, sample_tool, system_message, tool_call_message, tool_result_message,
         user_message,
@@ -1211,7 +1212,7 @@ mod tests {
     }
 
     fn minimax_provider(session: &ProviderSession) -> Box<dyn Provider> {
-        build_test_provider(&crate::provider::MiniMaxCodingPlanFactory, session)
+        build_test_provider(&MiniMaxCodingPlanFactory, session)
     }
 
     fn concrete_anthropic_provider(

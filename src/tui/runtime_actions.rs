@@ -2523,7 +2523,7 @@ async fn start_refresh(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
             futures.push(Box::pin(async move {
                 (
                     idx,
-                    crate::commands::refresh_models_dev_source(&catalog).await,
+                    crate::commands::providers::refresh_models_dev_source(&catalog).await,
                 )
             }));
         }
@@ -2533,7 +2533,7 @@ async fn start_refresh(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
             let source_index = provider_base + index;
             let catalog = catalog.clone();
             futures.push(Box::pin(async move {
-                let source = crate::commands::refresh_provider_source(
+                let source = crate::commands::providers::refresh_provider_source(
                     &factory,
                     &session,
                     &display_name,

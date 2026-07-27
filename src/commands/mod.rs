@@ -20,17 +20,17 @@ pub(crate) mod bug;
 mod config_cmd;
 mod hooks_cmd;
 mod mcp_cmd;
-mod memory;
-mod metadata;
+pub(crate) mod memory;
+pub(crate) mod metadata;
 pub(crate) mod model_switch;
-mod permissions;
-mod providers;
+pub(crate) mod permissions;
+pub(crate) mod providers;
 mod providers_manage;
 mod pure;
-mod retry;
+pub(crate) mod retry;
 mod sandbox;
 mod self_review;
-mod serenity;
+pub(crate) mod serenity;
 mod smol;
 #[cfg(test)]
 mod tests;
@@ -42,52 +42,35 @@ pub(crate) use authorize::{
 pub(crate) use autonomy::{
     AutonomyCommandRequest, autonomy_status_message, parse_autonomy_command,
 };
-pub(crate) use config_cmd::{
-    ConfigCommandRequest, config_edit_message, format_config_diagnostics, format_config_view,
-    parse_config_command,
-};
 pub(crate) use handlers::common::handle_command_with_catalog;
-pub(crate) use hooks_cmd::{apply_hooks_command, parse_hooks_command};
-pub(crate) use mcp_cmd::{McpCommandRequest, apply_mcp_command, parse_mcp_command};
+pub(crate) use mcp_cmd::{McpCommandRequest, apply_mcp_command};
 pub(crate) use memory::{
-    MEMORY_USAGE, MemoryCommandRequest, parse_memory_command, parse_remember_command,
+    MemoryCommandRequest, parse_memory_command, parse_remember_command,
     unknown_memory_entry_message,
 };
-#[cfg(test)]
-pub(crate) use metadata::canonical_command_name;
 pub use metadata::complete_command;
 pub(crate) use metadata::{
-    BusyCommandBehavior, COMMANDS, CommandMetadata, CommandSurface, busy_behavior_for,
-    command_completion_preview, command_description, command_surface, command_usage_hint,
-    complete_from_matches,
+    BusyCommandBehavior, COMMANDS, CommandMetadata, busy_behavior_for, command_completion_preview,
+    command_description, command_usage_hint,
 };
 pub(crate) use model_switch::{
     apply_model_selection, context_window_downgrade_warning, rebuild_agent_provider,
     record_active_mode_model,
 };
-pub(crate) use permissions::{
-    PermissionsCommandRequest, format_permission_rules, parse_permissions_command,
-};
 pub(crate) use providers::resolve_model_selection;
 pub(crate) use providers::{
     RefreshSourceState, RefreshSourceStatus, ResolvedModelSelection, refresh_all_provider_models,
-    refresh_models_dev_source, refresh_provider_source, refresh_stale_authorized_provider_models,
     refresh_stale_model_cache,
 };
 pub(crate) use pure::{
     PureCommandRequest, PureTarget, parse_pure_command, pure_set_message, pure_status_message,
 };
-pub(crate) use retry::parse_retry_command;
 pub(crate) use sandbox::{
-    SandboxCommandRequest, parse_sandbox_command, sandbox_net_message, sandbox_set_message,
-    sandbox_unavailable_message,
+    SandboxCommandRequest, parse_sandbox_command, sandbox_unavailable_message,
 };
 pub(crate) use self_review::{
     SelfReviewCommandRequest, parse_self_review_command, self_review_set_message,
     self_review_status_message,
-};
-pub(crate) use serenity::{
-    SerenityCommandRequest, parse_serenity_command, serenity_set_message, serenity_status_message,
 };
 pub(crate) use smol::{
     SmolCommandRequest, parse_smol_command, smol_set_message, smol_status_message,

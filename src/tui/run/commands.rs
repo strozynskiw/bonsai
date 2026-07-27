@@ -664,7 +664,7 @@ pub(in crate::tui::run) async fn apply_serenity_command(
     app: &mut AppState,
     storage: &crate::storage::Storage,
 ) {
-    match crate::commands::parse_serenity_command(input) {
+    match crate::commands::serenity::parse_serenity_command(input) {
         Ok(request) => match request.target_state(app.serenity_mode) {
             Some(on) => {
                 app.reduce(AppAction::SetSerenityMode(on));
@@ -680,14 +680,14 @@ pub(in crate::tui::run) async fn apply_serenity_command(
                 push_command_message(
                     app,
                     CommandOutputKind::Status,
-                    crate::commands::serenity_set_message(on),
+                    crate::commands::serenity::serenity_set_message(on),
                 );
             }
             None => {
                 push_command_message(
                     app,
                     CommandOutputKind::Status,
-                    crate::commands::serenity_status_message(app.serenity_mode),
+                    crate::commands::serenity::serenity_status_message(app.serenity_mode),
                 );
             }
         },
@@ -705,8 +705,8 @@ pub(in crate::tui::run) async fn apply_permissions_command(
     storage: &crate::storage::Storage,
     session_id: Option<crate::storage::SessionId>,
 ) {
-    use crate::commands::PermissionsCommandRequest;
-    match crate::commands::parse_permissions_command(input) {
+    use crate::commands::permissions::PermissionsCommandRequest;
+    match crate::commands::permissions::parse_permissions_command(input) {
         Ok(PermissionsCommandRequest::Manage) => {
             // Bare `/permissions` opens the interactive manager built from both
             // rule sets; `list`/`remove` below stay as the scriptable text path.
@@ -737,7 +737,7 @@ pub(in crate::tui::run) async fn apply_permissions_command(
             push_command_message(
                 app,
                 CommandOutputKind::Status,
-                &crate::commands::format_permission_rules(
+                &crate::commands::permissions::format_permission_rules(
                     &rules,
                     deny_floor,
                     defaults,
@@ -860,7 +860,7 @@ pub(in crate::tui) async fn apply_non_idle_read_only_command(
                     push_command_message(
                         app,
                         CommandOutputKind::Error,
-                        crate::commands::MEMORY_USAGE,
+                        crate::commands::memory::MEMORY_USAGE,
                     );
                 }
             }
@@ -1118,7 +1118,11 @@ async fn apply_memory_forget_command(
     let crate::commands::MemoryCommandRequest::Forget { name } = request else {
         // List/view are ReadOnlyNow; getting here means the classification
         // and this executor disagree — surface it.
-        push_command_message(app, CommandOutputKind::Error, crate::commands::MEMORY_USAGE);
+        push_command_message(
+            app,
+            CommandOutputKind::Error,
+            crate::commands::memory::MEMORY_USAGE,
+        );
         return;
     };
     if memory.store().get(&name).is_none() {
@@ -1650,7 +1654,7 @@ pub(in crate::tui::run) async fn retry_last_turn(
     tasks: &mut TaskController,
     deps: RetryCommandDeps<'_>,
 ) -> bool {
-    let request = match crate::commands::parse_retry_command(input) {
+    let request = match crate::commands::retry::parse_retry_command(input) {
         Ok(request) => request,
         Err(message) => {
             push_command_message(app, CommandOutputKind::Error, &message);

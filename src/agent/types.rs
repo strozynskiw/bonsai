@@ -1,9 +1,12 @@
 //! Public data types in the agent's API surface: run results, the queued-input
-//! channel payloads, and the compaction request/report vocabulary. Re-exported
-//! from the crate's `agent` module via `pub use`.
+//! channel payloads, and the compaction request/report vocabulary.
 
-use super::*;
+use async_openai::types::chat::ChatCompletionRequestMessage;
+use tokio_util::sync::CancellationToken;
+
+use super::AgentMode;
 use crate::model_catalog::ConnectionId;
+use crate::provider::{EstimateConfidence, InputCacheUsage, TokenCounterKind};
 use crate::storage::SessionId;
 
 /// An image attached to a user turn, already encoded and ready to become an

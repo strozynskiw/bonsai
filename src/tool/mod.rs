@@ -1,30 +1,30 @@
 mod action_policy;
 mod agent;
-mod apply_patch;
+pub(crate) mod apply_patch;
 pub(crate) mod arg_repair;
 mod bash;
-mod diagnostics;
+pub(crate) mod diagnostics;
 mod edit;
 mod edit_recovery;
-mod enter_plan_mode;
+pub(crate) mod enter_plan_mode;
 mod file_mutation;
-mod git;
-mod glob;
-mod grep;
-mod lsp;
-mod memory_write;
+pub(crate) mod git;
+pub(crate) mod glob;
+pub(crate) mod grep;
+pub(crate) mod lsp;
+pub(crate) mod memory_write;
 mod output;
 mod path_suggest;
-mod peers;
-mod plan;
+pub(crate) mod peers;
+pub(crate) mod plan;
 pub(crate) mod profile;
 mod project_info;
-mod question;
+pub(crate) mod question;
 mod read;
 pub(crate) mod read_evidence;
 mod read_region;
 mod read_tracker;
-mod recall;
+pub(crate) mod recall;
 pub(crate) mod registry_assembly;
 mod repo_map;
 mod risk;
@@ -32,14 +32,14 @@ pub(crate) mod schema;
 mod search;
 #[cfg(unix)]
 mod secure_fs;
-mod set_session_title;
-mod skill;
-mod symbol_search;
-mod tasks;
-mod terminal;
-mod todo_write;
+pub(crate) mod set_session_title;
+pub(crate) mod skill;
+pub(crate) mod symbol_search;
+pub(crate) mod tasks;
+pub(crate) mod terminal;
+pub(crate) mod todo_write;
 mod webfetch;
-mod websearch;
+pub(crate) mod websearch;
 mod workspace_lock;
 mod write;
 
@@ -54,50 +54,25 @@ pub(crate) use agent::{
     SubagentToolRegistryFactory, agents_index_section_with_settings, builtin_agents,
     builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
 };
-pub use apply_patch::ApplyPatchTool;
 pub(crate) use apply_patch::patched_paths_from_arguments;
 pub use bash::BashTool;
 pub(crate) use bash::command::analyze_command as analyze_bash_command;
 pub(crate) use bash::command::single_read_path;
 pub(crate) use bash::{BashExecutionPolicy, BashOutputBudget, BashRuntimeDeps};
-pub use diagnostics::DiagnosticsTool;
 pub use edit::EditTool;
-pub use enter_plan_mode::EnterPlanModeTool;
-pub use git::GitTool;
-pub use glob::GlobTool;
-pub use grep::GrepTool;
-pub(crate) use lsp::{
-    DefinitionTool, HoverTool, ReferencesTool, RenameSymbolTool, WorkspaceSymbolTool,
-};
-pub use memory_write::MemoryWriteTool;
-pub use peers::PeersTool;
-pub use plan::{
-    PlanAddFindingTool, PlanAddQuestionTool, PlanAssociateFindingTool, PlanCheckTaskTool,
-    PlanInsertTaskTool, PlanMovePhaseTool, PlanMoveSectionTool, PlanPatchSectionTool,
-    PlanRemovePhaseTool, PlanRemoveQuestionTool, PlanRemoveSectionTool, PlanRemoveTaskTool,
-    PlanReplaceDraftTool, PlanResolveFindingTool, PlanUncheckTaskTool, PlanUpdateTaskTool,
-};
 pub use project_info::ProjectInfoTool;
 pub(crate) use project_info::{ProjectInfoProviderState, ProjectInfoRuntime};
-pub use question::QuestionTool;
 pub use read::ReadTool;
 pub(crate) use read_evidence::digest_content;
 pub use read_evidence::{ReadCoverage, ReadEvidence, ReadWindow};
 pub use read_region::{ReadRegionTool, ReadSymbolTool};
 pub use read_tracker::ReadTracker;
-pub use recall::RecallTool;
 pub(crate) use repo_map::build_repo_map;
 pub(crate) use risk::{ApprovalLevel, RiskTier};
+pub use set_session_title::SharedActiveSessionId;
 pub(crate) use set_session_title::normalize_session_title;
-pub use set_session_title::{SetSessionTitleTool, SharedActiveSessionId};
-pub use skill::SkillTool;
-pub use symbol_search::SymbolSearchTool;
-pub use tasks::TasksTool;
-pub use terminal::TerminalTool;
-pub use todo_write::TodoWriteTool;
 pub use webfetch::WebFetchTool;
 pub(crate) use webfetch::resolve_safe_http_addresses;
-pub(crate) use websearch::WebSearchTool;
 pub(crate) use workspace_lock::WorkspaceLockContext;
 pub use write::WriteTool;
 
@@ -1219,6 +1194,9 @@ impl ToolRegistry {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
+    use crate::tool::glob::GlobTool;
+    use crate::tool::grep::GrepTool;
+    use crate::tool::symbol_search::SymbolSearchTool;
     use std::sync::Arc;
 
     fn sample_registry() -> ToolRegistry {

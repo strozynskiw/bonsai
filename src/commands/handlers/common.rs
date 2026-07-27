@@ -1,27 +1,35 @@
 use super::super::*;
 use crate::agent::CompactionSummaryPolicy;
+use crate::commands::CommandRuntimeContext;
 use crate::commands::autonomy::{
     AutonomyCommandRequest, autonomy_set_message, autonomy_status_message, parse_autonomy_command,
 };
+use crate::commands::config_cmd::{
+    ConfigCommandRequest, config_edit_message, format_config_diagnostics, format_config_view,
+    parse_config_command,
+};
 use crate::commands::context_window_downgrade_warning;
 use crate::commands::handlers::headless::unsupported_tui_feature;
+use crate::commands::hooks_cmd::{apply_hooks_command, parse_hooks_command};
+use crate::commands::mcp_cmd::parse_mcp_command;
 use crate::commands::memory::{
     MemoryCommandRequest, format_memory_list, format_memory_view, parse_memory_command,
     parse_remember_command, unknown_memory_entry_message,
 };
+use crate::commands::metadata::{CommandSurface, command_surface};
 use crate::commands::parse_command;
 use crate::commands::providers::{
     ModelPickerOutcome, authorization_input_for_provider, authorize_provider_choices,
     open_model_picker, resolve_model_selection, resolve_provider, unauthorize_provider_choices,
     unknown_provider_error,
 };
+use crate::commands::sandbox::{sandbox_net_message, sandbox_set_message};
 use crate::commands::self_review::{
     SelfReviewCommandRequest, parse_self_review_command, self_review_set_message,
     self_review_status_message,
 };
 use crate::commands::smol::{parse_smol_command, smol_set_message, smol_status_message};
 use crate::commands::yolo::{YoloCommandRequest, parse_yolo_command};
-use crate::commands::{CommandRuntimeContext, CommandSurface, command_surface};
 use crate::memory::entry::{MemoryEntryType, MemoryTier};
 use crate::model_catalog::ModelCatalog;
 use crate::model_resolution::context_window_for_current_model_with_catalog;

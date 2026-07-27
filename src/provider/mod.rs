@@ -1,12 +1,12 @@
-mod anthropic;
+pub(crate) mod anthropic;
 mod auth;
-mod codex;
+pub(crate) mod codex;
 mod discovery;
 mod endpoint;
 mod metadata;
-mod minimax_coding_plan;
+pub(crate) mod minimax_coding_plan;
 mod openai_catalog;
-mod opencode;
+pub(crate) mod opencode;
 mod reasoning;
 mod registry;
 mod request_preview;
@@ -20,9 +20,7 @@ mod tool_calls;
 mod transform;
 mod usage;
 
-pub use anthropic::AnthropicFactory;
 pub use auth::{AuthInput, AuthorizeOutcome};
-pub use codex::CodexFactory;
 pub(crate) use codex::codex_cached_authorization;
 pub(crate) use discovery::{DetectedServer, detect_server, fetch_models_with_discovery};
 pub(crate) use endpoint::{
@@ -33,8 +31,6 @@ pub use metadata::{
     NO_PARAMETERS, NO_REASONING, ParameterPreview, Protocol, ProviderCapabilities,
     ProviderMetadata, ReasoningEffort, ReasoningOption, ReasoningSelection,
 };
-pub use minimax_coding_plan::MiniMaxCodingPlanFactory;
-pub use opencode::OpenCodeFactory;
 pub(crate) use reasoning::ReasoningCodec;
 pub use registry::ProviderRegistry;
 pub use request_preview::{

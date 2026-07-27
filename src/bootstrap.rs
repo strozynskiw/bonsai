@@ -133,7 +133,7 @@ fn refresh_live_model_caches_at_startup(
         if let Err(panic) = std::panic::AssertUnwindSafe(async {
             tokio::join!(
                 refresh_active_codex_cache_schema(&registry, &session_store, &catalog),
-                crate::commands::refresh_stale_authorized_provider_models(
+                crate::commands::providers::refresh_stale_authorized_provider_models(
                     &registry,
                     &session_store,
                     &catalog,

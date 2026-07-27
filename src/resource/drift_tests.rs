@@ -375,7 +375,7 @@ fn readme_slash_command_mentions_resolve_to_registered_commands() {
         {
             continue;
         }
-        let canonical = crate::commands::canonical_command_name(token);
+        let canonical = crate::commands::metadata::canonical_command_name(token);
         assert!(
             crate::commands::COMMANDS
                 .iter()

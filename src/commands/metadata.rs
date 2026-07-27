@@ -1,8 +1,8 @@
 use super::{
-    PureCommandRequest, SandboxCommandRequest, SelfReviewCommandRequest, SerenityCommandRequest,
-    SmolCommandRequest, parse_pure_command, parse_sandbox_command, parse_self_review_command,
-    parse_serenity_command, parse_smol_command,
+    PureCommandRequest, SandboxCommandRequest, SelfReviewCommandRequest, SmolCommandRequest,
+    parse_pure_command, parse_sandbox_command, parse_self_review_command, parse_smol_command,
 };
+use crate::commands::serenity::{SerenityCommandRequest, parse_serenity_command};
 use crate::model_role::ModelShortcutKey;
 
 pub(crate) struct CommandMetadata {

@@ -4,9 +4,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::model_catalog::{ConnectionAuth, ConnectionSpec, LiveModelAvailability, ModelCatalog};
+use crate::provider::anthropic::AnthropicFactory;
+use crate::provider::codex::CodexFactory;
+use crate::provider::minimax_coding_plan::MiniMaxCodingPlanFactory;
+use crate::provider::opencode::OpenCodeFactory;
 use crate::provider::{
-    AnthropicFactory, AuthInput, AuthRequirement, AuthorizeOutcome, CodexFactory,
-    MiniMaxCodingPlanFactory, NO_PARAMETERS, NO_REASONING, OpenCodeFactory, Protocol,
+    AuthInput, AuthRequirement, AuthorizeOutcome, NO_PARAMETERS, NO_REASONING, Protocol,
     ProviderCapabilities, ProviderFactory, ProviderMetadata,
 };
 use crate::session::ProviderSession;
