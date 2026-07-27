@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::model_catalog::{AvailableModel, ModelFeature};
 use crate::provider::ModelPricing;
 
+#[cfg(test)]
 pub(crate) fn model_ids_from_response(value: &Value) -> Vec<String> {
     available_models_from_response(value)
         .into_iter()

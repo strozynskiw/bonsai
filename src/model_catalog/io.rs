@@ -221,6 +221,21 @@ pub(crate) async fn refresh_models_dev_cache_from_home(
     refresh_models_dev_cache(&config, &paths.models_dev_cache_path).await
 }
 
+/// Force an explicit Models.dev refresh without the startup freshness skip.
+///
+/// Startup respects the configured TTL to avoid unnecessary traffic. A manual
+/// refresh bypasses that TTL so a recently written cache does not suppress new
+/// prices, limits, capabilities, or model rows. Explicit path overrides and
+/// disabled fetching remain authoritative offline settings.
+pub(crate) async fn force_refresh_models_dev_cache_from_home(
+    home_dir: &Path,
+) -> Result<ModelsDevCatalog, CatalogError> {
+    let paths = CatalogPaths::from_home_dir(home_dir);
+    transaction::with_recovered_catalog_lock(home_dir, || ensure_user_catalog_scaffold(&paths))?;
+    let config = ModelsDevConfig::from_env(|var| std::env::var(var).ok()).force_refresh();
+    refresh_models_dev_cache(&config, &paths.models_dev_cache_path).await
+}
+
 pub(super) fn load_catalog_from_paths_unlocked(
     paths: &CatalogPaths,
 ) -> Result<ModelCatalog, CatalogError> {
@@ -377,6 +392,11 @@ impl ModelsDevConfig {
 
     pub(crate) fn load_path<'a>(&'a self, default_cache_path: &'a Path) -> &'a Path {
         self.path_override.as_deref().unwrap_or(default_cache_path)
+    }
+
+    fn force_refresh(mut self) -> Self {
+        self.refresh_ttl = Duration::ZERO;
+        self
     }
 }
 
@@ -949,5 +969,6 @@ mod tests {
             config.load_path(Path::new("/default/models-dev.json")),
             Path::new("/tmp/models-dev.json")
         );
+        assert_eq!(config.force_refresh().refresh_ttl, Duration::ZERO);
     }
 }

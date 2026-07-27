@@ -134,6 +134,16 @@ pub(crate) struct ConnectionSpec {
     pub default_endpoint_path: Option<Box<str>>,
     #[serde(default)]
     pub default_token_counter: Option<TokenCounterKind>,
+    /// Models.dev provider namespace used for dynamically discovered models
+    /// whose remote ids are bare model names. Defaults to the connection id.
+    ///
+    /// Gateways such as OpenCode Go use a different models.dev namespace
+    /// (`opencode-go`) than their stable Bonsai connection id (`opencode`).
+    /// Keeping the mapping on the connection lets `/refresh` enrich a newly
+    /// served model with current pricing, limits, and capabilities before a
+    /// hand-written target exists.
+    #[serde(default)]
+    pub models_dev_provider: Option<ConnectionId>,
     #[serde(default)]
     pub reasoning_codec: Option<ReasoningCodec>,
     /// Whether this connection's backend supports prompt caching. On OpenAI-chat
@@ -194,6 +204,8 @@ pub(crate) struct ConnectionSpecPatch {
     #[serde(default)]
     pub default_token_counter: Option<TokenCounterKind>,
     #[serde(default)]
+    pub models_dev_provider: Option<ConnectionId>,
+    #[serde(default)]
     pub reasoning_codec: Option<ReasoningCodec>,
     #[serde(default)]
     pub prompt_cache: Option<bool>,
@@ -234,6 +246,7 @@ impl ConnectionSpecPatch {
             default_model: self.default_model.unwrap_or(None),
             default_endpoint_path: self.default_endpoint_path,
             default_token_counter: self.default_token_counter,
+            models_dev_provider: self.models_dev_provider,
             reasoning_codec: self.reasoning_codec,
             prompt_cache: self.prompt_cache.unwrap_or(false),
             prompt_cache_policy: self.prompt_cache_policy.unwrap_or_default(),
@@ -291,6 +304,9 @@ impl ConnectionSpec {
         }
         if let Some(default_token_counter) = patch.default_token_counter {
             self.default_token_counter = Some(default_token_counter);
+        }
+        if let Some(models_dev_provider) = patch.models_dev_provider {
+            self.models_dev_provider = Some(models_dev_provider);
         }
         if let Some(reasoning_codec) = patch.reasoning_codec {
             self.reasoning_codec = Some(reasoning_codec);
@@ -361,10 +377,10 @@ pub(crate) struct TargetSpec {
     pub pricing: Option<ModelPricing>,
     #[serde(default)]
     pub roles: Vec<LegacyModelRole>,
-    /// Marks a deliberate divergence from models.dev (working-window caps,
-    /// price-tier pins, beta-gated limits) so the catalog-load drift warning
-    /// stays quiet for it. Precedence is unchanged — explicit TOML values
-    /// always win; this only suppresses the warning.
+    /// Marks a deliberate divergence from refreshed metadata (working-window
+    /// caps, price-tier pins, beta-gated limits). Pinned values remain
+    /// authoritative and skip drift warnings; unpinned values act as offline
+    /// fallbacks so `/refresh` can adopt newer provider/models.dev metadata.
     #[serde(default)]
     pub pinned: bool,
 }

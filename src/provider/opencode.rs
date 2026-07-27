@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::model_catalog::{LiveModelAvailability, RunTarget};
+use crate::model_catalog::{AvailableModel, LiveModelAvailability, RunTarget};
 use crate::output::SharedSink;
-use crate::provider::openai_catalog::{model_ids_from_response, normalize_openai_base_url};
+use crate::provider::openai_catalog::{available_models_from_response, normalize_openai_base_url};
 use crate::provider::reasoning::ReasoningCodec;
 use crate::provider::think_tags::ThinkTagSplitter;
 use crate::provider::transform;
@@ -73,13 +73,11 @@ impl ProviderFactory for OpenCodeFactory {
         &self,
         session: &ProviderSession,
     ) -> Result<LiveModelAvailability> {
-        Ok(LiveModelAvailability::from_remote_ids(
-            fetch_opencode_model_catalog(session).await?,
-        ))
+        fetch_opencode_model_catalog(session).await
     }
 }
 
-async fn fetch_opencode_model_catalog(session: &ProviderSession) -> Result<Vec<String>> {
+async fn fetch_opencode_model_catalog(session: &ProviderSession) -> Result<LiveModelAvailability> {
     let base_url = if session.base_url.trim().is_empty() {
         OPENCODE_METADATA.default_base_url.as_ref()
     } else {
@@ -101,15 +99,22 @@ async fn fetch_opencode_model_catalog(session: &ProviderSession) -> Result<Vec<S
         .await
         .context("Failed to parse OpenCode /models response")?;
     let mut models = opencode_catalog_from_response(&value);
-    models.sort();
+    models.sort_by(|left, right| left.remote_model_id.cmp(&right.remote_model_id));
     if models.is_empty() {
-        models = OPENCODE_METADATA.seed_model_list();
+        models = OPENCODE_METADATA
+            .seed_model_list()
+            .into_iter()
+            .map(AvailableModel::remote)
+            .collect();
     }
-    Ok(models)
+    Ok(LiveModelAvailability {
+        models,
+        ..LiveModelAvailability::default()
+    })
 }
 
-fn opencode_catalog_from_response(value: &Value) -> Vec<String> {
-    model_ids_from_response(value)
+fn opencode_catalog_from_response(value: &Value) -> Vec<AvailableModel> {
+    available_models_from_response(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1666,15 +1671,37 @@ mod tests {
     }
 
     #[test]
-    fn live_model_parser_returns_remote_ids_only() {
+    fn live_model_parser_preserves_reported_metadata() {
         let models = opencode_catalog_from_response(&serde_json::json!({
             "data": [
-                {"id": "glm-5.2", "object": "model", "owned_by": "opencode"},
+                {
+                    "id": "glm-5.2",
+                    "object": "model",
+                    "owned_by": "opencode",
+                    "context_window": 1000000,
+                    "supported_parameters": ["tools"],
+                    "pricing": {"prompt": "0.0000014", "completion": "0.0000044"}
+                },
                 {"object": "model"}
             ]
         }));
 
-        assert_eq!(models, vec!["glm-5.2"]);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].remote_model_id.as_ref(), "glm-5.2");
+        assert_eq!(models[0].context_window, Some(1_000_000));
+        assert!(
+            models[0]
+                .features
+                .contains(&crate::model_catalog::ModelFeature::ToolCall)
+        );
+        assert_eq!(
+            models[0]
+                .pricing
+                .as_ref()
+                .expect("gateway pricing")
+                .input_micros_per_million,
+            1_400_000
+        );
     }
 
     #[test]
@@ -1785,11 +1812,22 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/models"))
             .and(header("authorization", "Bearer sk-oc-test"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(
-                    r#"{"data":[{"id":"deepseek-v4-flash","context_window":131072},{"id":"qwen3.7-max"}]}"#,
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{
+                        "data": [
+                            {
+                                "id": "deepseek-v4-flash",
+                                "context_window": 131072,
+                                "supported_parameters": ["tools"],
+                                "pricing": {
+                                    "prompt": "0.00000014",
+                                    "completion": "0.00000028"
+                                }
+                            },
+                            {"id": "qwen3.7-max"}
+                        ]
+                    }"#,
+            ))
             .mount(&server)
             .await;
 
@@ -1801,6 +1839,77 @@ mod tests {
         assert_eq!(
             availability.remote_model_ids(),
             vec!["deepseek-v4-flash".to_string(), "qwen3.7-max".to_string()]
+        );
+        assert_eq!(availability.models[0].context_window, Some(131_072));
+        assert_eq!(
+            availability.models[0]
+                .pricing
+                .as_ref()
+                .expect("live pricing")
+                .input_micros_per_million,
+            140_000
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_registry_opencode_refresh_uses_live_models_endpoint() {
+        use std::collections::HashMap;
+
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer sk-oc-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{
+                    "data": [
+                        {"id": "hy3"},
+                        {"id": "hy3-preview"}
+                    ]
+                }"#,
+            ))
+            .mount(&server)
+            .await;
+        let connection_id: crate::model_catalog::ConnectionId = "opencode".parse().unwrap();
+        let catalog =
+            crate::model_catalog::ModelCatalog::from_spec(crate::model_catalog::CatalogSpec {
+                connections: vec![crate::model_catalog::ConnectionSpec {
+                    id: connection_id,
+                    enabled: true,
+                    display_name: "OpenCode Go".into(),
+                    auth: crate::model_catalog::ConnectionAuth::ApiKey,
+                    transport: crate::model_catalog::TransportProtocol::OpenAiChat,
+                    default_base_url: server.uri().into(),
+                    api_key_env: None,
+                    model_env: None,
+                    base_url_env: None,
+                    default_model: None,
+                    default_endpoint_path: Some("chat/completions".into()),
+                    default_token_counter: Some(TokenCounterKind::Qwen3),
+                    models_dev_provider: Some("opencode-go".parse().unwrap()),
+                    reasoning_codec: None,
+                    prompt_cache: true,
+                    prompt_cache_policy: crate::model_catalog::PromptCachePolicy::RollingHistory,
+                    reasoning_content_echo: true,
+                    usage_frame_ends_stream: false,
+                    auth_header: None,
+                    discovery: Default::default(),
+                }],
+                targets: Vec::new(),
+                models_dev: Default::default(),
+                connection_sources: HashMap::new(),
+            });
+        let registry = crate::provider::ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("opencode").expect("catalog OpenCode factory");
+        let session = provider_session("sk-oc-test", &server.uri(), "hy3");
+
+        let availability = factory.list_available_models(&session).await.unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec!["hy3".to_string(), "hy3-preview".to_string()]
         );
     }
 

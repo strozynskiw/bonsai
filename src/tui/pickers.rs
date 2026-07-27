@@ -1,5 +1,6 @@
 use crate::model_catalog::{
-    ConnectionId, ModelCatalog, ModelFeature, ModelId, connection_id_for_provider_id,
+    ConnectionId, ModelCatalog, ModelFeature, ModelId, ResolvedModelMetadataSources,
+    connection_id_for_provider_id,
 };
 use crate::model_resolution::{
     normalize_reasoning_for_provider_model, resolved_model_for_provider_model,
@@ -62,6 +63,12 @@ pub struct ModelOption {
     pub context_window: Option<u32>,
     /// Capability badges (tools/vision/reasoning), live probe first.
     pub features: Vec<ModelFeature>,
+    /// Per-field provenance after the catalog/live/models.dev merge.
+    pub(crate) metadata_sources: ResolvedModelMetadataSources,
+    /// Unpinned bundled values that differ from refreshed metadata.
+    pub(crate) catalog_drift: Vec<String>,
+    /// Live-only model absent from both the static catalog and models.dev.
+    pub(crate) unverified: bool,
 }
 
 impl ModelOption {
@@ -147,6 +154,9 @@ impl ModelOption {
                 pricing,
                 context_window,
                 features,
+                metadata_sources: resolved.metadata_sources.clone(),
+                catalog_drift: resolved.catalog_drift.clone(),
+                unverified: resolved.unverified,
             };
         }
 
@@ -174,6 +184,7 @@ impl ModelOption {
             .filter(|model| !model.supported_reasoning.is_empty())
             .map(|model| model.supported_reasoning.clone())
             .unwrap_or_else(|| capabilities.reasoning.to_vec());
+        let unverified = live.is_some();
         Self {
             provider_id: provider_id.to_string(),
             connection_id: connection_id_for_provider_id(provider_id)
@@ -205,6 +216,9 @@ impl ModelOption {
                 .and_then(|model| model.context_window)
                 .or(metadata.context_window),
             features: live.map(|model| model.features).unwrap_or_default(),
+            metadata_sources: ResolvedModelMetadataSources::default(),
+            catalog_drift: Vec::new(),
+            unverified,
         }
     }
 
@@ -443,6 +457,7 @@ mod tests {
                 default_model: None,
                 default_endpoint_path: Some("chat/completions".into()),
                 default_token_counter: Some(crate::provider::TokenCounterKind::Heuristic),
+                models_dev_provider: None,
                 reasoning_codec: None,
                 prompt_cache: false,
                 prompt_cache_policy: Default::default(),
@@ -689,6 +704,45 @@ mod tests {
                 .contains(&ReasoningSelection::Ultra)
         );
         assert_eq!(option.context_window, Some(272_000));
+    }
+
+    #[test]
+    fn live_only_shadow_is_marked_unverified_in_picker() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let connection_id: crate::model_catalog::ConnectionId = "opencode".parse().unwrap();
+        catalog
+            .write_live_availability(
+                &connection_id,
+                crate::model_catalog::LiveModelAvailability::from_remote_ids([
+                    "hy3".to_string(),
+                    "hy3-preview".to_string(),
+                ]),
+            )
+            .unwrap();
+        let mut session_store = SessionStore::default();
+        session_store.ensure_provider("opencode");
+        let metadata = crate::provider::metadata_for("opencode").unwrap();
+
+        let verified = ModelOption::from_provider_model(
+            Some(&catalog),
+            "opencode",
+            "OpenCode Go",
+            &session_store,
+            metadata,
+            "hy3".to_string(),
+        );
+        let preview = ModelOption::from_provider_model(
+            Some(&catalog),
+            "opencode",
+            "OpenCode Go",
+            &session_store,
+            metadata,
+            "hy3-preview".to_string(),
+        );
+
+        assert!(!verified.unverified);
+        assert!(preview.unverified);
+        assert_eq!(preview.model_id.as_deref(), Some("opencode/hy3-preview"));
     }
 
     #[test]

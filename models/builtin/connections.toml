@@ -10,6 +10,10 @@ base_url_env = "OPENCODE_BASE_URL"
 default_model = "opencode/qwen3.7-max"
 default_endpoint_path = "chat/completions"
 default_token_counter = "qwen3"
+# Live model ids are bare (`hy3`), while models.dev stores this gateway under
+# `opencode-go`. `/refresh` uses this namespace to enrich newly served models
+# before a bundled target exists.
+models_dev_provider = "opencode-go"
 # Zen gateway accepts `prompt_cache_key` and reports `prompt_tokens_details.cached_tokens`
 # (verified live: ~95% on a warm prefix). Enable the OpenAI-family cache key.
 prompt_cache = true

@@ -594,6 +594,9 @@ pub(super) fn model_picker_entry(
         pricing: None,
         context_window: Some(131_072),
         features: Vec::new(),
+        metadata_sources: crate::model_catalog::ResolvedModelMetadataSources::default(),
+        catalog_drift: Vec::new(),
+        unverified: false,
     }
 }
 

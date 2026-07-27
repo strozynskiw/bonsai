@@ -383,6 +383,9 @@ fn model_picker_metadata(entry: &ModelOption) -> String {
     if !icons.is_empty() {
         parts.push(icons);
     }
+    if entry.unverified {
+        parts.push("unverified".to_string());
+    }
     parts.join("  ")
 }
 
@@ -407,17 +410,23 @@ fn selected_model_summary(
 }
 
 fn selected_model_price_line(entry: Option<&ModelOption>, width: usize) -> Line<'static> {
-    let label = "price: ";
-    let price = entry
-        .map(ModelOption::pricing_label)
-        .unwrap_or_else(|| "n/a".to_string());
-    Line::from(vec![
-        Span::styled(label, theme::muted()),
-        Span::styled(
-            truncate_ascii(&price, width.saturating_sub(label.len())),
-            theme::dim(),
-        ),
-    ])
+    let detail = entry
+        .map(|entry| {
+            let mut parts = vec![format!("price: {}", entry.pricing_label())];
+            if !entry.catalog_drift.is_empty() {
+                parts.push("⚠ catalog drift".to_string());
+            }
+            if entry.unverified {
+                parts.push("⚠ unverified live model".to_string());
+            }
+            let sources = entry.metadata_sources.compact_label();
+            if !sources.is_empty() {
+                parts.push(format!("sources: {sources}"));
+            }
+            parts.join(" · ")
+        })
+        .unwrap_or_else(|| "price: n/a".to_string());
+    Line::from(Span::styled(truncate_ascii(&detail, width), theme::dim()))
 }
 
 /// Append the shortcut *invocation* hint to the button row, right-aligned so

@@ -438,6 +438,9 @@ mod tests {
             pricing: None,
             context_window: None,
             features: Vec::new(),
+            metadata_sources: crate::model_catalog::ResolvedModelMetadataSources::default(),
+            catalog_drift: Vec::new(),
+            unverified: false,
         }
     }
 

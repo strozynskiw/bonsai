@@ -165,10 +165,26 @@ fn model_picker_shows_input_cached_and_output_pricing() {
 }
 
 #[test]
+fn model_picker_shows_refreshed_metadata_source_and_catalog_drift() {
+    let area = Rect::new(0, 0, 180, 12);
+    let mut entry = model_picker_entry("opencode", "OpenCode Go", "qwen3.7-max");
+    entry.metadata_sources.pricing = Some(crate::model_catalog::ModelMetadataSource::ModelsDev);
+    entry.catalog_drift = vec!["pricing differs from models.dev".to_string()];
+
+    let buffer = render_model_picker_to_buffer(area, &[entry], 0);
+    let text = buffer_text(&buffer);
+
+    assert!(text.contains("price: n/a"), "{text}");
+    assert!(text.contains("sources: price:models.dev"), "{text}");
+    assert!(text.contains("⚠ catalog drift"), "{text}");
+}
+
+#[test]
 fn model_picker_shows_capability_icons_and_assumed_context() {
     let area = Rect::new(0, 0, 160, 12);
     let mut entry = model_picker_entry("lm-local", "LM Studio", "qwen3-coder");
     entry.context_window = None;
+    entry.unverified = true;
     entry.features = vec![
         crate::model_catalog::ModelFeature::ToolCall,
         crate::model_catalog::ModelFeature::Attachment,
@@ -179,6 +195,7 @@ fn model_picker_shows_capability_icons_and_assumed_context() {
     let text = buffer_text(&buffer);
 
     assert!(text.contains("~120k ctx (assumed)"), "{text}");
+    assert!(text.contains("unverified"), "{text}");
     assert!(text.contains("⚒︎"), "{text}");
     assert!(text.contains("◉"), "{text}");
     assert!(text.contains("∴"), "{text}");

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -8,8 +9,8 @@ use thiserror::Error;
 
 use crate::model_role::LegacyModelRole;
 use crate::provider::{
-    ModelPricing, ParameterPreview, ProviderMetadata, ReasoningCodec, ReasoningOption,
-    ReasoningSelection, TokenCounterKind,
+    ModelPricing, ParameterPreview, ProviderMetadata, ReasoningCodec, ReasoningEffort,
+    ReasoningOption, ReasoningSelection, TokenCounterKind,
 };
 
 mod availability;
@@ -417,6 +418,7 @@ impl CatalogBuilder {
 #[derive(Debug)]
 pub(crate) struct ModelCatalog {
     models_dev: RwLock<ModelsDevCatalog>,
+    models_dev_revision: AtomicU64,
     models_dev_refresh_notice: RwLock<Option<String>>,
     connections: HashMap<ConnectionId, ConnectionSpec>,
     connection_sources: HashMap<ConnectionId, SourceKind>,
@@ -471,6 +473,7 @@ impl ModelCatalog {
 
         Self {
             models_dev: RwLock::new(models_dev),
+            models_dev_revision: AtomicU64::new(0),
             models_dev_refresh_notice: RwLock::new(None),
             connections,
             connection_sources,
@@ -545,16 +548,15 @@ impl ModelCatalog {
             .remote_model
             .clone()
             .unwrap_or_else(|| target.model.model().into());
-        let live_pricing = self
-            .live_model_for_connection_model(connection_id, &remote_model_id)
-            .and_then(|available| available.pricing);
+        let live = self.live_model_for_connection_model(connection_id, &remote_model_id);
 
         Ok(resolve_target(
             connection,
             target,
             models_dev.as_ref(),
-            live_pricing,
+            live.as_ref(),
             ModelSource::BuiltIn,
+            false,
         ))
     }
 
@@ -607,15 +609,21 @@ impl ModelCatalog {
         let connection = self.connections.get(connection_id)?;
         let live = self.live_model_for_connection_model(connection_id, model);
         // models.dev keys models as `provider/model`; a bare remote id (how
-        // live discovery stores them) is namespaced under the connection id,
-        // which is the models.dev provider for direct providers. Remapped
-        // connections (id != models.dev provider) miss here and return `None` —
-        // no regression over today's unpriced behaviour for those.
+        // live discovery stores them) is namespaced under the connection's
+        // explicit models.dev provider when configured, or its own id for
+        // direct providers.
         let canonical: ModelId = model
             .parse()
             .or_else(|_err| format!("{connection_id}/{model}").parse())
             .ok()?;
-        let models_dev = self.models_dev_read().model(&canonical).cloned();
+        let metadata_model = connection
+            .models_dev_provider
+            .as_ref()
+            .and_then(|provider| format!("{provider}/{}", canonical.model()).parse().ok())
+            .unwrap_or_else(|| canonical.clone());
+        let models_dev = self.models_dev_read().model(&metadata_model).cloned();
+        let metadata_model_override =
+            (metadata_model != canonical).then_some(metadata_model.clone());
         // Only synthesize when something real backs the model. Neither signal
         // present → keep the historical `None` so we never fabricate a target.
         if models_dev.is_none() && live.is_none() {
@@ -643,7 +651,7 @@ impl ModelCatalog {
             display_name: live
                 .as_ref()
                 .and_then(|available| available.display_name.clone()),
-            metadata_model: None,
+            metadata_model: metadata_model_override,
             remote_model: Some(remote_model),
             recommended: false,
             recommended_effort: None,
@@ -663,13 +671,13 @@ impl ModelCatalog {
             roles: Vec::new(),
             pinned: false,
         };
-        let live_pricing = live.as_ref().and_then(|available| available.pricing);
         Some(resolve_target(
             connection,
             &shadow,
             models_dev.as_ref(),
-            live_pricing,
+            live.as_ref(),
             ModelSource::Discovered,
+            models_dev.is_none(),
         ))
     }
 
@@ -783,7 +791,14 @@ impl ModelCatalog {
             Ok(mut guard) => *guard = models_dev,
             Err(poisoned) => *poisoned.into_inner() = models_dev,
         }
+        self.models_dev_revision.fetch_add(1, Ordering::Relaxed);
         self.set_models_dev_refresh_notice(None);
+    }
+
+    /// Monotonic signal used by read-only picker caches to notice a metadata
+    /// refresh even when the provider's live model-id list did not change.
+    pub(crate) fn models_dev_revision(&self) -> u64 {
+        self.models_dev_revision.load(Ordering::Relaxed)
     }
 
     /// Refresh shared Models.dev metadata when this catalog came from a Bonsai
@@ -793,7 +808,7 @@ impl ModelCatalog {
         let Some(home_dir) = self.catalog_home_dir.as_deref() else {
             return Ok(None);
         };
-        match refresh_models_dev_cache_from_home(home_dir).await {
+        match force_refresh_models_dev_cache_from_home(home_dir).await {
             Ok(models_dev) => {
                 let model_count = models_dev.len();
                 self.replace_models_dev_metadata(models_dev);
@@ -1106,6 +1121,15 @@ pub(crate) struct ResolvedModel {
     pub discouraged_efforts: Vec<ReasoningSelection>,
     pub roles: Vec<LegacyModelRole>,
     pub source: ModelSource,
+    /// Discovered live model with no bundled target or models.dev row.
+    pub unverified: bool,
+    /// Per-field provenance for metadata shown by `/models` and used at
+    /// runtime after the current merge.
+    pub metadata_sources: ResolvedModelMetadataSources,
+    /// Explicit unpinned catalog values that disagree with current models.dev.
+    /// The refreshed value is used, while the mismatch remains visible so the
+    /// bundled offline fallback can be maintained.
+    pub catalog_drift: Vec<String>,
 }
 
 impl ResolvedModel {
@@ -1167,10 +1191,10 @@ impl ResolvedModel {
 }
 
 /// Warn once per catalog load about every explicit TOML value that disagrees
-/// with the models.dev row it shadows. TOML precedence is unchanged — this is
-/// the visibility mechanism that keeps hand-maintained values from drifting
-/// silently. Targets marked `pinned = true` (deliberate divergences: working
-/// windows, price-tier caps, beta-gated limits) are skipped.
+/// with the models.dev row it shadows. Refreshed values outrank unpinned
+/// fallbacks, but the warning keeps the offline catalog from drifting silently.
+/// Targets marked `pinned = true` (deliberate divergences: working windows,
+/// price-tier caps, beta-gated limits) remain authoritative and are skipped.
 fn log_models_dev_drift(
     targets: &HashMap<(ConnectionId, ModelId), TargetSpec>,
     models_dev: &ModelsDevCatalog,
@@ -1226,21 +1250,151 @@ pub(crate) enum ModelSource {
     Discovered,
 }
 
+/// Source selected for one resolved model-metadata field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ModelMetadataSource {
+    /// Bundled or user/project TOML.
+    Catalog,
+    /// Current models.dev metadata.
+    ModelsDev,
+    /// Metadata published by the provider's live model endpoint.
+    Provider,
+}
+
+impl ModelMetadataSource {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::ModelsDev => "models.dev",
+            Self::Provider => "provider",
+        }
+    }
+}
+
+/// Provenance of the independently merged fields on a resolved model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ResolvedModelMetadataSources {
+    pub display_name: Option<ModelMetadataSource>,
+    pub context_window: Option<ModelMetadataSource>,
+    pub output_limit: Option<ModelMetadataSource>,
+    pub pricing: Option<ModelMetadataSource>,
+    pub features: Option<ModelMetadataSource>,
+    pub reasoning: Option<ModelMetadataSource>,
+}
+
+impl ResolvedModelMetadataSources {
+    /// Compact source attribution for the model-picker detail row.
+    pub(crate) fn compact_label(&self) -> String {
+        let fields = [
+            ("ctx", self.context_window),
+            ("out", self.output_limit),
+            ("price", self.pricing),
+            ("caps", self.features),
+            ("reason", self.reasoning),
+        ];
+        fields
+            .into_iter()
+            .filter_map(|(field, source)| {
+                source.map(|source| format!("{field}:{}", source.label()))
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn choose_refreshed_metadata<T>(
+    pinned: bool,
+    catalog: Option<T>,
+    provider: Option<T>,
+    models_dev: Option<T>,
+) -> (Option<T>, Option<ModelMetadataSource>) {
+    let candidates = if pinned {
+        [
+            (catalog, ModelMetadataSource::Catalog),
+            (provider, ModelMetadataSource::Provider),
+            (models_dev, ModelMetadataSource::ModelsDev),
+        ]
+    } else {
+        [
+            (provider, ModelMetadataSource::Provider),
+            (models_dev, ModelMetadataSource::ModelsDev),
+            (catalog, ModelMetadataSource::Catalog),
+        ]
+    };
+    candidates
+        .into_iter()
+        .find_map(|(value, source)| value.map(|value| (Some(value), Some(source))))
+        .unwrap_or((None, None))
+}
+
+fn live_reasoning_options(
+    model: &AvailableModel,
+    transport: TransportProtocol,
+) -> Option<Vec<ReasoningOption>> {
+    if model.supported_reasoning.is_empty() {
+        return None;
+    }
+
+    let mut options = Vec::new();
+    if model
+        .supported_reasoning
+        .iter()
+        .any(|selection| matches!(selection, ReasoningSelection::Off | ReasoningSelection::On))
+    {
+        options.push(ReasoningOption::Toggle);
+    }
+    let efforts = model
+        .supported_reasoning
+        .iter()
+        .filter_map(|selection| match selection {
+            ReasoningSelection::Minimal => Some(ReasoningEffort::Minimal),
+            ReasoningSelection::Low => Some(ReasoningEffort::Low),
+            ReasoningSelection::Medium => Some(ReasoningEffort::Medium),
+            ReasoningSelection::High => Some(ReasoningEffort::High),
+            ReasoningSelection::XHigh => Some(ReasoningEffort::XHigh),
+            ReasoningSelection::Max => Some(ReasoningEffort::Max),
+            ReasoningSelection::Ultra => Some(ReasoningEffort::Ultra),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !efforts.is_empty() {
+        options.push(ReasoningOption::Effort(efforts));
+    }
+    options.extend(model.supported_reasoning.iter().filter_map(|selection| {
+        let ReasoningSelection::BudgetTokens(default) = selection else {
+            return None;
+        };
+        Some(ReasoningOption::BudgetTokens {
+            min: None,
+            max: None,
+            default: *default,
+        })
+    }));
+    Some(reasoning_options_for_transport(&options, transport))
+}
+
 fn resolve_target(
     connection: &ConnectionSpec,
     target: &TargetSpec,
     models_dev: Option<&ModelsDevModel>,
-    live_pricing: Option<ModelPricing>,
+    live: Option<&AvailableModel>,
     source: ModelSource,
+    unverified: bool,
 ) -> ResolvedModel {
     let remote_model_id = target
         .remote_model
         .clone()
         .unwrap_or_else(|| target.model.model().into());
-    let output_limit = target
-        .output_limit
-        .or_else(|| models_dev.and_then(|model| model.output_limit))
-        .or(target.max_tokens);
+    let (mut output_limit, mut output_limit_source) = choose_refreshed_metadata(
+        target.pinned,
+        target.output_limit,
+        None,
+        models_dev.and_then(|model| model.output_limit),
+    );
+    if output_limit.is_none() {
+        output_limit = target.max_tokens;
+        output_limit_source = target.max_tokens.map(|_| ModelMetadataSource::Catalog);
+    }
     let transport = target.transport.unwrap_or(connection.transport);
     let prompt_cache_policy = target
         .prompt_cache_policy
@@ -1255,31 +1409,61 @@ fn resolve_target(
         .map(ParameterPreview::MaxTokens)
         .into_iter()
         .collect::<Vec<_>>();
-    let features = if target.features.is_empty() {
-        models_dev.map(ModelsDevModel::features).unwrap_or_default()
-    } else {
-        target.features.clone()
-    };
-    let reasoning_options = target
+    let live_features = live
+        .filter(|model| !model.features.is_empty())
+        .map(|model| model.features.clone());
+    let models_dev_features = models_dev.map(ModelsDevModel::features);
+    let catalog_features = (!target.features.is_empty()).then(|| target.features.clone());
+    let (features, features_source) = choose_refreshed_metadata(
+        target.pinned,
+        catalog_features,
+        live_features,
+        models_dev_features,
+    );
+    let features = features.unwrap_or_default();
+    let catalog_reasoning = target
         .reasoning_options
         .as_deref()
-        .map(|options| reasoning_options_for_transport(options, transport))
-        .unwrap_or_else(|| {
-            models_dev
-                .map(|model| model.reasoning_options_for_transport(transport))
-                .unwrap_or_default()
-        });
+        .map(|options| reasoning_options_for_transport(options, transport));
+    let live_reasoning = live.and_then(|model| live_reasoning_options(model, transport));
+    let models_dev_reasoning =
+        models_dev.map(|model| model.reasoning_options_for_transport(transport));
+    let (reasoning_options, reasoning_source) = choose_refreshed_metadata(
+        target.pinned,
+        catalog_reasoning,
+        live_reasoning,
+        models_dev_reasoning,
+    );
+    let reasoning_options = reasoning_options.unwrap_or_default();
+
+    let (context_window, context_window_source) = choose_refreshed_metadata(
+        target.pinned,
+        target.context_window,
+        live.and_then(|model| model.context_window),
+        models_dev.and_then(|model| model.context_window),
+    );
+    let (pricing, pricing_source) = choose_refreshed_metadata(
+        target.pinned,
+        target.pricing,
+        live.and_then(|model| model.pricing),
+        models_dev.and_then(|model| model.pricing),
+    );
+    let (display_name, display_name_source) = choose_refreshed_metadata(
+        target.pinned,
+        target.display_name.clone(),
+        live.and_then(|model| model.display_name.clone()),
+        models_dev.map(|model| model.display_name.clone()),
+    );
+    let catalog_drift = models_dev
+        .map(|model| models_dev_drift_lines(target, model))
+        .unwrap_or_default();
 
     ResolvedModel {
         connection_id: connection.id.clone(),
         model_id: target.model.clone(),
         remote_model_id,
         default_base_url: connection.default_base_url.clone(),
-        display_name: target
-            .display_name
-            .clone()
-            .or_else(|| models_dev.map(|model| model.display_name.clone()))
-            .unwrap_or_else(|| target.model.model().into()),
+        display_name: display_name.unwrap_or_else(|| target.model.model().into()),
         transport,
         prompt_cache_policy,
         reasoning_codec,
@@ -1287,26 +1471,40 @@ fn resolve_target(
             .endpoint_path
             .clone()
             .or_else(|| connection.default_endpoint_path.clone()),
-        context_window: target
-            .context_window
-            .or_else(|| models_dev.and_then(|model| model.context_window)),
+        context_window,
         output_limit,
         token_counter: target.token_counter.or(connection.default_token_counter),
-        // Precedence: a hand-pinned catalog price wins (deliberate divergence);
-        // then the gateway's own published billed price; then the models.dev
-        // estimate. Only `None` when no source knows this model.
-        pricing: target
-            .pricing
-            .or(live_pricing)
-            .or_else(|| models_dev.and_then(|model| model.pricing)),
+        // A hand-pinned catalog price is a deliberate override. Otherwise a
+        // fresh provider-published billed price wins, then current models.dev
+        // metadata, with the bundled value retained only as the offline
+        // fallback. This makes `/refresh` update prices without sacrificing a
+        // usable catalog when every remote source is unavailable.
+        pricing,
         reasoning_options,
         parameter_preview,
         features,
         recommended: target.recommended,
-        recommended_effort: target.recommended_effort,
+        recommended_effort: if target.pinned {
+            target
+                .recommended_effort
+                .or_else(|| live.and_then(|model| model.recommended_reasoning))
+        } else {
+            live.and_then(|model| model.recommended_reasoning)
+                .or(target.recommended_effort)
+        },
         discouraged_efforts: target.discouraged_efforts.clone(),
         roles: target.roles.clone(),
         source,
+        unverified,
+        metadata_sources: ResolvedModelMetadataSources {
+            display_name: display_name_source,
+            context_window: context_window_source,
+            output_limit: output_limit_source,
+            pricing: pricing_source,
+            features: features_source,
+            reasoning: reasoning_source,
+        },
+        catalog_drift,
     }
 }
 
@@ -1378,7 +1576,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 181);
+        assert_eq!(catalog.targets.len(), 182);
         assert!(
             catalog
                 .connections
@@ -1390,6 +1588,25 @@ mod tests {
                 .connections
                 .iter()
                 .any(|connection| connection.id == connection_id("anthropic-compatible"))
+        );
+        let opencode = catalog
+            .connections
+            .iter()
+            .find(|connection| connection.id.as_str() == "opencode")
+            .unwrap();
+        assert_eq!(
+            opencode
+                .models_dev_provider
+                .as_ref()
+                .map(ConnectionId::as_str),
+            Some("opencode-go")
+        );
+        assert!(
+            catalog
+                .targets
+                .iter()
+                .any(|target| target.model.as_str() == "opencode/hy3"),
+            "documented OpenCode Go models must remain usable offline"
         );
 
         let opencode_zen = catalog
@@ -2077,7 +2294,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 181);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 182);
 
         let cases = [
             EquivalenceCase {
@@ -2441,6 +2658,345 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
+    fn discovered_model_uses_connection_models_dev_namespace() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "opencode"
+                    display_name = "OpenCode Go"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    models_dev_provider = "opencode-go"
+                    default_base_url = "https://opencode.ai/zen/go/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "qwen3"
+                "#,
+            )],
+            &[],
+        )
+        .unwrap()
+        .with_models_dev(
+            parse_models_dev_catalog(
+                "test",
+                r#"{
+                    "opencode-go": {
+                        "models": {
+                            "hy3": {
+                                "id": "hy3",
+                                "name": "Hy3",
+                                "tool_call": true,
+                                "reasoning": true,
+                                "structured_output": true,
+                                "cost": {
+                                    "input": 0.14,
+                                    "output": 0.58,
+                                    "cache_read": 0.035
+                                },
+                                "limit": { "context": 262144, "output": 65536 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("opencode");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability::from_remote_ids([
+                    "hy3".to_string(),
+                    "hy3-preview".to_string(),
+                ]),
+            )
+            .unwrap();
+
+        let hy3 = catalog
+            .resolve_connection_model(&connection, "hy3")
+            .expect("remapped models.dev shadow resolves");
+        assert_eq!(hy3.source, ModelSource::Discovered);
+        assert!(!hy3.unverified);
+        assert_eq!(hy3.model_id.as_str(), "opencode/hy3");
+        assert_eq!(hy3.context_window, Some(262_144));
+        assert_eq!(hy3.output_limit, Some(65_536));
+        assert_eq!(
+            hy3.pricing
+                .expect("models.dev pricing")
+                .input_micros_per_million,
+            140_000
+        );
+        assert!(hy3.features.contains(&ModelFeature::ToolCall));
+        assert!(hy3.features.contains(&ModelFeature::StructuredOutput));
+
+        let preview = catalog
+            .resolve_connection_model(&connection, "hy3-preview")
+            .expect("live-only model remains selectable as an unverified shadow");
+        assert_eq!(preview.source, ModelSource::Discovered);
+        assert!(preview.unverified);
+        assert!(preview.pricing.is_none());
+        assert!(preview.context_window.is_none());
+    }
+
+    #[test]
+    fn refreshed_metadata_overrides_unpinned_offline_fallbacks() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "opencode"
+                    display_name = "OpenCode Go"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                "#,
+            )],
+            &[source(
+                "opencode.toml",
+                r#"
+                    [[targets]]
+                    connection = "opencode"
+                    model = "opencode/qwen"
+                    metadata_model = "opencode-go/qwen"
+                    remote_model = "qwen"
+                    display_name = "Bundled Qwen"
+                    context_window = 100000
+                    output_limit = 10000
+                    features = ["tool-call"]
+                    pricing = {
+                        input_micros_per_million = 1000000,
+                        output_micros_per_million = 2000000
+                    }
+
+                    [[targets.reasoning_options]]
+                    type = "effort"
+                    values = ["low"]
+                "#,
+            )],
+        )
+        .unwrap()
+        .with_models_dev(
+            parse_models_dev_catalog(
+                "old",
+                r#"{
+                    "opencode-go": {
+                        "models": {
+                            "qwen": {
+                                "id": "qwen",
+                                "name": "Current Qwen",
+                                "reasoning": true,
+                                "reasoning_options": [
+                                    { "type": "effort", "values": ["medium", "high"] }
+                                ],
+                                "cost": { "input": 1.5, "output": 3 },
+                                "limit": { "context": 200000, "output": 20000 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("opencode");
+        let model = model_id("opencode/qwen");
+
+        let old = catalog.resolve(&connection, &model).unwrap();
+        assert_eq!(old.context_window, Some(200_000));
+        assert_eq!(old.output_limit, Some(20_000));
+        assert_eq!(old.display_name.as_ref(), "Current Qwen");
+        assert!(!old.features.contains(&ModelFeature::ToolCall));
+        assert!(old.features.contains(&ModelFeature::Reasoning));
+        assert_eq!(
+            old.reasoning_options,
+            vec![ReasoningOption::Effort(vec![
+                ReasoningEffort::Medium,
+                ReasoningEffort::High
+            ])]
+        );
+        assert_eq!(
+            old.pricing.as_ref().unwrap().input_micros_per_million,
+            1_500_000
+        );
+        assert_eq!(
+            old.metadata_sources.context_window,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+        assert_eq!(
+            old.metadata_sources.pricing,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+        assert_eq!(
+            old.metadata_sources.display_name,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+        assert_eq!(
+            old.metadata_sources.reasoning,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+        assert_eq!(
+            old.metadata_sources.features,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+        assert!(
+            !old.catalog_drift.is_empty(),
+            "the refreshed value wins, but offline-fallback drift remains visible"
+        );
+
+        catalog.replace_models_dev_metadata(
+            parse_models_dev_catalog(
+                "new",
+                r#"{
+                    "opencode-go": {
+                        "models": {
+                            "qwen": {
+                                "id": "qwen",
+                                "name": "Refreshed Qwen",
+                                "reasoning": true,
+                                "reasoning_options": [
+                                    { "type": "effort", "values": ["high", "max"] }
+                                ],
+                                "cost": { "input": 2.5, "output": 5 },
+                                "limit": { "context": 300000, "output": 30000 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let refreshed = catalog.resolve(&connection, &model).unwrap();
+        assert_eq!(refreshed.context_window, Some(300_000));
+        assert_eq!(refreshed.output_limit, Some(30_000));
+        assert_eq!(refreshed.display_name.as_ref(), "Refreshed Qwen");
+        assert_eq!(
+            refreshed.reasoning_options,
+            vec![ReasoningOption::Effort(vec![
+                ReasoningEffort::High,
+                ReasoningEffort::Max
+            ])]
+        );
+        assert_eq!(
+            refreshed.pricing.as_ref().unwrap().input_micros_per_million,
+            2_500_000
+        );
+        assert_eq!(
+            refreshed.metadata_sources.pricing,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+    }
+
+    #[test]
+    fn pinned_metadata_remains_authoritative_over_refresh_sources() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "opencode"
+                    display_name = "OpenCode Go"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                "#,
+            )],
+            &[source(
+                "opencode.toml",
+                r#"
+                    [[targets]]
+                    connection = "opencode"
+                    model = "opencode/pinned"
+                    metadata_model = "opencode-go/pinned"
+                    remote_model = "pinned"
+                    display_name = "Pinned"
+                    pinned = true
+                    context_window = 100000
+                    output_limit = 10000
+                    pricing = {
+                        input_micros_per_million = 1000000,
+                        output_micros_per_million = 2000000
+                    }
+
+                    [[targets.reasoning_options]]
+                    type = "effort"
+                    values = ["low"]
+                "#,
+            )],
+        )
+        .unwrap()
+        .with_models_dev(
+            parse_models_dev_catalog(
+                "models-dev",
+                r#"{
+                    "opencode-go": {
+                        "models": {
+                            "pinned": {
+                                "id": "pinned",
+                                "name": "Models.dev",
+                                "reasoning": true,
+                                "reasoning_options": [
+                                    { "type": "effort", "values": ["high"] }
+                                ],
+                                "cost": { "input": 3, "output": 4 },
+                                "limit": { "context": 300000, "output": 30000 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("opencode");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability {
+                    models: vec![
+                        AvailableModel::with_metadata(
+                            "pinned",
+                            Some(400_000),
+                            Some("Provider".to_string()),
+                            vec![ModelFeature::Attachment],
+                        )
+                        .with_pricing(Some(ModelPricing::new(5_000_000, 6_000_000)))
+                        .with_reasoning(
+                            vec![ReasoningSelection::Max],
+                            Some(ReasoningSelection::Max),
+                        ),
+                    ],
+                    ..LiveModelAvailability::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = catalog
+            .resolve(&connection, &model_id("opencode/pinned"))
+            .unwrap();
+        assert_eq!(resolved.display_name.as_ref(), "Pinned");
+        assert_eq!(resolved.context_window, Some(100_000));
+        assert_eq!(resolved.output_limit, Some(10_000));
+        assert_eq!(
+            resolved.pricing.unwrap().input_micros_per_million,
+            1_000_000
+        );
+        assert_eq!(
+            resolved.reasoning_options,
+            vec![ReasoningOption::Effort(vec![ReasoningEffort::Low])]
+        );
+        assert_eq!(
+            resolved.metadata_sources.context_window,
+            Some(ModelMetadataSource::Catalog)
+        );
+        assert_eq!(
+            resolved.metadata_sources.reasoning,
+            Some(ModelMetadataSource::Catalog)
+        );
+        assert!(resolved.catalog_drift.is_empty());
+    }
+
+    #[test]
     fn shadow_target_uses_live_gateway_pricing_when_models_dev_is_silent() {
         // Gateway (OpenRouter-class) model with no target and no models.dev row,
         // but the live listing published a price — step 5's path.
@@ -2491,6 +3047,10 @@ default_base_url = "http://localhost:11434/v1"
             .expect("live gateway pricing flows through the shadow target");
         assert_eq!(pricing.input_micros_per_million, 1_000_000);
         assert_eq!(pricing.output_micros_per_million, 2_000_000);
+        assert_eq!(
+            resolved.metadata_sources.pricing,
+            Some(ModelMetadataSource::Provider)
+        );
     }
 
     #[test]

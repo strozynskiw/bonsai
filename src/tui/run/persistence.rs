@@ -1381,6 +1381,7 @@ pub(in crate::tui::run) fn cached_model_signature(
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     catalog.live_availability_snapshot().hash(&mut hasher);
+    catalog.models_dev_revision().hash(&mut hasher);
     session.providers.len().hash(&mut hasher);
     let mut provider_ids = session.providers.keys().collect::<Vec<_>>();
     provider_ids.sort();
@@ -1412,4 +1413,20 @@ pub(in crate::tui::run) fn plan_signature(plan: &crate::plan::PlanDoc) -> u64 {
 
 pub(in crate::tui::run) fn todo_signature(todos: &[crate::todo::TodoItem]) -> u64 {
     crate::session_persist::todo_signature(todos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_cache_signature_changes_after_models_dev_refresh() {
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
+        let session = SessionStore::default();
+        let before = cached_model_signature(&session, &catalog);
+
+        catalog.replace_models_dev_metadata(Default::default());
+
+        assert_ne!(cached_model_signature(&session, &catalog), before);
+    }
 }

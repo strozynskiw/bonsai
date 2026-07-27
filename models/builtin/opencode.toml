@@ -229,3 +229,10 @@ model = "opencode/grok-4.5"
 metadata_model = "opencode-go/grok-4.5"
 remote_model = "grok-4.5"
 token_counter = "tiktoken"
+
+[[targets]]
+connection = "opencode"
+model = "opencode/hy3"
+metadata_model = "opencode-go/hy3"
+remote_model = "hy3"
+token_counter = "tiktoken"

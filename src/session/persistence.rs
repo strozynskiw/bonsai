@@ -624,6 +624,7 @@ mod tests {
                 default_model: Some(model_id.clone()),
                 default_endpoint_path: Some("chat/completions".into()),
                 default_token_counter: Some(crate::provider::TokenCounterKind::Tiktoken),
+                models_dev_provider: None,
                 reasoning_codec: None,
                 prompt_cache: false,
                 prompt_cache_policy: Default::default(),
