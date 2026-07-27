@@ -40,6 +40,8 @@ jobs:
           /tmp/build-release-manifest-tests
       - name: Test RC soak evidence validator
         run: python3 scripts/test_check_rc_soak.py
+      - name: Test Homebrew tap updater
+        run: python3 scripts/test_update_homebrew_tap.py
       - name: Run clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Run tests
@@ -288,3 +290,17 @@ jobs:
             dist/bonsai.bash dist/_bonsai dist/bonsai.fish \
             "dist/bonsai-${{ github.ref_name }}.spdx.json" \
             --prerelease --generate-notes
+      - name: Record Homebrew release metadata
+        env:
+          TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p homebrew-release-metadata
+          printf '%s\n' "$TAG" > homebrew-release-metadata/tag
+          printf '%s\n' "$RELEASE_SHA" > homebrew-release-metadata/sha
+      - name: Upload Homebrew release metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: homebrew-release-metadata
+          path: homebrew-release-metadata
+          retention-days: 7

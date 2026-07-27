@@ -1,0 +1,138 @@
+name: Update Homebrew tap
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  update-tap:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted updater
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          path: bonsai
+
+      - name: Download immutable release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: gh run download "$RUN_ID" --name homebrew-release-metadata --dir "$RUNNER_TEMP/release-metadata"
+
+      - name: Resolve release tag
+        id: release
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          tag="$(cat "$RUNNER_TEMP/release-metadata/tag")"
+          sha="$(cat "$RUNNER_TEMP/release-metadata/sha")"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || {
+            echo "release metadata contains an invalid tag: $tag" >&2
+            exit 1
+          }
+          [ "$sha" = "$HEAD_SHA" ] || {
+            echo "release metadata SHA does not match the completed workflow run" >&2
+            exit 1
+          }
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Homebrew tap
+        run: git clone --depth 1 https://github.com/strozynskiw/homebrew-bonsai.git tap
+
+      - name: Download and validate release manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern release-manifest.json \
+            --pattern release-manifest.json.sig \
+            --dir "$RUNNER_TEMP/release"
+          test -s "$RUNNER_TEMP/release/release-manifest.json"
+          test -s "$RUNNER_TEMP/release/release-manifest.json.sig"
+
+      - name: Verify signed release manifest
+        env:
+          BONSAI_RELEASE_PUBLIC_KEY: ${{ vars.BONSAI_RELEASE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$BONSAI_RELEASE_PUBLIC_KEY"
+          raw_key="$RUNNER_TEMP/release-public-key.raw"
+          der_key="$RUNNER_TEMP/release-public-key.der"
+          public_key="$RUNNER_TEMP/release-public-key.pem"
+          signature="$RUNNER_TEMP/release-manifest.sig"
+          printf '%s' "$BONSAI_RELEASE_PUBLIC_KEY" | openssl base64 -d -A > "$raw_key"
+          test "$(wc -c < "$raw_key")" -eq 32
+          printf '302a300506032b6570032100' | xxd -r -p > "$der_key"
+          cat "$raw_key" >> "$der_key"
+          openssl pkey -pubin -inform DER -in "$der_key" -out "$public_key"
+          openssl base64 -d -A \
+            -in "$RUNNER_TEMP/release/release-manifest.json.sig" \
+            -out "$signature"
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey "$public_key" \
+            -in "$RUNNER_TEMP/release/release-manifest.json" \
+            -sigfile "$signature"
+
+      - name: Update formula
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: >-
+          python3 bonsai/scripts/update-homebrew-tap.py "$TAG" tap
+          --manifest "$RUNNER_TEMP/release/release-manifest.json"
+
+      - name: Commit and push formula branch
+        id: commit
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          branch="release/$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+          remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)"
+          git checkout -B "$branch"
+          git add Formula/bonsai.rb
+          if git diff --cached --quiet; then
+            echo "Formula already packages $TAG"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "feat(formula): package Bonsai $TAG"
+          git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "$branch"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update tap pull request
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          branch="release/$TAG"
+          existing="$(gh pr list --repo strozynskiw/homebrew-bonsai --head "$branch" --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --repo strozynskiw/homebrew-bonsai \
+              --title "feat(formula): package Bonsai $TAG" \
+              --body "Packages Bonsai $TAG from its published release manifest. Merge after the Tests workflow passes."
+          else
+            gh pr create --repo strozynskiw/homebrew-bonsai \
+              --head "$branch" --base main \
+              --title "feat(formula): package Bonsai $TAG" \
+              --body "Packages Bonsai $TAG from its published release manifest. Merge after the Tests workflow passes."
+          fi

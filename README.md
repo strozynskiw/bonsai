@@ -43,6 +43,31 @@ built-in self-updater working without elevated permissions.
 Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux glibc
 (x86-64 and arm64).
 
+### Homebrew
+
+Install Bonsai from its third-party tap:
+
+```sh
+brew install strozynskiw/bonsai/bonsai
+```
+
+Alternatively, add the tap first and then use the short formula name:
+
+```sh
+brew tap strozynskiw/bonsai
+brew install bonsai
+```
+
+This formula is maintained in
+[`strozynskiw/homebrew-bonsai`](https://github.com/strozynskiw/homebrew-bonsai).
+Its four archive checksums are pinned from Bonsai's signed release manifest;
+the tap verifies those checksums while Homebrew manages future upgrades instead
+of Bonsai's built-in self-updater. Third-party taps are not listed on
+`formulae.brew.sh`; that site indexes the official `homebrew/core` and
+`homebrew/cask` repositories. New Bonsai versions become available after the
+release-generated tap pull request passes its `Tests` workflow and is merged.
+Refresh and upgrade with `brew update && brew upgrade bonsai`.
+
 ### From source
 
 Building needs a recent stable Rust toolchain — install one with
@@ -1115,7 +1140,14 @@ The script updates `Cargo.toml`, `Cargo.lock`, and public install references,
 runs the release checks, commits `chore(release): prepare v<version>`, creates
 an annotated `v<version>` tag, and can push both to GitHub. Review the local commit
 and tag before pushing them. The pushed tag starts the `Release` workflow, which
-builds the release assets and currently publishes a GitHub prerelease.
+builds the release assets, publishes a GitHub prerelease, and opens or updates a
+Homebrew tap pull request on the deterministic `release/v<version>` branch. Merge
+that pull request after the tap's `Tests` workflow passes.
+
+Tap automation requires a Bonsai repository secret named `HOMEBREW_TAP_TOKEN`.
+Use a fine-grained personal access token or GitHub App token limited to
+`strozynskiw/homebrew-bonsai`, with read/write **Contents** and **Pull requests**
+permissions. No access to other repositories is required.
 
 Use `--no-push` to prepare the commit and tag locally without publishing them.
 

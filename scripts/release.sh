@@ -26,7 +26,8 @@ disagrees with it. Use this when the bump was committed separately and only
 the tag is missing.
 
 Pushing the tag starts .github/workflows/release.yml, which publishes the
-GitHub release and release assets.
+GitHub release and release assets. After it succeeds, GitHub Actions opens or
+updates the Homebrew tap PR for release/<tag>.
 EOF
 }
 
@@ -206,6 +207,7 @@ if [ "$push" -eq 1 ]; then
   git push "$remote" "$tag"
   printf 'release: pushed %s and %s to %s\n' "$current_branch" "$tag" "$remote"
   printf 'release: GitHub Actions will publish the release from %s\n' "$tag"
+  printf 'release: the published release will open or update the Homebrew tap PR\n'
 else
   printf 'release: prepared %s locally; push with:\n' "$tag"
   printf '  git push %s %s\n' "$remote" "$current_branch"
