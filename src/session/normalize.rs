@@ -29,7 +29,7 @@ impl SessionStore {
     fn ensure_provider_for_connection(&mut self, provider_id: &str, connection: &ConnectionSpec) {
         if !self.providers.contains_key(provider_id) {
             self.providers.insert(
-                provider_id.to_string(),
+                ConnectionId::fallback(provider_id),
                 default_session_for_connection(connection),
             );
         }
@@ -99,10 +99,11 @@ impl SessionStore {
             }
         }
 
-        let ids: Vec<String> = self.providers.keys().cloned().collect();
+        let ids: Vec<ConnectionId> = self.providers.keys().cloned().collect();
         for id in ids {
             let session = self.providers.get_mut(&id).unwrap();
-            if let Some((connection_id, connection)) = catalog_connection_for_provider(catalog, &id)
+            if let Some((connection_id, connection)) =
+                catalog_connection_for_provider(catalog, id.as_str())
             {
                 if session.base_url.trim().is_empty() {
                     session.base_url = connection.default_base_url.to_string();
@@ -117,11 +118,11 @@ impl SessionStore {
                 }
                 if let Some(catalog) = catalog {
                     normalize_reasoning_for_connection(session, catalog, &connection_id);
-                } else if let Some(metadata) = crate::provider::metadata_for(&id) {
+                } else if let Some(metadata) = crate::provider::metadata_for(id.as_str()) {
                     session.normalize_reasoning(metadata);
                 }
-            } else if let Some((default_base_url, default_model)) = defaults_for(&id) {
-                let metadata = crate::provider::metadata_for(&id)
+            } else if let Some((default_base_url, default_model)) = defaults_for(id.as_str()) {
+                let metadata = crate::provider::metadata_for(id.as_str())
                     .expect("defaults_for returned metadata-backed provider");
                 if session.base_url.trim().is_empty() {
                     session.base_url = default_base_url.to_string();
@@ -139,7 +140,7 @@ impl SessionStore {
         }
 
         if !known_provider_with_catalog(catalog, &self.current_provider)
-            || !self.providers.contains_key(&self.current_provider)
+            || !self.providers.contains_key(self.current_provider.as_str())
         {
             self.ensure_provider(DEFAULT_PROVIDER_ID);
             self.current_provider = DEFAULT_PROVIDER_ID.to_string();
@@ -158,7 +159,7 @@ impl SessionStore {
 
         let session_model = self
             .providers
-            .get(&current_provider)
+            .get(current_provider.as_str())
             .map(|session| session.model.trim().to_string())
             .unwrap_or_default();
         if let Some(active_model_id) = &self.active_model_id
@@ -175,7 +176,7 @@ impl SessionStore {
         }
 
         if let Some(model_id) = &self.active_model_id
-            && let Some(session) = self.providers.get_mut(&current_provider)
+            && let Some(session) = self.providers.get_mut(current_provider.as_str())
         {
             session.model = model_id.to_string();
         }

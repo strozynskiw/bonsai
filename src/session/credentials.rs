@@ -198,7 +198,7 @@ impl super::SessionStore {
             });
             if legacy_plaintext {
                 migrated_plaintext = true;
-                let is_codex_cache = crate::provider::metadata_for(&provider_id)
+                let is_codex_cache = crate::provider::metadata_for(provider_id.as_str())
                     .is_some_and(|metadata| metadata.auth_requirement.uses_codex_cache());
                 if is_codex_cache {
                     if let Some(session) = self.providers.get_mut(&provider_id) {
@@ -208,7 +208,7 @@ impl super::SessionStore {
                     let secret = self.providers[&provider_id].api_key.clone();
                     match self
                         .credential_store
-                        .set(&CredentialSource::File, &provider_id, &secret)
+                        .set(&CredentialSource::File, provider_id.as_str(), &secret)
                         .await
                     {
                         Ok(()) => {
@@ -247,7 +247,11 @@ impl super::SessionStore {
                     }
                 }
                 CredentialSource::File | CredentialSource::Keyring => {
-                    match self.credential_store.get(&source, &provider_id).await {
+                    match self
+                        .credential_store
+                        .get(&source, provider_id.as_str())
+                        .await
+                    {
                         Ok(Some(secret)) => {
                             if let Some(session) = self.providers.get_mut(&provider_id) {
                                 session.api_key = secret;

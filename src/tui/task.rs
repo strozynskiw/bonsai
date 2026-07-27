@@ -838,7 +838,7 @@ impl TaskController {
                     }));
                     let mut model_entries = Vec::new();
                     for (provider_id, provider_session) in &session.providers {
-                        let Some(factory) = registry.lookup(provider_id) else {
+                        let Some(factory) = registry.lookup(provider_id.as_str()) else {
                             continue;
                         };
                         if !factory.is_authorized(provider_session) {
@@ -848,14 +848,14 @@ impl TaskController {
                         let provider_label = metadata.display_name.to_string();
                         let models = crate::model_catalog::available_model_ids_for_provider(
                             Some(&model_catalog),
-                            provider_id,
+                            provider_id.as_str(),
                             metadata,
                             &provider_session.model,
                         );
                         for model in models {
                             model_entries.push(ModelOption::from_provider_model(
                                 Some(&model_catalog),
-                                provider_id,
+                                provider_id.as_str(),
                                 &provider_label,
                                 &session,
                                 metadata,

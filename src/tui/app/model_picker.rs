@@ -200,9 +200,9 @@ impl AppState {
             .providers
             .iter()
             .filter_map(|(provider_id, provider_session)| {
-                let factory = registry.lookup(provider_id)?;
+                let factory = registry.lookup(provider_id.as_str())?;
                 factory.is_authorized(provider_session).then_some((
-                    provider_id,
+                    provider_id.as_str(),
                     provider_session,
                     factory,
                 ))

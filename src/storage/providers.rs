@@ -240,11 +240,14 @@ impl Storage {
         let mut providers = HashMap::new();
         for row in rows {
             let provider_id: String = row.try_get("provider_id")?;
+            let connection_id = provider_id
+                .parse::<crate::model_catalog::ConnectionId>()
+                .with_context(|| format!("Invalid persisted provider id `{provider_id}`"))?;
             let reasoning_json: String = row.try_get("reasoning_json")?;
             let model_reasoning_json: String = row.try_get("model_reasoning_json")?;
             let authorized_at_ms: Option<i64> = row.try_get("authorized_at_ms")?;
             providers.insert(
-                provider_id,
+                connection_id,
                 ProviderSession {
                     api_key: String::new(),
                     credential_source: crate::session::CredentialSource::from_db(
@@ -344,7 +347,7 @@ impl Storage {
                   context_window = excluded.context_window
                 "#,
             )
-            .bind(provider_id)
+            .bind(provider_id.as_str())
             .bind(&session.base_url)
             .bind(&session.model)
             .bind(reasoning_json)
@@ -372,7 +375,7 @@ impl Storage {
                   reference = excluded.reference
                 "#,
             )
-            .bind(provider_id)
+            .bind(provider_id.as_str())
             .bind(session.credential_source.as_db_str())
             .bind(session.credential_source.reference())
             .execute(&mut *tx)
@@ -397,7 +400,7 @@ impl Storage {
             .await
             .context("Failed to list persisted providers before authoritative save")?;
             for provider_id in persisted_provider_ids {
-                if store.providers.contains_key(&provider_id) {
+                if store.providers.contains_key(provider_id.as_str()) {
                     continue;
                 }
                 // provider_credentials cascades from provider_settings, but an

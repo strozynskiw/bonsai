@@ -1261,7 +1261,7 @@ mod tests {
             .unwrap();
         let mut providers = std::collections::HashMap::new();
         providers.insert(
-            "local-openai".to_string(),
+            "local-openai".parse().unwrap(),
             ProviderSession::new(
                 String::new(),
                 "http://localhost:11434/v1".to_string(),
@@ -1597,7 +1597,7 @@ mod tests {
             .unwrap();
         let mut providers = std::collections::HashMap::new();
         providers.insert(
-            "local-openai".to_string(),
+            "local-openai".parse().unwrap(),
             ProviderSession::new(
                 String::new(),
                 "http://localhost:11434/v1".to_string(),
@@ -1673,7 +1673,7 @@ mod tests {
             .unwrap();
         let mut providers = std::collections::HashMap::new();
         providers.insert(
-            "local-openai".to_string(),
+            "local-openai".parse().unwrap(),
             ProviderSession::new(
                 String::new(),
                 "http://localhost:11434/v1".to_string(),

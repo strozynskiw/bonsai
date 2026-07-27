@@ -1496,7 +1496,7 @@ mod tests {
     fn test_store() -> SessionStore {
         let mut providers = HashMap::new();
         providers.insert(
-            "provider-a".to_string(),
+            "provider-a".parse().unwrap(),
             ProviderSession::new(
                 "sk-a".to_string(),
                 TEST_A_METADATA.default_base_url.to_string(),
@@ -1504,7 +1504,7 @@ mod tests {
             ),
         );
         providers.insert(
-            "provider-b".to_string(),
+            "provider-b".parse().unwrap(),
             ProviderSession::new(
                 "sk-b".to_string(),
                 TEST_B_METADATA.default_base_url.to_string(),

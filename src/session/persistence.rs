@@ -373,7 +373,7 @@ impl SessionStore {
         current_provider: String,
         active_connection_id: Option<ConnectionId>,
         active_model_id: Option<ModelId>,
-        providers: HashMap<String, ProviderSession>,
+        providers: HashMap<ConnectionId, ProviderSession>,
         model_roles: std::collections::BTreeMap<
             crate::model_role::LegacyModelRole,
             crate::model_role::ModelShortcutBinding,
@@ -405,11 +405,13 @@ impl SessionStore {
     fn migrate_legacy_into_providers(&mut self) {
         if let Some(opencode) = self.legacy.opencode_go.take() {
             self.providers
-                .entry("opencode".to_string())
+                .entry(ConnectionId::fallback("opencode"))
                 .or_insert(opencode);
         }
         if let Some(codex) = self.legacy.codex.take() {
-            self.providers.entry("codex".to_string()).or_insert(codex);
+            self.providers
+                .entry(ConnectionId::fallback("codex"))
+                .or_insert(codex);
         }
 
         // v0.1.0-alpha.1 persisted the OpenCode Go connection under this id.
@@ -417,7 +419,7 @@ impl SessionStore {
         // frozen. Move the complete provider record so credentials, the model,
         // and authorization metadata survive the public-alpha upgrade.
         if let Some(opencode) = self.providers.remove("opencode-go") {
-            match self.providers.entry("opencode".to_string()) {
+            match self.providers.entry(ConnectionId::fallback("opencode")) {
                 Entry::Vacant(entry) => {
                     entry.insert(opencode);
                 }
@@ -447,9 +449,9 @@ impl SessionStore {
         let mut providers = HashMap::new();
         let mut opencode = ProviderSession::new(legacy.api_key, legacy.base_url, legacy.model);
         opencode.credential_source = CredentialSource::None;
-        providers.insert("opencode".to_string(), opencode);
+        providers.insert(ConnectionId::fallback("opencode"), opencode);
         providers.insert(
-            "codex".to_string(),
+            ConnectionId::fallback("codex"),
             ProviderSession::new(String::new(), String::new(), String::new()),
         );
         Ok(Self {
@@ -880,7 +882,7 @@ mod tests {
             .unwrap();
         let catalog = custom_openai_catalog();
         let mut providers = HashMap::new();
-        providers.insert("local-openai".to_string(), ProviderSession::default());
+        providers.insert("local-openai".parse().unwrap(), ProviderSession::default());
         let store = SessionStore::from_persistent_parts(
             "local-openai".to_string(),
             None,

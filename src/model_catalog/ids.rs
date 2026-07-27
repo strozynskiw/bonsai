@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::fmt;
 use std::str::FromStr;
 
@@ -102,6 +103,12 @@ impl ConnectionId {
 
     pub(crate) fn fallback(value: &str) -> Self {
         value.parse().unwrap_or_else(|_err| Self("unknown".into()))
+    }
+}
+
+impl Borrow<str> for ConnectionId {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 

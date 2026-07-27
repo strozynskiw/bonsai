@@ -124,7 +124,7 @@ pub struct SessionStore {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_model_id: Option<ModelId>,
     #[serde(default)]
-    pub providers: HashMap<String, ProviderSession>,
+    pub providers: HashMap<ConnectionId, ProviderSession>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) model_shortcuts: BTreeMap<ModelShortcutKey, ModelShortcutBinding>,
     /// Per-working-mode model selection (keys: `coding` / `planning`), stored
@@ -181,7 +181,7 @@ impl Default for SessionStore {
 
 impl SessionStore {
     pub fn current_kind_id(&self) -> &str {
-        if self.providers.contains_key(&self.current_provider) {
+        if self.providers.contains_key(self.current_provider.as_str()) {
             self.current_provider.as_str()
         } else {
             DEFAULT_PROVIDER_ID
@@ -380,7 +380,7 @@ impl SessionStore {
     pub fn ensure_provider(&mut self, id: &str) {
         if !self.providers.contains_key(id) {
             self.providers
-                .insert(id.to_string(), default_session_for(id));
+                .insert(ConnectionId::fallback(id), default_session_for(id));
         }
     }
 
@@ -389,7 +389,7 @@ impl SessionStore {
         self.active_connection_id = connection_id_for_provider_id(&current_provider);
         self.active_model_id = self
             .providers
-            .get(&current_provider)
+            .get(current_provider.as_str())
             .and_then(|session| session.model.parse::<ModelId>().ok());
     }
 }
