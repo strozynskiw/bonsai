@@ -115,7 +115,7 @@ pub(super) fn render_openai_compatible_prompt(
 
     lines.push(Line::from(""));
     lines.push(footer_hint_line(&[
-        ("Tab", "field"),
+        ("Tab/Shift+Tab", "field"),
         ("Ctrl+P", "storage"),
         ("Enter", "submit"),
         ("Esc", "cancel"),
@@ -242,7 +242,7 @@ mod tests {
             .expect("unauthorize confirm should render");
         let text = rendered_text(&terminal);
         assert!(text.contains("Clear Bonsai auth for OpenCode Go?"));
-        assert!(text.contains("Enter/Y unauthorize"));
+        assert!(text.contains("Enter/Y confirm"));
         assert!(text.contains("Esc/N cancel"));
     }
 }
@@ -385,7 +385,7 @@ pub(super) fn render_unauthorize_confirm(f: &mut Frame, area: Rect, display_name
     );
     f.render_widget(
         Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "unauthorize"),
+            ("Enter/Y", "confirm"),
             ("Esc/N", "cancel"),
         ])),
         chunks[1],

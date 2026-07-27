@@ -24,7 +24,7 @@ pub(super) struct ConfirmPrompt {
 }
 
 pub(super) fn approval_footer(scopes: &ApprovalScopes) -> Vec<Line<'static>> {
-    let mut hints: Vec<(&str, &str)> = vec![("A", "once"), ("S", "session")];
+    let mut hints: Vec<(&str, &str)> = vec![("A/Enter", "once"), ("S", "session")];
     if scopes.project {
         hints.push(("P", "project"));
     }

@@ -89,10 +89,11 @@ pub(super) fn render_memory_manager(
     f.render_widget(
         Paragraph::new(footer_hint_line(&[
             ("Up/Down", "move"),
+            ("PgUp/PgDn", "page detail"),
             ("Space", "enable/disable"),
             ("a", "add"),
             ("e/Enter", "edit"),
-            ("d", "delete"),
+            ("d/Delete", "delete"),
             ("Esc", "close"),
         ]))
         .style(theme::panel()),

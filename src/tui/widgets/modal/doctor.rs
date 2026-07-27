@@ -30,7 +30,10 @@ pub(super) fn render_doctor(f: &mut Frame, area: Rect, report: &DoctorReport, cu
         ]),
     ];
 
-    let footer = vec![footer_hint_line(&[("Up/Down", "move"), ("Esc", "close")])];
+    let footer = vec![footer_hint_line(&[
+        ("Up/Down", "move"),
+        ("Enter/Esc", "close"),
+    ])];
 
     render_list_picker(f, area, "Doctor", &header, &footer, |body_area| {
         if report.checks.is_empty() {

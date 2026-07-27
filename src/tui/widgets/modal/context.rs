@@ -719,20 +719,23 @@ pub(super) fn wire_token_estimate(text: &str) -> usize {
 pub(super) fn context_footer_line(app: &AppState) -> Line<'static> {
     match app.context_state.view_mode {
         ContextViewMode::Wire => footer_hint_line(&[
+            ("Up/Down", "move"),
             ("Enter", "expand/collapse"),
-            ("p/d/s/r", "disabled"),
-            ("Tab", "turns"),
+            ("Tab/Shift+Tab", "turns"),
+            ("Esc", "close"),
         ]),
-        ContextViewMode::Turns => {
-            footer_hint_line(&[("Enter", "expand/collapse"), ("Tab", "ledger")])
-        }
-        ContextViewMode::Ledger => footer_hint_line(&[
+        ContextViewMode::Turns => footer_hint_line(&[
+            ("Up/Down", "move"),
             ("Enter", "expand/collapse"),
-            ("p", "pin"),
-            ("d", "drop"),
-            ("s", "stub"),
-            ("r", "restore"),
-            ("Tab", "wire"),
+            ("Tab/Shift+Tab", "ledger"),
+            ("Esc", "close"),
+        ]),
+        ContextViewMode::Ledger => footer_hint_line(&[
+            ("Up/Down", "move"),
+            ("Enter", "expand/collapse"),
+            ("p/d/s/r", "edit"),
+            ("Tab/Shift+Tab", "wire"),
+            ("Esc", "close"),
         ]),
     }
 }

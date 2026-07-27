@@ -106,8 +106,8 @@ fn mode_picker_footer() -> Vec<Line<'static>> {
         )),
         super::common::footer_hint_line(&[
             ("Up/Down", "move"),
-            ("Left/Right/Enter", "cycle"),
-            ("Esc", "close"),
+            ("Left/Right", "cycle"),
+            ("Enter/Esc", "close"),
         ]),
     ]
 }
@@ -115,6 +115,7 @@ fn mode_picker_footer() -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::tests::support::rendered_lines_text;
     use crate::tui::event::ModeAxisId;
 
     fn rows() -> Vec<ModeRow> {
@@ -151,6 +152,13 @@ mod tests {
                 note: None,
             },
         ]
+    }
+
+    #[test]
+    fn mode_picker_footer_describes_live_cycle_and_close_keys() {
+        let footer = rendered_lines_text(&mode_picker_footer());
+        assert!(footer.contains("Left/Right cycle"));
+        assert!(footer.contains("Enter/Esc close"));
     }
 
     #[test]

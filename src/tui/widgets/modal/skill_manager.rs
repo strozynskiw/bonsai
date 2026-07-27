@@ -20,7 +20,7 @@ pub(super) fn render_skill_manager(
             ("Up/Down", "move"),
             ("PgUp/PgDn", "page"),
             ("Space", "enable/disable"),
-            ("l", "load/unload"),
+            ("Enter/l", "load/unload"),
             ("Esc", "close"),
         ]),
     ];

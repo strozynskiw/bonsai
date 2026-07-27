@@ -121,20 +121,17 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
         ]),
         Line::from(vec![
             Span::styled("Esc", theme::body(theme::palette().text)),
-            Span::styled("       close modal  ", theme::dim()),
+            Span::styled("       exit or cancel  ", theme::dim()),
             Span::styled("↑/↓", theme::body(theme::palette().text)),
-            Span::styled(" move cursor", theme::dim()),
+            Span::styled(" move or scroll where available", theme::dim()),
         ]),
-        // The uniform modal dialect: these work in every modal/picker.
         Line::from(vec![
-            Span::styled("q", theme::body(theme::palette().text)),
-            Span::styled("         also closes  ", theme::dim()),
-            Span::styled("PgUp/PgDn Home/End", theme::body(theme::palette().text)),
-            Span::styled(" page/jump", theme::dim()),
+            Span::styled("PgUp/PgDn", theme::body(theme::palette().text)),
+            Span::styled(" page detailed views where available", theme::dim()),
         ]),
         Line::from(vec![
             Span::styled("Click outside", theme::body(theme::palette().text)),
-            Span::styled(" dismisses any modal (same as Esc)", theme::dim()),
+            Span::styled(" dismisses using that modal's Esc action", theme::dim()),
         ]),
         Line::from(vec![
             Span::styled("/keys", theme::body(theme::palette().text)),

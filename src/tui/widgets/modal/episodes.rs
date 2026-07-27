@@ -13,11 +13,7 @@ pub(super) fn render_episodes(
 ) {
     let footer_lines = vec![
         Line::from(Span::styled(episode_summary(report), theme::dim())),
-        footer_hint_line(&[
-            ("Up/Down or j/k", "move"),
-            ("PgUp/PgDn", "page"),
-            ("Esc", "close"),
-        ]),
+        footer_hint_line(&[("Up/Down", "move"), ("PgUp/PgDn", "page"), ("Esc", "close")]),
     ];
     render_list_detail_modal(
         f,

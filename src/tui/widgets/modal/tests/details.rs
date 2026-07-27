@@ -1363,6 +1363,10 @@ fn confirm_prompt_specs_render_expected_content() {
     assert_eq!(rendered_lines_text(&p.body), "ls -la");
     let footer = rendered_lines_text(&approval_footer(&p.scopes));
     assert!(
+        footer.contains("A/Enter once"),
+        "permission advertises Enter as allow-once: {footer}"
+    );
+    assert!(
         footer.contains("P project"),
         "permission offers project: {footer}"
     );

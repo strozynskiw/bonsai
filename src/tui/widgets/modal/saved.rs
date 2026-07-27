@@ -215,7 +215,7 @@ pub(super) fn render_plan_delete_confirm(
     );
     f.render_widget(
         Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "delete"),
+            ("Enter/Y", "confirm"),
             ("Esc/N", "cancel"),
         ])),
         chunks[1],
@@ -252,7 +252,7 @@ pub(super) fn render_session_delete_confirm(
     );
     f.render_widget(
         Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "delete"),
+            ("Enter/Y", "confirm"),
             ("Esc/N", "cancel"),
         ])),
         chunks[1],
@@ -290,7 +290,7 @@ pub(super) fn render_plan_discard_confirm(
     );
     f.render_widget(
         Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "discard"),
+            ("Enter/Y", "confirm"),
             ("Esc/N", "cancel"),
         ])),
         chunks[1],

@@ -790,8 +790,8 @@ pub(super) fn map_refresh_key(key: KeyEvent) -> KeyIntent {
     }
 }
 
-/// The `/episodes` view is read-only: arrows select an entry and page keys
-/// scroll the selected entry's detail pane.
+/// The `/episodes` view: arrows select an entry and page keys scroll the
+/// selected entry's detail pane.
 pub(super) fn map_episodes_key(key: KeyEvent) -> KeyIntent {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
@@ -869,11 +869,11 @@ pub(super) fn map_subtask_list_key(key: KeyEvent, app: &AppState) -> KeyIntent {
             KeyIntent::Action(AppAction::ScrollModal(i16::MAX))
         }
         // `m` overrides the selected agent's model/effort for future runs.
-        KeyCode::Char('m') | KeyCode::Char('M') => {
+        KeyCode::Char('m') | KeyCode::Char('M') if pane == SubtaskListPane::List => {
             KeyIntent::Action(AppAction::SubtaskOverrideModel)
         }
         // `d` clears that override — back to the default (inherited) model.
-        KeyCode::Char('d') | KeyCode::Char('D') => {
+        KeyCode::Char('d') | KeyCode::Char('D') if pane == SubtaskListPane::List => {
             KeyIntent::Action(AppAction::SubtaskClearModelOverride)
         }
         KeyCode::Up => KeyIntent::Action(AppAction::SubtaskListMove(-1)),

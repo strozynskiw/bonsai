@@ -15,10 +15,11 @@ pub(super) fn render_agent_browser(
     let footer = vec![
         Line::from(Span::styled(description, theme::dim())),
         footer_hint_line(&[
+            ("Up/Down", "move"),
+            ("Enter/e", "edit"),
+            ("Space/t", "enable/disable"),
             ("a", "add"),
-            ("e", "edit"),
-            ("Space", "enable/disable"),
-            ("d", "delete"),
+            ("d/Delete", "delete"),
             ("Esc", "close"),
         ]),
     ];
@@ -62,7 +63,7 @@ pub(super) fn render_agent_delete_confirm(
         ]),
         Line::from(Span::styled(path.display().to_string(), theme::dim())),
         Line::from(""),
-        footer_hint_line(&[("Enter", "delete"), ("Esc", "cancel")]),
+        footer_hint_line(&[("Enter/Y", "confirm"), ("Esc/N", "cancel")]),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

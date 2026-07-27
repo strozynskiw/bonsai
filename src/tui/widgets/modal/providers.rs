@@ -327,7 +327,7 @@ pub(super) fn render_provider_remove_confirm(
         ]),
         Line::from(Span::styled(note, theme::dim())),
         Line::from(""),
-        footer_hint_line(&[("Enter", "confirm"), ("Esc", "cancel")]),
+        footer_hint_line(&[("Enter/Y", "confirm"), ("Esc/N", "cancel")]),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
