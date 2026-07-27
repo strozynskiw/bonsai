@@ -22,21 +22,29 @@ impl TerminalSession {
             let _ = disable_raw_mode();
             return Err(err).context("failed to enter alternate screen");
         }
-        if mouse_capture && let Err(err) = execute!(stdout, EnableMouseCapture) {
-            let _ = disable_raw_mode();
+        if mouse_capture && let Err(err) = enable_mouse_capture(&mut stdout) {
+            // The first command may have enabled a prefix of the mouse modes
+            // before the final 1003-disable write failed. Undo the whole group
+            // while raw mode still contains any resulting input bytes.
+            let _ = execute!(stdout, DisableMouseCapture);
             if alternate_screen {
                 let _ = execute!(stdout, LeaveAlternateScreen);
             }
+            let _ = stdout.flush();
+            drain_pending_terminal_events();
+            let _ = disable_raw_mode();
             return Err(err).context("failed to enable mouse capture");
         }
         if let Err(err) = execute!(stdout, EnableBracketedPaste) {
-            let _ = disable_raw_mode();
             if mouse_capture {
                 let _ = execute!(stdout, DisableMouseCapture);
             }
             if alternate_screen {
                 let _ = execute!(stdout, LeaveAlternateScreen);
             }
+            let _ = stdout.flush();
+            drain_pending_terminal_events();
+            let _ = disable_raw_mode();
             return Err(err).context("failed to enable bracketed paste");
         }
         // Push the keyboard protocol so `Alt+<key>` is delivered as a
@@ -130,7 +138,13 @@ impl TerminalSession {
             return Ok(());
         }
         if enabled {
-            execute!(self.terminal.backend_mut(), EnableMouseCapture)?;
+            if let Err(err) = enable_mouse_capture(self.terminal.backend_mut()) {
+                // `EnableMouseCapture` expands to several terminal modes. A
+                // short write can enable only a prefix, so always undo the
+                // whole group before reporting failure.
+                let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+                return Err(err);
+            }
         } else {
             execute!(self.terminal.backend_mut(), DisableMouseCapture)?;
         }
@@ -152,11 +166,6 @@ impl TerminalSession {
     fn restore_best_effort(&mut self) -> Result<()> {
         drain_pending_terminal_events();
         let mut first_error = None;
-        record_cleanup_error(
-            &mut first_error,
-            "failed to disable raw mode",
-            disable_raw_mode(),
-        );
         record_cleanup_error(
             &mut first_error,
             "failed to reset terminal title",
@@ -203,6 +212,15 @@ impl TerminalSession {
             "failed to flush terminal cleanup",
             self.terminal.backend_mut().flush(),
         );
+        // Keep raw mode active until all terminal protocols are disabled and
+        // their final events are drained. Otherwise late mouse/keyboard bytes
+        // can be echoed into the parent shell as visible escape sequences.
+        drain_pending_terminal_events();
+        record_cleanup_error(
+            &mut first_error,
+            "failed to disable raw mode",
+            disable_raw_mode(),
+        );
 
         if let Some(err) = first_error {
             Err(err)
@@ -229,6 +247,31 @@ impl Drop for TerminalSession {
             let _ = self.restore_best_effort();
             self.restored = true;
         }
+    }
+}
+
+/// Enable clicks and button-drag reporting without crossterm's any-motion mode.
+///
+/// `EnableMouseCapture` also turns on DECSET 1003, which makes the terminal send
+/// an SGR sequence for every bare pointer movement. A large motion burst can
+/// overrun or desynchronize terminal input and expose those bytes as composer
+/// text (`ESC[<35;…M`). Mode 1002 still reports all events bonsai consumes:
+/// presses, releases, wheel input, and movement while a button is held.
+fn enable_mouse_capture(writer: &mut impl io::Write) -> io::Result<()> {
+    execute!(writer, EnableMouseCapture, DisableAnyMotionCapture)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAnyMotionCapture;
+
+impl crossterm::Command for DisableAnyMotionCapture {
+    fn write_ansi(&self, writer: &mut impl std::fmt::Write) -> std::fmt::Result {
+        writer.write_str("\x1b[?1003l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -446,6 +489,16 @@ mod tests {
             terminal_viewport(true),
             Viewport::Inline(height) if height > 0
         ));
+    }
+
+    #[test]
+    fn mouse_capture_finishes_with_any_motion_disabled() {
+        let mut output = Vec::new();
+
+        enable_mouse_capture(&mut output).unwrap();
+
+        assert!(output.windows(8).any(|window| window == b"\x1b[?1002h"));
+        assert!(output.ends_with(b"\x1b[?1003l"));
     }
 
     fn run_script(sink: &dyn OutputSink) {
