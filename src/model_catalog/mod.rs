@@ -876,7 +876,7 @@ impl ModelCatalog {
     }
 }
 
-const LIVE_MODEL_CACHE_SCHEMA_VERSION: u8 = 2;
+const LIVE_MODEL_CACHE_SCHEMA_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct LiveModelAvailability {
@@ -966,6 +966,9 @@ pub(crate) struct AvailableModel {
     pub model_id: Option<ModelId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Maximum output tokens reported by the provider's model listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limit: Option<u32>,
     /// Human-readable name reported by the server (LM Studio native API);
     /// `None` when the listing only carries ids.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -981,6 +984,11 @@ pub(crate) struct AvailableModel {
     /// Provider-recommended effort when the user has no saved model override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_reasoning: Option<ReasoningSelection>,
+    /// Provider-reported wire codec for reasoning. This is essential for
+    /// newly discovered Anthropic models whose adaptive-thinking request shape
+    /// differs from the classic budget-tokens shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_codec: Option<ReasoningCodec>,
     /// Codex backend routing contract for models that use Responses Lite.
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_responses_lite: bool,
@@ -1020,13 +1028,25 @@ impl AvailableModel {
             remote_model_id: remote_model_id.into().into_boxed_str(),
             model_id: None,
             context_window,
+            output_limit: None,
             display_name: display_name.map(String::into_boxed_str),
             features,
             supported_reasoning: Vec::new(),
             recommended_reasoning: None,
+            reasoning_codec: None,
             use_responses_lite: false,
             pricing: None,
         }
+    }
+
+    pub(crate) fn with_output_limit(mut self, output_limit: Option<u32>) -> Self {
+        self.output_limit = output_limit.filter(|value| *value > 0);
+        self
+    }
+
+    pub(crate) fn with_reasoning_codec(mut self, reasoning_codec: ReasoningCodec) -> Self {
+        self.reasoning_codec = Some(reasoning_codec);
+        self
     }
 
     /// Attach provider-published live pricing (gateway listings only).
@@ -1395,7 +1415,7 @@ fn resolve_target(
     let (mut output_limit, mut output_limit_source) = choose_refreshed_metadata(
         target.pins(ModelMetadataField::OutputLimit),
         target.output_limit,
-        None,
+        live.and_then(|model| model.output_limit),
         models_dev.and_then(|model| model.output_limit),
     );
     if output_limit.is_none() {
@@ -1408,6 +1428,7 @@ fn resolve_target(
         .unwrap_or(connection.prompt_cache_policy);
     let reasoning_codec = target
         .reasoning_codec
+        .or_else(|| live.and_then(|model| model.reasoning_codec))
         .or(connection.reasoning_codec)
         .unwrap_or_else(|| ReasoningCodec::default_for_transport(transport));
     let parameter_preview = target
@@ -1583,7 +1604,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 186);
+        assert_eq!(catalog.targets.len(), 187);
         assert!(
             catalog
                 .connections
@@ -2141,9 +2162,11 @@ default_base_url = "http://localhost:11434/v1"
         .unwrap();
         assert_eq!(legacy.models[0].remote_model_id.as_ref(), "old-entry");
         assert_eq!(legacy.models[0].display_name, None);
+        assert_eq!(legacy.models[0].output_limit, None);
         assert!(legacy.models[0].features.is_empty());
         assert!(legacy.models[0].supported_reasoning.is_empty());
         assert_eq!(legacy.models[0].recommended_reasoning, None);
+        assert_eq!(legacy.models[0].reasoning_codec, None);
         assert!(!legacy.models[0].use_responses_lite);
 
         let enriched = LiveModelAvailability {
@@ -2154,10 +2177,12 @@ default_base_url = "http://localhost:11434/v1"
                     Some("New Entry".to_string()),
                     vec![ModelFeature::ToolCall],
                 )
+                .with_output_limit(Some(65_536))
                 .with_reasoning(
                     vec![ReasoningSelection::Low, ReasoningSelection::Ultra],
                     Some(ReasoningSelection::Ultra),
-                );
+                )
+                .with_reasoning_codec(ReasoningCodec::AnthropicAdaptive);
                 model.use_responses_lite = true;
                 model
             }],
@@ -2369,7 +2394,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 186);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 187);
 
         let cases = [
             EquivalenceCase {
@@ -2381,6 +2406,11 @@ default_base_url = "http://localhost:11434/v1"
                 connection_id: "anthropic",
                 model_id: "anthropic/claude-opus-4-1",
                 remote_model: "claude-opus-4-1",
+            },
+            EquivalenceCase {
+                connection_id: "anthropic",
+                model_id: "anthropic/claude-opus-5",
+                remote_model: "claude-opus-5",
             },
             EquivalenceCase {
                 connection_id: "anthropic",
@@ -3257,6 +3287,78 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(pricing.output_micros_per_million, 2_000_000);
         assert_eq!(
             resolved.metadata_sources.pricing,
+            Some(ModelMetadataSource::Provider)
+        );
+    }
+
+    #[test]
+    fn shadow_target_uses_live_output_limit_and_reasoning_codec() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "anthropic"
+                    display_name = "Anthropic API"
+                    auth = "api-key"
+                    transport = "anthropic-messages"
+                    default_base_url = "https://api.anthropic.com"
+                    default_endpoint_path = "v1/messages"
+                    default_token_counter = "anthropic-count-tokens"
+                "#,
+            )],
+            &[],
+        )
+        .unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("anthropic");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability {
+                    models: vec![
+                        AvailableModel::with_metadata(
+                            "claude-future",
+                            Some(1_000_000),
+                            Some("Claude Future".to_string()),
+                            vec![ModelFeature::ToolCall, ModelFeature::Reasoning],
+                        )
+                        .with_output_limit(Some(128_000))
+                        .with_reasoning(
+                            vec![
+                                ReasoningSelection::Off,
+                                ReasoningSelection::Low,
+                                ReasoningSelection::High,
+                            ],
+                            Some(ReasoningSelection::High),
+                        )
+                        .with_reasoning_codec(ReasoningCodec::AnthropicAdaptive),
+                    ],
+                    ..LiveModelAvailability::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = catalog
+            .resolve_connection_model(&connection, "claude-future")
+            .expect("live Anthropic model resolves through a shadow target");
+
+        assert_eq!(resolved.source, ModelSource::Discovered);
+        assert_eq!(resolved.context_window, Some(1_000_000));
+        assert_eq!(resolved.output_limit, Some(128_000));
+        assert_eq!(resolved.reasoning_codec, ReasoningCodec::AnthropicAdaptive);
+        assert_eq!(
+            resolved.reasoning_selections(),
+            vec![
+                ReasoningSelection::Default,
+                ReasoningSelection::Off,
+                ReasoningSelection::Low,
+                ReasoningSelection::High,
+            ]
+        );
+        assert_eq!(resolved.recommended_effort, Some(ReasoningSelection::High));
+        assert_eq!(
+            resolved.metadata_sources.output_limit,
             Some(ModelMetadataSource::Provider)
         );
     }

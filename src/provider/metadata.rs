@@ -744,7 +744,7 @@ mod tests {
             ExpectedDefaults {
                 id: "anthropic",
                 display_name: "Anthropic API",
-                default_model: "claude-sonnet-4-5",
+                default_model: "claude-sonnet-5",
                 default_base_url: "https://api.anthropic.com",
                 env_var_api_key: Some("ANTHROPIC_API_KEY"),
                 env_var_model: Some("ANTHROPIC_MODEL"),
@@ -752,6 +752,7 @@ mod tests {
                 seed_models: &[
                     "claude-sonnet-4-5",
                     "claude-sonnet-5",
+                    "claude-opus-5",
                     "claude-opus-4-8",
                     "claude-fable-5",
                     "claude-haiku-4-5",

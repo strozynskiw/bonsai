@@ -578,7 +578,7 @@ mod tests {
 
         let anthropic = store.session("anthropic");
         assert_eq!(anthropic.base_url, "https://api.anthropic.com");
-        assert_eq!(anthropic.model, "claude-sonnet-4-5");
+        assert_eq!(anthropic.model, "claude-sonnet-5");
 
         let minimax = store.session("minimax-coding-plan");
         assert_eq!(minimax.base_url, "https://api.minimax.io/anthropic");

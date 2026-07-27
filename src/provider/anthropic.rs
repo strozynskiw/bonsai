@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::model_catalog::{AvailableModel, LiveModelAvailability, RunTarget};
+use crate::model_catalog::{AvailableModel, LiveModelAvailability, ModelFeature, RunTarget};
 use crate::output::SharedSink;
 use crate::provider::reasoning::{ReasoningCodec, anthropic_adaptive_effort};
 use crate::provider::think_tags::ThinkTagSplitter;
@@ -35,7 +35,7 @@ pub static ANTHROPIC_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
     ProviderMetadata::new(
         "anthropic",
         "Anthropic API",
-        "claude-sonnet-4-5",
+        "claude-sonnet-5",
         "https://api.anthropic.com",
         Some("ANTHROPIC_API_KEY"),
         Some("ANTHROPIC_MODEL"),
@@ -45,6 +45,7 @@ pub static ANTHROPIC_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         &[
             "claude-sonnet-4-5",
             "claude-sonnet-5",
+            "claude-opus-5",
             "claude-opus-4-8",
             "claude-fable-5",
             "claude-haiku-4-5",
@@ -103,9 +104,9 @@ impl ProviderFactory for AnthropicFactory {
 }
 
 /// Live model discovery against `GET /v1/models`. The endpoint reports
-/// `max_input_tokens` (context window) per model, so live data corrects the
-/// static catalog whenever they disagree — new models appear without a binary
-/// update, retired ones drop out.
+/// model limits and capabilities per model, so live data corrects the static
+/// catalog whenever they disagree — new models appear with a runnable request
+/// shape without a binary update, and retired ones drop out.
 async fn fetch_anthropic_models(
     session: &ProviderSession,
     target: &RunTarget,
@@ -177,6 +178,140 @@ struct AnthropicModelRow {
     /// Anthropic-compatible gateways.
     #[serde(default)]
     max_input_tokens: Option<i64>,
+    /// Maximum generated tokens; absent on older Anthropic-compatible
+    /// gateways.
+    #[serde(default)]
+    max_tokens: Option<i64>,
+    /// Rich capability metadata returned by the first-party Models API.
+    #[serde(default)]
+    capabilities: Option<AnthropicModelCapabilities>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AnthropicModelCapabilities {
+    #[serde(default)]
+    effort: Option<AnthropicEffortCapability>,
+    #[serde(default)]
+    image_input: Option<AnthropicCapabilitySupport>,
+    #[serde(default)]
+    pdf_input: Option<AnthropicCapabilitySupport>,
+    #[serde(default)]
+    structured_outputs: Option<AnthropicCapabilitySupport>,
+    #[serde(default)]
+    thinking: Option<AnthropicThinkingCapability>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AnthropicCapabilitySupport {
+    #[serde(default)]
+    supported: bool,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AnthropicEffortCapability {
+    #[serde(default)]
+    supported: bool,
+    #[serde(default)]
+    low: AnthropicCapabilitySupport,
+    #[serde(default)]
+    medium: AnthropicCapabilitySupport,
+    #[serde(default)]
+    high: AnthropicCapabilitySupport,
+    #[serde(default)]
+    xhigh: AnthropicCapabilitySupport,
+    #[serde(default)]
+    max: AnthropicCapabilitySupport,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AnthropicThinkingCapability {
+    #[serde(default)]
+    supported: bool,
+    #[serde(default)]
+    types: AnthropicThinkingTypes,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AnthropicThinkingTypes {
+    #[serde(default)]
+    adaptive: AnthropicCapabilitySupport,
+    #[serde(default)]
+    enabled: AnthropicCapabilitySupport,
+}
+
+#[derive(Debug, Default)]
+struct AnthropicLiveMetadata {
+    features: Vec<ModelFeature>,
+    reasoning: Vec<ReasoningSelection>,
+    recommended_reasoning: Option<ReasoningSelection>,
+    reasoning_codec: Option<ReasoningCodec>,
+}
+
+impl AnthropicModelCapabilities {
+    fn into_live_metadata(self, model_id: &str) -> AnthropicLiveMetadata {
+        let mut metadata = AnthropicLiveMetadata {
+            // Client-defined tool use is part of the Messages API contract but
+            // is not repeated in the model capability object.
+            features: vec![ModelFeature::ToolCall],
+            ..AnthropicLiveMetadata::default()
+        };
+        if self.image_input.is_some_and(|value| value.supported)
+            || self.pdf_input.is_some_and(|value| value.supported)
+        {
+            metadata.features.push(ModelFeature::Attachment);
+        }
+        if self.structured_outputs.is_some_and(|value| value.supported) {
+            metadata.features.push(ModelFeature::StructuredOutput);
+        }
+
+        let thinking_supported = self
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.supported);
+        let adaptive_thinking = self
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.types.adaptive.supported);
+        let enabled_thinking = self
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.types.enabled.supported);
+        let effort_supported = self.effort.as_ref().is_some_and(|effort| effort.supported);
+        if thinking_supported || effort_supported {
+            metadata.features.push(ModelFeature::Reasoning);
+        }
+
+        if let Some(effort) = self.effort.as_ref().filter(|effort| effort.supported) {
+            if !anthropic_thinking_is_always_on(model_id) {
+                metadata.reasoning.push(ReasoningSelection::Off);
+            }
+            for (supported, selection) in [
+                (effort.low.supported, ReasoningSelection::Low),
+                (effort.medium.supported, ReasoningSelection::Medium),
+                (effort.high.supported, ReasoningSelection::High),
+                (effort.xhigh.supported, ReasoningSelection::XHigh),
+                (effort.max.supported, ReasoningSelection::Max),
+            ] {
+                if supported {
+                    metadata.reasoning.push(selection);
+                }
+            }
+            metadata.recommended_reasoning = metadata
+                .reasoning
+                .contains(&ReasoningSelection::High)
+                .then_some(ReasoningSelection::High);
+        }
+        if adaptive_thinking {
+            metadata.reasoning_codec = Some(ReasoningCodec::AnthropicAdaptive);
+        } else if enabled_thinking && effort_supported {
+            metadata.reasoning_codec = Some(ReasoningCodec::AnthropicThinkingWithEffort);
+        }
+        metadata
+    }
+}
+
+fn anthropic_thinking_is_always_on(model_id: &str) -> bool {
+    model_id.starts_with("claude-fable-5") || model_id.starts_with("claude-mythos-5")
 }
 
 impl AnthropicModelRow {
@@ -185,7 +320,28 @@ impl AnthropicModelRow {
             .max_input_tokens
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0);
-        AvailableModel::with_metadata(self.id, context_window, self.display_name, Vec::new())
+        let output_limit = self
+            .max_tokens
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0);
+        let metadata = self
+            .capabilities
+            .map(|capabilities| capabilities.into_live_metadata(&self.id))
+            .unwrap_or_default();
+        let mut model = AvailableModel::with_metadata(
+            self.id,
+            context_window,
+            self.display_name,
+            metadata.features,
+        )
+        .with_output_limit(output_limit);
+        if !metadata.reasoning.is_empty() {
+            model = model.with_reasoning(metadata.reasoning, metadata.recommended_reasoning);
+        }
+        if let Some(reasoning_codec) = metadata.reasoning_codec {
+            model = model.with_reasoning_codec(reasoning_codec);
+        }
+        model
     }
 }
 
@@ -277,11 +433,13 @@ impl AnthropicCompatibleProvider {
             output_limit: target.output_limit,
             reasoning: target.reasoning,
             reasoning_escalation: target.reasoning_escalation,
-            // Anything that isn't the adaptive codec collapses to the classic
-            // budget-tokens shape: chat-completions codecs make no sense on
-            // this transport, and AnthropicThinking is its historical default.
+            // Non-Anthropic codecs make no sense on this transport. Preserve
+            // both current Anthropic shapes plus the Opus 4.5 hybrid; otherwise
+            // fall back to the historical budget-tokens shape.
             reasoning_codec: match target.reasoning_codec {
-                ReasoningCodec::AnthropicAdaptive => ReasoningCodec::AnthropicAdaptive,
+                ReasoningCodec::AnthropicAdaptive | ReasoningCodec::AnthropicThinkingWithEffort => {
+                    target.reasoning_codec
+                }
                 _ => ReasoningCodec::AnthropicThinking,
             },
             require_api_key,
@@ -438,8 +596,10 @@ impl AnthropicCompatibleProvider {
         if let Some(thinking) = thinking {
             body["thinking"] = thinking;
         }
-        if self.reasoning_codec == ReasoningCodec::AnthropicAdaptive
-            && let Some(effort) = anthropic_adaptive_effort(reasoning)
+        if matches!(
+            self.reasoning_codec,
+            ReasoningCodec::AnthropicAdaptive | ReasoningCodec::AnthropicThinkingWithEffort
+        ) && let Some(effort) = anthropic_adaptive_effort(reasoning)
         {
             body["output_config"] = json!({"effort": effort});
         }
@@ -1256,6 +1416,25 @@ mod tests {
         )
     }
 
+    fn hybrid_anthropic_provider(reasoning: ReasoningSelection) -> AnthropicCompatibleProvider {
+        let mut session = make_session();
+        session.reasoning = reasoning;
+        let mut target = crate::provider::fallback_run_target(&ANTHROPIC_METADATA, &session);
+        target.reasoning = reasoning;
+        target.reasoning_codec = ReasoningCodec::AnthropicThinkingWithEffort;
+        AnthropicCompatibleProvider::new(
+            "anthropic",
+            &session,
+            &target,
+            AnthropicTransportFlags {
+                require_api_key: true,
+                supports_prompt_cache: false,
+                supports_vision: true,
+            },
+            "x-api-key",
+        )
+    }
+
     fn anthropic_sse(events: &[&str]) -> String {
         let mut out = String::new();
         for event in events {
@@ -1380,6 +1559,22 @@ mod tests {
 
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn hybrid_request_uses_budget_tokens_and_output_effort() {
+        let provider = hybrid_anthropic_provider(ReasoningSelection::High);
+
+        let body = provider
+            .request_body(&[user_message("hello")], &[])
+            .unwrap();
+
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 16_384})
+        );
+        assert_eq!(body["output_config"], json!({"effort": "high"}));
+        assert!(body["max_tokens"].as_u64().unwrap() > 16_384);
     }
 
     fn pasted_image_user_message() -> ChatCompletionRequestMessage {
@@ -2073,6 +2268,7 @@ mod tests {
         let models = factory.list_models(&session).await.unwrap();
         assert!(models.contains(&"claude-sonnet-4-5".to_string()));
         assert!(models.contains(&"claude-sonnet-5".to_string()));
+        assert!(models.contains(&"claude-opus-5".to_string()));
         assert!(models.contains(&"claude-opus-4-8".to_string()));
         assert!(models.contains(&"claude-fable-5".to_string()));
         assert!(models.contains(&"claude-haiku-4-5".to_string()));
@@ -2094,11 +2290,79 @@ mod tests {
                     "data": [
                         {"type": "model", "id": "claude-sonnet-5",
                          "display_name": "Claude Sonnet 5",
-                         "max_input_tokens": 1000000, "max_tokens": 128000},
+                         "max_input_tokens": 1000000, "max_tokens": 128000,
+                         "capabilities": {
+                           "effort": {
+                             "supported": true,
+                             "low": {"supported": true},
+                             "medium": {"supported": true},
+                             "high": {"supported": true},
+                             "xhigh": {"supported": true},
+                             "max": {"supported": true}
+                           },
+                           "image_input": {"supported": true},
+                           "pdf_input": {"supported": true},
+                           "structured_outputs": {"supported": true},
+                           "thinking": {
+                             "supported": true,
+                             "types": {
+                               "adaptive": {"supported": true},
+                               "enabled": {"supported": false}
+                             }
+                           }
+                         }},
+                        {"type": "model", "id": "claude-fable-5",
+                         "display_name": "Claude Fable 5",
+                         "max_input_tokens": 1000000, "max_tokens": 128000,
+                         "capabilities": {
+                           "effort": {
+                             "supported": true,
+                             "low": {"supported": true},
+                             "medium": {"supported": true},
+                             "high": {"supported": true},
+                             "xhigh": {"supported": true},
+                             "max": {"supported": true}
+                           },
+                           "thinking": {
+                             "supported": true,
+                             "types": {
+                               "adaptive": {"supported": true}
+                             }
+                           }
+                         }},
+                        {"type": "model", "id": "claude-opus-4-5",
+                         "display_name": "Claude Opus 4.5",
+                         "max_input_tokens": 200000, "max_tokens": 64000,
+                         "capabilities": {
+                           "effort": {
+                             "supported": true,
+                             "low": {"supported": true},
+                             "medium": {"supported": true},
+                             "high": {"supported": true}
+                           },
+                           "thinking": {
+                             "supported": true,
+                             "types": {
+                               "adaptive": {"supported": false},
+                               "enabled": {"supported": true}
+                             }
+                           }
+                         }},
                         {"type": "model", "id": "claude-haiku-4-5",
                          "display_name": "Claude Haiku 4.5",
-                         "max_input_tokens": 200000, "max_tokens": 64000},
-                        {"type": "model", "id": "claude-mystery"}
+                         "max_input_tokens": 200000, "max_tokens": 64000,
+                         "capabilities": {
+                           "effort": {"supported": false},
+                           "thinking": {
+                             "supported": true,
+                             "types": {
+                               "adaptive": {"supported": false},
+                               "enabled": {"supported": true}
+                             }
+                           }
+                         }},
+                        {"type": "model", "id": "claude-mystery",
+                         "max_input_tokens": 0, "max_tokens": -1}
                     ],
                     "has_more": false,
                     "first_id": "claude-sonnet-5",
@@ -2114,14 +2378,67 @@ mod tests {
         session.base_url = server.uri();
         let availability = factory.list_available_models(&session).await.unwrap();
 
-        assert_eq!(availability.models.len(), 3);
+        assert_eq!(availability.models.len(), 5);
         let sonnet = &availability.models[0];
         assert_eq!(sonnet.remote_model_id.as_ref(), "claude-sonnet-5");
         assert_eq!(sonnet.context_window, Some(1_000_000));
+        assert_eq!(sonnet.output_limit, Some(128_000));
         assert_eq!(sonnet.display_name.as_deref(), Some("Claude Sonnet 5"));
-        // A row without max_input_tokens stays context-unknown so static
-        // catalog metadata keeps governing.
-        assert_eq!(availability.models[2].context_window, None);
+        assert_eq!(
+            sonnet.features,
+            vec![
+                ModelFeature::ToolCall,
+                ModelFeature::Attachment,
+                ModelFeature::StructuredOutput,
+                ModelFeature::Reasoning,
+            ]
+        );
+        assert_eq!(
+            sonnet.supported_reasoning,
+            vec![
+                ReasoningSelection::Off,
+                ReasoningSelection::Low,
+                ReasoningSelection::Medium,
+                ReasoningSelection::High,
+                ReasoningSelection::XHigh,
+                ReasoningSelection::Max,
+            ]
+        );
+        assert_eq!(sonnet.recommended_reasoning, Some(ReasoningSelection::High));
+        assert_eq!(
+            sonnet.reasoning_codec,
+            Some(ReasoningCodec::AnthropicAdaptive)
+        );
+
+        let fable = &availability.models[1];
+        assert!(!fable.supported_reasoning.contains(&ReasoningSelection::Off));
+        assert_eq!(
+            fable.reasoning_codec,
+            Some(ReasoningCodec::AnthropicAdaptive)
+        );
+        let opus = &availability.models[2];
+        assert_eq!(
+            opus.reasoning_codec,
+            Some(ReasoningCodec::AnthropicThinkingWithEffort)
+        );
+        assert_eq!(
+            opus.supported_reasoning,
+            vec![
+                ReasoningSelection::Off,
+                ReasoningSelection::Low,
+                ReasoningSelection::Medium,
+                ReasoningSelection::High,
+            ]
+        );
+        // Non-positive limits stay unknown so static or models.dev catalog
+        // metadata keeps governing.
+        assert_eq!(availability.models[4].context_window, None);
+        assert_eq!(availability.models[4].output_limit, None);
+        assert!(availability.models[4].features.is_empty());
+        // Manual-only rows leave the selection details unknown so static or
+        // models.dev budget-token controls remain authoritative.
+        assert!(availability.models[3].supported_reasoning.is_empty());
+        assert_eq!(availability.models[3].reasoning_codec, None);
     }
 
     #[tokio::test]

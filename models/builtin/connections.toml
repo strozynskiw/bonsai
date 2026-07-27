@@ -87,7 +87,7 @@ default_base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 model_env = "ANTHROPIC_MODEL"
 base_url_env = "ANTHROPIC_BASE_URL"
-default_model = "anthropic/claude-sonnet-4-5"
+default_model = "anthropic/claude-sonnet-5"
 default_endpoint_path = "v1/messages"
 default_token_counter = "anthropic-count-tokens"
 # Anthropic caches ONLY with explicit `cache_control` breakpoints (tools

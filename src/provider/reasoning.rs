@@ -16,6 +16,10 @@ pub(crate) enum ReasoningCodec {
     OpenAiChatCompletions,
     CodexResponses,
     AnthropicThinking,
+    /// Claude Opus 4.5 combines legacy `budget_tokens` thinking with the
+    /// separate `output_config.effort` control. The Anthropic provider emits
+    /// both fields for this codec.
+    AnthropicThinkingWithEffort,
     /// Anthropic's adaptive-thinking generation (claude-sonnet-4-6 and later,
     /// claude-opus-4-7 and later, claude-sonnet-5, claude-fable-5). These
     /// models reject `{"type": "enabled", "budget_tokens": N}` with HTTP 400;
@@ -50,7 +54,9 @@ impl ReasoningCodec {
             Self::OpenAiCompatible => openai_compatible_reasoning(selection),
             Self::OpenAiChatCompletions => None,
             Self::CodexResponses => codex_responses_reasoning(selection),
-            Self::AnthropicThinking => anthropic_thinking(selection),
+            Self::AnthropicThinking | Self::AnthropicThinkingWithEffort => {
+                anthropic_thinking(selection)
+            }
             Self::AnthropicAdaptive => anthropic_adaptive(selection),
             Self::KimiThinking | Self::ZaiThinking | Self::ZaiReasoningEffort => None,
         }
@@ -69,6 +75,7 @@ impl ReasoningCodec {
             Self::OpenAiCompatible
             | Self::CodexResponses
             | Self::AnthropicThinking
+            | Self::AnthropicThinkingWithEffort
             | Self::AnthropicAdaptive => {
                 if let Some(reasoning) = self.encode_json(selection) {
                     body["reasoning"] = reasoning;
@@ -483,6 +490,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ReasoningCodec>("\"anthropic-adaptive\"").unwrap(),
             ReasoningCodec::AnthropicAdaptive
+        );
+    }
+
+    #[test]
+    fn anthropic_hybrid_codec_parses_from_kebab_case() {
+        assert_eq!(
+            serde_json::from_str::<ReasoningCodec>("\"anthropic-thinking-with-effort\"").unwrap(),
+            ReasoningCodec::AnthropicThinkingWithEffort
         );
     }
 
