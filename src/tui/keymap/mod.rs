@@ -567,7 +567,29 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         }
         KeyEvent {
             code: KeyCode::Up, ..
+        } if matches!(app.focus, Focus::Input) && app.composer.history_cursor.is_some() => {
+            KeyIntent::Action(AppAction::HistoryPrev)
+        }
+        KeyEvent {
+            code: KeyCode::Up, ..
+        } if matches!(app.focus, Focus::Input) && app.input().is_empty() => {
+            KeyIntent::Action(AppAction::HistoryPrev)
+        }
+        KeyEvent {
+            code: KeyCode::Up, ..
         } if matches!(app.focus, Focus::Input) => KeyIntent::Action(AppAction::CursorUp),
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        } if matches!(app.focus, Focus::Input) && app.composer.history_cursor.is_some() => {
+            KeyIntent::Action(AppAction::HistoryNext)
+        }
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        } if matches!(app.focus, Focus::Input) && app.input().is_empty() => {
+            KeyIntent::Action(AppAction::HistoryNext)
+        }
         KeyEvent {
             code: KeyCode::Down,
             ..
