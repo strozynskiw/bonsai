@@ -1528,8 +1528,11 @@ mod tests {
         let registry = crate::provider::ProviderRegistry::from_catalog(&catalog);
         let factory = registry.get("openai").expect("OpenAI API connection");
         let metadata = factory.metadata();
-        let mut session =
-            provider_session("sk-openai", &metadata.default_base_url, "openai/gpt-5.6");
+        let mut session = provider_session(
+            "sk-openai",
+            &metadata.default_base_url,
+            "openai/gpt-5.6-sol",
+        );
         session.reasoning = crate::provider::ReasoningSelection::High;
         let connection_id = "openai"
             .parse::<crate::model_catalog::ConnectionId>()
@@ -1910,6 +1913,55 @@ mod tests {
         assert_eq!(
             availability.remote_model_ids(),
             vec!["hy3".to_string(), "hy3-preview".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_openai_refresh_uses_account_model_listing() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer sk-openai-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "gpt-5.6-sol",
+                        "object": "model",
+                        "created": 1_783_555_200_u64,
+                        "owned_by": "system"
+                    },
+                    {
+                        "id": "gpt-5.7",
+                        "object": "model",
+                        "created": 1_783_555_201_u64,
+                        "owned_by": "system"
+                    },
+                    {
+                        "id": "gpt-image-2",
+                        "object": "model",
+                        "created": 1_783_555_202_u64,
+                        "owned_by": "system"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let catalog =
+            crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
+        let registry = crate::provider::ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("openai").expect("OpenAI API connection");
+        let session = provider_session("sk-openai-test", &server.uri(), "gpt-5.6-sol");
+
+        let availability = factory.list_available_models(&session).await.unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec!["gpt-5.6-sol".to_string(), "gpt-5.7".to_string()]
         );
     }
 

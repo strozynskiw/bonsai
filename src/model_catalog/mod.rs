@@ -721,10 +721,7 @@ impl ModelCatalog {
             .get(connection_id)
             .map(LiveModelAvailability::remote_model_ids)
             .unwrap_or_default();
-        if !live_models.is_empty() {
-            return live_models;
-        }
-
+        let has_live_models = !live_models.is_empty();
         let target_models = self
             .target_order
             .iter()
@@ -742,10 +739,67 @@ impl ModelCatalog {
             })
             .collect::<Vec<_>>();
         if target_models.is_empty() {
-            fallback_models
-        } else {
-            dedup_preserving_order(target_models)
+            return if has_live_models {
+                live_models
+            } else {
+                fallback_models
+            };
         }
+
+        // Provider listings contain wire ids, while one wire id can back
+        // multiple catalog targets (OpenAI's short- and long-context price
+        // bands). Keep the provider's live order, collapse aliases that resolve
+        // to the same canonical target, then append canonical selectors for
+        // any additional target sharing an available wire model. Without this,
+        // `/refresh` made synthetic price-band targets disappear from `/model`.
+        let source_selectors = if has_live_models {
+            live_models
+        } else {
+            target_models
+        };
+        let mut selectors = Vec::new();
+        let mut seen_model_ids = HashSet::new();
+        let mut seen_unresolved = HashSet::new();
+        for selector in source_selectors {
+            let resolved = self.resolve_connection_model(connection_id, &selector);
+            let available_remote = resolved
+                .as_ref()
+                .map(|model| model.remote_model_id.as_ref())
+                .unwrap_or(selector.as_str());
+            let keep = resolved.as_ref().map_or_else(
+                || seen_unresolved.insert(selector.clone()),
+                |model| seen_model_ids.insert(model.model_id.clone()),
+            );
+            if !keep {
+                continue;
+            }
+
+            // Place price-band variants immediately after their base model so
+            // a provider with several tiered models stays readable.
+            let mut variants = Vec::new();
+            for (target_connection_id, model_id) in &self.target_order {
+                if target_connection_id != connection_id || seen_model_ids.contains(model_id) {
+                    continue;
+                }
+                let Some(target) = self
+                    .targets
+                    .get(&(target_connection_id.clone(), model_id.clone()))
+                else {
+                    continue;
+                };
+                let remote_model = target
+                    .remote_model
+                    .as_deref()
+                    .unwrap_or_else(|| target.model.model());
+                if remote_model == available_remote {
+                    seen_model_ids.insert(model_id.clone());
+                    variants.push(model_id.to_string());
+                }
+            }
+            selectors.push(selector);
+            selectors.extend(variants);
+        }
+        selectors
     }
 
     pub(crate) fn target_remote_models_for_connection(
@@ -1260,7 +1314,10 @@ fn models_dev_drift_lines(target: &TargetSpec, models_dev_model: &ModelsDevModel
         mismatches.push(format!("output_limit {toml} vs models.dev {live}"));
     }
     if !target.pins(ModelMetadataField::Pricing)
-        && let (Some(toml), Some(live)) = (target.pricing, models_dev_model.pricing)
+        && let (Some(toml), Some(live)) = (
+            target.pricing,
+            models_dev_model.pricing_for_context_window(target.context_window),
+        )
         && toml != live
     {
         mismatches.push("pricing differs from models.dev".to_string());
@@ -1474,7 +1531,7 @@ fn resolve_target(
         target.pins(ModelMetadataField::Pricing),
         target.pricing,
         live.and_then(|model| model.pricing),
-        models_dev.and_then(|model| model.pricing),
+        models_dev.and_then(|model| model.pricing_for_context_window(context_window)),
     );
     let (display_name, display_name_source) = choose_refreshed_metadata(
         target.pins(ModelMetadataField::DisplayName),
@@ -1604,7 +1661,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 187);
+        assert_eq!(catalog.targets.len(), 195);
         assert!(
             catalog
                 .connections
@@ -1809,7 +1866,7 @@ mod tests {
         assert_eq!(openai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(
             openai.default_model.as_ref().map(ModelId::as_str),
-            Some("openai/gpt-5.6")
+            Some("openai/gpt-5.6-sol")
         );
         assert_eq!(
             openai.reasoning_codec,
@@ -1821,12 +1878,13 @@ mod tests {
             .targets
             .iter()
             .find(|target| {
-                target.connection.as_str() == "openai" && target.model.as_str() == "openai/gpt-5.6"
+                target.connection.as_str() == "openai"
+                    && target.model.as_str() == "openai/gpt-5.6-sol"
             })
             .unwrap();
         assert!(openai_default.is_default);
         assert!(openai_default.recommended);
-        assert_eq!(openai_default.context_window, Some(200_000));
+        assert_eq!(openai_default.context_window, Some(272_000));
 
         let hosted_connections = [
             (
@@ -2394,7 +2452,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 187);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 195);
 
         let cases = [
             EquivalenceCase {
@@ -2679,6 +2737,71 @@ default_base_url = "http://localhost:11434/v1"
                 .map(|model| model.remote_model_id.to_string())
                 .as_deref(),
             Some("qwen/qwen3.6-35b-a3b")
+        );
+    }
+
+    #[test]
+    fn available_models_preserve_multiple_targets_for_one_live_wire_model() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openai"
+                    display_name = "OpenAI"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "openai"
+                    model = "openai/gpt-current"
+                    remote_model = "gpt-current"
+                    aliases = ["gpt-current-alias"]
+                    context_window = 272000
+
+                    [[targets]]
+                    connection = "openai"
+                    model = "openai/gpt-current-1m"
+                    metadata_model = "openai/gpt-current"
+                    remote_model = "gpt-current"
+                    context_window = 1050000
+                "#,
+            )],
+        )
+        .unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection_id = connection_id("openai");
+
+        assert_eq!(
+            catalog.available_models_for_connection(&connection_id, Vec::new()),
+            vec![
+                "gpt-current".to_string(),
+                "openai/gpt-current-1m".to_string()
+            ]
+        );
+
+        catalog
+            .write_live_availability(
+                &connection_id,
+                LiveModelAvailability::from_remote_ids([
+                    "gpt-current-alias".to_string(),
+                    "gpt-current".to_string(),
+                    "gpt-next".to_string(),
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            catalog.available_models_for_connection(&connection_id, Vec::new()),
+            vec![
+                "gpt-current-alias".to_string(),
+                "openai/gpt-current-1m".to_string(),
+                "gpt-next".to_string()
+            ]
         );
     }
 
@@ -3465,7 +3588,7 @@ default_base_url = "http://localhost:11434/v1"
             ),
             (
                 "openai",
-                "openai/gpt-5.6",
+                "openai/gpt-5.6-sol",
                 PromptCachePolicy::TransportDefault,
             ),
             (
@@ -3484,6 +3607,84 @@ default_base_url = "http://localhost:11434/v1"
                 "IMPORTANT: cache policy drifted for {connection}/{model}"
             );
         }
+    }
+
+    #[test]
+    fn openai_builtin_matches_current_chat_completions_lineup() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let openai_id = connection_id("openai");
+        let connection = catalog.connection(&openai_id).unwrap();
+        assert_eq!(
+            connection.default_model.as_ref().map(ModelId::as_str),
+            Some("openai/gpt-5.6-sol")
+        );
+        assert_eq!(
+            catalog.available_models_for_connection(&openai_id, Vec::new()),
+            vec![
+                "gpt-5.6-sol",
+                "openai/gpt-5.6-1m",
+                "gpt-5.6-terra",
+                "openai/gpt-5.6-terra-1m",
+                "gpt-5.6-luna",
+                "openai/gpt-5.6-luna-1m",
+                "gpt-5.5",
+                "openai/gpt-5.5-1m",
+                "gpt-5.4",
+                "openai/gpt-5.4-1m",
+                "gpt-5.4-mini",
+                "gpt-5.4-nano",
+            ]
+        );
+
+        let cases = [
+            ("openai/gpt-5.6-sol", 272_000, 5_000_000, 30_000_000),
+            ("openai/gpt-5.6-1m", 1_050_000, 10_000_000, 45_000_000),
+            ("openai/gpt-5.6-terra", 272_000, 2_500_000, 15_000_000),
+            ("openai/gpt-5.6-terra-1m", 1_050_000, 5_000_000, 22_500_000),
+            ("openai/gpt-5.6-luna", 272_000, 1_000_000, 6_000_000),
+            ("openai/gpt-5.6-luna-1m", 1_050_000, 2_000_000, 9_000_000),
+            ("openai/gpt-5.5", 272_000, 5_000_000, 30_000_000),
+            ("openai/gpt-5.5-1m", 1_050_000, 10_000_000, 45_000_000),
+            ("openai/gpt-5.4", 272_000, 2_500_000, 15_000_000),
+            ("openai/gpt-5.4-1m", 1_050_000, 5_000_000, 22_500_000),
+            ("openai/gpt-5.4-mini", 400_000, 750_000, 4_500_000),
+            ("openai/gpt-5.4-nano", 400_000, 200_000, 1_250_000),
+        ];
+        for (model, context, input, output) in cases {
+            let resolved = catalog
+                .resolve(&openai_id, &model_id(model))
+                .unwrap_or_else(|_| panic!("{model} must resolve"));
+            assert_eq!(resolved.context_window, Some(context), "{model}");
+            assert_eq!(resolved.output_limit, Some(128_000), "{model}");
+            assert_eq!(
+                resolved.pricing.map(|pricing| (
+                    pricing.input_micros_per_million,
+                    pricing.output_micros_per_million
+                )),
+                Some((input, output)),
+                "{model}"
+            );
+            for feature in [
+                ModelFeature::ToolCall,
+                ModelFeature::Reasoning,
+                ModelFeature::StructuredOutput,
+                ModelFeature::Attachment,
+            ] {
+                assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
+            }
+            assert!(
+                resolved
+                    .reasoning_selections()
+                    .contains(&ReasoningSelection::Off),
+                "{model}"
+            );
+        }
+
+        let legacy = catalog
+            .resolve_connection_model(&openai_id, "openai/gpt-5.6")
+            .expect("the previous default selector must keep working");
+        assert_eq!(legacy.model_id.as_str(), "openai/gpt-5.6-sol");
+        assert_eq!(legacy.remote_model_id.as_ref(), "gpt-5.6-sol");
     }
 
     #[test]
@@ -3653,6 +3854,93 @@ default_base_url = "http://localhost:11434/v1"
             resolved.pricing,
             Some(ModelPricing::new(5_000_000, 30_000_000)),
             "omitted pricing should refresh from models.dev"
+        );
+    }
+
+    #[test]
+    fn resolver_applies_refreshed_price_tier_for_long_context_target() {
+        let models_dev = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "openai": {
+                "models": {
+                  "gpt-current": {
+                    "id": "gpt-current",
+                    "cost": {
+                      "input": 5,
+                      "output": 30,
+                      "tiers": [{
+                        "input": 10,
+                        "output": 45,
+                        "tier": { "type": "context", "size": 272000 }
+                      }]
+                    }
+                  }
+                }
+              }
+            }
+            "#,
+        )
+        .unwrap();
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openai"
+                    display_name = "OpenAI"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                "#,
+            )],
+            &[source(
+                "targets.toml",
+                r#"
+                    [[targets]]
+                    connection = "openai"
+                    model = "openai/gpt-current"
+                    pinned_fields = ["context-window"]
+                    context_window = 272000
+                    pricing = { input_micros_per_million = 1, output_micros_per_million = 1 }
+
+                    [[targets]]
+                    connection = "openai"
+                    model = "openai/gpt-current-1m"
+                    metadata_model = "openai/gpt-current"
+                    remote_model = "gpt-current"
+                    pinned_fields = ["context-window"]
+                    context_window = 1050000
+                    pricing = { input_micros_per_million = 1, output_micros_per_million = 1 }
+                "#,
+            )],
+        )
+        .unwrap()
+        .with_models_dev(models_dev);
+        let catalog = ModelCatalog::from_spec(spec);
+
+        let short = catalog
+            .resolve(&connection_id("openai"), &model_id("openai/gpt-current"))
+            .unwrap();
+        let long = catalog
+            .resolve(&connection_id("openai"), &model_id("openai/gpt-current-1m"))
+            .unwrap();
+
+        assert_eq!(
+            short.pricing,
+            Some(ModelPricing::new(5_000_000, 30_000_000))
+        );
+        assert_eq!(
+            long.pricing,
+            Some(ModelPricing::new(10_000_000, 45_000_000))
+        );
+        assert_eq!(
+            short.metadata_sources.pricing,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+        assert_eq!(
+            long.metadata_sources.pricing,
+            Some(ModelMetadataSource::ModelsDev)
         );
     }
 

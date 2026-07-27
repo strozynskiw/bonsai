@@ -59,6 +59,7 @@ pub(crate) struct ModelsDevModel {
     pub context_window: Option<u32>,
     pub output_limit: Option<u32>,
     pub pricing: Option<ModelPricing>,
+    context_pricing: Vec<ContextPricingTier>,
 }
 
 impl ModelsDevModel {
@@ -104,6 +105,34 @@ impl ModelsDevModel {
 
         reasoning_options_for_transport(&self.reasoning_options, transport)
     }
+
+    /// Return the price that applies to a target's configured context window.
+    ///
+    /// Models.dev publishes threshold tiers for models whose entire request is
+    /// repriced above a prompt-size boundary (OpenAI's 1.05M models are the
+    /// first direct-provider example). Bonsai represents each price band as a
+    /// separate target, so `/refresh` must choose the matching tier instead of
+    /// applying the base price to every target.
+    pub(crate) fn pricing_for_context_window(
+        &self,
+        context_window: Option<u32>,
+    ) -> Option<ModelPricing> {
+        context_window
+            .and_then(|window| {
+                self.context_pricing
+                    .iter()
+                    .filter(|tier| window > tier.above_tokens)
+                    .max_by_key(|tier| tier.above_tokens)
+                    .map(|tier| tier.pricing)
+            })
+            .or(self.pricing)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContextPricingTier {
+    above_tokens: u32,
+    pricing: ModelPricing,
 }
 
 pub(crate) fn reasoning_selections_from_options(
@@ -218,7 +247,10 @@ impl RawModelsDevModel {
     ) -> Result<ModelsDevModel, CatalogError> {
         let model_id = models_dev_model_id(source_name, provider_id, &self.id)?;
         let display_name = self.name.unwrap_or_else(|| model_id.model().into());
-        let pricing = self.cost.and_then(|cost| cost.pricing());
+        let (pricing, context_pricing) = self
+            .cost
+            .map(RawModelsDevCost::into_pricing)
+            .unwrap_or_default();
         // A zero limit is publisher noise, not a real window — treat it as
         // unknown (the live-availability path applies the same `> 0` floor).
         let context_window = self.limit.context.filter(|value| *value > 0);
@@ -252,6 +284,7 @@ impl RawModelsDevModel {
             context_window,
             output_limit,
             pricing,
+            context_pricing,
         })
     }
 }
@@ -529,8 +562,16 @@ struct RawModelsDevLimit {
     output: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct RawModelsDevCost {
+    #[serde(flatten)]
+    rates: RawModelsDevRates,
+    #[serde(default)]
+    tiers: Vec<RawModelsDevCostTier>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+struct RawModelsDevRates {
     #[serde(
         default,
         rename = "input",
@@ -557,7 +598,7 @@ struct RawModelsDevCost {
     cache_write_micros_per_million: Option<u64>,
 }
 
-impl RawModelsDevCost {
+impl RawModelsDevRates {
     fn pricing(self) -> Option<ModelPricing> {
         Some(
             ModelPricing::new(
@@ -569,6 +610,46 @@ impl RawModelsDevCost {
                 self.cache_write_micros_per_million,
             ),
         )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawModelsDevCostTier {
+    #[serde(flatten)]
+    rates: RawModelsDevRates,
+    #[serde(default)]
+    tier: Option<RawModelsDevTierSelector>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawModelsDevTierSelector {
+    #[serde(rename = "type")]
+    kind: Box<str>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_negative_u32")]
+    size: Option<u32>,
+}
+
+impl RawModelsDevCost {
+    fn into_pricing(self) -> (Option<ModelPricing>, Vec<ContextPricingTier>) {
+        let pricing = self.rates.pricing();
+        let mut context_pricing = self
+            .tiers
+            .into_iter()
+            .filter_map(|tier| {
+                let selector = tier.tier?;
+                if selector.kind.as_ref() != "context" {
+                    return None;
+                }
+                let above_tokens = selector.size.filter(|size| *size > 0)?;
+                let pricing = tier.rates.pricing()?;
+                Some(ContextPricingTier {
+                    above_tokens,
+                    pricing,
+                })
+            })
+            .collect::<Vec<_>>();
+        context_pricing.sort_by_key(|tier| tier.above_tokens);
+        (pricing, context_pricing)
     }
 }
 
@@ -958,6 +1039,59 @@ mod tests {
         assert_eq!(tiny.context_window, None);
         assert_eq!(tiny.pricing, None);
         assert!(tiny.features().is_empty());
+    }
+
+    #[test]
+    fn models_dev_parser_selects_context_pricing_tiers() {
+        let catalog = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "openai": {
+                "models": {
+                  "gpt-current": {
+                    "id": "gpt-current",
+                    "cost": {
+                      "input": 5,
+                      "output": 30,
+                      "cache_read": 0.5,
+                      "cache_write": 6.25,
+                      "tiers": [
+                        {
+                          "input": 10,
+                          "output": 45,
+                          "cache_read": 1,
+                          "cache_write": 12.5,
+                          "tier": { "type": "context", "size": 272000 }
+                        },
+                        {
+                          "input": 99,
+                          "output": 99,
+                          "tier": { "type": "service", "size": 1 }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let model = catalog.model(&model_id("openai/gpt-current")).unwrap();
+        let base = ModelPricing::new(5_000_000, 30_000_000)
+            .with_cache_rates(Some(500_000), Some(6_250_000));
+        let long = ModelPricing::new(10_000_000, 45_000_000)
+            .with_cache_rates(Some(1_000_000), Some(12_500_000));
+
+        assert_eq!(model.pricing_for_context_window(None), Some(base));
+        assert_eq!(model.pricing_for_context_window(Some(272_000)), Some(base));
+        assert_eq!(model.pricing_for_context_window(Some(272_001)), Some(long));
+        assert_eq!(
+            model.pricing_for_context_window(Some(1_050_000)),
+            Some(long)
+        );
     }
 
     #[test]

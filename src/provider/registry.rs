@@ -439,7 +439,7 @@ mod tests {
             metadata.default_base_url.as_ref(),
             "https://api.openai.com/v1"
         );
-        assert_eq!(metadata.default_model.as_ref(), "openai/gpt-5.6");
+        assert_eq!(metadata.default_model.as_ref(), "openai/gpt-5.6-sol");
         assert_eq!(metadata.endpoint_path.as_ref(), "chat/completions");
         assert_eq!(metadata.env_var_api_key.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(metadata.env_var_model.as_deref(), Some("OPENAI_MODEL"));
@@ -451,7 +451,21 @@ mod tests {
             metadata.token_counter,
             Some(crate::provider::TokenCounterKind::Tiktoken)
         );
-        assert!(metadata.seed_model_list().contains(&"gpt-5.6".to_string()));
+        let seed_models = metadata.seed_model_list();
+        for model in [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+        ] {
+            assert!(
+                seed_models.iter().any(|seed| seed == model),
+                "OpenAI offline catalog must include {model}"
+            );
+        }
         assert!(metadata.capabilities.supports_prompt_cache);
     }
 
