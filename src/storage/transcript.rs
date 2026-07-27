@@ -21,21 +21,22 @@ impl Storage {
         transcript: &[TranscriptItem],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM messages WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete transcript messages")?;
-        sqlx::query("DELETE FROM transcript_blocks WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete transcript blocks")?;
-        sqlx::query("DELETE FROM tool_calls WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete transcript tool calls")?;
+        storage_op!(
+            tx,
+            "delete transcript messages",
+            sqlx::query("DELETE FROM messages WHERE session_id = ?").bind(session_id.as_i64()),
+        )?;
+        storage_op!(
+            tx,
+            "delete transcript blocks",
+            sqlx::query("DELETE FROM transcript_blocks WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
+        storage_op!(
+            tx,
+            "delete transcript tool calls",
+            sqlx::query("DELETE FROM tool_calls WHERE session_id = ?").bind(session_id.as_i64()),
+        )?;
 
         let mut message_seq = 0_i64;
         let mut tool_seq = 0_i64;
@@ -88,12 +89,13 @@ impl Storage {
         // Touch the session so `updated_at_ms` reflects this snapshot. Real
         // Token accounting lives in the split prompt/completion columns written
         // by `update_session_usage`; transcript flushes only advance recency.
-        sqlx::query("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")
-            .bind(now)
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to touch session updated_at")?;
+        storage_op!(
+            tx,
+            "touch session updated_at",
+            sqlx::query("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")
+                .bind(now)
+                .bind(session_id.as_i64()),
+        )?;
         Ok(())
     }
     /// The newest completion report persisted for `session_id`, if any run has

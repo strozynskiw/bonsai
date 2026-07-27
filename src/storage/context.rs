@@ -36,11 +36,12 @@ impl Storage {
         snapshot: &ContextMessageSnapshot,
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM context_messages WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete context messages")?;
+        storage_op!(
+            tx,
+            "delete context messages",
+            sqlx::query("DELETE FROM context_messages WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
 
         for (seq, message) in snapshot.messages.iter().enumerate() {
             let raw_json =
@@ -125,16 +126,18 @@ impl Storage {
         sources: &HashMap<String, Vec<ChatCompletionRequestMessage>>,
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM context_controls WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete context controls")?;
-        sqlx::query("DELETE FROM context_sources WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete context sources")?;
+        storage_op!(
+            tx,
+            "delete context controls",
+            sqlx::query("DELETE FROM context_controls WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
+        storage_op!(
+            tx,
+            "delete context sources",
+            sqlx::query("DELETE FROM context_sources WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
 
         for (node_id, state) in controls {
             if !state.is_active() {
@@ -254,11 +257,12 @@ impl Storage {
         events: &[CompactionEvent],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM compaction_events WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete compaction events")?;
+        storage_op!(
+            tx,
+            "delete compaction events",
+            sqlx::query("DELETE FROM compaction_events WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
 
         for event in events {
             sqlx::query(
@@ -479,8 +483,11 @@ impl Storage {
         session_id: SessionId,
         turn: &UsageTurn,
     ) -> Result<()> {
-        sqlx::query(
-            r#"
+        storage_op!(
+            tx,
+            "update mutable usage-turn attribution",
+            sqlx::query(
+                r#"
             WITH incoming (
               parent_tool_call_id, launch_group_id,
               cache_read_input_tokens, cache_creation_input_tokens,
@@ -519,24 +526,22 @@ impl Storage {
                 usage_turns.delegated_parent_overlap IS NOT incoming.delegated_parent_overlap
               )
             "#,
-        )
-        .bind(turn.parent_tool_call_id.as_deref())
-        .bind(turn.launch_group_id.as_deref())
-        .bind(optional_u64_to_i64(turn.cache_read_input_tokens))
-        .bind(optional_u64_to_i64(turn.cache_creation_input_tokens))
-        .bind(optional_u64_to_i64(turn.cache_measured_input_tokens))
-        .bind(optional_u64_to_i64(turn.actual_cache_read_percent))
-        .bind(usize_to_i64(turn.inspection_executed))
-        .bind(usize_to_i64(turn.inspection_reused))
-        .bind(usize_to_i64(turn.inspection_rejected))
-        .bind(usize_to_i64(turn.inspection_returned_chars))
-        .bind(usize_to_i64(turn.inspection_avoided_chars))
-        .bind(usize_to_i64(turn.delegated_parent_overlap))
-        .bind(session_id.as_i64())
-        .bind(usize_to_i64(turn.seq))
-        .execute(&mut **tx)
-        .await
-        .context("Failed to update mutable usage-turn attribution")?;
+            )
+            .bind(turn.parent_tool_call_id.as_deref())
+            .bind(turn.launch_group_id.as_deref())
+            .bind(optional_u64_to_i64(turn.cache_read_input_tokens))
+            .bind(optional_u64_to_i64(turn.cache_creation_input_tokens))
+            .bind(optional_u64_to_i64(turn.cache_measured_input_tokens))
+            .bind(optional_u64_to_i64(turn.actual_cache_read_percent))
+            .bind(usize_to_i64(turn.inspection_executed))
+            .bind(usize_to_i64(turn.inspection_reused))
+            .bind(usize_to_i64(turn.inspection_rejected))
+            .bind(usize_to_i64(turn.inspection_returned_chars))
+            .bind(usize_to_i64(turn.inspection_avoided_chars))
+            .bind(usize_to_i64(turn.delegated_parent_overlap))
+            .bind(session_id.as_i64())
+            .bind(usize_to_i64(turn.seq)),
+        )?;
         Ok(())
     }
 

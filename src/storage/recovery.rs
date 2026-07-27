@@ -182,15 +182,16 @@ impl Storage {
         let Some(id) = matching_id else {
             return Ok(false);
         };
-        let updated = sqlx::query(
-            "UPDATE recovery_points SET session_id = ?, updated_at_ms = ? WHERE id = ?",
-        )
-        .bind(session_id.as_i64())
-        .bind(now)
-        .bind(id)
-        .execute(&mut **tx)
-        .await
-        .context("Failed to attach recovery workspace during session switch")?;
+        let updated = storage_op!(
+            tx,
+            "attach recovery workspace during session switch",
+            sqlx::query(
+                "UPDATE recovery_points SET session_id = ?, updated_at_ms = ? WHERE id = ?",
+            )
+            .bind(session_id.as_i64())
+            .bind(now)
+            .bind(id),
+        )?;
         anyhow::ensure!(
             updated.rows_affected() == 1,
             "Recovery workspace disappeared during session switch"

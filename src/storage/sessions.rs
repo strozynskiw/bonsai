@@ -548,10 +548,7 @@ impl Storage {
         for id in &promoted_ids {
             release_query = release_query.bind(id);
         }
-        release_query
-            .execute(&mut *tx)
-            .await
-            .context("Failed to release promoted sessions' claims")?;
+        storage_op!(&mut tx, "release promoted sessions' claims", release_query,)?;
 
         let placeholders = vec!["?"; promoted_ids.len()].join(", ");
         let query = session_summary_query(

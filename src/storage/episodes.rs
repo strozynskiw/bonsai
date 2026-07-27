@@ -29,11 +29,11 @@ impl Storage {
         episodes: &[Episode],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM episodes WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete episodes")?;
+        storage_op!(
+            tx,
+            "delete episodes",
+            sqlx::query("DELETE FROM episodes WHERE session_id = ?").bind(session_id.as_i64()),
+        )?;
 
         for episode in episodes {
             let episode_seq = i64::try_from(episode.seq())

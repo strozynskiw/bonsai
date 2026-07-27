@@ -1409,20 +1409,21 @@ impl Storage {
             None
         };
 
-        sqlx::query(
-            r#"
+        storage_op!(
+            &mut tx,
+            "finalize atomic peer wake operation",
+            sqlx::query(
+                r#"
             UPDATE peer_wake_operations
             SET outcome = ?, subscription_id = ?, fyi_message_id = ?
             WHERE id = ?
             "#,
-        )
-        .bind(registration.outcome.operation_db_str())
-        .bind(registration.subscription_id)
-        .bind(fyi_message.as_ref().map(|message| message.id))
-        .bind(operation_id)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to finalize atomic peer wake operation")?;
+            )
+            .bind(registration.outcome.operation_db_str())
+            .bind(registration.subscription_id)
+            .bind(fyi_message.as_ref().map(|message| message.id))
+            .bind(operation_id),
+        )?;
 
         tx.commit()
             .await
@@ -1508,26 +1509,27 @@ impl Storage {
             let body = crate::redact::redact(&body);
             // The done notice inherits the subscription's originating hop so a
             // wake chain cannot reset the anti-loop counter by parking.
-            sqlx::query(
-                r#"
+            storage_op!(
+                &mut tx,
+                "insert done notice",
+                sqlx::query(
+                    r#"
                 INSERT INTO agent_messages (
                   project_id, from_session_id, to_session_id, kind, body,
                   hop_count, created_at_ms, wake_subscription_id
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
-            )
-            .bind(project_id)
-            .bind(target.as_i64())
-            .bind(requester)
-            .bind(PeerMessageKind::DoneNotice.as_db_str())
-            .bind(body.as_ref())
-            .bind(hop_count)
-            .bind(now)
-            .bind(subscription_id)
-            .execute(&mut *tx)
-            .await
-            .context("Failed to insert done notice")?;
+                )
+                .bind(project_id)
+                .bind(target.as_i64())
+                .bind(requester)
+                .bind(PeerMessageKind::DoneNotice.as_db_str())
+                .bind(body.as_ref())
+                .bind(hop_count)
+                .bind(now)
+                .bind(subscription_id),
+            )?;
             requesters.push(SessionId::from_raw(*requester));
         }
 
@@ -1585,26 +1587,27 @@ impl Storage {
             )
         };
         let body = crate::redact::redact(&body);
-        sqlx::query(
-            r#"
+        storage_op!(
+            &mut tx,
+            "insert expiry done notice",
+            sqlx::query(
+                r#"
             INSERT INTO agent_messages (
               project_id, from_session_id, to_session_id, kind, body,
               hop_count, created_at_ms, wake_subscription_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
-        )
-        .bind(project_id)
-        .bind(target.as_i64())
-        .bind(requester.as_i64())
-        .bind(PeerMessageKind::DoneNotice.as_db_str())
-        .bind(body.as_ref())
-        .bind(hop_count)
-        .bind(now)
-        .bind(subscription_id)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to insert expiry done notice")?;
+            )
+            .bind(project_id)
+            .bind(target.as_i64())
+            .bind(requester.as_i64())
+            .bind(PeerMessageKind::DoneNotice.as_db_str())
+            .bind(body.as_ref())
+            .bind(hop_count)
+            .bind(now)
+            .bind(subscription_id),
+        )?;
         tx.commit()
             .await
             .context("Failed to commit wake-subscription expiry")?;
@@ -1658,26 +1661,27 @@ impl Storage {
             )
         };
         let body = crate::redact::redact(&body);
-        sqlx::query(
-            r#"
+        storage_op!(
+            &mut tx,
+            "insert wake recheck notice",
+            sqlx::query(
+                r#"
             INSERT INTO agent_messages (
               project_id, from_session_id, to_session_id, kind, body,
               hop_count, created_at_ms, wake_subscription_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
-        )
-        .bind(project_id)
-        .bind(target.as_i64())
-        .bind(requester.as_i64())
-        .bind(PeerMessageKind::DoneNotice.as_db_str())
-        .bind(body.as_ref())
-        .bind(hop_count)
-        .bind(now)
-        .bind(subscription_id)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to insert wake recheck notice")?;
+            )
+            .bind(project_id)
+            .bind(target.as_i64())
+            .bind(requester.as_i64())
+            .bind(PeerMessageKind::DoneNotice.as_db_str())
+            .bind(body.as_ref())
+            .bind(hop_count)
+            .bind(now)
+            .bind(subscription_id),
+        )?;
         tx.commit()
             .await
             .context("Failed to commit wake-subscription recheck")?;

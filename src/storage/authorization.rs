@@ -51,33 +51,37 @@ impl Storage {
             .begin_write()
             .await
             .context("Failed to begin authorization-decision transaction")?;
-        sqlx::query(
-            r#"
+        storage_op!(
+            &mut transaction,
+            "persist authorization decision",
+            sqlx::query(
+                r#"
             INSERT INTO authorization_decisions (
               session_id, tool_call_id, surface, subject, effects_json,
               risk_tier, rule_source, autonomy_level, sandbox_posture,
               decision, reason, created_at_ms
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
-        )
-        .bind(session_id.as_i64())
-        .bind(decision.tool_call_id)
-        .bind(decision.surface)
-        .bind(decision.subject)
-        .bind(effects_json)
-        .bind(decision.risk_tier)
-        .bind(decision.rule_source)
-        .bind(decision.autonomy_level)
-        .bind(decision.sandbox_posture)
-        .bind(decision.decision)
-        .bind(decision.reason)
-        .bind(now_ms())
-        .execute(&mut *transaction)
-        .await
-        .context("Failed to persist authorization decision")?;
+            )
+            .bind(session_id.as_i64())
+            .bind(decision.tool_call_id)
+            .bind(decision.surface)
+            .bind(decision.subject)
+            .bind(effects_json)
+            .bind(decision.risk_tier)
+            .bind(decision.rule_source)
+            .bind(decision.autonomy_level)
+            .bind(decision.sandbox_posture)
+            .bind(decision.decision)
+            .bind(decision.reason)
+            .bind(now_ms()),
+        )?;
 
-        sqlx::query(
-            r#"
+        storage_op!(
+            &mut transaction,
+            "enforce authorization-decision retention",
+            sqlx::query(
+                r#"
             DELETE FROM authorization_decisions
             WHERE session_id = ?
               AND id NOT IN (
@@ -87,13 +91,11 @@ impl Storage {
                 LIMIT ?
               )
             "#,
-        )
-        .bind(session_id.as_i64())
-        .bind(session_id.as_i64())
-        .bind(MAX_DECISIONS_PER_SESSION)
-        .execute(&mut *transaction)
-        .await
-        .context("Failed to enforce authorization-decision retention")?;
+            )
+            .bind(session_id.as_i64())
+            .bind(session_id.as_i64())
+            .bind(MAX_DECISIONS_PER_SESSION),
+        )?;
         transaction
             .commit()
             .await

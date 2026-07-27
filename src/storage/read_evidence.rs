@@ -12,17 +12,20 @@ impl Storage {
         records: &[ReadEvidenceRecord],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM read_evidence WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete read evidence")?;
+        storage_op!(
+            tx,
+            "delete read evidence",
+            sqlx::query("DELETE FROM read_evidence WHERE session_id = ?").bind(session_id.as_i64()),
+        )?;
 
         for (seq, record) in records.iter().enumerate() {
             let observation = record.evidence.observation();
             let baseline = record.evidence.freshness_baseline();
-            sqlx::query(
-                r#"
+            storage_op!(
+                tx,
+                "insert read evidence",
+                sqlx::query(
+                    r#"
                 INSERT INTO read_evidence (
                   session_id, seq, lane_kind, lane_id, source_id, provenance,
                   target_message_id, target_content_digest, target_tool_call_id,
@@ -37,51 +40,49 @@ impl Storage {
                 )
                 VALUES (?, ?, 'parent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
-            )
-            .bind(session_id.as_i64())
-            .bind(seq as i64)
-            .bind(session_id.to_string())
-            .bind(&record.source_id)
-            .bind(record.provenance.label())
-            .bind(&record.target_message_id)
-            .bind(record.target_content_digest.to_hex().to_string())
-            .bind(record.target_tool_call_id.as_deref())
-            .bind(record.tool_name.as_deref())
-            .bind(record.tool_arguments.as_deref())
-            .bind(i64::from(record.target_live))
-            .bind(i64::from(record.target_stubbed))
-            .bind(observation.canonical_path().to_string_lossy().as_ref())
-            .bind(observation.display_path())
-            .bind(usize_to_i64(observation.window().requested_offset))
-            .bind(usize_to_i64(observation.window().requested_limit))
-            .bind(usize_to_i64(observation.window().start_line))
-            .bind(observation.window().end_line.map(usize_to_i64))
-            .bind(observation.window().total_lines.map(usize_to_i64))
-            .bind(observation.coverage().label())
-            .bind(observation.visible_digest().to_hex().as_str())
-            .bind(usize_to_i64(observation.visible_chars()))
-            .bind(
-                observation
-                    .file_digest_at_read()
-                    .map(|digest| digest.to_hex().to_string()),
-            )
-            .bind(u64_to_i64(baseline.len()))
-            .bind(baseline.modified().and_then(system_time_to_ms))
-            .bind(
-                baseline
-                    .current_file_digest()
-                    .map(|digest| digest.to_hex().to_string()),
-            )
-            .bind(baseline.status().label())
-            .bind(i64::from(baseline.observation_is_current()))
-            .bind(&record.admission_outcome)
-            .bind(&record.admission_reason)
-            .bind(usize_to_i64(record.requested_chars))
-            .bind(usize_to_i64(record.returned_chars))
-            .bind(usize_to_i64(record.avoided_chars))
-            .execute(&mut **tx)
-            .await
-            .context("Failed to insert read evidence")?;
+                )
+                .bind(session_id.as_i64())
+                .bind(seq as i64)
+                .bind(session_id.to_string())
+                .bind(&record.source_id)
+                .bind(record.provenance.label())
+                .bind(&record.target_message_id)
+                .bind(record.target_content_digest.to_hex().to_string())
+                .bind(record.target_tool_call_id.as_deref())
+                .bind(record.tool_name.as_deref())
+                .bind(record.tool_arguments.as_deref())
+                .bind(i64::from(record.target_live))
+                .bind(i64::from(record.target_stubbed))
+                .bind(observation.canonical_path().to_string_lossy().as_ref())
+                .bind(observation.display_path())
+                .bind(usize_to_i64(observation.window().requested_offset))
+                .bind(usize_to_i64(observation.window().requested_limit))
+                .bind(usize_to_i64(observation.window().start_line))
+                .bind(observation.window().end_line.map(usize_to_i64))
+                .bind(observation.window().total_lines.map(usize_to_i64))
+                .bind(observation.coverage().label())
+                .bind(observation.visible_digest().to_hex().as_str())
+                .bind(usize_to_i64(observation.visible_chars()))
+                .bind(
+                    observation
+                        .file_digest_at_read()
+                        .map(|digest| digest.to_hex().to_string()),
+                )
+                .bind(u64_to_i64(baseline.len()))
+                .bind(baseline.modified().and_then(system_time_to_ms))
+                .bind(
+                    baseline
+                        .current_file_digest()
+                        .map(|digest| digest.to_hex().to_string()),
+                )
+                .bind(baseline.status().label())
+                .bind(i64::from(baseline.observation_is_current()))
+                .bind(&record.admission_outcome)
+                .bind(&record.admission_reason)
+                .bind(usize_to_i64(record.requested_chars))
+                .bind(usize_to_i64(record.returned_chars))
+                .bind(usize_to_i64(record.avoided_chars)),
+            )?;
         }
 
         touch_session(tx, session_id, now).await
@@ -124,15 +125,19 @@ impl Storage {
         records: &[InspectionEventRecord],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM inspection_events WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete inspection events")?;
+        storage_op!(
+            tx,
+            "delete inspection events",
+            sqlx::query("DELETE FROM inspection_events WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
 
         for (seq, record) in records.iter().enumerate() {
-            sqlx::query(
-                r#"
+            storage_op!(
+                tx,
+                "insert inspection event",
+                sqlx::query(
+                    r#"
                 INSERT INTO inspection_events (
                   session_id, seq, lane_kind, lane_id, call_id,
                   target_message_id, target_content_digest, tool_name,
@@ -142,26 +147,24 @@ impl Storage {
                 )
                 VALUES (?, ?, 'parent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
-            )
-            .bind(session_id.as_i64())
-            .bind(seq as i64)
-            .bind(session_id.to_string())
-            .bind(&record.call_id)
-            .bind(&record.target_message_id)
-            .bind(record.target_content_digest.to_hex().to_string())
-            .bind(&record.tool_name)
-            .bind(&record.tool_arguments)
-            .bind(i64::from(record.target_live))
-            .bind(i64::from(record.target_stubbed))
-            .bind(record.admission.outcome.label())
-            .bind(record.admission.reason.label())
-            .bind(record.admission.reuse_target_tool_call_id.as_deref())
-            .bind(usize_to_i64(record.admission.requested_chars))
-            .bind(usize_to_i64(record.admission.returned_chars))
-            .bind(usize_to_i64(record.admission.avoided_chars))
-            .execute(&mut **tx)
-            .await
-            .context("Failed to insert inspection event")?;
+                )
+                .bind(session_id.as_i64())
+                .bind(seq as i64)
+                .bind(session_id.to_string())
+                .bind(&record.call_id)
+                .bind(&record.target_message_id)
+                .bind(record.target_content_digest.to_hex().to_string())
+                .bind(&record.tool_name)
+                .bind(&record.tool_arguments)
+                .bind(i64::from(record.target_live))
+                .bind(i64::from(record.target_stubbed))
+                .bind(record.admission.outcome.label())
+                .bind(record.admission.reason.label())
+                .bind(record.admission.reuse_target_tool_call_id.as_deref())
+                .bind(usize_to_i64(record.admission.requested_chars))
+                .bind(usize_to_i64(record.admission.returned_chars))
+                .bind(usize_to_i64(record.admission.avoided_chars)),
+            )?;
         }
 
         touch_session(tx, session_id, now).await

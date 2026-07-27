@@ -432,11 +432,11 @@ impl Storage {
             .begin_write()
             .await
             .context("Failed to begin workspace lock transaction")?;
-        sqlx::query("DELETE FROM workspace_locks WHERE expires_at_ms < ?")
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .context("Failed to clear expired workspace locks")?;
+        storage_op!(
+            &mut tx,
+            "clear expired workspace locks",
+            sqlx::query("DELETE FROM workspace_locks WHERE expires_at_ms < ?").bind(now),
+        )?;
 
         let conflict_count: i64 = sqlx::query_scalar(
             r#"

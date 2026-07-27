@@ -25,15 +25,19 @@ impl Storage {
         runs: &[SelfReviewRunRecord],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM self_review_runs WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete self-review runs")?;
+        storage_op!(
+            tx,
+            "delete self-review runs",
+            sqlx::query("DELETE FROM self_review_runs WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
 
         for (seq, run) in runs.iter().enumerate() {
-            sqlx::query(
-                r#"
+            storage_op!(
+                tx,
+                "insert self-review run",
+                sqlx::query(
+                    r#"
                     INSERT INTO self_review_runs (
                       session_id, seq, started_at_ms, mode, scope, diff_line_count,
                       reviewer_duration_ms, reviewer_prompt_tokens,
@@ -41,28 +45,26 @@ impl Storage {
                       blocker_count, major_count, minor_count, nit_count, disposition
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
-            )
-            .bind(session_id.as_i64())
-            .bind(i64::try_from(seq).context("Self-review sequence is out of range")?)
-            .bind(run.started_at_ms)
-            .bind(run.mode.label())
-            .bind(run.scope.label())
-            .bind(i64::from(run.diff_line_count))
-            .bind(i64::try_from(run.reviewer_duration_ms).unwrap_or(i64::MAX))
-            .bind(i64::try_from(run.reviewer_prompt_tokens).unwrap_or(i64::MAX))
-            .bind(i64::try_from(run.reviewer_completion_tokens).unwrap_or(i64::MAX))
-            .bind(
-                run.reviewer_cost_micros
-                    .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
-            )
-            .bind(i64::from(run.findings.blocker))
-            .bind(i64::from(run.findings.major))
-            .bind(i64::from(run.findings.minor))
-            .bind(i64::from(run.findings.nit))
-            .bind(run.disposition.map(SelfReviewDisposition::label))
-            .execute(&mut **tx)
-            .await
-            .context("Failed to insert self-review run")?;
+                )
+                .bind(session_id.as_i64())
+                .bind(i64::try_from(seq).context("Self-review sequence is out of range")?)
+                .bind(run.started_at_ms)
+                .bind(run.mode.label())
+                .bind(run.scope.label())
+                .bind(i64::from(run.diff_line_count))
+                .bind(i64::try_from(run.reviewer_duration_ms).unwrap_or(i64::MAX))
+                .bind(i64::try_from(run.reviewer_prompt_tokens).unwrap_or(i64::MAX))
+                .bind(i64::try_from(run.reviewer_completion_tokens).unwrap_or(i64::MAX))
+                .bind(
+                    run.reviewer_cost_micros
+                        .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                )
+                .bind(i64::from(run.findings.blocker))
+                .bind(i64::from(run.findings.major))
+                .bind(i64::from(run.findings.minor))
+                .bind(i64::from(run.findings.nit))
+                .bind(run.disposition.map(SelfReviewDisposition::label)),
+            )?;
         }
         touch_session(tx, session_id, now).await
     }

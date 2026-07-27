@@ -26,6 +26,16 @@ use crate::tui::transcript::{
 };
 use crate::util::time::{now_ms, system_time_from_ms, system_time_to_ms};
 
+/// Execute a SQLite mutation inside a transaction and preserve its error context.
+macro_rules! storage_op {
+    ($tx:expr, $operation:literal, $query:expr $(,)?) => {
+        ($query)
+            .execute(&mut **$tx)
+            .await
+            .context(concat!("Failed to ", $operation))
+    };
+}
+
 mod authorization;
 mod builtin_subagents;
 mod context;
@@ -437,18 +447,21 @@ impl Storage {
             .begin_write()
             .await
             .context("Failed to begin SQLite write probe")?;
-        sqlx::query("CREATE TEMP TABLE bonsai_doctor_probe (value INTEGER NOT NULL)")
-            .execute(&mut *tx)
-            .await
-            .context("Failed to create SQLite write probe")?;
-        sqlx::query("INSERT INTO bonsai_doctor_probe (value) VALUES (1)")
-            .execute(&mut *tx)
-            .await
-            .context("Failed to write SQLite probe")?;
-        sqlx::query("DROP TABLE bonsai_doctor_probe")
-            .execute(&mut *tx)
-            .await
-            .context("Failed to remove SQLite write probe")?;
+        storage_op!(
+            &mut tx,
+            "create SQLite write probe",
+            sqlx::query("CREATE TEMP TABLE bonsai_doctor_probe (value INTEGER NOT NULL)"),
+        )?;
+        storage_op!(
+            &mut tx,
+            "write SQLite probe",
+            sqlx::query("INSERT INTO bonsai_doctor_probe (value) VALUES (1)"),
+        )?;
+        storage_op!(
+            &mut tx,
+            "remove SQLite write probe",
+            sqlx::query("DROP TABLE bonsai_doctor_probe"),
+        )?;
         tx.commit()
             .await
             .context("Failed to commit SQLite write probe")?;

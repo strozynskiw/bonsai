@@ -25,19 +25,23 @@ impl Storage {
         runs: &[VerificationRunRecord],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM verification_runs WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete verification runs")?;
+        storage_op!(
+            tx,
+            "delete verification runs",
+            sqlx::query("DELETE FROM verification_runs WHERE session_id = ?")
+                .bind(session_id.as_i64()),
+        )?;
 
         for (run_seq, run) in runs.iter().enumerate() {
             let changes_json = serde_json::to_string(&run.workspace_changes_after_last_check)
                 .context("Failed to serialize verification workspace changes")?;
             let reasoning_escalations_json = serde_json::to_string(&run.reasoning_escalations)
                 .context("Failed to serialize verification reasoning escalations")?;
-            sqlx::query(
-                r#"
+            storage_op!(
+                tx,
+                "insert verification run",
+                sqlx::query(
+                    r#"
                     INSERT INTO verification_runs (
                       session_id, seq, kind, status, started_at_ms, finished_at_ms,
                       observed_final_workspace, workspace_changes_json, repair_attempts,
@@ -45,25 +49,26 @@ impl Storage {
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
-            )
-            .bind(session_id.as_i64())
-            .bind(run_seq as i64)
-            .bind(run.kind.label())
-            .bind(run.status.label())
-            .bind(run.started_at_ms)
-            .bind(run.finished_at_ms)
-            .bind(run.observed_final_workspace.map(i64::from))
-            .bind(changes_json)
-            .bind(i64::from(run.repair_attempts))
-            .bind(reasoning_escalations_json)
-            .bind(&run.terminal_reason)
-            .execute(&mut **tx)
-            .await
-            .context("Failed to insert verification run")?;
+                )
+                .bind(session_id.as_i64())
+                .bind(run_seq as i64)
+                .bind(run.kind.label())
+                .bind(run.status.label())
+                .bind(run.started_at_ms)
+                .bind(run.finished_at_ms)
+                .bind(run.observed_final_workspace.map(i64::from))
+                .bind(changes_json)
+                .bind(i64::from(run.repair_attempts))
+                .bind(reasoning_escalations_json)
+                .bind(&run.terminal_reason),
+            )?;
 
             for (check_seq, check) in run.checks.iter().enumerate() {
-                sqlx::query(
-                    r#"
+                storage_op!(
+                    tx,
+                    "insert verification check",
+                    sqlx::query(
+                        r#"
                         INSERT INTO verification_checks (
                           session_id, run_seq, seq, name, command, status,
                           tool_call_id, exit_code, completed_at_ms, attempt_count,
@@ -71,21 +76,19 @@ impl Storage {
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         "#,
-                )
-                .bind(session_id.as_i64())
-                .bind(run_seq as i64)
-                .bind(check_seq as i64)
-                .bind(&check.name)
-                .bind(&check.command)
-                .bind(check.status.label())
-                .bind(&check.tool_call_id)
-                .bind(check.exit_code)
-                .bind(check.completed_at_ms)
-                .bind(i64::from(check.attempt_count))
-                .bind(&check.last_failure_signature)
-                .execute(&mut **tx)
-                .await
-                .context("Failed to insert verification check")?;
+                    )
+                    .bind(session_id.as_i64())
+                    .bind(run_seq as i64)
+                    .bind(check_seq as i64)
+                    .bind(&check.name)
+                    .bind(&check.command)
+                    .bind(check.status.label())
+                    .bind(&check.tool_call_id)
+                    .bind(check.exit_code)
+                    .bind(check.completed_at_ms)
+                    .bind(i64::from(check.attempt_count))
+                    .bind(&check.last_failure_signature),
+                )?;
             }
         }
         touch_session(tx, session_id, now).await

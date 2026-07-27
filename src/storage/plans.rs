@@ -8,8 +8,11 @@ impl Storage {
         plan: &PlanDoc,
         now: i64,
     ) -> Result<()> {
-        sqlx::query(
-            r#"
+        storage_op!(
+            tx,
+            "upsert plan",
+            sqlx::query(
+                r#"
             INSERT INTO plans (session_id, title, revision, updated_at_ms)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
@@ -17,14 +20,12 @@ impl Storage {
               revision = excluded.revision,
               updated_at_ms = excluded.updated_at_ms
             "#,
-        )
-        .bind(session_id.as_i64())
-        .bind(&plan.title)
-        .bind(plan.revision as i64)
-        .bind(now)
-        .execute(&mut **tx)
-        .await
-        .context("Failed to upsert plan")?;
+            )
+            .bind(session_id.as_i64())
+            .bind(&plan.title)
+            .bind(plan.revision as i64)
+            .bind(now),
+        )?;
         replace_plan_rows(tx, session_id.as_i64(), plan).await?;
         touch_session(tx, session_id, now).await
     }

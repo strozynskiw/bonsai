@@ -8,11 +8,11 @@ impl Storage {
         todos: &[TodoItem],
         now: i64,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM todos WHERE session_id = ?")
-            .bind(session_id.as_i64())
-            .execute(&mut **tx)
-            .await
-            .context("Failed to delete todos")?;
+        storage_op!(
+            tx,
+            "delete todos",
+            sqlx::query("DELETE FROM todos WHERE session_id = ?").bind(session_id.as_i64()),
+        )?;
         for (seq, todo) in todos.iter().enumerate() {
             sqlx::query("INSERT INTO todos (session_id, seq, content, status) VALUES (?, ?, ?, ?)")
                 .bind(session_id.as_i64())
