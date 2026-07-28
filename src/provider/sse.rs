@@ -487,6 +487,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn truncated_error_response_keeps_http_classification_and_source() {
+        use std::error::Error as _;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\nContent-Length: 32\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let error = error_from_response(response).await;
+
+        let ProviderFailure::Http {
+            status,
+            retry_after_secs,
+            source,
+            ..
+        } = &error
+        else {
+            panic!("expected HTTP failure")
+        };
+        assert_eq!(*status, 429);
+        assert_eq!(*retry_after_secs, Some(7));
+        assert!(error.is_retryable());
+        assert!(source.is_some());
+        assert!(error.source().and_then(std::error::Error::source).is_some());
+    }
+
+    #[tokio::test]
     async fn tls_handshake_failure_is_a_retryable_transport_failure() {
         use tokio::io::AsyncWriteExt;
 
