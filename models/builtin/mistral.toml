@@ -1,80 +1,111 @@
-# Mistral AI La Plateforme (https://api.mistral.ai/v1), OpenAI Chat Completions
-# wire. Auth is a plain `Authorization: Bearer <MISTRAL_API_KEY>`.
+# Mistral AI La Plateforme (https://api.mistral.ai/v1), using the documented
+# Chat Completions wire with bearer authentication.
 #
-# Reasoning: Mistral's reasoning line is the Magistral family, toggled by a
-# top-level `prompt_mode: "reasoning"` and returning structured thinking/text
-# content parts. Bonsai has no codec for that wire shape, so the Magistral models
-# are intentionally NOT shipped here — the targets below are the direct-answer
-# coding/general models, exposed without reasoning options. Add Magistral once a
-# `prompt_mode` codec + structured-content parsing exist.
+# The current generalist lineup is Mistral Medium 3.5, Mistral Small 4,
+# Mistral Large 3, and the Ministral 3 family. All six support function calls,
+# structured output, and image input. Medium 3.5 and Small 4 are hybrid
+# reasoning models with the official none/high effort choices; their streamed
+# thinking blocks are parsed and replayed by the `mistral-chat-completions`
+# codec selected on the connection.
 #
-# Caching: Mistral caches on an explicit `prompt_cache_key` and reports read hits
-# in usage.prompt_tokens_details.cached_tokens at ~10% of input price — exactly
-# what bonsai's openai-chat transport sends when prompt_cache is on. Left at the
-# default (TransportDefault) cache policy; consider "rolling-history" once warm
-# cache reuse is verified live.
+# Cached prompt input is billed at 10% of normal input. Every row therefore
+# includes the official cache-read rate, while connections.toml enables the
+# stable cache key and append-only history needed for prefix reuse.
 #
-# `*-latest` aliases are the served, auto-updating handles. Windows come from
-# models.dev; the official pricing page is authoritative for prices (it and
-# models.dev disagreed on Mistral Medium's output price — the page's value is
-# used). All pinned.
+# The 32K completion cap is Bonsai's conservative agent-output containment
+# limit; Mistral's model cards publish the context capacity, not a smaller
+# completion limit. Official model cards and pricing were rechecked 2026-07-28.
 #
-# not-shipped: devstral-latest — models.dev's `devstral-latest`/`devstral-2512`
-#   rows are spec-and-price identical to the shipped `devstral-medium-latest`
-#   (262K/262K, $0.4/$2, Dec-2025 releases): an alias of the same engine, not a
-#   distinct model. Revisit if a live /models listing shows them diverging.
-# not-shipped: devstral-2512 — see devstral-latest above.
-# not-shipped: codestral-latest — FIM/completion model (4K output ceiling), not
-#   useful for agent turns.
-# (The Magistral family is excluded for the codec reason in the Reasoning note
-# above; magistral-medium-latest / magistral-small flag as informational gaps
-# until a `prompt_mode` codec exists.)
-
-[[targets]]
-connection = "mistral"
-model = "mistral/devstral-medium-latest"
-remote_model = "devstral-medium-latest"
-recommended = true
-default = true
-token_counter = "tiktoken"
-pinned = true
-context_window = 262144
-# Advertised max output is very large; capped to the reference-agent clamp as the
-# rumination/output-containment lever, same as the other connections.
-output_limit = 32000
-pricing = { input_micros_per_million = 400000, output_micros_per_million = 2000000, cache_read_micros_per_million = 40000 }
+# Deprecated Devstral and Magistral generations are intentionally absent.
+# `/refresh` uses Mistral's native model cards and rejects archived models,
+# non-chat products, and models without function calling before enrichment.
 
 [[targets]]
 connection = "mistral"
 model = "mistral/mistral-medium-latest"
 remote_model = "mistral-medium-latest"
+display_name = "Mistral Medium 3.5"
 recommended = true
+default = true
+recommended_effort = "high"
 token_counter = "tiktoken"
-pinned = true
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
 context_window = 262144
 output_limit = 32000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 1500000, output_micros_per_million = 7500000, cache_read_micros_per_million = 150000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "high"]
+
+[[targets]]
+connection = "mistral"
+model = "mistral/mistral-small-latest"
+remote_model = "mistral-small-latest"
+display_name = "Mistral Small 4"
+recommended = true
+roles = ["cheap"]
+recommended_effort = "high"
+token_counter = "tiktoken"
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 256000
+output_limit = 32000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 150000, output_micros_per_million = 600000, cache_read_micros_per_million = 15000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "high"]
 
 [[targets]]
 connection = "mistral"
 model = "mistral/mistral-large-latest"
 remote_model = "mistral-large-latest"
+display_name = "Mistral Large 3"
+recommended = true
 token_counter = "tiktoken"
-pinned = true
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
 context_window = 262144
 output_limit = 32000
+features = ["tool-call", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 500000, output_micros_per_million = 1500000, cache_read_micros_per_million = 50000 }
 
 [[targets]]
 connection = "mistral"
-model = "mistral/devstral-small-latest"
-remote_model = "devstral-small-latest"
-# models.dev carries only dated Devstral Small snapshots, not the `-latest`
-# alias; map metadata to the current one for backfill (specs match).
-metadata_model = "mistral/devstral-small-2507"
-roles = ["cheap"]
+model = "mistral/ministral-14b-latest"
+remote_model = "ministral-14b-latest"
+display_name = "Ministral 3 14B"
 token_counter = "tiktoken"
+# The official current alias is absent from models.dev as of 2026-07-28; keep
+# the fully official-card-backed row intentionally pinned until it appears.
 pinned = true
-context_window = 128000
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 256000
 output_limit = 32000
-pricing = { input_micros_per_million = 100000, output_micros_per_million = 300000, cache_read_micros_per_million = 10000 }
+features = ["tool-call", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 200000, output_micros_per_million = 200000, cache_read_micros_per_million = 20000 }
+
+[[targets]]
+connection = "mistral"
+model = "mistral/ministral-8b-latest"
+remote_model = "ministral-8b-latest"
+display_name = "Ministral 3 8B"
+token_counter = "tiktoken"
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 256000
+output_limit = 32000
+features = ["tool-call", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 150000, output_micros_per_million = 150000, cache_read_micros_per_million = 15000 }
+
+[[targets]]
+connection = "mistral"
+model = "mistral/ministral-3b-latest"
+remote_model = "ministral-3b-latest"
+display_name = "Ministral 3 3B"
+token_counter = "tiktoken"
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 256000
+output_limit = 32000
+features = ["tool-call", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 100000, output_micros_per_million = 100000, cache_read_micros_per_million = 10000 }

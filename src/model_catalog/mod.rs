@@ -1750,7 +1750,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 204);
+        assert_eq!(catalog.targets.len(), 206);
         assert!(
             catalog
                 .connections
@@ -2541,7 +2541,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 204);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 206);
 
         let cases = [
             EquivalenceCase {
@@ -3958,6 +3958,79 @@ default_base_url = "http://localhost:11434/v1"
         ] {
             assert!(grok_43.features.contains(&feature), "{feature:?}");
         }
+    }
+
+    #[test]
+    fn mistral_builtin_exposes_current_generalist_lineup_and_reasoning_codec() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let mistral_id = connection_id("mistral");
+        let connection = catalog.connection(&mistral_id).unwrap();
+        assert_eq!(connection.discovery, DiscoveryKind::Mistral);
+        assert_eq!(
+            connection.default_model.as_ref().map(ModelId::as_str),
+            Some("mistral/mistral-medium-latest")
+        );
+        assert_eq!(
+            connection.reasoning_codec,
+            Some(ReasoningCodec::MistralChatCompletions)
+        );
+        assert!(connection.prompt_cache);
+        assert_eq!(
+            connection.prompt_cache_policy,
+            PromptCachePolicy::RollingHistory
+        );
+        assert_eq!(
+            catalog.available_models_for_connection(&mistral_id, Vec::new()),
+            vec![
+                "mistral-medium-latest",
+                "mistral-small-latest",
+                "mistral-large-latest",
+                "ministral-14b-latest",
+                "ministral-8b-latest",
+                "ministral-3b-latest",
+            ]
+        );
+
+        let medium = catalog
+            .resolve(&mistral_id, &model_id("mistral/mistral-medium-latest"))
+            .unwrap();
+        assert_eq!(
+            medium.reasoning_selections(),
+            vec![
+                ReasoningSelection::Default,
+                ReasoningSelection::Off,
+                ReasoningSelection::High
+            ]
+        );
+        assert_eq!(
+            medium.pricing.map(|pricing| (
+                pricing.input_micros_per_million,
+                pricing.output_micros_per_million,
+                pricing.cache_read_micros_per_million,
+            )),
+            Some((1_500_000, 7_500_000, Some(150_000)))
+        );
+        for feature in [
+            ModelFeature::ToolCall,
+            ModelFeature::Reasoning,
+            ModelFeature::StructuredOutput,
+            ModelFeature::Attachment,
+        ] {
+            assert!(medium.features.contains(&feature), "{feature:?}");
+        }
+
+        let ministral = catalog
+            .resolve(&mistral_id, &model_id("mistral/ministral-3b-latest"))
+            .unwrap();
+        assert_eq!(ministral.context_window, Some(256_000));
+        assert_eq!(
+            ministral.pricing.map(|pricing| (
+                pricing.input_micros_per_million,
+                pricing.output_micros_per_million,
+                pricing.cache_read_micros_per_million,
+            )),
+            Some((100_000, 100_000, Some(10_000)))
+        );
     }
 
     #[test]
