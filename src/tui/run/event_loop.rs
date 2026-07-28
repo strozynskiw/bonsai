@@ -15,6 +15,7 @@ pub(in crate::tui) use background::{
     open_background_task_list, start_delete_selected_background_task,
 };
 use scroll::*;
+use terminal_input::TerminalInput;
 
 const BACKGROUND_AGENT_WAKE_DELAY: Duration = Duration::from_millis(350);
 const PEER_WAIT_RECHECK_DELAY: Duration = Duration::from_secs(10 * 60);
@@ -2553,6 +2554,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     let mut repo_map = RepoMapInjector::new(repo_map_watch);
     let mut ctrl_c_prompt: Option<CtrlCExitPrompt> = None;
     let mut deferred_ui_event = None;
+    let mut terminal_input = TerminalInput::default();
     let mut terminal_input_health = TerminalInputHealth::default();
     let mut tty_hangup_watch = TtyHangupWatch::open();
     let mut next_persistence_flush = Instant::now();
@@ -3005,7 +3007,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         // CPU-time bracket around the blocking poll (no await between the two
         // readings, so both observe the same OS thread).
         let poll_cpu_started = thread_cpu_time();
-        let has_terminal_event = match event::poll(EVENT_POLL_TIMEOUT) {
+        let has_terminal_event = match terminal_input.poll(EVENT_POLL_TIMEOUT) {
             Ok(has_event) => has_event,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => false,
             Err(err) => {
@@ -3036,7 +3038,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         }
 
         if has_terminal_event {
-            let terminal_event = match event::read() {
+            let terminal_event = match terminal_input.read() {
                 Ok(event) => Some(event),
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => None,
                 Err(err) => {

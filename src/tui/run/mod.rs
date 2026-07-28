@@ -65,6 +65,7 @@ mod ctrl_c;
 mod event_loop;
 mod persistence;
 mod setup;
+mod terminal_input;
 
 use commands::*;
 use persistence::*;
