@@ -93,6 +93,7 @@ pub(crate) struct RunTarget {
     pub remote_model_id: Box<str>,
     pub base_url: Box<str>,
     pub transport: TransportProtocol,
+    pub prompt_cache_header: Option<Box<str>>,
     pub prompt_cache_policy: PromptCachePolicy,
     pub reasoning_codec: ReasoningCodec,
     pub endpoint_path: Option<Box<str>>,
@@ -145,14 +146,26 @@ pub(crate) struct ConnectionSpec {
     /// hand-written target exists.
     #[serde(default)]
     pub models_dev_provider: Option<ConnectionId>,
+    /// Remote model-id prefixes omitted from live discovery. This keeps
+    /// non-chat products and known wire-incompatible variants out of agent
+    /// pickers while allowing genuinely new model families through.
+    #[serde(default)]
+    pub model_exclude_prefixes: Vec<Box<str>>,
     #[serde(default)]
     pub reasoning_codec: Option<ReasoningCodec>,
-    /// Whether this connection's backend supports prompt caching. On OpenAI-chat
-    /// transports it gates sending a `prompt_cache_key`; on Anthropic transports
-    /// it gates `cache_control` breakpoints. Builtin metadata providers carry
-    /// this on their capabilities; catalog connections opt in here.
+    /// Whether this connection's backend supports prompt caching. On
+    /// OpenAI-chat transports it gates the configured cache route (a
+    /// `prompt_cache_key` body field by default, or `prompt_cache_header` when
+    /// set); on Anthropic transports it gates `cache_control` breakpoints.
+    /// Builtin metadata providers carry this on their capabilities; catalog
+    /// connections opt in here.
     #[serde(default)]
     pub prompt_cache: bool,
+    /// Optional Chat Completions header carrying the stable conversation cache
+    /// route. When set, the transport sends this header instead of the
+    /// Responses-only `prompt_cache_key` request field.
+    #[serde(default)]
+    pub prompt_cache_header: Option<Box<str>>,
     /// Prompt-cache policy inherited by every target unless that model declares
     /// an override.
     #[serde(default)]
@@ -207,9 +220,13 @@ pub(crate) struct ConnectionSpecPatch {
     #[serde(default)]
     pub models_dev_provider: Option<ConnectionId>,
     #[serde(default)]
+    pub model_exclude_prefixes: Option<Vec<Box<str>>>,
+    #[serde(default)]
     pub reasoning_codec: Option<ReasoningCodec>,
     #[serde(default)]
     pub prompt_cache: Option<bool>,
+    #[serde(default)]
+    pub prompt_cache_header: Option<Box<str>>,
     #[serde(default)]
     pub prompt_cache_policy: Option<PromptCachePolicy>,
     #[serde(default)]
@@ -248,8 +265,10 @@ impl ConnectionSpecPatch {
             default_endpoint_path: self.default_endpoint_path,
             default_token_counter: self.default_token_counter,
             models_dev_provider: self.models_dev_provider,
+            model_exclude_prefixes: self.model_exclude_prefixes.unwrap_or_default(),
             reasoning_codec: self.reasoning_codec,
             prompt_cache: self.prompt_cache.unwrap_or(false),
+            prompt_cache_header: self.prompt_cache_header,
             prompt_cache_policy: self.prompt_cache_policy.unwrap_or_default(),
             reasoning_content_echo: self.reasoning_content_echo.unwrap_or(false),
             usage_frame_ends_stream: self.usage_frame_ends_stream.unwrap_or(false),
@@ -309,11 +328,17 @@ impl ConnectionSpec {
         if let Some(models_dev_provider) = patch.models_dev_provider {
             self.models_dev_provider = Some(models_dev_provider);
         }
+        if let Some(model_exclude_prefixes) = patch.model_exclude_prefixes {
+            self.model_exclude_prefixes = model_exclude_prefixes;
+        }
         if let Some(reasoning_codec) = patch.reasoning_codec {
             self.reasoning_codec = Some(reasoning_codec);
         }
         if let Some(prompt_cache) = patch.prompt_cache {
             self.prompt_cache = prompt_cache;
+        }
+        if let Some(prompt_cache_header) = patch.prompt_cache_header {
+            self.prompt_cache_header = Some(prompt_cache_header);
         }
         if let Some(prompt_cache_policy) = patch.prompt_cache_policy {
             self.prompt_cache_policy = prompt_cache_policy;

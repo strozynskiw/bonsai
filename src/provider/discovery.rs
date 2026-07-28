@@ -41,20 +41,26 @@ pub(crate) async fn fetch_models_for_metadata(
 ) -> Result<LiveModelAvailability> {
     // `Static` connections curate their model list in the catalog and never hit
     // the network (see `DiscoveryKind::Static`): offer exactly the seed models.
-    if metadata.discovery == DiscoveryKind::Static {
-        return Ok(LiveModelAvailability::from_remote_ids(
-            metadata.seed_model_list(),
-        ));
-    }
-    fetch_models_with_discovery(
-        metadata.discovery,
-        metadata.protocol,
-        &metadata.display_name,
-        base_url,
-        api_key,
-        metadata.auth_header.as_deref(),
-    )
-    .await
+    let mut availability = if metadata.discovery == DiscoveryKind::Static {
+        LiveModelAvailability::from_remote_ids(metadata.seed_model_list())
+    } else {
+        fetch_models_with_discovery(
+            metadata.discovery,
+            metadata.protocol,
+            &metadata.display_name,
+            base_url,
+            api_key,
+            metadata.auth_header.as_deref(),
+        )
+        .await?
+    };
+    availability.models.retain(|model| {
+        !metadata
+            .model_exclude_prefixes
+            .iter()
+            .any(|prefix| model.remote_model_id.starts_with(prefix.as_ref()))
+    });
+    Ok(availability)
 }
 
 /// Fetch the live model list for an endpoint, using the given discovery kind.

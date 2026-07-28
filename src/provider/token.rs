@@ -122,10 +122,12 @@ pub struct ModelPricing {
 /// One context-length pricing tier for a model.
 ///
 /// The tier applies to the entire request when the provider-reported prompt
-/// token count is strictly greater than `above_input_tokens`.
+/// token count is at least `minimum_input_tokens`. Catalog sources must encode
+/// the provider's exact boundary: use `200_000` for "at least 200K" and
+/// `200_001` for "above 200K".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelPricingTier {
-    pub above_input_tokens: u32,
+    pub minimum_input_tokens: u32,
     pub pricing: ModelPricing,
 }
 
@@ -139,9 +141,9 @@ pub struct ModelPricingSchedule {
 impl ModelPricingSchedule {
     /// Builds a schedule from base rates and ordered input-size tiers.
     pub fn new(base: ModelPricing, mut tiers: Vec<ModelPricingTier>) -> Self {
-        tiers.retain(|tier| tier.above_input_tokens > 0);
-        tiers.sort_by_key(|tier| tier.above_input_tokens);
-        tiers.dedup_by_key(|tier| tier.above_input_tokens);
+        tiers.retain(|tier| tier.minimum_input_tokens > 0);
+        tiers.sort_by_key(|tier| tier.minimum_input_tokens);
+        tiers.dedup_by_key(|tier| tier.minimum_input_tokens);
         Self {
             base,
             tiers: tiers.into_boxed_slice(),
@@ -163,7 +165,7 @@ impl ModelPricingSchedule {
         self.tiers
             .iter()
             .rev()
-            .find(|tier| prompt_tokens > tier.above_input_tokens)
+            .find(|tier| prompt_tokens >= tier.minimum_input_tokens)
             .map(|tier| tier.pricing)
             .unwrap_or(self.base)
     }
@@ -921,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn pricing_schedule_switches_only_above_each_input_threshold() {
+    fn pricing_schedule_switches_at_each_inclusive_input_threshold() {
         let base = ModelPricing::new(1_000_000, 2_000_000);
         let medium = ModelPricing::new(3_000_000, 4_000_000);
         let high = ModelPricing::new(5_000_000, 6_000_000);
@@ -929,11 +931,11 @@ mod tests {
             base,
             vec![
                 ModelPricingTier {
-                    above_input_tokens: 400_000,
+                    minimum_input_tokens: 400_001,
                     pricing: high,
                 },
                 ModelPricingTier {
-                    above_input_tokens: 200_000,
+                    minimum_input_tokens: 200_001,
                     pricing: medium,
                 },
             ],

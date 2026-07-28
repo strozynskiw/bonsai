@@ -266,6 +266,8 @@ pub(crate) enum CatalogError {
     },
     #[error("duplicate connection id `{id}`")]
     DuplicateConnection { id: ConnectionId },
+    #[error("connection `{id}` is invalid: {message}")]
+    InvalidConnection { id: ConnectionId, message: String },
     #[error("duplicate target `{connection_id}:{model_id}`")]
     DuplicateTarget {
         connection_id: ConnectionId,
@@ -1191,6 +1193,7 @@ pub(crate) struct ResolvedModel {
     pub default_base_url: Box<str>,
     pub display_name: Box<str>,
     pub transport: TransportProtocol,
+    pub prompt_cache_header: Option<Box<str>>,
     pub prompt_cache_policy: PromptCachePolicy,
     pub reasoning_codec: ReasoningCodec,
     pub endpoint_path: Option<Box<str>>,
@@ -1232,6 +1235,7 @@ impl ResolvedModel {
             remote_model_id: self.remote_model_id.clone(),
             base_url,
             transport: self.transport,
+            prompt_cache_header: self.prompt_cache_header.clone(),
             prompt_cache_policy: self.prompt_cache_policy,
             reasoning_codec: self.reasoning_codec,
             endpoint_path: self.endpoint_path.clone(),
@@ -1576,6 +1580,7 @@ fn resolve_target(
         default_base_url: connection.default_base_url.clone(),
         display_name: display_name.unwrap_or_else(|| target.model.model().into()),
         transport,
+        prompt_cache_header: connection.prompt_cache_header.clone(),
         prompt_cache_policy,
         reasoning_codec,
         endpoint_path: target
@@ -1631,6 +1636,36 @@ fn validate_catalog(
                 id: connection.id.clone(),
             });
         }
+        if connection
+            .model_exclude_prefixes
+            .iter()
+            .any(|prefix| prefix.trim().is_empty())
+        {
+            return Err(CatalogError::InvalidConnection {
+                id: connection.id.clone(),
+                message: "model exclusion prefixes must not be empty".to_string(),
+            });
+        }
+        if let Some(header) = &connection.prompt_cache_header {
+            if !connection.prompt_cache {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: "prompt_cache_header requires prompt_cache = true".to_string(),
+                });
+            }
+            if connection.transport != TransportProtocol::OpenAiChat {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: "prompt_cache_header is only valid on openai-chat".to_string(),
+                });
+            }
+            if reqwest::header::HeaderName::from_bytes(header.as_bytes()).is_err() {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: format!("invalid prompt_cache_header `{header}`"),
+                });
+            }
+        }
     }
 
     let mut target_keys = HashSet::new();
@@ -1661,18 +1696,18 @@ fn validate_catalog(
             }
             let mut thresholds = HashSet::new();
             for tier in &target.pricing_tiers {
-                if tier.above_input_tokens == 0 {
+                if tier.minimum_input_tokens == 0 {
                     return Err(CatalogError::InvalidPricingTiers {
                         connection_id: target.connection.clone(),
                         model_id: target.model.clone(),
                         message: "thresholds must be greater than zero".to_string(),
                     });
                 }
-                if !thresholds.insert(tier.above_input_tokens) {
+                if !thresholds.insert(tier.minimum_input_tokens) {
                     return Err(CatalogError::InvalidPricingTiers {
                         connection_id: target.connection.clone(),
                         model_id: target.model.clone(),
-                        message: format!("duplicate threshold {}", tier.above_input_tokens),
+                        message: format!("duplicate threshold {}", tier.minimum_input_tokens),
                     });
                 }
             }
@@ -1715,7 +1750,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 201);
+        assert_eq!(catalog.targets.len(), 204);
         assert!(
             catalog
                 .connections
@@ -2506,7 +2541,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 201);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 204);
 
         let cases = [
             EquivalenceCase {
@@ -3838,6 +3873,108 @@ default_base_url = "http://localhost:11434/v1"
                 .reasoning_selections()
                 .contains(&ReasoningSelection::Off)
         );
+    }
+
+    #[test]
+    fn xai_builtin_exposes_context_profiles_cache_route_and_exact_tiers() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let xai_id = connection_id("xai");
+        let connection = catalog.connection(&xai_id).unwrap();
+        assert!(connection.prompt_cache);
+        assert_eq!(
+            connection.prompt_cache_header.as_deref(),
+            Some("x-grok-conv-id")
+        );
+        assert_eq!(
+            connection.prompt_cache_policy,
+            PromptCachePolicy::RollingHistory
+        );
+        assert_eq!(
+            catalog.available_models_for_connection(&xai_id, Vec::new()),
+            vec![
+                "grok-build-0.1",
+                "xai/grok-build-0.1-256k",
+                "grok-4.5",
+                "xai/grok-4.5-500k",
+                "grok-4.3",
+                "xai/grok-4.3-1m",
+            ]
+        );
+
+        let short = catalog.resolve(&xai_id, &model_id("xai/grok-4.5")).unwrap();
+        let long = catalog
+            .resolve(&xai_id, &model_id("xai/grok-4.5-500k"))
+            .unwrap();
+        assert_eq!(short.remote_model_id, long.remote_model_id);
+        assert_eq!(short.context_window, Some(199_999));
+        assert_eq!(long.context_window, Some(500_000));
+        assert_eq!(
+            short
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(2_000_000)
+        );
+        assert_eq!(
+            long.pricing.map(|pricing| (
+                pricing.input_micros_per_million,
+                pricing.output_micros_per_million,
+                pricing.cache_read_micros_per_million,
+            )),
+            Some((4_000_000, 12_000_000, Some(600_000)))
+        );
+        let schedule = long.pricing_schedule.as_ref().expect("tier pricing");
+        assert_eq!(
+            schedule
+                .pricing_for_prompt_tokens(199_999)
+                .input_micros_per_million,
+            2_000_000
+        );
+        assert_eq!(
+            schedule
+                .pricing_for_prompt_tokens(200_000)
+                .input_micros_per_million,
+            4_000_000
+        );
+        assert_eq!(
+            long.run_target("https://api.x.ai/v1".into(), ReasoningSelection::Medium)
+                .prompt_cache_header
+                .as_deref(),
+            Some("x-grok-conv-id")
+        );
+
+        let grok_43 = catalog
+            .resolve(&xai_id, &model_id("xai/grok-4.3-1m"))
+            .unwrap();
+        assert!(
+            grok_43
+                .reasoning_selections()
+                .contains(&ReasoningSelection::Off)
+        );
+        for feature in [
+            ModelFeature::ToolCall,
+            ModelFeature::Reasoning,
+            ModelFeature::StructuredOutput,
+            ModelFeature::Attachment,
+        ] {
+            assert!(grok_43.features.contains(&feature), "{feature:?}");
+        }
+    }
+
+    #[test]
+    fn catalog_rejects_empty_live_model_exclusion_prefixes() {
+        let catalog = load_builtin_catalog().unwrap();
+        let mut connections = catalog.connections;
+        connections
+            .iter_mut()
+            .find(|connection| connection.id.as_str() == "xai")
+            .unwrap()
+            .model_exclude_prefixes = vec![" ".into()];
+
+        assert!(matches!(
+            validate_catalog(&connections, &catalog.targets),
+            Err(CatalogError::InvalidConnection { id, message })
+                if id.as_str() == "xai" && message.contains("must not be empty")
+        ));
     }
 
     #[test]

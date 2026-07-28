@@ -1,57 +1,69 @@
 # xAI Grok direct API (https://api.x.ai/v1), OpenAI Chat Completions wire.
-# Auth is a plain `Authorization: Bearer <XAI_API_KEY>`.
+# Auth is `Authorization: Bearer <XAI_API_KEY>`.
 #
-# Reasoning: the Chat Completions path takes OpenAI's top-level `reasoning_effort`
-# (low/medium/high; default high). That is bonsai's `openai-chat-completions`
-# codec. IMPORTANT — grok-4.5 and grok-build-0.1 are always-on reasoning models:
-# reasoning CANNOT be disabled, only its depth dialed. So these targets expose an
-# `effort` option but NO `toggle` — a toggle would let bonsai send
-# `reasoning_effort: "none"`, which these models reject. Only the non-reasoning
-# grok-4.20 variant (not shipped here) could take a toggle.
+# `/refresh` uses xAI's authenticated `/models` listing, then merges current
+# models.dev metadata. Official xAI model and pricing pages remain authoritative
+# where the aggregator differs.
 #
-# Wire footgun (documented): `presence_penalty`, `frequency_penalty`, and `stop`
-# are rejected on reasoning models. Bonsai does not send these by default; do not
-# add them for this connection.
+# Prompt caching is automatic and strictly prefix-based. Chat Completions uses
+# the stable `x-grok-conv-id` header for sticky routing; `prompt_cache_key` is a
+# Responses API body field and must not be sent on this transport. The
+# connection declares both the header and rolling history in connections.toml.
 #
-# Pricing note: xAI steps to a higher tier once a request's prompt exceeds ~200K
-# tokens. Working windows are pinned at 200K so per-target cost accounting stays
-# exact at the low tier (same pattern as openai.toml / gemini.toml).
+# Long-context pricing begins at 200,000 prompt tokens and reprices the entire
+# request. Every short/full picker pair carries the same schedule, so billing
+# selects rates from actual provider-reported usage. The picker row controls
+# Bonsai's context/compaction budget, not which remote model id is sent.
 #
-# Model IDs current as of 2026-07: the coding-specialized model is
-# `grok-build-0.1` (the former `grok-code-fast-1` was retired mid-2026 — do not
-# use that legacy id). models.dev reported $0.00 placeholder prices for several
-# Grok models, so every target is `pinned` with pricing from docs.x.ai.
+# grok-4.5 and grok-build-0.1 have always-on reasoning with low/medium/high
+# effort. grok-4.3 additionally supports `none`, represented by the toggle that
+# the OpenAI Chat Completions reasoning codec maps to reasoning_effort="none".
 #
-# The grok-4.20 snapshot trio is served but deliberately excluded (the
-# `not-shipped` lines below are read by the refresh-models audit so these do
-# not flag as lineup gaps):
-# not-shipped: grok-4.20-0309-reasoning — dominated by grok-4.3: same price
-#   ($1.25/$2.50), same 1M/30K limits, older snapshot (2026-03 vs 2026-04).
-# not-shipped: grok-4.20-0309-non-reasoning — the only toggle-capable Grok, but
-#   priced identically to grok-4.3 with no quality edge; grok-build-0.1 already
-#   covers the low-latency lane. Revisit if a no-reasoning Grok is wanted.
-# not-shipped: grok-4.20-multi-agent-0309 — no tool calling (models.dev
-#   tool_call=false); unusable in an agent harness.
-# Caching is automatic server-side (read hits in prompt_tokens_details.cached_tokens);
-# prompt_cache is enabled but VERIFY a warm request reports cached tokens before
-# trusting the accounting (chat-completions cache keys off the `x-grok-conv-id`
-# header, which bonsai does not yet send).
+# xAI documents function calling and image input for all shipped rows. It does
+# not publish a separate maximum completion-token limit; the 30K cap matches
+# the current 4.x listing and remains a conservative rumination guard.
+#
+# Re-evaluated exclusions (official docs checked 2026-07-28):
+# not-shipped: grok-4.20-0309-reasoning — older than grok-4.3 with the same 1M limits and rates
+# not-shipped: grok-4.20-0309-non-reasoning — grok-4.3 now provides reasoning_effort=none
+# not-shipped: grok-4.20-multi-agent-0309 — no Chat Completions or client/custom tool support
 
 [[targets]]
 connection = "xai"
 model = "xai/grok-build-0.1"
 remote_model = "grok-build-0.1"
+display_name = "Grok Build 0.1 · <200K context"
 recommended = true
 default = true
 recommended_effort = "medium"
 token_counter = "tiktoken"
 reasoning_codec = "openai-chat-completions"
-pinned = true
-context_window = 200000
-# Model output ceiling is unpublished; 30000 respects the ~30K ceiling the 4.x
-# line reports and doubles as the rumination-containment cap.
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 199999
 output_limit = 30000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 1000000, output_micros_per_million = 2000000, cache_read_micros_per_million = 200000 }
+pricing_tiers = [{ minimum_input_tokens = 200000, pricing = { input_micros_per_million = 2000000, output_micros_per_million = 4000000, cache_read_micros_per_million = 400000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
+[[targets]]
+connection = "xai"
+model = "xai/grok-build-0.1-256k"
+remote_model = "grok-build-0.1"
+metadata_model = "xai/grok-build-0.1"
+display_name = "Grok Build 0.1 · 256K context"
+recommended_effort = "medium"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 256000
+output_limit = 30000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 1000000, output_micros_per_million = 2000000, cache_read_micros_per_million = 200000 }
+pricing_tiers = [{ minimum_input_tokens = 200000, pricing = { input_micros_per_million = 2000000, output_micros_per_million = 4000000, cache_read_micros_per_million = 400000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -61,34 +73,77 @@ values = ["low", "medium", "high"]
 connection = "xai"
 model = "xai/grok-4.5"
 remote_model = "grok-4.5"
+display_name = "Grok 4.5 · <200K context"
 recommended = true
 recommended_effort = "medium"
 token_counter = "tiktoken"
 reasoning_codec = "openai-chat-completions"
-pinned = true
-context_window = 200000
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 199999
 output_limit = 30000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 300000 }
+pricing_tiers = [{ minimum_input_tokens = 200000, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 600000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
 values = ["low", "medium", "high"]
 
-# Mid-tier flagship (2026-04): always-on reasoning like grok-4.5, native 1M
-# window pinned at 200K for the price-tier boundary. Pricing verified against
-# docs.x.ai 2026-07-19 (matches models.dev: $1.25/$2.50, cached $0.20).
+[[targets]]
+connection = "xai"
+model = "xai/grok-4.5-500k"
+remote_model = "grok-4.5"
+metadata_model = "xai/grok-4.5"
+display_name = "Grok 4.5 · 500K context"
+recommended_effort = "medium"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 500000
+output_limit = 30000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 300000 }
+pricing_tiers = [{ minimum_input_tokens = 200000, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 600000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
+
 [[targets]]
 connection = "xai"
 model = "xai/grok-4.3"
 remote_model = "grok-4.3"
+display_name = "Grok 4.3 · <200K context"
 recommended_effort = "medium"
 token_counter = "tiktoken"
 reasoning_codec = "openai-chat-completions"
-pinned = true
-context_window = 200000
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 199999
 output_limit = 30000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 1250000, output_micros_per_million = 2500000, cache_read_micros_per_million = 200000 }
+pricing_tiers = [{ minimum_input_tokens = 200000, pricing = { input_micros_per_million = 2500000, output_micros_per_million = 5000000, cache_read_micros_per_million = 400000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
-values = ["low", "medium", "high"]
+values = ["none", "low", "medium", "high"]
+
+[[targets]]
+connection = "xai"
+model = "xai/grok-4.3-1m"
+remote_model = "grok-4.3"
+metadata_model = "xai/grok-4.3"
+display_name = "Grok 4.3 · 1M context"
+recommended_effort = "medium"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 1000000
+output_limit = 30000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 1250000, output_micros_per_million = 2500000, cache_read_micros_per_million = 200000 }
+pricing_tiers = [{ minimum_input_tokens = 200000, pricing = { input_micros_per_million = 2500000, output_micros_per_million = 5000000, cache_read_micros_per_million = 400000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high"]

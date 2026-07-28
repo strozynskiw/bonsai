@@ -234,11 +234,11 @@ def audit_target(t: dict, m: dict | None, key: str) -> list[str]:
 
     if "pricing" not in pinned_fields and t.get("pricing_tiers"):
         toml_tiers = {
-            tier["above_input_tokens"]: tier.get("pricing") or {}
+            tier["minimum_input_tokens"]: tier.get("pricing") or {}
             for tier in t["pricing_tiers"]
         }
         models_dev_tiers = {
-            selector["size"]: tier
+            selector["size"] + 1: tier
             for tier in cost.get("tiers") or []
             if isinstance(tier, dict)
             and isinstance((selector := tier.get("tier")), dict)
@@ -263,7 +263,7 @@ def audit_target(t: dict, m: dict | None, key: str) -> list[str]:
                 mv = micros(models_dev_rates.get(models_dev_key))
                 if tv != mv and (tv is not None or mv is not None):
                     issues.append(
-                        f"price tier >{threshold}.{field}: "
+                        f"price tier >={threshold}.{field}: "
                         f"toml={tv} models.dev={mv}"
                     )
 

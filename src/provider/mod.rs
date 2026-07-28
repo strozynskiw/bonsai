@@ -915,6 +915,7 @@ pub(crate) fn fallback_run_target(
         remote_model_id,
         base_url,
         transport,
+        prompt_cache_header: None,
         prompt_cache_policy: crate::model_catalog::PromptCachePolicy::TransportDefault,
         reasoning_codec: crate::provider::ReasoningCodec::default_for_transport(transport),
         endpoint_path: (!metadata.endpoint_path.is_empty())

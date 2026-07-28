@@ -717,7 +717,7 @@ mod tests {
         let schedule = ModelPricingSchedule::new(
             base,
             vec![ModelPricingTier {
-                above_input_tokens: 200_000,
+                minimum_input_tokens: 200_001,
                 pricing: high,
             }],
         );

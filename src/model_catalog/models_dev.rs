@@ -630,15 +630,18 @@ impl RawModelsDevCost {
                 if selector.kind.as_ref() != "context" {
                     return None;
                 }
-                let above_tokens = selector.size.filter(|size| *size > 0)?;
+                let above_tokens = selector.size.filter(|size| *size > 0 && *size < u32::MAX)?;
                 let pricing = tier.rates.pricing()?;
                 Some(ModelPricingTier {
-                    above_input_tokens: above_tokens,
+                    // models.dev context selectors are named
+                    // `context_over_<size>`: convert that exclusive threshold
+                    // to the schedule's inclusive lower bound.
+                    minimum_input_tokens: above_tokens.saturating_add(1),
                     pricing,
                 })
             })
             .collect::<Vec<_>>();
-        context_pricing.sort_by_key(|tier| tier.above_input_tokens);
+        context_pricing.sort_by_key(|tier| tier.minimum_input_tokens);
         (pricing, context_pricing)
     }
 }

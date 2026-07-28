@@ -27,7 +27,7 @@ context_window = 200000
 output_limit = 65536
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
-pricing_tiers = [{ above_input_tokens = 200000, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
+pricing_tiers = [{ minimum_input_tokens = 200001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -47,7 +47,7 @@ context_window = 1048576
 output_limit = 65536
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
-pricing_tiers = [{ above_input_tokens = 200000, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
+pricing_tiers = [{ minimum_input_tokens = 200001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -67,7 +67,7 @@ context_window = 200000
 output_limit = 65536
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
-pricing_tiers = [{ above_input_tokens = 200000, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
+pricing_tiers = [{ minimum_input_tokens = 200001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -87,7 +87,7 @@ context_window = 1048576
 output_limit = 65536
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
-pricing_tiers = [{ above_input_tokens = 200000, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
+pricing_tiers = [{ minimum_input_tokens = 200001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -185,7 +185,7 @@ context_window = 200000
 output_limit = 65536
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 1250000, output_micros_per_million = 10000000, cache_read_micros_per_million = 125000 }
-pricing_tiers = [{ above_input_tokens = 200000, pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000 } }]
+pricing_tiers = [{ minimum_input_tokens = 200001, pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -205,7 +205,7 @@ context_window = 1048576
 output_limit = 65536
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
 pricing = { input_micros_per_million = 1250000, output_micros_per_million = 10000000, cache_read_micros_per_million = 125000 }
-pricing_tiers = [{ above_input_tokens = 200000, pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000 } }]
+pricing_tiers = [{ minimum_input_tokens = 200001, pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000 } }]
 
 [[targets.reasoning_options]]
 type = "effort"

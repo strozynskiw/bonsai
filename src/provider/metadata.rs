@@ -425,6 +425,8 @@ pub struct ProviderMetadata {
     pub env_var_model: Option<Box<str>>,
     pub env_var_base_url: Option<Box<str>>,
     pub seed_models: Box<[Box<str>]>,
+    /// Live model-id prefixes hidden from this connection's picker.
+    pub model_exclude_prefixes: Box<[Box<str>]>,
     pub protocol: Protocol,
     pub capabilities: ProviderCapabilities,
     pub endpoint_path: Box<str>,
@@ -470,6 +472,7 @@ impl ProviderMetadata {
                 .iter()
                 .map(|model| Box::<str>::from(*model))
                 .collect(),
+            model_exclude_prefixes: Box::default(),
             protocol,
             capabilities,
             endpoint_path: endpoint_path.into(),

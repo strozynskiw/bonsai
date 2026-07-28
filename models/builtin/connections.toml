@@ -423,13 +423,25 @@ base_url_env = "XAI_BASE_URL"
 default_model = "xai/grok-build-0.1"
 default_endpoint_path = "chat/completions"
 default_token_counter = "tiktoken"
+# Keep media products and variants that cannot run Bonsai's client-side tools
+# out of live discovery. New compatible language-model families remain visible.
+model_exclude_prefixes = [
+  "grok-imagine-",
+  "grok-4.20-0309-reasoning",
+  "grok-4.20-0309-non-reasoning",
+  "grok-4.20-multi-agent",
+]
 # Chat Completions takes top-level `reasoning_effort` (low/medium/high); grok-4.5
 # and grok-build-0.1 are always-on reasoning models (no toggle). See grok.toml.
 reasoning_codec = "openai-chat-completions"
 # Automatic server-side prefix caching; read hits in
-# prompt_tokens_details.cached_tokens (verify live — chat completions keys off the
-# x-grok-conv-id header, which bonsai does not yet send).
+# prompt_tokens_details.cached_tokens. Chat Completions uses this stable header
+# for sticky routing (prompt_cache_key is only valid on the Responses API).
 prompt_cache = true
+prompt_cache_header = "x-grok-conv-id"
+# xAI caches only exact prefixes. Immutable project-state snapshots ensure each
+# previous request remains a literal prefix of the next.
+prompt_cache_policy = "rolling-history"
 
 [[connections]]
 id = "mistral"

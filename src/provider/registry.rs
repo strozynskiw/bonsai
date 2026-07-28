@@ -313,6 +313,7 @@ fn build_provider_metadata(
     .with_auth_requirement(auth_requirement_for_connection_auth(&connection.auth))
     .with_discovery(connection.discovery)
     .with_auth_header(connection.auth_header.clone());
+    metadata.model_exclude_prefixes = connection.model_exclude_prefixes.clone().into_boxed_slice();
     if let Some(token_counter) = connection.default_token_counter {
         metadata = metadata.with_token_counter(token_counter);
     }
@@ -564,6 +565,47 @@ mod tests {
                 "deepseek-v4-pro".to_string(),
                 "deepseek-v4-turbo".to_string(),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn xai_refresh_discovers_new_language_models_without_excluded_variants() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer sk-xai-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [
+                    {"id": "grok-build-0.1", "object": "model"},
+                    {"id": "grok-build-0.2", "object": "model"},
+                    {"id": "grok-4.20-0309-reasoning", "object": "model"},
+                    {"id": "grok-4.20-multi-agent-0309", "object": "model"},
+                    {"id": "grok-imagine-image", "object": "model"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin()
+            .expect("builtin catalog should load");
+        let registry = ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("xai").expect("xAI provider");
+        let session = ProviderSession::new(
+            "sk-xai-test".to_string(),
+            server.uri(),
+            "grok-build-0.1".to_string(),
+        );
+
+        let availability = factory.list_available_models(&session).await.unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec!["grok-build-0.1".to_string(), "grok-build-0.2".to_string(),],
+            "new language models remain discoverable while configured incompatible prefixes stay hidden"
         );
     }
 

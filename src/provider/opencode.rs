@@ -160,6 +160,10 @@ pub struct OpenAiCompatibleProvider {
     /// so an image already in history cannot 400 every later turn.
     supports_vision: bool,
     prompt_cache_key: String,
+    /// Chat Completions backends whose sticky cache route is an HTTP header
+    /// (xAI uses `x-grok-conv-id`) set it here. Its presence suppresses the
+    /// Responses-only `prompt_cache_key` body field.
+    prompt_cache_header: Option<Box<str>>,
     /// Native reasoning captured for assistant tool-call turns, keyed by the
     /// first call id so it can be restored when that turn re-enters history.
     reasoning_by_call_id: std::sync::Mutex<HashMap<String, String>>,
@@ -209,6 +213,7 @@ impl OpenAiCompatibleProvider {
             // catalog has no row.
             supports_vision: target.supports_vision || capabilities.supports_vision,
             prompt_cache_key: crate::provider::new_conversation_cache_key(),
+            prompt_cache_header: target.prompt_cache_header.clone(),
             reasoning_by_call_id: std::sync::Mutex::new(HashMap::new()),
             tool_call_extra_content_by_id: std::sync::Mutex::new(HashMap::new()),
             last_request_diagnostics: std::sync::Mutex::new(None),
@@ -332,7 +337,7 @@ impl OpenAiCompatibleProvider {
         // hashing it keeps plan-mode and coding-mode turns on separate cache
         // routes. Only verified backends receive the field, so strict servers
         // never see it.
-        if self.supports_prompt_cache {
+        if self.supports_prompt_cache && self.prompt_cache_header.is_none() {
             let lane = request_messages
                 .first()
                 .and_then(|message| serde_json::to_value(message).ok())
@@ -690,6 +695,15 @@ impl Provider for OpenAiCompatibleProvider {
             .body(serialized_body);
         if !self.api_key.trim().is_empty() {
             builder = builder.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+        if let Some(header) = &self.prompt_cache_header {
+            let header =
+                reqwest::header::HeaderName::from_bytes(header.as_bytes()).map_err(|error| {
+                    crate::provider::ProviderFailure::transport(format!(
+                        "invalid prompt-cache header `{header}`: {error}"
+                    ))
+                })?;
+            builder = builder.header(header, &self.prompt_cache_key);
         }
         let Some(response) = streaming::send_json_stream(builder, &cancellation_token).await?
         else {
@@ -1196,6 +1210,65 @@ mod tests {
             coding.get("prompt_cache_key").and_then(Value::as_str),
             "plan-mode and coding-mode lanes must not share a cache route",
         );
+    }
+
+    #[tokio::test]
+    async fn xai_cache_route_uses_conversation_header_not_body_field() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer sk-xai"))
+            .and(header("x-grok-conv-id", "bonsai-xai-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let catalog =
+            crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
+        let resolved = catalog
+            .resolve_connection_model(&"xai".parse().expect("connection id"), "xai/grok-build-0.1")
+            .expect("xAI target resolves");
+        let session = provider_session("sk-xai", &server.uri(), "xai/grok-build-0.1");
+        let target = resolved.run_target(server.uri().into(), session.reasoning);
+        let mut provider = OpenAiCompatibleProvider::with_api_key_policy(
+            "xai",
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            CACHING,
+        );
+        provider.set_conversation_cache_key("bonsai-xai-session");
+
+        let messages = [system_message("stable"), user_message("hello")];
+        let body = provider.request_body(&messages, &[]).unwrap();
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "xAI Chat Completions accepts the sticky route only as a header"
+        );
+        assert_eq!(
+            provider.project_state_cache_strategy(),
+            crate::provider::ProjectStateCacheStrategy::AppendOnlyHistory,
+            "xAI cache hits require an exact growing prompt prefix"
+        );
+
+        let response = provider
+            .chat_stream(
+                &messages,
+                &[],
+                CancellationToken::new(),
+                std::sync::Arc::new(crate::output::StdoutSink),
+            )
+            .await
+            .expect("xAI-shaped stream succeeds");
+        assert_eq!(response.content, "ok");
     }
 
     /// The OpenCode Go gateway 400s a DeepSeek request whose assistant
@@ -1951,8 +2024,10 @@ mod tests {
                     default_endpoint_path: Some("chat/completions".into()),
                     default_token_counter: Some(TokenCounterKind::Qwen3),
                     models_dev_provider: Some("opencode-go".parse().unwrap()),
+                    model_exclude_prefixes: Vec::new(),
                     reasoning_codec: None,
                     prompt_cache: true,
+                    prompt_cache_header: None,
                     prompt_cache_policy: crate::model_catalog::PromptCachePolicy::RollingHistory,
                     reasoning_content_echo: true,
                     usage_frame_ends_stream: false,
