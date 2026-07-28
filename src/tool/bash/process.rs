@@ -147,6 +147,7 @@ impl BashTool {
         cwd: &Path,
         timeout_secs: u64,
         escape: bool,
+        allow_network: bool,
         context: Option<ToolExecutionContext>,
     ) -> Result<CommandResult> {
         use tokio::io::AsyncReadExt;
@@ -160,8 +161,14 @@ impl BashTool {
         let (mut cmd, decision) = if escape {
             self.sandbox.command_unconfined(&self.shell, command, cwd)
         } else {
-            self.sandbox.command(&self.shell, command, cwd)
+            self.sandbox
+                .command_with_network(&self.shell, command, cwd, allow_network)
         };
+        if allow_network && !decision.confined {
+            anyhow::bail!(
+                "planning collaboration commands require an active filesystem sandbox; enable a supported sandbox before retrying"
+            );
+        }
         let confined = decision.confined;
         decision.log();
         // Backstop: SIGKILL the shell PID if this future is dropped. The timeout

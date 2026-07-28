@@ -28,6 +28,9 @@ use crate::yolo::YoloMode;
 pub(in crate::tool) mod command;
 use command::{CommandAnalysis, analyze_command, extract_read_paths};
 
+mod planning;
+use planning::classify_planning_command;
+
 mod output;
 pub(crate) use output::BashOutputBudget;
 
@@ -74,6 +77,16 @@ const MAX_TIMEOUT_SECS: u64 = 900;
 const FAILURE_SUMMARY_LINES: usize = 12;
 const FAILURE_SUMMARY_LINE_CHARS: usize = 240;
 
+/// Capability surface bound to a Bash tool instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BashCapability {
+    /// The full coding-mode shell surface, guarded by the ordinary permission
+    /// and autonomy policies.
+    Coding,
+    /// The fail-closed inspection and collaboration surface used while planning.
+    Planning,
+}
+
 pub struct BashTool {
     // Fields are visible to the whole `bash` module tree so the cohesive
     // `impl BashTool` blocks can live in sibling files (session/process/policy)
@@ -98,6 +111,7 @@ pub struct BashTool {
     pub(in crate::tool::bash) confined_failures: Arc<ConfinedFailures>,
     pub(in crate::tool::bash) hooks: Arc<crate::hooks::HookEngine>,
     pub(in crate::tool::bash) authorization_ledger: AuthorizationLedger,
+    pub(in crate::tool::bash) capability: BashCapability,
     verification_cache: Arc<Mutex<HashMap<VerificationCacheKey, CachedVerificationOutput>>>,
 }
 
@@ -308,6 +322,7 @@ impl BashTool {
             confined_failures: Arc::new(ConfinedFailures::default()),
             hooks,
             authorization_ledger,
+            capability: BashCapability::Coding,
             verification_cache,
         }
     }
@@ -333,8 +348,18 @@ impl BashTool {
             confined_failures: self.confined_failures.clone(),
             hooks: self.hooks.clone(),
             authorization_ledger: self.authorization_ledger.clone(),
+            capability: self.capability,
             verification_cache: self.verification_cache.clone(),
         }
+    }
+
+    /// Bind this session's shared shell state to the restricted planning-mode
+    /// capability. This is intentionally a separate instance so coding Bash
+    /// keeps its existing surface and policy.
+    pub(crate) fn for_planning(&self) -> Self {
+        let mut tool = self.with_shared_session_and_output_budget(self.output_budget);
+        tool.capability = BashCapability::Planning;
+        tool
     }
 }
 
@@ -432,8 +457,15 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run a shell command from the persistent project cwd. Use workdir instead of a repo `cd`; \
-supports bounded foreground, background task, PTY, parallel, and approved sandbox-escape modes."
+        match self.capability {
+            BashCapability::Coding => {
+                "Run a shell command from the persistent project cwd. Use workdir instead of a repo `cd`; \
+                 supports bounded foreground, background task, PTY, parallel, and approved sandbox-escape modes."
+            }
+            BashCapability::Planning => {
+                "Run a restricted planning command: safe local inspection or approved gh/glab issue and pull/merge-request collaboration. Foreground only; shell syntax, redirects, project mutation, and sandbox escape are unavailable."
+            }
+        }
     }
 
     fn parallel_policy(&self) -> ParallelPolicy {
@@ -441,53 +473,52 @@ supports bounded foreground, background task, PTY, parallel, and approved sandbo
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        closed_object(
-            [
-                (
-                    "command",
-                    string_property(
-                        "Command to execute in the persistent cwd (initially the project root).",
-                    ),
+        let mut properties = vec![
+            (
+                "command",
+                string_property(
+                    "Command to execute in the persistent cwd (initially the project root).",
                 ),
-                (
-                    "timeout",
-                    bounded_integer_property(
-                        "Timeout in seconds (foreground default: 45; background default: 900; max: 900)",
-                        Some(1),
-                        Some(MAX_TIMEOUT_SECS as i64),
-                    ),
+            ),
+            (
+                "timeout",
+                bounded_integer_property(
+                    "Timeout in seconds (foreground default: 45; background default: 900; max: 900)",
+                    Some(1),
+                    Some(MAX_TIMEOUT_SECS as i64),
                 ),
-                (
-                    "workdir",
-                    string_property("Optional project-relative working directory"),
+            ),
+            (
+                "workdir",
+                string_property("Optional project-relative working directory"),
+            ),
+            (
+                "parallel",
+                boolean_property(
+                    "Run with sibling parallel:true calls; does not update persistent cwd",
                 ),
-                (
-                    "parallel",
-                    boolean_property(
-                        "Run with sibling parallel:true calls; does not update persistent cwd",
-                    ),
+            ),
+            (
+                "run_in_background",
+                boolean_property("Return a background task ID immediately (default timeout: 900s)"),
+            ),
+            (
+                "interactive",
+                boolean_property(
+                    "Return a PTY ID; incompatible with parallel, background, or escape",
                 ),
-                (
-                    "run_in_background",
-                    boolean_property(
-                        "Return a background task ID immediately (default timeout: 900s)",
-                    ),
+            ),
+            (
+                "escape_sandbox",
+                boolean_property(
+                    "Request approval to run outside the sandbox; foreground non-PTY only",
                 ),
-                (
-                    "interactive",
-                    boolean_property(
-                        "Return a PTY ID; incompatible with parallel, background, or escape",
-                    ),
-                ),
-                (
-                    "escape_sandbox",
-                    boolean_property(
-                        "Request approval to run outside the sandbox; foreground non-PTY only",
-                    ),
-                ),
-            ],
-            &["command"],
-        )
+            ),
+        ];
+        if self.capability == BashCapability::Planning {
+            properties.truncate(3);
+        }
+        closed_object(properties, &["command"])
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
@@ -529,15 +560,34 @@ impl BashTool {
         let requested_command = self
             .normalize_redundant_leading_cd(&args.command, &cwd)
             .await;
-        let canonical_check = canonical_check_command(&requested_command);
-        let command = canonical_check
-            .as_deref()
-            .map(structured_cargo_command)
+        let planning_command = (self.capability == BashCapability::Planning)
+            .then(|| classify_planning_command(&requested_command))
+            .transpose()?;
+        if planning_command.is_some()
+            && (run_in_background || interactive || parallel || escape_sandbox)
+        {
+            anyhow::bail!(
+                "planning Bash only supports confined foreground commands; background, interactive, parallel, and sandbox escape are unavailable"
+            );
+        }
+        let canonical_check = planning_command
+            .is_none()
+            .then(|| canonical_check_command(&requested_command))
+            .flatten();
+        let command = planning_command
+            .as_ref()
+            .map(|command| command.command().to_string())
+            .or_else(|| canonical_check.as_deref().map(structured_cargo_command))
             .unwrap_or_else(|| requested_command.clone());
         let analysis = analyze_command(&command);
 
         let origin = context.as_ref().and_then(|ctx| ctx.origin());
-        self.authorize_command(&command, &analysis, origin).await?;
+        if let Some(planning_command) = &planning_command {
+            self.authorize_planning_command(&command, &analysis, planning_command, origin)
+                .await?;
+        } else {
+            self.authorize_command(&command, &analysis, origin).await?;
+        }
 
         let pre_outcome = self
             .hooks
@@ -683,6 +733,9 @@ impl BashTool {
                 &cwd,
                 timeout_secs,
                 escape.escaped(),
+                planning_command
+                    .as_ref()
+                    .is_some_and(|command| command.permits_network()),
                 context.clone(),
             )
             .await?;
@@ -776,6 +829,28 @@ impl BashTool {
                     truncation: truncation.clone(),
                 },
             );
+        }
+
+        if planning_command
+            .as_ref()
+            .is_some_and(|command| command.permits_network())
+        {
+            let remote_output = if stderr.is_empty() {
+                stdout.as_str()
+            } else if stdout.is_empty() {
+                stderr.as_str()
+            } else {
+                &format!("stdout:\n{stdout}\n\nstderr:\n{stderr}")
+            };
+            return Ok(ToolOutput::untrusted_context_with_status(
+                "GitHub/GitLab CLI output",
+                remote_output,
+                if timed_out || !matches!(exit_code, Some(0)) {
+                    crate::tool::ToolExecutionStatus::Failed
+                } else {
+                    crate::tool::ToolExecutionStatus::Succeeded
+                },
+            ));
         }
 
         Ok(ToolOutput::Command {

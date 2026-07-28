@@ -726,6 +726,7 @@ pub(crate) fn build_tool_registries(
         read_symbol_tool,
         grep_tool,
     );
+    planning_instances.insert(ToolFactoryKey::Bash, Arc::new(bash_tool.for_planning()));
     planning_instances.insert(ToolFactoryKey::Question, question_tool);
     planning_instances.insert(ToolFactoryKey::Skill, skill_tool);
     if let Some(agent_tool) = agent_tool {
@@ -1023,6 +1024,7 @@ mod tests {
             "git",
             "read_region",
             "read_symbol",
+            "bash",
             "question",
             "skill",
             "plan_replace_draft",
@@ -1064,7 +1066,6 @@ mod tests {
         assert_profile_contract(ToolProfile::Smol, &smol);
 
         for tool in [
-            "bash",
             "terminal",
             "write",
             "edit",

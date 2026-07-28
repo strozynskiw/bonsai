@@ -42,6 +42,8 @@ pub(crate) enum ActionEffect {
     CodeExecution,
     /// Connects to a remote endpoint.
     Network,
+    /// Mutates a remote collaboration resource such as an issue or pull request.
+    RemoteWrite,
     /// Rewrites history, permissions, or another non-recoverable resource.
     Irreversible,
     /// Mutates only Bonsai-owned session, plan, memory, or UI state.
@@ -53,9 +55,11 @@ impl ActionEffect {
         match self {
             Self::Read => RiskTier::ReadOnly,
             Self::WorkspaceWrite => RiskTier::Medium,
-            Self::MultiFileWrite | Self::ExternalWrite | Self::CodeExecution | Self::Network => {
-                RiskTier::High
-            }
+            Self::MultiFileWrite
+            | Self::ExternalWrite
+            | Self::CodeExecution
+            | Self::Network
+            | Self::RemoteWrite => RiskTier::High,
             Self::Delete | Self::Truncate | Self::ProtectedPath | Self::Irreversible => {
                 RiskTier::Destructive
             }
@@ -74,6 +78,7 @@ impl ActionEffect {
             Self::ExternalWrite => "external-write",
             Self::CodeExecution => "code-execution",
             Self::Network => "network",
+            Self::RemoteWrite => "remote-write",
             Self::Irreversible => "irreversible",
             Self::InternalState => "internal-state",
         }

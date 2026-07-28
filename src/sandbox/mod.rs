@@ -275,8 +275,27 @@ impl CommandSandbox {
         script: &str,
         cwd: &Path,
     ) -> (Command, SpawnDecision) {
+        self.command_with_network(shell, script, cwd, false)
+    }
+
+    /// Build a confined child command with a per-spawn network allowance.
+    ///
+    /// Unlike [`set_deny_network`](Self::set_deny_network), this never mutates
+    /// the session-wide sandbox state, so a collaboration command cannot race
+    /// another command into network access.
+    pub(crate) fn command_with_network(
+        &self,
+        shell: &str,
+        script: &str,
+        cwd: &Path,
+        allow_network: bool,
+    ) -> (Command, SpawnDecision) {
+        let mut policy = self.policy();
+        if allow_network {
+            policy.deny_network = false;
+        }
         let (mut command, decision) = if self.is_active()
-            && let Some(confined) = self.wrap_active(shell, script, cwd)
+            && let Some(confined) = self.wrap_active(shell, script, cwd, &policy)
         {
             confined
         } else {
@@ -328,6 +347,7 @@ impl CommandSandbox {
         shell: &str,
         script: &str,
         cwd: &Path,
+        policy: &SandboxPolicy,
     ) -> Option<(Command, SpawnDecision)> {
         match self.inner.backend {
             SandboxBackend::SeatbeltExec { .. } => Some(macos::wrap(
@@ -335,7 +355,7 @@ impl CommandSandbox {
                 script,
                 cwd,
                 self.inner.backend.clone(),
-                &self.policy(),
+                policy,
             )),
             _ => None,
         }
@@ -347,6 +367,7 @@ impl CommandSandbox {
         shell: &str,
         script: &str,
         cwd: &Path,
+        policy: &SandboxPolicy,
     ) -> Option<(Command, SpawnDecision)> {
         match self.inner.backend {
             SandboxBackend::Bubblewrap { .. } => Some(linux::wrap(
@@ -354,7 +375,7 @@ impl CommandSandbox {
                 script,
                 cwd,
                 self.inner.backend.clone(),
-                &self.policy(),
+                policy,
             )),
             _ => None,
         }
@@ -366,6 +387,7 @@ impl CommandSandbox {
         _shell: &str,
         _script: &str,
         _cwd: &Path,
+        _policy: &SandboxPolicy,
     ) -> Option<(Command, SpawnDecision)> {
         None
     }

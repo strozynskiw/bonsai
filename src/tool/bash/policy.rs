@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use super::BashTool;
 use super::command::CommandAnalysis;
+use super::planning::{PlanningCommand, PlanningCommandKind};
 use super::session::EscapeApproval;
 use crate::interaction::{
     EscalationDecision, InteractionOutcome, InteractionStatus, PermissionDecision,
@@ -130,6 +131,54 @@ impl BashTool {
                     .await
             }
         }
+    }
+
+    /// Authorize the independently parsed planning-mode shell capability. The
+    /// scope is fail-closed before this method is reached; here we preserve the
+    /// user's explicit deny rules while allowing approved collaboration work at
+    /// Balanced without an interaction prompt.
+    pub(super) async fn authorize_planning_command(
+        &self,
+        command: &str,
+        analysis: &CommandAnalysis,
+        planning: &PlanningCommand,
+        origin: Option<&str>,
+    ) -> Result<()> {
+        let permission = self
+            .permissions
+            .check_all_detailed(analysis.permission_commands());
+        if permission.permission == Permission::Deny {
+            let plan = planning_action_plan(command, planning);
+            self.authorization_ledger
+                .record(
+                    &plan,
+                    permission,
+                    self.yolo_mode.level(),
+                    "deny",
+                    "matching deny rule",
+                )
+                .await;
+            anyhow::bail!("Command not allowed by permission rules: {command}");
+        }
+        if self.yolo_mode.level() < ApprovalLevel::Balanced {
+            return self.authorize_command(command, analysis, origin).await;
+        }
+        if planning.permits_network() && !self.sandbox.is_active() {
+            anyhow::bail!(
+                "planning collaboration commands require an active filesystem sandbox; enable a supported sandbox before retrying"
+            );
+        }
+        let plan = planning_action_plan(command, planning);
+        self.authorization_ledger
+            .record(
+                &plan,
+                permission,
+                self.yolo_mode.level(),
+                "allow",
+                "planning capability",
+            )
+            .await;
+        Ok(())
     }
 
     /// Prompt the user to approve a command the rules marked `Ask` (and that the
@@ -345,4 +394,15 @@ impl BashTool {
             }
         }
     }
+}
+
+fn planning_action_plan(command: &str, planning: &PlanningCommand) -> ActionPlan {
+    let effects = match planning.kind() {
+        PlanningCommandKind::LocalRead => vec![ActionEffect::Read],
+        PlanningCommandKind::CollaborationRead => vec![ActionEffect::Read, ActionEffect::Network],
+        PlanningCommandKind::CollaborationWrite => {
+            vec![ActionEffect::Network, ActionEffect::RemoteWrite]
+        }
+    };
+    ActionPlan::new("bash.planning", command, effects)
 }

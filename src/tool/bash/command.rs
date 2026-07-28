@@ -322,7 +322,7 @@ fn extract_substitutions(command: &str) -> (String, Vec<String>) {
     (outer, bodies)
 }
 
-fn tokenize_shell(command: &str) -> Option<Vec<String>> {
+pub(super) fn tokenize_shell(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut chars = command.chars().peekable();
