@@ -1628,10 +1628,22 @@ impl Agent {
             let Some((target, path)) = file_read_target(tool_call) else {
                 continue;
             };
-            versions.file_targets.insert(target.clone());
-            let Ok(resolved) = resolver.resolve_existing(&path) else {
-                continue;
+            let resolved = match resolver.resolve_existing(&path) {
+                Ok(resolved) => resolved,
+                Err(_) if tool_call.name == "grep" => {
+                    versions.excluded_targets.insert(target);
+                    continue;
+                }
+                Err(_) => {
+                    versions.file_targets.insert(target);
+                    continue;
+                }
             };
+            if tool_call.name == "grep" && !resolved.canonical_path().is_file() {
+                versions.excluded_targets.insert(target);
+                continue;
+            }
+            versions.file_targets.insert(target.clone());
             paths_by_target.insert(target, resolved.canonical_path().to_path_buf());
         }
         let checks = paths_by_target
@@ -1845,6 +1857,7 @@ struct ReadStormGuard {
 struct ReadTargetVersions {
     file_targets: HashSet<String>,
     unchanged_targets: HashSet<String>,
+    excluded_targets: HashSet<String>,
 }
 
 impl ReadTargetVersions {
@@ -1864,6 +1877,7 @@ impl ReadTargetVersions {
         Self {
             unchanged_targets: file_targets.clone(),
             file_targets,
+            excluded_targets: HashSet::new(),
         }
     }
 }
@@ -1889,7 +1903,10 @@ impl ReadStormGuard {
             return None;
         }
 
-        let targets = read_storm_targets(tool_calls);
+        let targets = read_storm_targets(tool_calls)
+            .difference(&versions.excluded_targets)
+            .cloned()
+            .collect::<HashSet<_>>();
         self.decay_targets_not_seen(&targets);
         if targets.is_empty() {
             return None;
@@ -1979,6 +1996,8 @@ fn read_storm_target(tool_call: &ToolCall) -> Option<String> {
             tool_argument_string(&tool_call.arguments, "path")
                 .map(|path| format!("read {}", normalize_inspection_path(&path)))
         }
+        "grep" => tool_argument_string(&tool_call.arguments, "path")
+            .map(|path| format!("read {}", normalize_inspection_path(&path))),
         "bash" => bash_file_read_target(tool_call),
         "git" => {
             let op = tool_argument_string(&tool_call.arguments, "op")?;
@@ -1993,7 +2012,7 @@ fn read_storm_target(tool_call: &ToolCall) -> Option<String> {
 }
 
 fn file_read_target(tool_call: &ToolCall) -> Option<(String, String)> {
-    if structured_file_read_tool(&tool_call.name) {
+    if structured_file_read_tool(&tool_call.name) || tool_call.name == "grep" {
         let path = tool_argument_string(&tool_call.arguments, "path")?;
         return Some((format!("read {}", normalize_inspection_path(&path)), path));
     }
@@ -2966,6 +2985,7 @@ mod tests {
         let changed = ReadTargetVersions {
             file_targets: unchanged.file_targets.clone(),
             unchanged_targets: HashSet::new(),
+            excluded_targets: HashSet::new(),
         };
 
         let mut inspection = RepeatedInspectionGuard::default();
@@ -3177,6 +3197,55 @@ mod tests {
             is_storm_reject(rejected),
             "same-path shifted reads should trip even when earlier turns included agent calls"
         );
+    }
+
+    #[test]
+    fn read_storm_guard_counts_file_scoped_grep_as_the_same_target() {
+        let path = "src/storage/workspace_locks.rs";
+        let turns = [
+            call("read", &format!(r#"{{"path":"{path}"}}"#)),
+            call(
+                "grep",
+                &format!(r#"{{"path":"{path}","pattern":"fn refresh"}}"#),
+            ),
+            call(
+                "grep",
+                &format!(r#"{{"path":"{path}","pattern":"safety_margin"}}"#),
+            ),
+        ];
+        let mut guard = ReadStormGuard::default();
+        for tool_call in turns {
+            assert!(guard.action_for(&[tool_call]).is_none());
+        }
+
+        let rejected = guard.action_for(&[call(
+            "read_region",
+            &format!(r#"{{"path":"{path}","start_line":405,"end_line":495}}"#),
+        )]);
+        assert!(
+            is_storm_reject(rejected),
+            "session 78 alternated reads and file-scoped greps to evade the per-path guard"
+        );
+    }
+
+    #[test]
+    fn read_storm_guard_ignores_excluded_search_targets() {
+        let grep = call("grep", r#"{"path":"src","pattern":"workspace_lock"}"#);
+        let target = read_storm_target(&grep).expect("grep path should have a target");
+        let versions = ReadTargetVersions {
+            excluded_targets: HashSet::from([target]),
+            ..Default::default()
+        };
+        let mut guard = ReadStormGuard::default();
+
+        for _ in 0..READ_STORM_TARGET_TURN_LIMIT + 2 {
+            assert!(
+                guard
+                    .action_for_with_versions(std::slice::from_ref(&grep), &versions)
+                    .is_none(),
+                "directory-wide searches must remain available"
+            );
+        }
     }
 
     #[test]
