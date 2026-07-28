@@ -247,9 +247,20 @@ default_base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 model_env = "OPENROUTER_MODEL"
 base_url_env = "OPENROUTER_BASE_URL"
-default_model = "openrouter/gpt-5.2"
+default_model = "openrouter/gpt-5.6-sol"
 default_endpoint_path = "chat/completions"
 default_token_counter = "heuristic"
+# OpenRouter's native catalog exposes the complete tool-capable lineup, billed
+# prices (including prompt-length overrides), route limits, tokenizers, and
+# normalized reasoning controls. `/refresh` fetches it directly and keeps the
+# provider's most-popular ordering.
+discovery = "open-router"
+reasoning_codec = "open-router"
+# Automatic caches across routed providers use the stable prompt_cache_key.
+# Anthropic routes override this per model to add OpenRouter's documented
+# cache_control envelope and sticky session_id.
+prompt_cache = true
+prompt_cache_policy = "rolling-history"
 
 [[connections]]
 id = "openai"

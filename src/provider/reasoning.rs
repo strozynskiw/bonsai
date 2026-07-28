@@ -14,6 +14,12 @@ pub(crate) enum ReasoningCodec {
     /// that accept a `reasoning: { effort }` envelope.
     #[serde(rename = "openai-chat-completions", alias = "open-ai-chat-completions")]
     OpenAiChatCompletions,
+    /// OpenRouter's unified reasoning envelope normalizes effort, explicit
+    /// disable, and token budgets across the upstream providers it routes.
+    /// Keep this separate from the generic compatible codec: OpenRouter
+    /// documents `reasoning: { effort: "none" }` for an explicit opt-out,
+    /// while omission means the routed model may still reason by default.
+    OpenRouter,
     /// Mistral's current hybrid reasoning models accept the top-level
     /// `reasoning_effort` field, but only expose the `none`/`high` choices.
     /// The distinct codec also gates Mistral's structured thinking-content
@@ -57,6 +63,7 @@ impl ReasoningCodec {
     pub(crate) fn encode_json(self, selection: ReasoningSelection) -> Option<Value> {
         match self {
             Self::OpenAiCompatible => openai_compatible_reasoning(selection),
+            Self::OpenRouter => openrouter_reasoning(selection),
             Self::OpenAiChatCompletions | Self::MistralChatCompletions => None,
             Self::CodexResponses => codex_responses_reasoning(selection),
             Self::AnthropicThinking | Self::AnthropicThinkingWithEffort => {
@@ -81,6 +88,7 @@ impl ReasoningCodec {
             Self::ZaiThinking => apply_zai_thinking_fields(body, selection),
             Self::ZaiReasoningEffort => apply_zai_reasoning_effort_fields(body, selection),
             Self::OpenAiCompatible
+            | Self::OpenRouter
             | Self::CodexResponses
             | Self::AnthropicThinking
             | Self::AnthropicThinkingWithEffort
@@ -147,6 +155,17 @@ fn openai_compatible_reasoning(selection: ReasoningSelection) -> Option<Value> {
         // value or unset, which `effort_payload` maps appropriately.
         ReasoningSelection::On => Some(json!({ "enabled": true })),
         other => effort_payload(other),
+    }
+}
+
+fn openrouter_reasoning(selection: ReasoningSelection) -> Option<Value> {
+    match selection {
+        ReasoningSelection::Default => None,
+        ReasoningSelection::Off => Some(json!({ "effort": "none" })),
+        ReasoningSelection::On => Some(json!({ "enabled": true })),
+        ReasoningSelection::BudgetTokens(tokens) => Some(json!({ "max_tokens": tokens })),
+        ReasoningSelection::Ultra => Some(json!({ "effort": "max" })),
+        explicit => Some(json!({ "effort": explicit.as_str() })),
     }
 }
 
@@ -335,6 +354,31 @@ mod tests {
         assert_eq!(
             openai_compatible_reasoning(ReasoningSelection::High),
             Some(json!({ "effort": "high" }))
+        );
+    }
+
+    #[test]
+    fn openrouter_codec_encodes_toggle_effort_and_budget() {
+        assert_eq!(openrouter_reasoning(ReasoningSelection::Default), None);
+        assert_eq!(
+            openrouter_reasoning(ReasoningSelection::Off),
+            Some(json!({ "effort": "none" }))
+        );
+        assert_eq!(
+            openrouter_reasoning(ReasoningSelection::On),
+            Some(json!({ "enabled": true }))
+        );
+        assert_eq!(
+            openrouter_reasoning(ReasoningSelection::High),
+            Some(json!({ "effort": "high" }))
+        );
+        assert_eq!(
+            openrouter_reasoning(ReasoningSelection::BudgetTokens(8192)),
+            Some(json!({ "max_tokens": 8192 }))
+        );
+        assert_eq!(
+            openrouter_reasoning(ReasoningSelection::Ultra),
+            Some(json!({ "effort": "max" }))
         );
     }
 

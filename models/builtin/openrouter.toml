@@ -1,24 +1,43 @@
 # OpenRouter remote model slugs include the upstream provider prefix
-# (`openai/gpt-5.2`). Bonsai model ids allow one slash, so expose a
+# (`openai/gpt-5.6-sol`). Bonsai model ids allow one slash, so expose a
 # connection-local id and send the documented OpenRouter slug on the wire.
+# These targets are only the offline baseline. The internal native `/refresh`
+# imports every current text-output, tool-capable model in popularity order.
+[[targets]]
+connection = "openrouter"
+model = "openrouter/gpt-5.6-sol"
+metadata_model = "openai/gpt-5.6-sol"
+remote_model = "openai/gpt-5.6-sol"
+default = true
+recommended = true
+token_counter = "tiktoken"
+
+# OpenRouter's Anthropic routes accept a top-level cache_control envelope.
+# Keep this model-specific: other routes use the connection's automatic-cache
+# prompt_cache_key without changing provider eligibility. The policy also emits
+# a stable session_id and append-only project state across tool turns.
+[[targets]]
+connection = "openrouter"
+model = "openrouter/claude-sonnet-5"
+metadata_model = "anthropic/claude-sonnet-5"
+remote_model = "anthropic/claude-sonnet-5"
+recommended = true
+prompt_cache_policy = "open-router-anthropic"
+token_counter = "heuristic"
+
+# Persisted sessions using the previous offline baseline remain valid even
+# after newer defaults ship.
 [[targets]]
 connection = "openrouter"
 model = "openrouter/gpt-5.2"
 metadata_model = "openai/gpt-5.2"
 remote_model = "openai/gpt-5.2"
-default = true
-recommended = true
 token_counter = "tiktoken"
 
-# IMPORTANT — DO NOT GENERALIZE: OpenRouter requires an explicit top-level
-# cache_control for Anthropic models; sending it to every routed model changes
-# provider eligibility and can be rejected. This model policy also emits a
-# stable session_id and append-only project state so automatic breakpoints grow
-# through tool history. Verified live against Claude Haiku 4.5.
 [[targets]]
 connection = "openrouter"
 model = "openrouter/claude-haiku-4.5"
 metadata_model = "anthropic/claude-haiku-4-5"
 remote_model = "anthropic/claude-haiku-4.5"
 prompt_cache_policy = "open-router-anthropic"
-token_counter = "anthropic-count-tokens"
+token_counter = "heuristic"

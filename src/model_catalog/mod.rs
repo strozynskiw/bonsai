@@ -643,6 +643,9 @@ impl ModelCatalog {
             .as_ref()
             .map(|available| available.remote_model_id.clone())
             .unwrap_or_else(|| canonical.model().into());
+        let prompt_cache_policy = (connection_id.as_str() == "openrouter"
+            && remote_model.starts_with("anthropic/"))
+        .then_some(PromptCachePolicy::OpenRouterAnthropic);
         // Leave features empty when models.dev has the row so `resolve_target`
         // pulls its (more complete) capability set — live `/models` listings
         // routinely under-report vision. Use live features only as a fallback
@@ -669,7 +672,7 @@ impl ModelCatalog {
             discouraged_efforts: Vec::new(),
             is_default: false,
             transport: None,
-            prompt_cache_policy: None,
+            prompt_cache_policy,
             endpoint_path: None,
             context_window: None,
             output_limit: None,
@@ -939,7 +942,7 @@ impl ModelCatalog {
     }
 }
 
-const LIVE_MODEL_CACHE_SCHEMA_VERSION: u8 = 3;
+const LIVE_MODEL_CACHE_SCHEMA_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct LiveModelAvailability {
@@ -1052,6 +1055,12 @@ pub(crate) struct AvailableModel {
     /// differs from the classic budget-tokens shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_codec: Option<ReasoningCodec>,
+    /// Best local prompt counter inferred from provider-published tokenizer
+    /// metadata. Remote gateway counting endpoints are deliberately excluded:
+    /// an Anthropic model routed through OpenRouter does not expose Anthropic's
+    /// native `count_tokens` endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_counter: Option<TokenCounterKind>,
     /// Codex backend routing contract for models that use Responses Lite.
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_responses_lite: bool,
@@ -1062,6 +1071,11 @@ pub(crate) struct AvailableModel {
     /// below a hand-pinned catalog `pricing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ModelPricing>,
+    /// Prompt-length price bands published alongside the live base price.
+    /// OpenRouter uses these for long-context routes, so dropping them would
+    /// understate real spend after `/refresh`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pricing_tiers: Vec<crate::provider::ModelPricingTier>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -1097,8 +1111,10 @@ impl AvailableModel {
             supported_reasoning: Vec::new(),
             recommended_reasoning: None,
             reasoning_codec: None,
+            token_counter: None,
             use_responses_lite: false,
             pricing: None,
+            pricing_tiers: Vec::new(),
         }
     }
 
@@ -1112,9 +1128,18 @@ impl AvailableModel {
         self
     }
 
-    /// Attach provider-published live pricing (gateway listings only).
-    pub(crate) fn with_pricing(mut self, pricing: Option<ModelPricing>) -> Self {
+    pub(crate) fn with_token_counter(mut self, token_counter: Option<TokenCounterKind>) -> Self {
+        self.token_counter = token_counter;
+        self
+    }
+
+    pub(crate) fn with_pricing_schedule(
+        mut self,
+        pricing: Option<ModelPricing>,
+        pricing_tiers: Vec<crate::provider::ModelPricingTier>,
+    ) -> Self {
         self.pricing = pricing;
+        self.pricing_tiers = pricing_tiers;
         self
     }
 
@@ -1550,9 +1575,11 @@ fn resolve_target(
     let catalog_pricing = target
         .pricing
         .map(|base| ModelPricingSchedule::new(base, target.pricing_tiers.clone()));
-    let live_pricing = live
-        .and_then(|model| model.pricing)
-        .map(ModelPricingSchedule::flat);
+    let live_pricing = live.and_then(|model| {
+        model
+            .pricing
+            .map(|base| ModelPricingSchedule::new(base, model.pricing_tiers.clone()))
+    });
     let models_dev_pricing = models_dev.and_then(ModelsDevModel::pricing_schedule);
     let (pricing_schedule, pricing_source) = choose_refreshed_metadata(
         target.pins(ModelMetadataField::Pricing),
@@ -1589,7 +1616,10 @@ fn resolve_target(
             .or_else(|| connection.default_endpoint_path.clone()),
         context_window,
         output_limit,
-        token_counter: target.token_counter.or(connection.default_token_counter),
+        token_counter: target
+            .token_counter
+            .or_else(|| live.and_then(|model| model.token_counter))
+            .or(connection.default_token_counter),
         // A hand-pinned catalog price is a deliberate override. Otherwise a
         // fresh provider-published billed price wins, then current models.dev
         // metadata, with the bundled value retained only as the offline
@@ -1732,7 +1762,7 @@ fn validate_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ReasoningEffort;
+    use crate::provider::{ModelPricingTier, ReasoningEffort};
     fn source(name: &'static str, content: &'static str) -> TomlSource<'static> {
         TomlSource { name, content }
     }
@@ -1750,7 +1780,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 206);
+        assert_eq!(catalog.targets.len(), 208);
         assert!(
             catalog
                 .connections
@@ -1911,24 +1941,31 @@ mod tests {
         );
         assert_eq!(
             openrouter.default_model.as_ref().map(ModelId::as_str),
-            Some("openrouter/gpt-5.2")
+            Some("openrouter/gpt-5.6-sol")
+        );
+        assert_eq!(openrouter.discovery, DiscoveryKind::OpenRouter);
+        assert_eq!(openrouter.reasoning_codec, Some(ReasoningCodec::OpenRouter));
+        assert!(openrouter.prompt_cache);
+        assert_eq!(
+            openrouter.prompt_cache_policy,
+            PromptCachePolicy::RollingHistory
         );
 
         let openrouter_default = catalog
             .targets
             .iter()
-            .find(|target| target.model.as_str() == "openrouter/gpt-5.2")
+            .find(|target| target.model.as_str() == "openrouter/gpt-5.6-sol")
             .unwrap();
         assert_eq!(
             openrouter_default
                 .metadata_model
                 .as_ref()
                 .map(ModelId::as_str),
-            Some("openai/gpt-5.2")
+            Some("openai/gpt-5.6-sol")
         );
         assert_eq!(
             openrouter_default.remote_model.as_deref(),
-            Some("openai/gpt-5.2")
+            Some("openai/gpt-5.6-sol")
         );
         assert!(openrouter_default.is_default);
 
@@ -1940,6 +1977,10 @@ mod tests {
         assert_eq!(
             openrouter_haiku.prompt_cache_policy,
             Some(PromptCachePolicy::OpenRouterAnthropic)
+        );
+        assert_eq!(
+            openrouter_haiku.token_counter,
+            Some(TokenCounterKind::Heuristic)
         );
 
         let openai = catalog
@@ -2541,7 +2582,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 206);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 208);
 
         let cases = [
             EquivalenceCase {
@@ -3319,7 +3360,10 @@ default_base_url = "http://localhost:11434/v1"
                             Some("Provider".to_string()),
                             vec![ModelFeature::Attachment],
                         )
-                        .with_pricing(Some(ModelPricing::new(5_000_000, 6_000_000)))
+                        .with_pricing_schedule(
+                            Some(ModelPricing::new(5_000_000, 6_000_000)),
+                            Vec::new(),
+                        )
                         .with_reasoning(
                             vec![ReasoningSelection::Max],
                             Some(ReasoningSelection::Max),
@@ -3480,7 +3524,14 @@ default_base_url = "http://localhost:11434/v1"
                             None,
                             vec![ModelFeature::ToolCall],
                         )
-                        .with_pricing(Some(ModelPricing::new(1_000_000, 2_000_000))),
+                        .with_token_counter(Some(TokenCounterKind::Heuristic))
+                        .with_pricing_schedule(
+                            Some(ModelPricing::new(1_000_000, 2_000_000)),
+                            vec![ModelPricingTier {
+                                minimum_input_tokens: 250_001,
+                                pricing: ModelPricing::new(2_000_000, 3_000_000),
+                            }],
+                        ),
                     ],
                     ..LiveModelAvailability::default()
                 },
@@ -3497,10 +3548,92 @@ default_base_url = "http://localhost:11434/v1"
             .expect("live gateway pricing flows through the shadow target");
         assert_eq!(pricing.input_micros_per_million, 1_000_000);
         assert_eq!(pricing.output_micros_per_million, 2_000_000);
+        assert_eq!(resolved.token_counter, Some(TokenCounterKind::Heuristic));
+        assert_eq!(
+            resolved
+                .pricing_schedule
+                .as_ref()
+                .expect("live price tiers remain available at runtime")
+                .pricing_for_prompt_tokens(250_001),
+            ModelPricing::new(2_000_000, 3_000_000)
+        );
         assert_eq!(
             resolved.metadata_sources.pricing,
             Some(ModelMetadataSource::Provider)
         );
+    }
+
+    #[test]
+    fn openrouter_shadow_targets_apply_family_cache_policy_and_live_codec() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "openrouter"
+                    display_name = "OpenRouter"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    default_base_url = "https://openrouter.ai/api/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "heuristic"
+                    prompt_cache = true
+                    prompt_cache_policy = "rolling-history"
+                    reasoning_codec = "open-router"
+                "#,
+            )],
+            &[],
+        )
+        .unwrap();
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("openrouter");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability {
+                    models: vec![
+                        AvailableModel::with_metadata(
+                            "anthropic/claude-future",
+                            Some(1_000_000),
+                            None,
+                            vec![ModelFeature::ToolCall, ModelFeature::Reasoning],
+                        )
+                        .with_reasoning(
+                            vec![ReasoningSelection::Off, ReasoningSelection::High],
+                            Some(ReasoningSelection::High),
+                        )
+                        .with_reasoning_codec(ReasoningCodec::OpenRouter)
+                        .with_token_counter(Some(TokenCounterKind::Heuristic)),
+                        AvailableModel::with_metadata(
+                            "openai/gpt-future",
+                            Some(1_000_000),
+                            None,
+                            vec![ModelFeature::ToolCall],
+                        )
+                        .with_reasoning_codec(ReasoningCodec::OpenRouter)
+                        .with_token_counter(Some(TokenCounterKind::Tiktoken)),
+                    ],
+                    ..LiveModelAvailability::default()
+                },
+            )
+            .unwrap();
+
+        let claude = catalog
+            .resolve_connection_model(&connection, "anthropic/claude-future")
+            .expect("discovered Anthropic route resolves");
+        assert_eq!(
+            claude.prompt_cache_policy,
+            PromptCachePolicy::OpenRouterAnthropic
+        );
+        assert_eq!(claude.reasoning_codec, ReasoningCodec::OpenRouter);
+        assert_eq!(claude.token_counter, Some(TokenCounterKind::Heuristic));
+
+        let gpt = catalog
+            .resolve_connection_model(&connection, "openai/gpt-future")
+            .expect("discovered OpenAI route resolves");
+        assert_eq!(gpt.prompt_cache_policy, PromptCachePolicy::RollingHistory);
+        assert_eq!(gpt.reasoning_codec, ReasoningCodec::OpenRouter);
+        assert_eq!(gpt.token_counter, Some(TokenCounterKind::Tiktoken));
     }
 
     #[test]
@@ -3663,7 +3796,7 @@ default_base_url = "http://localhost:11434/v1"
             (
                 "openrouter",
                 "openai/gpt-5.2",
-                PromptCachePolicy::TransportDefault,
+                PromptCachePolicy::RollingHistory,
             ),
             (
                 "anthropic",

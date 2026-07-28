@@ -402,7 +402,7 @@ mod tests {
             metadata.default_base_url.as_ref(),
             "https://openrouter.ai/api/v1"
         );
-        assert_eq!(metadata.default_model.as_ref(), "openrouter/gpt-5.2");
+        assert_eq!(metadata.default_model.as_ref(), "openrouter/gpt-5.6-sol");
         assert_eq!(metadata.endpoint_path.as_ref(), "chat/completions");
         assert_eq!(
             metadata.env_var_api_key.as_deref(),
@@ -419,9 +419,18 @@ mod tests {
         );
         assert_eq!(
             metadata.seed_model_list(),
-            vec!["openai/gpt-5.2", "anthropic/claude-haiku-4.5"]
+            vec![
+                "openai/gpt-5.6-sol",
+                "anthropic/claude-sonnet-5",
+                "openai/gpt-5.2",
+                "anthropic/claude-haiku-4.5"
+            ]
         );
-        assert!(!metadata.capabilities.supports_prompt_cache);
+        assert!(metadata.capabilities.supports_prompt_cache);
+        assert_eq!(
+            metadata.discovery,
+            crate::model_catalog::DiscoveryKind::OpenRouter
+        );
     }
 
     #[test]

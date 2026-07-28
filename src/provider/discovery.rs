@@ -17,14 +17,21 @@ use serde_json::Value;
 
 use crate::model_catalog::{AvailableModel, DiscoveryKind, LiveModelAvailability, ModelFeature};
 use crate::provider::anthropic::ANTHROPIC_API_VERSION;
-use crate::provider::openai_catalog::{available_models_from_response, is_coding_model_id};
-use crate::provider::{Protocol, ProviderMetadata, sse};
+use crate::provider::openai_catalog::{
+    available_model_from_item, available_models_from_response, is_coding_model_id,
+};
+use crate::provider::{
+    Protocol, ProviderMetadata, ReasoningCodec, ReasoningSelection, TokenCounterKind, sse,
+};
 
 /// Per-request timeout for native discovery probes. Local servers answer in
 /// milliseconds; a probe that takes longer is down or wedged, and the caller
 /// falls back to the generic listing (or its own fallback ladder) instead of
 /// hanging the picker.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// OpenRouter returns the complete public tool-capable catalog in one response,
+/// which is substantially larger than a local native probe.
+const REMOTE_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bound on per-model `/api/show` calls for one Ollama listing; beyond this
 /// the remaining models are listed without metadata rather than hammering the
@@ -91,6 +98,7 @@ pub(crate) async fn fetch_models_with_discovery(
         DiscoveryKind::LmStudio => fetch_lm_studio_models(base_url, api_key).await,
         DiscoveryKind::Mistral => fetch_mistral_models(base_url, api_key).await,
         DiscoveryKind::Ollama => fetch_ollama_models(base_url).await,
+        DiscoveryKind::OpenRouter => fetch_openrouter_models(base_url, api_key).await,
     };
     match native {
         Ok(availability) => Ok(availability),
@@ -172,6 +180,186 @@ async fn fetch_generic_models(
         models,
         ..LiveModelAvailability::default()
     })
+}
+
+// ---------------------------------------------------------------------------
+// OpenRouter native model probe
+// ---------------------------------------------------------------------------
+
+/// Fetch OpenRouter's rich public catalog, restricted to text-output models
+/// that advertise tool calling and ranked by current weekly usage. The
+/// response supplies billed pricing (including long-context overrides), route
+/// limits, tokenizers, and normalized reasoning controls that the generic
+/// OpenAI-compatible listing parser cannot infer on its own.
+async fn fetch_openrouter_models(base_url: &str, api_key: &str) -> Result<LiveModelAvailability> {
+    let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut url = reqwest::Url::parse(&endpoint)
+        .with_context(|| format!("Invalid OpenRouter models endpoint {endpoint}"))?;
+    url.query_pairs_mut()
+        .append_pair("output_modalities", "text")
+        .append_pair("supported_parameters", "tools")
+        .append_pair("sort", "most-popular");
+
+    let mut builder = crate::provider::http_client()
+        .get(url)
+        .timeout(REMOTE_CATALOG_TIMEOUT)
+        .header("Accept", "application/json");
+    let api_key = api_key.trim();
+    if !api_key.is_empty() {
+        builder = builder.bearer_auth(api_key);
+    }
+    let response = builder
+        .send()
+        .await
+        .context("Failed to fetch OpenRouter model list")?;
+    if !response.status().is_success() {
+        return Err(sse::error_from_response(response).await.into());
+    }
+    let value: Value = response
+        .json()
+        .await
+        .context("Failed to parse OpenRouter model list")?;
+    let models = openrouter_models_from_response(&value)?;
+    Ok(LiveModelAvailability {
+        models,
+        ..LiveModelAvailability::default()
+    })
+}
+
+fn openrouter_models_from_response(value: &Value) -> Result<Vec<AvailableModel>> {
+    let Some(items) = value.get("data").and_then(Value::as_array) else {
+        anyhow::bail!("OpenRouter model list response has no `data` array");
+    };
+    let mut seen = std::collections::HashSet::new();
+    Ok(items
+        .iter()
+        .filter(|item| openrouter_supports_parameter(item, "tools"))
+        .filter(|item| openrouter_supports_text_output(item))
+        .filter_map(openrouter_model_from_item)
+        // Preserve OpenRouter's `most-popular` order while defending against
+        // malformed duplicate rows.
+        .filter(|model| seen.insert(model.remote_model_id.to_string()))
+        .collect())
+}
+
+fn openrouter_model_from_item(item: &Value) -> Option<AvailableModel> {
+    let mut model = available_model_from_item(item)?;
+    let top_provider = item.get("top_provider");
+    if let Some(context_window) = top_provider
+        .and_then(|provider| provider.get("context_length"))
+        .and_then(positive_u32_from_value)
+    {
+        model.context_window = Some(context_window);
+    }
+    model.output_limit = top_provider
+        .and_then(|provider| provider.get("max_completion_tokens"))
+        .and_then(positive_u32_from_value);
+    model.reasoning_codec = Some(ReasoningCodec::OpenRouter);
+    if model.token_counter.is_none() {
+        model.token_counter = Some(TokenCounterKind::Heuristic);
+    }
+    if let Some((supported, recommended)) = openrouter_reasoning_from_item(item) {
+        model = model.with_reasoning(supported, recommended);
+        push_unique_feature(&mut model.features, ModelFeature::Reasoning);
+    }
+    Some(model)
+}
+
+fn openrouter_supports_parameter(item: &Value, parameter: &str) -> bool {
+    item.get("supported_parameters")
+        .and_then(Value::as_array)
+        .is_some_and(|parameters| {
+            parameters
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|value| value == parameter)
+        })
+}
+
+fn openrouter_supports_text_output(item: &Value) -> bool {
+    item.get("architecture")
+        .and_then(|architecture| architecture.get("output_modalities"))
+        .and_then(Value::as_array)
+        .is_none_or(|modalities| {
+            modalities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|modality| modality == "text")
+        })
+}
+
+fn openrouter_reasoning_from_item(
+    item: &Value,
+) -> Option<(Vec<ReasoningSelection>, Option<ReasoningSelection>)> {
+    let reasoning = item.get("reasoning")?.as_object()?;
+    let mandatory = reasoning
+        .get("mandatory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut supported = Vec::new();
+    if !mandatory {
+        supported.push(ReasoningSelection::Off);
+    }
+
+    match reasoning.get("supported_efforts") {
+        Some(Value::Array(efforts)) => supported.extend(
+            efforts
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(openrouter_effort),
+        ),
+        // OpenRouter documents null as accepting every gateway effort value.
+        Some(Value::Null) => supported.extend([
+            ReasoningSelection::Minimal,
+            ReasoningSelection::Low,
+            ReasoningSelection::Medium,
+            ReasoningSelection::High,
+            ReasoningSelection::XHigh,
+            ReasoningSelection::Max,
+        ]),
+        _ => {}
+    }
+    if mandatory {
+        supported.retain(|selection| *selection != ReasoningSelection::Off);
+    }
+
+    let supports_max_tokens = reasoning
+        .get("supports_max_tokens")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if supports_max_tokens {
+        supported.push(ReasoningSelection::BudgetTokens(4_096));
+    }
+    if supported.is_empty() || (!mandatory && supported == [ReasoningSelection::Off]) {
+        supported.push(ReasoningSelection::On);
+    }
+
+    let default_enabled = reasoning.get("default_enabled").and_then(Value::as_bool);
+    let default_effort = reasoning
+        .get("default_effort")
+        .and_then(Value::as_str)
+        .and_then(openrouter_effort);
+    let recommended = match (default_enabled, default_effort) {
+        (Some(false), _) if !mandatory => Some(ReasoningSelection::Off),
+        (_, Some(effort)) => Some(effort),
+        (Some(true), None) if supports_max_tokens => Some(ReasoningSelection::BudgetTokens(4_096)),
+        (Some(true), None) => Some(ReasoningSelection::On),
+        _ => None,
+    };
+    Some((supported, recommended))
+}
+
+fn openrouter_effort(value: &str) -> Option<ReasoningSelection> {
+    match value {
+        "none" => Some(ReasoningSelection::Off),
+        "minimal" => Some(ReasoningSelection::Minimal),
+        "low" => Some(ReasoningSelection::Low),
+        "medium" => Some(ReasoningSelection::Medium),
+        "high" => Some(ReasoningSelection::High),
+        "xhigh" => Some(ReasoningSelection::XHigh),
+        "max" => Some(ReasoningSelection::Max),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +878,179 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn openrouter_response_filters_and_preserves_popularity_order() {
+        let value = serde_json::json!({
+            "data": [
+                {
+                    "id": "openai/gpt-5.6-sol",
+                    "name": "OpenAI: GPT-5.6 Sol",
+                    "context_length": 1_050_000,
+                    "architecture": {
+                        "input_modalities": ["text", "image"],
+                        "output_modalities": ["text"],
+                        "tokenizer": "GPT"
+                    },
+                    "supported_parameters": [
+                        "tools",
+                        "reasoning",
+                        "structured_outputs",
+                        "temperature"
+                    ],
+                    "top_provider": {
+                        "context_length": 1_048_576,
+                        "max_completion_tokens": 131_072
+                    },
+                    "reasoning": {
+                        "supported_efforts": ["max", "xhigh", "high", "medium", "low", "minimal"],
+                        "default_effort": "high",
+                        "default_enabled": true,
+                        "mandatory": false
+                    },
+                    "pricing": {
+                        "prompt": "0.0000025",
+                        "completion": "0.000015",
+                        "input_cache_read": "0.00000025",
+                        "overrides": [{
+                            "min_prompt_tokens": 272000,
+                            "prompt": "0.000005",
+                            "completion": "0.0000225"
+                        }]
+                    }
+                },
+                {
+                    "id": "anthropic/claude-sonnet-5",
+                    "architecture": {
+                        "output_modalities": ["text"],
+                        "tokenizer": "Claude"
+                    },
+                    "supported_parameters": ["tools"],
+                    "reasoning": {
+                        "supported_efforts": null,
+                        "default_effort": "medium",
+                        "default_enabled": true,
+                        "supports_max_tokens": true,
+                        "mandatory": true
+                    }
+                },
+                {
+                    "id": "text-without-tools",
+                    "architecture": {"output_modalities": ["text"]},
+                    "supported_parameters": ["temperature"]
+                },
+                {
+                    "id": "image-only-with-tools",
+                    "architecture": {"output_modalities": ["image"]},
+                    "supported_parameters": ["tools"]
+                }
+            ]
+        });
+
+        let models = openrouter_models_from_response(&value).unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].remote_model_id.as_ref(), "openai/gpt-5.6-sol");
+        assert_eq!(
+            models[1].remote_model_id.as_ref(),
+            "anthropic/claude-sonnet-5"
+        );
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[0].output_limit, Some(131_072));
+        assert_eq!(models[0].token_counter, Some(TokenCounterKind::Tiktoken));
+        assert_eq!(models[0].reasoning_codec, Some(ReasoningCodec::OpenRouter));
+        assert_eq!(
+            models[0].recommended_reasoning,
+            Some(ReasoningSelection::High)
+        );
+        assert!(models[0].features.contains(&ModelFeature::ToolCall));
+        assert!(models[0].features.contains(&ModelFeature::Attachment));
+        assert!(models[0].features.contains(&ModelFeature::Reasoning));
+        assert!(models[0].features.contains(&ModelFeature::StructuredOutput));
+        assert!(models[0].features.contains(&ModelFeature::Temperature));
+        assert_eq!(models[0].pricing_tiers.len(), 1);
+        assert_eq!(models[0].pricing_tiers[0].minimum_input_tokens, 272_001);
+        assert_eq!(
+            models[0].pricing_tiers[0]
+                .pricing
+                .cache_read_micros_per_million,
+            Some(250_000),
+            "missing override fields inherit the live base rate"
+        );
+
+        let claude = &models[1];
+        assert_eq!(claude.token_counter, Some(TokenCounterKind::Heuristic));
+        assert!(
+            !claude
+                .supported_reasoning
+                .contains(&ReasoningSelection::Off),
+            "mandatory reasoning cannot expose an off control"
+        );
+        assert!(
+            claude
+                .supported_reasoning
+                .contains(&ReasoningSelection::BudgetTokens(4_096))
+        );
+        assert_eq!(
+            claude.recommended_reasoning,
+            Some(ReasoningSelection::Medium)
+        );
+    }
+
+    #[tokio::test]
+    async fn openrouter_discovery_uses_filtered_ranked_authenticated_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(header("authorization", "Bearer openrouter-key"))
+            .and(query_param("output_modalities", "text"))
+            .and(query_param("supported_parameters", "tools"))
+            .and(query_param("sort", "most-popular"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "moonshotai/kimi-k3",
+                    "architecture": {
+                        "output_modalities": ["text"],
+                        "tokenizer": "Other"
+                    },
+                    "supported_parameters": ["tools"],
+                    "top_provider": {
+                        "context_length": 262_144,
+                        "max_completion_tokens": 32_768
+                    },
+                    "pricing": {
+                        "prompt": "0.000003",
+                        "completion": "0.000015"
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::OpenRouter,
+            Protocol::OpenAiChat,
+            "OpenRouter",
+            &format!("{}/api/v1", server.uri()),
+            "openrouter-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(availability.models.len(), 1);
+        assert_eq!(
+            availability.models[0].remote_model_id.as_ref(),
+            "moonshotai/kimi-k3"
+        );
+        assert_eq!(availability.models[0].context_window, Some(262_144));
+        assert_eq!(availability.models[0].output_limit, Some(32_768));
+        assert_eq!(
+            availability.models[0].token_counter,
+            Some(TokenCounterKind::Heuristic)
+        );
+    }
 
     #[test]
     fn mistral_native_response_keeps_current_tool_capable_chat_models_and_aliases() {

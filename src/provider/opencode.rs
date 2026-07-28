@@ -176,6 +176,10 @@ pub struct OpenAiCompatibleProvider {
     /// requests can replace Bonsai's text-only history projection with the
     /// exact thinking/text shape required by Mistral.
     mistral_content_replay: std::sync::Mutex<Vec<MistralContentReplay>>,
+    /// OpenRouter normalizes routed providers' preserved reasoning into an
+    /// opaque `reasoning_details` sequence. Tool follow-ups must replay that
+    /// sequence byte-for-byte on the assistant turn that produced it.
+    openrouter_reasoning_replay: std::sync::Mutex<Vec<OpenRouterReasoningReplay>>,
     last_request_diagnostics: std::sync::Mutex<Option<ProviderRequestDiagnostics>>,
 }
 
@@ -184,6 +188,14 @@ struct MistralContentReplay {
     visible_content: String,
     tool_call_ids: Vec<String>,
     parts: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct OpenRouterReasoningReplay {
+    visible_content: String,
+    tool_call_ids: Vec<String>,
+    reasoning_details: Vec<Value>,
+    legacy_reasoning: Option<String>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -229,6 +241,7 @@ impl OpenAiCompatibleProvider {
             reasoning_by_call_id: std::sync::Mutex::new(HashMap::new()),
             tool_call_extra_content_by_id: std::sync::Mutex::new(HashMap::new()),
             mistral_content_replay: std::sync::Mutex::new(Vec::new()),
+            openrouter_reasoning_replay: std::sync::Mutex::new(Vec::new()),
             last_request_diagnostics: std::sync::Mutex::new(None),
         }
     }
@@ -345,6 +358,12 @@ impl OpenAiCompatibleProvider {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Mistral content replay state lock is poisoned"))?;
             ensure_mistral_structured_content(&mut body, &replay);
+        }
+        if self.reasoning_codec == ReasoningCodec::OpenRouter {
+            let replay = self.openrouter_reasoning_replay.lock().map_err(|_| {
+                anyhow::anyhow!("OpenRouter reasoning replay state lock is poisoned")
+            })?;
+            ensure_openrouter_reasoning(&mut body, &replay);
         }
         // After the reasoning echo: `reasoning_by_call_id` is keyed by original
         // wire ids, so the lookup must run before duplicates are renamed.
@@ -466,6 +485,61 @@ fn ensure_mistral_structured_content(body: &mut Value, replay: &[MistralContentR
                 "content".to_string(),
                 Value::Array(replay[index].parts.clone()),
             );
+        }
+    }
+}
+
+/// Restore OpenRouter's exact normalized reasoning sequence on assistant
+/// history. OpenRouter explicitly requires preserved blocks to remain
+/// consecutive and unmodified, including encrypted data and signatures.
+fn ensure_openrouter_reasoning(body: &mut Value, replay: &[OpenRouterReasoningReplay]) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut used = HashSet::new();
+    for message in messages {
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let call_ids = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|call| call.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let visible_content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let match_index = replay.iter().enumerate().find_map(|(index, entry)| {
+            if used.contains(&index) {
+                return None;
+            }
+            let calls_match = !call_ids.is_empty()
+                && call_ids
+                    .iter()
+                    .any(|call_id| entry.tool_call_ids.iter().any(|stored| stored == call_id));
+            let text_match = call_ids.is_empty()
+                && entry.tool_call_ids.is_empty()
+                && entry.visible_content == visible_content;
+            (calls_match || text_match).then_some(index)
+        });
+        let Some(index) = match_index else {
+            continue;
+        };
+        used.insert(index);
+        let entry = &replay[index];
+        if !entry.reasoning_details.is_empty() {
+            message.insert(
+                "reasoning_details".to_string(),
+                Value::Array(entry.reasoning_details.clone()),
+            );
+        } else if let Some(reasoning) = &entry.legacy_reasoning {
+            message.insert("reasoning".to_string(), Value::String(reasoning.clone()));
         }
     }
 }
@@ -816,6 +890,7 @@ impl Provider for OpenAiCompatibleProvider {
         let mut reasoning_for_replay = String::new();
         let mut mistral_content_parts = Vec::new();
         let mut saw_mistral_structured_content = false;
+        let mut openrouter_reasoning_details = Vec::new();
         // Open models on this transport (DeepSeek, Qwen, GLM, …) emit reasoning
         // inline as `<think>…</think>` in the content channel; route it to the
         // reasoning channel rather than letting the tags leak into the answer.
@@ -863,6 +938,29 @@ impl Provider for OpenAiCompatibleProvider {
                         finish_reason = Some(crate::provider::FinishReason::from_openai(reason));
                     }
                     let delta = &choice["delta"];
+                    let has_openrouter_reasoning_details = self.reasoning_codec
+                        == ReasoningCodec::OpenRouter
+                        && delta["reasoning_details"]
+                            .as_array()
+                            .is_some_and(|reasoning_details| {
+                                for detail in reasoning_details {
+                                    if let Some(text) = detail
+                                        .get("text")
+                                        .or_else(|| detail.get("summary"))
+                                        .and_then(Value::as_str)
+                                        .filter(|text| !text.is_empty())
+                                    {
+                                        reasoning_chars =
+                                            reasoning_chars.saturating_add(text.chars().count());
+                                        sink.reasoning_delta(text);
+                                    }
+                                    // Preserve each object as returned.
+                                    // Concatenating chunk arrays in order
+                                    // is OpenRouter's reconstruction rule.
+                                    openrouter_reasoning_details.push(detail.clone());
+                                }
+                                !reasoning_details.is_empty()
+                            });
 
                     if self.reasoning_codec == ReasoningCodec::MistralChatCompletions
                         && let Some(parts) = delta["content"].as_array()
@@ -927,14 +1025,15 @@ impl Provider for OpenAiCompatibleProvider {
                     // DeepSeek uses reasoning_content, and OpenRouter/vLLM use
                     // reasoning. Route whichever is present (first non-empty wins)
                     // into the reasoning sink.
-                    if let Some(text) = [
-                        "reasoning_summary",
-                        "reasoning_summary_text",
-                        "reasoning_content",
-                        "reasoning",
-                    ]
-                    .into_iter()
-                    .find_map(|key| delta[key].as_str().filter(|text| !text.is_empty()))
+                    if !has_openrouter_reasoning_details
+                        && let Some(text) = [
+                            "reasoning_summary",
+                            "reasoning_summary_text",
+                            "reasoning_content",
+                            "reasoning",
+                        ]
+                        .into_iter()
+                        .find_map(|key| delta[key].as_str().filter(|text| !text.is_empty()))
                     {
                         reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
                         if delta["reasoning_content"].as_str() == Some(text)
@@ -1007,6 +1106,30 @@ impl Provider for OpenAiCompatibleProvider {
                     )
                 })?;
             extra_content_by_call_id.extend(captured_extra_content);
+        }
+        if self.reasoning_codec == ReasoningCodec::OpenRouter
+            && !interrupted
+            && (!openrouter_reasoning_details.is_empty() || !reasoning_for_replay.is_empty())
+        {
+            let legacy_reasoning = if openrouter_reasoning_details.is_empty() {
+                Some(std::mem::take(&mut reasoning_for_replay))
+            } else {
+                None
+            };
+            let entry = OpenRouterReasoningReplay {
+                visible_content: content.clone(),
+                tool_call_ids: tool_calls.iter().map(|call| call.id.clone()).collect(),
+                reasoning_details: openrouter_reasoning_details,
+                legacy_reasoning,
+            };
+            self.openrouter_reasoning_replay
+                .lock()
+                .map_err(|_| {
+                    crate::provider::ProviderFailure::transport(
+                        "OpenRouter reasoning replay state lock is poisoned",
+                    )
+                })?
+                .push(entry);
         }
         // Only `reasoning_content`-echoing backends replay reasoning (see
         // `streaming::stash_reasoning_for_replay` for the keying contract).
@@ -1299,8 +1422,8 @@ mod tests {
         assert!(default_body.get("session_id").is_none());
         assert_eq!(
             default_provider.project_state_cache_strategy(),
-            crate::provider::ProjectStateCacheStrategy::MutableSystemTail,
-            "OpenRouter's Anthropic cache policy must never leak to other models"
+            crate::provider::ProjectStateCacheStrategy::AppendOnlyHistory,
+            "OpenRouter automatic caches need a growing byte-stable prefix"
         );
     }
 
@@ -2256,6 +2379,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_openrouter_refresh_uses_native_ranked_metadata() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer sk-openrouter-test"))
+            .and(query_param("output_modalities", "text"))
+            .and(query_param("supported_parameters", "tools"))
+            .and(query_param("sort", "most-popular"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "openai/gpt-5.6-sol",
+                    "name": "OpenAI: GPT-5.6 Sol",
+                    "context_length": 1_050_000,
+                    "architecture": {
+                        "input_modalities": ["text", "image"],
+                        "output_modalities": ["text"],
+                        "tokenizer": "GPT"
+                    },
+                    "supported_parameters": ["tools", "reasoning"],
+                    "top_provider": {
+                        "context_length": 1_048_576,
+                        "max_completion_tokens": 131_072
+                    },
+                    "reasoning": {
+                        "supported_efforts": ["high", "medium", "low"],
+                        "default_effort": "medium",
+                        "default_enabled": true,
+                        "mandatory": false
+                    },
+                    "pricing": {
+                        "prompt": "0.0000025",
+                        "completion": "0.000015",
+                        "overrides": [{
+                            "min_prompt_tokens": 272000,
+                            "prompt": "0.000005",
+                            "completion": "0.0000225"
+                        }]
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let catalog =
+            crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
+        let registry = crate::provider::ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("openrouter").expect("OpenRouter connection");
+        let session = provider_session(
+            "sk-openrouter-test",
+            &server.uri(),
+            "openrouter/gpt-5.6-sol",
+        );
+
+        let availability = factory.list_available_models(&session).await.unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec!["openai/gpt-5.6-sol".to_string()]
+        );
+        let model = &availability.models[0];
+        assert_eq!(model.context_window, Some(1_048_576));
+        assert_eq!(model.output_limit, Some(131_072));
+        assert_eq!(model.token_counter, Some(TokenCounterKind::Tiktoken));
+        assert_eq!(model.reasoning_codec, Some(ReasoningCodec::OpenRouter));
+        assert_eq!(
+            model.recommended_reasoning,
+            Some(crate::provider::ReasoningSelection::Medium)
+        );
+        assert_eq!(model.pricing_tiers[0].minimum_input_tokens, 272_001);
+    }
+
+    #[tokio::test]
     async fn catalog_registry_zen_refresh_uses_live_models_endpoint() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2532,6 +2731,117 @@ mod tests {
                 "p": "opaque-tool"
             }])
         );
+    }
+
+    #[tokio::test]
+    async fn openrouter_reasoning_details_are_streamed_and_replayed_exactly() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let first_detail = serde_json::json!({
+            "type": "reasoning.text",
+            "text": "inspect ",
+            "signature": "signed-a",
+            "id": "reasoning-1",
+            "format": "anthropic-claude-v1",
+            "index": 0
+        });
+        let encrypted_detail = serde_json::json!({
+            "type": "reasoning.encrypted",
+            "data": "opaque-encrypted-payload",
+            "id": "reasoning-2",
+            "format": "anthropic-claude-v1",
+            "index": 1
+        });
+        let summary_detail = serde_json::json!({
+            "type": "reasoning.summary",
+            "summary": "the project",
+            "id": "reasoning-3",
+            "format": "anthropic-claude-v1",
+            "index": 2
+        });
+        let sse = format!(
+            "data: {}\n\ndata: {}\n\ndata: \
+             {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_1\",\
+             \"function\":{{\"name\":\"read\",\"arguments\":\"{{\\\"path\\\":\\\"Cargo.toml\\\"}}\"}}}}]}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+             data: [DONE]\n\n",
+            serde_json::json!({
+                "choices": [{"delta": {
+                    "reasoning": "inspect ",
+                    "reasoning_details": [first_detail]
+                }}]
+            }),
+            serde_json::json!({
+                "choices": [{"delta": {
+                    "reasoning": "the project",
+                    "reasoning_details": [encrypted_detail, summary_detail]
+                }}]
+            })
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server)
+            .await;
+
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
+        let connection_id = "openrouter".parse().unwrap();
+        let resolved = catalog
+            .resolve_connection_model(&connection_id, "openrouter/gpt-5.6-sol")
+            .unwrap();
+        let mut session =
+            provider_session("openrouter-key", &server.uri(), "openrouter/gpt-5.6-sol");
+        session.reasoning = crate::provider::ReasoningSelection::High;
+        let mut target = resolved.run_target(server.uri().into(), session.reasoning);
+        target.endpoint_path = Some("chat/completions".into());
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            "openrouter",
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            CACHING,
+        );
+
+        let response = provider
+            .chat_stream(
+                &[],
+                &[],
+                CancellationToken::new(),
+                std::sync::Arc::new(crate::output::StdoutSink),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.reasoning_chars,
+            "inspect the project".chars().count(),
+            "legacy reasoning alongside details must not be displayed twice"
+        );
+        assert_eq!(response.tool_calls[0].id, "call_1");
+
+        let history = [
+            tool_call_message("call_1", "read", "{\"path\":\"Cargo.toml\"}"),
+            tool_result_message("call_1", "contents"),
+        ];
+        let body = provider
+            .request_body_with_reasoning(&history, &[], crate::provider::ReasoningSelection::High)
+            .unwrap();
+
+        assert_eq!(
+            body["reasoning"],
+            serde_json::json!({"effort": "high"}),
+            "the OpenRouter unified reasoning envelope reaches the wire"
+        );
+        assert!(
+            body.get("prompt_cache_key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| !key.is_empty())
+        );
+        assert_eq!(
+            body["messages"][0]["reasoning_details"],
+            serde_json::json!([first_detail, encrypted_detail, summary_detail])
+        );
+        assert!(body["messages"][0].get("reasoning_content").is_none());
     }
 
     #[tokio::test]

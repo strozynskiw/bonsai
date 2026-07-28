@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::model_catalog::{AvailableModel, ModelFeature};
-use crate::provider::ModelPricing;
+use crate::provider::{ModelPricing, ModelPricingTier, TokenCounterKind};
 
 #[cfg(test)]
 pub(crate) fn model_ids_from_response(value: &Value) -> Vec<String> {
@@ -16,42 +16,31 @@ pub(crate) fn available_models_from_response(value: &Value) -> Vec<AvailableMode
     value
         .get("data")
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let id = item.get("id").and_then(Value::as_str)?;
-                    // Google's OpenAI-compat layer lists ids under the native
-                    // resource name (`models/gemini-2.5-flash`) while its chat
-                    // endpoint accepts the bare id — and catalog targets use
-                    // bare ids. Strip the prefix at the discovery boundary or
-                    // no Gemini live row ever maps to its target (every model
-                    // shows "(assumed)" with no price). Deliberate, don't
-                    // simplify: no other provider names models `models/...`,
-                    // so this cannot collide with router-style `org/model` ids.
-                    let id = id.strip_prefix("models/").unwrap_or(id);
-                    // bonsai is a coding agent, so the picker lists only
-                    // coding-usable models. A `/models` listing routinely mixes
-                    // in other modalities (image/video/speech/embedding) and
-                    // non-coding text roles (translation/roleplay/captioning);
-                    // Qwen Cloud alone returns ~149. Drop them all at the
-                    // discovery boundary so they never reach the model picker.
-                    if !is_coding_model_id(id) {
-                        return None;
-                    }
-                    Some(
-                        AvailableModel::with_metadata(
-                            id,
-                            context_window_from_model_item(item),
-                            display_name_from_model_item(item, id),
-                            features_from_model_item(item),
-                        )
-                        .with_pricing(pricing_from_model_item(item)),
-                    )
-                })
-                .collect()
-        })
+        .map(|items| items.iter().filter_map(available_model_from_item).collect())
         .unwrap_or_default()
+}
+
+pub(crate) fn available_model_from_item(item: &Value) -> Option<AvailableModel> {
+    let id = item.get("id").and_then(Value::as_str)?;
+    // Google's OpenAI-compat layer lists ids under the native resource name
+    // (`models/gemini-2.5-flash`) while its chat endpoint accepts the bare id.
+    let id = id.strip_prefix("models/").unwrap_or(id);
+    // A `/models` listing routinely mixes chat models with embedding, media,
+    // translation, and roleplay products that Bonsai cannot use for coding.
+    if !is_coding_model_id(id) {
+        return None;
+    }
+    let (pricing, pricing_tiers) = pricing_schedule_from_model_item(item);
+    Some(
+        AvailableModel::with_metadata(
+            id,
+            context_window_from_model_item(item),
+            display_name_from_model_item(item, id),
+            features_from_model_item(item),
+        )
+        .with_token_counter(token_counter_from_model_item(item, id))
+        .with_pricing_schedule(pricing, pricing_tiers),
+    )
 }
 
 /// Whether a `/models` id names a model bonsai can select for coding — a
@@ -146,17 +135,26 @@ fn display_name_from_model_item(item: &Value, id: &str) -> Option<String> {
 /// unsupported.
 fn features_from_model_item(item: &Value) -> Vec<ModelFeature> {
     let mut features = Vec::new();
-    let supports_tools = item
-        .get("supported_parameters")
-        .and_then(Value::as_array)
-        .is_some_and(|parameters| {
+    let parameters = item.get("supported_parameters").and_then(Value::as_array);
+    let supports = |name: &str| {
+        parameters.is_some_and(|parameters| {
             parameters
                 .iter()
                 .filter_map(Value::as_str)
-                .any(|parameter| parameter == "tools")
-        });
-    if supports_tools {
+                .any(|value| value == name)
+        })
+    };
+    if supports("tools") {
         features.push(ModelFeature::ToolCall);
+    }
+    if supports("reasoning") || supports("include_reasoning") {
+        features.push(ModelFeature::Reasoning);
+    }
+    if supports("structured_outputs") || supports("response_format") {
+        features.push(ModelFeature::StructuredOutput);
+    }
+    if supports("temperature") {
+        features.push(ModelFeature::Temperature);
     }
     if input_modalities_include_image(item) {
         features.push(ModelFeature::Attachment);
@@ -183,13 +181,77 @@ fn input_modalities_include_image(item: &Value) -> bool {
 /// `"0"` price is a real free tier (priced at $0), not a missing price, so it
 /// yields `Some`. `None` only when the pricing object or the two required rates
 /// are absent or unparseable.
-fn pricing_from_model_item(item: &Value) -> Option<ModelPricing> {
-    let pricing = item.get("pricing")?;
+fn pricing_from_value(pricing: &Value) -> Option<ModelPricing> {
     let input = usd_per_token_micros_per_million(pricing.get("prompt"))?;
     let output = usd_per_token_micros_per_million(pricing.get("completion"))?;
     let cache_read = usd_per_token_micros_per_million(pricing.get("input_cache_read"));
     let cache_write = usd_per_token_micros_per_million(pricing.get("input_cache_write"));
     Some(ModelPricing::new(input, output).with_cache_rates(cache_read, cache_write))
+}
+
+fn pricing_override_from_value(pricing: &Value, base: ModelPricing) -> ModelPricing {
+    let input = usd_per_token_micros_per_million(pricing.get("prompt"))
+        .unwrap_or(base.input_micros_per_million);
+    let output = usd_per_token_micros_per_million(pricing.get("completion"))
+        .unwrap_or(base.output_micros_per_million);
+    let cache_read = if pricing.get("input_cache_read").is_some() {
+        usd_per_token_micros_per_million(pricing.get("input_cache_read"))
+    } else {
+        base.cache_read_micros_per_million
+    };
+    let cache_write = if pricing.get("input_cache_write").is_some() {
+        usd_per_token_micros_per_million(pricing.get("input_cache_write"))
+    } else {
+        base.cache_write_micros_per_million
+    };
+    ModelPricing::new(input, output).with_cache_rates(cache_read, cache_write)
+}
+
+fn pricing_schedule_from_model_item(item: &Value) -> (Option<ModelPricing>, Vec<ModelPricingTier>) {
+    let Some(pricing) = item.get("pricing") else {
+        return (None, Vec::new());
+    };
+    let base = pricing_from_value(pricing);
+    let Some(base_pricing) = base else {
+        return (None, Vec::new());
+    };
+    let tiers = pricing
+        .get("overrides")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|override_value| {
+            // OpenRouter defines `min_prompt_tokens` as a strict greater-than
+            // boundary, while `ModelPricingTier` is inclusive.
+            let threshold = override_value
+                .get("min_prompt_tokens")
+                .and_then(value_as_positive_u32)?;
+            let minimum_input_tokens = threshold.checked_add(1)?;
+            let pricing = pricing_override_from_value(override_value, base_pricing);
+            Some(ModelPricingTier {
+                minimum_input_tokens,
+                pricing,
+            })
+        })
+        .collect();
+    (Some(base_pricing), tiers)
+}
+
+fn token_counter_from_model_item(item: &Value, id: &str) -> Option<TokenCounterKind> {
+    let tokenizer = item
+        .get("architecture")
+        .and_then(|architecture| architecture.get("tokenizer"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let id = id.to_ascii_lowercase();
+    if tokenizer == "gpt" || id.starts_with("openai/") {
+        Some(TokenCounterKind::Tiktoken)
+    } else if tokenizer.contains("qwen3") || id.contains("qwen3") {
+        Some(TokenCounterKind::Qwen3)
+    } else {
+        None
+    }
 }
 
 /// Convert a USD-per-token rate (number or numeric string) into micro-USD per
@@ -424,12 +486,23 @@ mod tests {
             "data": [{
                 "id": "moonshotai/kimi-k3",
                 "context_length": 262_144,
-                "supported_parameters": ["tools"],
+                "supported_parameters": [
+                    "tools",
+                    "reasoning",
+                    "structured_outputs",
+                    "temperature"
+                ],
                 "architecture": { "input_modalities": ["text", "image"], "output_modalities": ["text"] },
                 "pricing": {
                     "prompt": "0.000003",
                     "completion": "0.000015",
-                    "input_cache_read": "0.0000003"
+                    "input_cache_read": "0.0000003",
+                    "input_cache_write": "0.00000375",
+                    "overrides": [{
+                        "min_prompt_tokens": 250000,
+                        "prompt": "0.000006",
+                        "completion": "0.0000225"
+                    }]
                 }
             }]
         }));
@@ -442,6 +515,44 @@ mod tests {
         assert_eq!(pricing.cache_read_micros_per_million, Some(300_000));
         assert!(models[0].features.contains(&ModelFeature::ToolCall));
         assert!(models[0].features.contains(&ModelFeature::Attachment));
+        assert!(models[0].features.contains(&ModelFeature::Reasoning));
+        assert!(models[0].features.contains(&ModelFeature::StructuredOutput));
+        assert!(models[0].features.contains(&ModelFeature::Temperature));
+        assert_eq!(models[0].pricing_tiers.len(), 1);
+        let tier = models[0].pricing_tiers[0];
+        assert_eq!(tier.minimum_input_tokens, 250_001);
+        assert_eq!(tier.pricing.input_micros_per_million, 6_000_000);
+        assert_eq!(tier.pricing.output_micros_per_million, 22_500_000);
+        assert_eq!(
+            tier.pricing.cache_read_micros_per_million,
+            Some(300_000),
+            "unspecified override rates inherit from the live base"
+        );
+        assert_eq!(tier.pricing.cache_write_micros_per_million, Some(3_750_000));
+    }
+
+    #[test]
+    fn openrouter_tokenizer_metadata_selects_safe_local_counters() {
+        let models = available_models_from_response(&serde_json::json!({
+            "data": [
+                {
+                    "id": "openai/gpt-5.6-sol",
+                    "architecture": {"tokenizer": "GPT"}
+                },
+                {
+                    "id": "qwen/qwen3-coder-next",
+                    "architecture": {"tokenizer": "Qwen3"}
+                },
+                {
+                    "id": "anthropic/claude-sonnet-5",
+                    "architecture": {"tokenizer": "Claude"}
+                }
+            ]
+        }));
+
+        assert_eq!(models[0].token_counter, Some(TokenCounterKind::Tiktoken));
+        assert_eq!(models[1].token_counter, Some(TokenCounterKind::Qwen3));
+        assert_eq!(models[2].token_counter, None);
     }
 
     #[test]
