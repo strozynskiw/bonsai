@@ -165,17 +165,18 @@ mod tests {
 
     #[tokio::test]
     async fn authorize_from_env_reads_key() {
-        unsafe {
-            std::env::set_var("MINIMAX_CODING_PLAN_API_KEY", "sk-mm-env");
-        }
-        let outcome = MiniMaxCodingPlanFactory
-            .authorize(AuthInput::FromEnv)
-            .await
-            .unwrap();
-        assert_eq!(outcome.api_key, "sk-mm-env");
-        unsafe {
-            std::env::remove_var("MINIMAX_CODING_PLAN_API_KEY");
-        }
+        crate::util::test_env::with_var_async(
+            "MINIMAX_CODING_PLAN_API_KEY",
+            Some("sk-mm-env"),
+            async {
+                let outcome = MiniMaxCodingPlanFactory
+                    .authorize(AuthInput::FromEnv)
+                    .await
+                    .unwrap();
+                assert_eq!(outcome.api_key, "sk-mm-env");
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

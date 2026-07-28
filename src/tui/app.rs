@@ -2265,14 +2265,14 @@ mod tests {
         status: crate::subagent::SubagentStatus,
     ) -> crate::subagent::SubagentSnapshot {
         crate::subagent::SubagentSnapshot {
-            id: id.to_string(),
-            agent: "explore".to_string(),
-            prompt: "find the thing".to_string(),
+            id: id.into(),
+            agent: "explore".into(),
+            prompt: "find the thing".into(),
             detached: false,
             status,
             started_at: SystemTime::now(),
             finished_at: None,
-            activity: String::new(),
+            activity: String::new().into(),
             result: None,
             model: None,
             tool_call_id: None,
@@ -2292,10 +2292,10 @@ mod tests {
         });
         app.reduce(AppAction::OpenSubtaskList);
         assert_eq!(app.focus, Focus::Modal);
-        assert_eq!(app.selected_subtask().map(|s| s.id.as_str()), Some("sub-1"));
+        assert_eq!(app.selected_subtask().map(|s| s.id.as_ref()), Some("sub-1"));
 
         app.reduce(AppAction::SubtaskListMove(1));
-        assert_eq!(app.selected_subtask().map(|s| s.id.as_str()), Some("sub-2"));
+        assert_eq!(app.selected_subtask().map(|s| s.id.as_ref()), Some("sub-2"));
     }
 
     #[test]
@@ -2350,7 +2350,7 @@ mod tests {
 
         app.reduce(AppAction::SubtaskListMove(1));
 
-        assert_eq!(app.selected_subtask().map(|s| s.id.as_str()), Some("sub-2"));
+        assert_eq!(app.selected_subtask().map(|s| s.id.as_ref()), Some("sub-2"));
         assert_eq!(app.modal_scroll, 0);
         assert!(
             matches!(
@@ -2383,7 +2383,7 @@ mod tests {
                 subtask_snapshot("sub-1", SubagentStatus::Succeeded),
             ],
         });
-        assert_eq!(app.selected_subtask().map(|s| s.id.as_str()), Some("sub-2"));
+        assert_eq!(app.selected_subtask().map(|s| s.id.as_ref()), Some("sub-2"));
     }
 
     #[test]

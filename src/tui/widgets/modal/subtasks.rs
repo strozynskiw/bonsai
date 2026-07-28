@@ -98,7 +98,7 @@ fn subtask_columns(width: usize) -> Vec<TableColumn<SubagentSnapshot>> {
         TableColumn {
             header: "ID",
             width: TableWidth::Fit { cap: usize::MAX },
-            render: CellRender::Value(|sub| sub.id.clone()),
+            render: CellRender::Value(|sub| sub.id.to_string()),
             style: CellStyle::Meta,
         },
         TableColumn {
@@ -116,7 +116,7 @@ fn subtask_columns(width: usize) -> Vec<TableColumn<SubagentSnapshot>> {
         TableColumn {
             header: "Agent",
             width: TableWidth::Fit { cap: 12 },
-            render: CellRender::Value(|sub| sub.agent.clone()),
+            render: CellRender::Value(|sub| sub.agent.to_string()),
             style: CellStyle::Meta,
         },
         TableColumn {
@@ -137,7 +137,10 @@ fn subtask_columns(width: usize) -> Vec<TableColumn<SubagentSnapshot>> {
 /// The Model-column cell: the model the run used, or `—` before its provider is
 /// minted.
 fn subtask_model_cell(sub: &SubagentSnapshot) -> String {
-    sub.model.clone().unwrap_or_else(|| "—".to_string())
+    sub.model
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn subtask_list_row_lines(
@@ -236,7 +239,7 @@ pub(super) fn subtask_detail_lines_full(
         .subagent_model_overrides
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .get(&sub.agent)
+        .get(sub.agent.as_ref())
         .cloned()
     {
         lines.push(Line::from(""));

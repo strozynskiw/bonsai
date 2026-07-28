@@ -142,9 +142,7 @@ mod tests {
     fn set_message_flags_unenforced_network_deny() {
         let tmp = tempfile::tempdir().unwrap();
         let sandbox = CommandSandbox::new(
-            crate::sandbox::SandboxBackend::Bubblewrap {
-                network_deny_supported: false,
-            },
+            crate::sandbox::SandboxBackend::test_bubblewrap(false),
             tmp.path(),
         );
         sandbox.set_deny_network(true);

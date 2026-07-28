@@ -69,7 +69,7 @@ async fn build_engine_with_sandbox(
 }
 
 async fn build_engine_with_active_sandbox(config: &Config) -> HookEngine {
-    let sandbox = CommandSandbox::new(SandboxBackend::SeatbeltExec, &std::env::temp_dir());
+    let sandbox = CommandSandbox::new(SandboxBackend::test_seatbelt(), &std::env::temp_dir());
     sandbox.set_enabled(true);
     sandbox.set_deny_network(true);
     build_engine_with_sandbox(config, None, sandbox).await

@@ -27,12 +27,8 @@ fn unavailable_backend_reports_no_capabilities() {
 #[cfg(target_os = "linux")]
 #[test]
 fn bubblewrap_backend_reports_capabilities() {
-    let full = SandboxBackend::Bubblewrap {
-        network_deny_supported: true,
-    };
-    let shared_net_only = SandboxBackend::Bubblewrap {
-        network_deny_supported: false,
-    };
+    let full = SandboxBackend::test_bubblewrap(true);
+    let shared_net_only = SandboxBackend::test_bubblewrap(false);
 
     assert!(full.is_available());
     assert!(full.supports_network_deny());
@@ -134,7 +130,7 @@ fn activation_is_independent_of_autonomy() {
     // bypassed at `yolo`. (Backend availability is platform-independent for
     // SeatbeltExec, so this is portable.)
     let proj = tempfile::tempdir().unwrap();
-    let sb = CommandSandbox::new(SandboxBackend::SeatbeltExec, proj.path());
+    let sb = CommandSandbox::new(SandboxBackend::test_seatbelt(), proj.path());
     assert!(
         sb.is_active(),
         "available backends are active by default, regardless of autonomy"
@@ -151,9 +147,7 @@ mod bubblewrap {
     use super::*;
 
     fn linux_backend(network_deny: bool) -> SandboxBackend {
-        SandboxBackend::Bubblewrap {
-            network_deny_supported: network_deny,
-        }
+        SandboxBackend::test_bubblewrap(network_deny)
     }
 
     fn linux_sandbox(root: &Path) -> CommandSandbox {
@@ -189,7 +183,10 @@ mod bubblewrap {
         let proj = tempfile::tempdir().unwrap();
         let sb = linux_sandbox(proj.path());
         let (cmd, decision) = sb.command("/bin/sh", "echo hi", proj.path());
-        assert_eq!(cmd.as_std().get_program(), linux::BWRAP_PATH);
+        assert_eq!(
+            cmd.as_std().get_program(),
+            std::path::Path::new("/usr/bin/bwrap")
+        );
         assert!(decision.confined);
         assert_eq!(decision.backend, linux_backend(true));
     }
@@ -336,7 +333,7 @@ mod bubblewrap {
 
         let in_path = proj_root.join("in.txt");
         let status = run(
-            backend,
+            backend.clone(),
             &policy,
             &proj_root,
             &format!("echo ok > '{}'", in_path.display()),
@@ -347,7 +344,7 @@ mod bubblewrap {
 
         let escape = outside.path().canonicalize().unwrap().join("escape.txt");
         let status = run(
-            backend,
+            backend.clone(),
             &policy,
             &proj_root,
             &format!("echo pwned > '{}'", escape.display()),
@@ -360,7 +357,7 @@ mod bubblewrap {
         std::os::unix::fs::symlink(outside.path(), &symlink).unwrap();
         let through_symlink = outside.path().join("through-symlink.txt");
         let status = run(
-            backend,
+            backend.clone(),
             &policy,
             &proj_root,
             &format!("echo pwned > '{}/through-symlink.txt'", symlink.display()),
@@ -452,7 +449,7 @@ mod seatbelt {
     use super::*;
 
     fn macos_sandbox(root: &Path) -> CommandSandbox {
-        let sb = CommandSandbox::new(SandboxBackend::SeatbeltExec, root);
+        let sb = CommandSandbox::new(SandboxBackend::test_seatbelt(), root);
         sb.set_enabled(true);
         sb
     }
@@ -462,15 +459,18 @@ mod seatbelt {
         let proj = tempfile::tempdir().unwrap();
         let sb = macos_sandbox(proj.path());
         let (cmd, decision) = sb.command("/bin/sh", "echo hi", proj.path());
-        assert_eq!(cmd.as_std().get_program(), "/usr/bin/sandbox-exec");
+        assert_eq!(
+            cmd.as_std().get_program(),
+            std::path::Path::new("/usr/bin/sandbox-exec")
+        );
         assert!(decision.confined);
-        assert_eq!(decision.backend, SandboxBackend::SeatbeltExec);
+        assert_eq!(decision.backend, SandboxBackend::test_seatbelt());
     }
 
     #[test]
     fn disabled_command_is_not_wrapped() {
         let proj = tempfile::tempdir().unwrap();
-        let sb = CommandSandbox::new(SandboxBackend::SeatbeltExec, proj.path());
+        let sb = CommandSandbox::new(SandboxBackend::test_seatbelt(), proj.path());
         sb.set_enabled(false);
         let (cmd, decision) = sb.command("/bin/sh", "echo hi", proj.path());
         assert_eq!(cmd.as_std().get_program(), "/bin/sh");
@@ -522,7 +522,7 @@ mod seatbelt {
     fn production_policy_profile_grants_project_root() {
         let proj = tempfile::tempdir().unwrap();
         let proj_root = proj.path().canonicalize().unwrap();
-        let sb = CommandSandbox::new(SandboxBackend::SeatbeltExec, proj.path());
+        let sb = CommandSandbox::new(SandboxBackend::test_seatbelt(), proj.path());
         let profile = macos::generate_profile(&sb.policy());
         assert!(profile.contains(&format!("(subpath \"{}\")", proj_root.display())));
     }
@@ -693,7 +693,7 @@ mod seatbelt {
         assert!(!escape_file.exists());
 
         // Escaped: the same command, spawned unconfined, succeeds.
-        let sb = CommandSandbox::new(SandboxBackend::SeatbeltExec, &proj_root);
+        let sb = CommandSandbox::new(SandboxBackend::test_seatbelt(), &proj_root);
         let (mut cmd, decision) = sb.command_unconfined("/bin/sh", &script, &proj_root);
         assert!(decision.escaped, "escape spawn must be flagged");
         cmd.stdout(Stdio::null()).stderr(Stdio::null());

@@ -33,21 +33,17 @@ pub(crate) fn expand_env_vars(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        unsafe_code,
-        reason = "edition-2024 requires `unsafe` around std::env::{set_var,remove_var}; test-only"
-    )]
     use super::*;
 
     #[test]
     fn expands_known_vars_and_blanks_unknown_ones() {
-        unsafe { std::env::set_var("BONSAI_UTIL_ENV_TEST_VAR", "secret") };
-        assert_eq!(
-            expand_env_vars("Bearer ${BONSAI_UTIL_ENV_TEST_VAR}"),
-            "Bearer secret"
-        );
-        assert_eq!(expand_env_vars("${BONSAI_UTIL_ENV_TEST_VAR_UNSET}"), "");
-        assert_eq!(expand_env_vars("no vars here"), "no vars here");
-        unsafe { std::env::remove_var("BONSAI_UTIL_ENV_TEST_VAR") };
+        crate::util::test_env::with_var("BONSAI_UTIL_ENV_TEST_VAR", Some("secret"), || {
+            assert_eq!(
+                expand_env_vars("Bearer ${BONSAI_UTIL_ENV_TEST_VAR}"),
+                "Bearer secret"
+            );
+            assert_eq!(expand_env_vars("${BONSAI_UTIL_ENV_TEST_VAR_UNSET}"), "");
+            assert_eq!(expand_env_vars("no vars here"), "no vars here");
+        });
     }
 }

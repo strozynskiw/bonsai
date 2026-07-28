@@ -199,8 +199,12 @@ impl Agent {
             let execution_result = match max_tool_duration {
                 Some(limit) => {
                     tokio::select! {
-                        result = execution => result,
-                        _ = tokio::time::sleep(limit) => {
+                        biased;
+                        _ = async {
+                            if !limit.is_zero() {
+                                tokio::time::sleep(limit).await;
+                            }
+                        } => {
                             tool_cancellation.cancel();
                             break 'call (
                                 ToolOutput::Text(format!(
@@ -211,6 +215,7 @@ impl Agent {
                                 crate::output::ToolExecutionStatus::Interrupted,
                             );
                         }
+                        result = execution => result,
                     }
                 }
                 None => execution.await,

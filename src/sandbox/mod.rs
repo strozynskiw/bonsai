@@ -39,39 +39,58 @@ pub(crate) use policy::SandboxPolicy;
 
 /// Which OS mechanism confines child commands on this host, decided once at
 /// startup by [`detect_backend`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SandboxBackend {
-    /// macOS `sandbox-exec` wrapper at `/usr/bin/sandbox-exec`. Constructed only
-    /// on macOS.
+    /// macOS `sandbox-exec` wrapper resolved from `PATH`. Constructed only on
+    /// macOS.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    SeatbeltExec,
-    /// Linux Bubblewrap wrapper at `/usr/bin/bwrap`. Constructed only on Linux.
+    SeatbeltExec { executable: PathBuf },
+    /// Linux Bubblewrap wrapper resolved from `PATH`. Constructed only on Linux.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    Bubblewrap { network_deny_supported: bool },
+    Bubblewrap {
+        executable: PathBuf,
+        network_deny_supported: bool,
+    },
     /// No OS sandbox available (unsupported OS, or the backend tool is missing).
     Unavailable,
 }
 
 impl SandboxBackend {
+    #[cfg(test)]
+    pub(crate) fn test_seatbelt() -> Self {
+        Self::SeatbeltExec {
+            executable: PathBuf::from("/usr/bin/sandbox-exec"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_bubblewrap(network_deny_supported: bool) -> Self {
+        Self::Bubblewrap {
+            executable: PathBuf::from("/usr/bin/bwrap"),
+            network_deny_supported,
+        }
+    }
+
     /// Whether this backend can actually confine a command.
-    pub(crate) fn is_available(self) -> bool {
+    pub(crate) fn is_available(&self) -> bool {
         !matches!(self, Self::Unavailable)
     }
 
     /// Whether this backend can enforce a network-deny policy.
-    pub(crate) fn supports_network_deny(self) -> bool {
+    pub(crate) fn supports_network_deny(&self) -> bool {
         matches!(
             self,
-            Self::SeatbeltExec
+            Self::SeatbeltExec { .. }
                 | Self::Bubblewrap {
                     network_deny_supported: true,
+                    ..
                 }
         )
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(&self) -> &'static str {
         match self {
-            Self::SeatbeltExec => "seatbelt",
+            Self::SeatbeltExec { .. } => "seatbelt",
             Self::Bubblewrap { .. } => "bubblewrap",
             Self::Unavailable => "none",
         }
@@ -83,8 +102,8 @@ impl SandboxBackend {
 pub(crate) fn detect_backend() -> SandboxBackend {
     #[cfg(target_os = "macos")]
     {
-        if Path::new("/usr/bin/sandbox-exec").exists() {
-            return SandboxBackend::SeatbeltExec;
+        if let Some(executable) = resolve_executable("sandbox-exec") {
+            return SandboxBackend::SeatbeltExec { executable };
         }
     }
     #[cfg(target_os = "linux")]
@@ -146,7 +165,8 @@ impl CommandSandbox {
         project_root: &Path,
         config: &crate::config::SandboxConfig,
     ) -> Self {
-        let want_enabled = env_flag("BONSAI_SANDBOX").unwrap_or_else(|| backend.is_available());
+        let backend_available = backend.is_available();
+        let want_enabled = env_flag("BONSAI_SANDBOX").unwrap_or(backend_available);
         let deny_network = env_deny_network().or(config.deny_network).unwrap_or(true);
         let private_temp = tempfile::Builder::new()
             .prefix("bonsai-session-")
@@ -171,7 +191,7 @@ impl CommandSandbox {
         Self {
             inner: Arc::new(Inner {
                 backend,
-                enabled: AtomicBool::new(want_enabled && backend.is_available()),
+                enabled: AtomicBool::new(want_enabled && backend_available),
                 deny_network: AtomicBool::new(deny_network),
                 private_temp,
                 writable_roots,
@@ -199,7 +219,7 @@ impl CommandSandbox {
     }
 
     pub(crate) fn backend(&self) -> SandboxBackend {
-        self.inner.backend
+        self.inner.backend.clone()
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -262,7 +282,7 @@ impl CommandSandbox {
         } else {
             (
                 plain_command(shell, script, cwd),
-                SpawnDecision::unconfined(self.inner.backend),
+                SpawnDecision::unconfined(self.inner.backend.clone()),
             )
         };
         self.configure_temp_environment(&mut command);
@@ -281,7 +301,7 @@ impl CommandSandbox {
     ) -> (Command, SpawnDecision) {
         let mut command = plain_command(shell, script, cwd);
         self.configure_temp_environment(&mut command);
-        (command, SpawnDecision::escaped(self.inner.backend))
+        (command, SpawnDecision::escaped(self.inner.backend.clone()))
     }
 
     /// Steer temp/cache writes into the per-session private root. Advisory,
@@ -310,7 +330,13 @@ impl CommandSandbox {
         cwd: &Path,
     ) -> Option<(Command, SpawnDecision)> {
         match self.inner.backend {
-            SandboxBackend::SeatbeltExec => Some(macos::wrap(shell, script, cwd, &self.policy())),
+            SandboxBackend::SeatbeltExec { .. } => Some(macos::wrap(
+                shell,
+                script,
+                cwd,
+                self.inner.backend.clone(),
+                &self.policy(),
+            )),
             _ => None,
         }
     }
@@ -327,7 +353,7 @@ impl CommandSandbox {
                 shell,
                 script,
                 cwd,
-                self.inner.backend,
+                self.inner.backend.clone(),
                 &self.policy(),
             )),
             _ => None,
@@ -343,6 +369,89 @@ impl CommandSandbox {
     ) -> Option<(Command, SpawnDecision)> {
         None
     }
+}
+
+/// Return the first executable regular file named `name` in `paths`.
+///
+/// This preserves `OsString` path components end-to-end, including non-UTF-8
+/// `PATH` entries, and intentionally considers no locations outside `PATH`.
+fn resolve_executable_in_paths(
+    name: &str,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    paths
+        .into_iter()
+        .map(|directory| directory.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn resolve_executable(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    resolve_executable_in_paths(name, paths)
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::prelude::OsStringExt;
+
+    #[test]
+    fn executable_resolver_uses_first_valid_path_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let invalid = root.path().join("invalid");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(invalid.join("bwrap")).unwrap();
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let selected = first.join("bwrap");
+        std::fs::write(&selected, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let later = second.join("bwrap");
+        std::fs::write(&later, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&later, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            resolve_executable_in_paths("bwrap", [invalid, first.clone(), second].into_iter(),),
+            Some(selected),
+        );
+    }
+
+    #[test]
+    fn executable_resolver_preserves_non_utf8_path_components() {
+        let root = tempfile::tempdir().unwrap();
+        let mut name = b"invalid-".to_vec();
+        name.push(0xFF);
+        let directory = root.path().join(OsString::from_vec(name));
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("bwrap");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let resolved = resolve_executable_in_paths("bwrap", [directory]);
+
+        assert_eq!(resolved, Some(executable));
+    }
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
 }
 
 /// The unconfined `shell -c <script>` command, used when the sandbox is inactive.

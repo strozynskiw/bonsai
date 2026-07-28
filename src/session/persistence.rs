@@ -1346,20 +1346,17 @@ mod tests {
         store.set_current_kind_id("anthropic");
         store.save_to(&path).unwrap();
 
-        // SAFETY: single-threaded test; env var is isolated to this function.
-        // Must run in its own binary invocation (via --test-threads=1 or alone)
-        // to avoid races with other tests in the same module.
-        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "") };
-        let loaded = SessionStore::load_from(&path).unwrap();
-        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+        crate::util::test_env::with_var("ANTHROPIC_API_KEY", Some(""), || {
+            let loaded = SessionStore::load_from(&path).unwrap();
 
-        assert!(loaded.session("anthropic").api_key.is_empty());
-        assert!(!loaded.authorized_provider_ids().contains(&"anthropic"));
-        assert!(
-            !std::fs::read_to_string(path)
-                .unwrap()
-                .contains("sk-ant-123")
-        );
+            assert!(loaded.session("anthropic").api_key.is_empty());
+            assert!(!loaded.authorized_provider_ids().contains(&"anthropic"));
+            assert!(
+                !std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("sk-ant-123")
+            );
+        });
     }
 
     #[tokio::test]

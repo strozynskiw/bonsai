@@ -1,3 +1,5 @@
+//! Git diff selection and prompt construction for self-review subagents.
+
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap};

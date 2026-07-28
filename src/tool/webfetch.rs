@@ -1159,7 +1159,7 @@ mod tests {
         let session_id = fixture.start_session().await;
         let active_session_id = Arc::new(tokio::sync::Mutex::new(Some(session_id)));
         let sandbox = CommandSandbox::new(
-            crate::sandbox::SandboxBackend::SeatbeltExec,
+            crate::sandbox::SandboxBackend::test_seatbelt(),
             fixture.project_path(),
         );
         sandbox.set_enabled(true);
@@ -1205,7 +1205,7 @@ mod tests {
         let fixture = crate::storage::test_utils::TestStorage::new().await;
         let session_id = fixture.start_session().await;
         let sandbox = CommandSandbox::new(
-            crate::sandbox::SandboxBackend::SeatbeltExec,
+            crate::sandbox::SandboxBackend::test_seatbelt(),
             fixture.project_path(),
         );
         sandbox.set_enabled(true);

@@ -1530,7 +1530,7 @@ mod tests {
     /// An *active* sandbox (`is_active() == true`) on any OS — `SeatbeltExec` is
     /// always "available"; actual confinement is macOS-only.
     fn active_sandbox(root: &Path) -> CommandSandbox {
-        let sandbox = CommandSandbox::new(crate::sandbox::SandboxBackend::SeatbeltExec, root);
+        let sandbox = CommandSandbox::new(crate::sandbox::SandboxBackend::test_seatbelt(), root);
         sandbox.set_enabled(true);
         sandbox
     }

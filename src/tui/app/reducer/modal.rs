@@ -252,7 +252,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.subagent_model_overrides
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
-                    .remove(&agent);
+                    .remove(agent.as_ref());
             }
         }
         AppAction::EpisodesMove(delta) => {

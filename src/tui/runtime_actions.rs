@@ -2314,7 +2314,7 @@ async fn override_selected_subtask_model(app: &mut AppState, deps: RuntimeAction
         );
         return;
     }
-    app.pending_agent_model_override = Some(agent);
+    app.pending_agent_model_override = Some(agent.to_string());
     app.reduce(AppAction::OpenModal(ModalKind::ModelPicker { entries }));
 }
 

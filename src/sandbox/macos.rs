@@ -17,10 +17,14 @@ pub(super) fn wrap(
     shell: &str,
     script: &str,
     cwd: &Path,
+    backend: SandboxBackend,
     policy: &SandboxPolicy,
 ) -> (Command, SpawnDecision) {
     let profile = generate_profile(policy);
-    let mut cmd = Command::new("/usr/bin/sandbox-exec");
+    let SandboxBackend::SeatbeltExec { executable } = &backend else {
+        unreachable!("Seatbelt wrapper requires a Seatbelt backend");
+    };
+    let mut cmd = Command::new(executable);
     cmd.arg("-p")
         .arg(profile)
         .arg("--")
@@ -32,7 +36,7 @@ pub(super) fn wrap(
         cmd,
         SpawnDecision {
             confined: true,
-            backend: SandboxBackend::SeatbeltExec,
+            backend,
             network_denied: policy.deny_network,
             degraded: None,
             escaped: false,

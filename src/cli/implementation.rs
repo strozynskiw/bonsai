@@ -1,3 +1,5 @@
+//! Command-line argument parsing and startup-mode selection.
+
 use std::time::Duration;
 
 use crate::completions::CompletionShell;

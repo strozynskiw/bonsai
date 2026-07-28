@@ -1,7 +1,6 @@
 //! Linux Bubblewrap backend. Bubblewrap gives bonsai the same wrapper shape as
 //! macOS `sandbox-exec`: configure the child sandbox, then run `shell -c`.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use std::time::{Duration, Instant};
@@ -11,7 +10,6 @@ use tokio::process::Command;
 use super::policy::SandboxPolicy;
 use super::{SandboxBackend, SpawnDecision};
 
-pub(super) const BWRAP_PATH: &str = "/usr/bin/bwrap";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug)]
@@ -22,24 +20,19 @@ enum NetworkMode {
 
 /// Detect the Bubblewrap capabilities available on this host.
 pub(super) fn detect_backend() -> Option<SandboxBackend> {
-    let path = Path::new(BWRAP_PATH);
-    if !is_executable_file(path) || !probe_bubblewrap(NetworkMode::Shared) {
+    let executable = super::resolve_executable("bwrap")?;
+    if !probe_bubblewrap(&executable, NetworkMode::Shared) {
         return None;
     }
 
     Some(SandboxBackend::Bubblewrap {
-        network_deny_supported: probe_bubblewrap(NetworkMode::Isolated),
+        network_deny_supported: probe_bubblewrap(&executable, NetworkMode::Isolated),
+        executable,
     })
 }
 
-fn is_executable_file(path: &Path) -> bool {
-    path.metadata()
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-fn probe_bubblewrap(network: NetworkMode) -> bool {
-    let mut command = StdCommand::new(BWRAP_PATH);
+fn probe_bubblewrap(executable: &Path, network: NetworkMode) -> bool {
+    let mut command = StdCommand::new(executable);
     command.arg("--unshare-all");
     if matches!(network, NetworkMode::Shared) {
         command.arg("--share-net");
@@ -103,7 +96,10 @@ pub(super) fn wrap(
     backend: SandboxBackend,
     policy: &SandboxPolicy,
 ) -> (Command, SpawnDecision) {
-    let mut cmd = Command::new(BWRAP_PATH);
+    let SandboxBackend::Bubblewrap { executable, .. } = &backend else {
+        unreachable!("Bubblewrap wrapper requires a Bubblewrap backend");
+    };
+    let mut cmd = Command::new(executable);
     cmd.arg("--unshare-all")
         .arg("--die-with-parent")
         .arg("--ro-bind")
@@ -135,7 +131,7 @@ pub(super) fn wrap(
         cmd,
         SpawnDecision {
             confined: true,
-            backend,
+            backend: backend.clone(),
             network_denied,
             degraded: network_degradation(policy, backend),
             escaped: false,

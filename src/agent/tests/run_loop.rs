@@ -2560,7 +2560,7 @@ async fn background_subagent_launch_pauses_parent_until_wake() {
             subagents
                 .snapshot(&subtask_id)
                 .and_then(|snapshot| snapshot.launch_group_id),
-            Some("group-1".to_string())
+            Some("group-1".into())
         );
     }
 }

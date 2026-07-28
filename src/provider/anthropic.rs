@@ -2212,14 +2212,11 @@ mod tests {
     #[tokio::test]
     async fn authorize_from_env_reads_key() {
         let factory = AnthropicFactory;
-        unsafe {
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-test");
-        }
-        let outcome = factory.authorize(AuthInput::FromEnv).await.unwrap();
-        assert_eq!(outcome.api_key, "sk-test");
-        unsafe {
-            std::env::remove_var("ANTHROPIC_API_KEY");
-        }
+        crate::util::test_env::with_var_async("ANTHROPIC_API_KEY", Some("sk-test"), async {
+            let outcome = factory.authorize(AuthInput::FromEnv).await.unwrap();
+            assert_eq!(outcome.api_key, "sk-test");
+        })
+        .await;
     }
 
     #[tokio::test]

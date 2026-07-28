@@ -1079,7 +1079,7 @@ fn subtask_list_scrolls_multi_line_rows_to_keep_cursor_visible() {
     let subtasks = (1..=6)
         .map(|index| {
             let mut snapshot = subagent_snapshot(&format!("sub-{index}"), "research", 1);
-            snapshot.prompt = long_prompt.clone();
+            snapshot.prompt = long_prompt.clone().into();
             snapshot
         })
         .collect::<Vec<_>>();

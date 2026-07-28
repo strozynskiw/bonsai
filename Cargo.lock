@@ -587,6 +587,7 @@ dependencies = [
  "sqlx",
  "strsim",
  "tar",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.19",
  "tiktoken-rs",
@@ -5167,6 +5168,16 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "temp-env"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96374855068f47402c3121c6eed88d29cb1de8f3ab27090e273e420bdabcf050"
+dependencies = [
+ "futures",
+ "parking_lot",
 ]
 
 [[package]]

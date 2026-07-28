@@ -276,24 +276,24 @@ impl SubagentStatus {
 /// One recorded subagent run. Internal, owns live state mutated by the sink.
 #[derive(Debug, Clone)]
 struct SubagentRecord {
-    id: String,
-    agent: String,
-    prompt: String,
+    id: Arc<str>,
+    agent: Arc<str>,
+    prompt: Arc<str>,
     detached: bool,
     status: SubagentStatus,
     started_at: SystemTime,
     finished_at: Option<SystemTime>,
-    activity: String,
-    result: Option<String>,
-    tool_call_id: Option<String>,
-    launch_group_id: Option<String>,
+    activity: Arc<String>,
+    result: Option<Arc<str>>,
+    tool_call_id: Option<Arc<str>>,
+    launch_group_id: Option<Arc<str>>,
     reported_to_agent: bool,
     usage: Option<UsageTotals>,
     usage_turns: Vec<UsageTurn>,
     delegated_read_evidence: Vec<DelegatedReadEvidence>,
     /// The model this run actually used (set once the provider is minted), so the
     /// `/subagents` view can show when an override took effect.
-    model: Option<String>,
+    model: Option<Arc<str>>,
 }
 
 impl SubagentRecord {
@@ -319,22 +319,22 @@ impl SubagentRecord {
 /// it and keep the modal cursor stable across live refreshes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentSnapshot {
-    pub id: String,
-    pub agent: String,
-    pub prompt: String,
+    pub id: Arc<str>,
+    pub agent: Arc<str>,
+    pub prompt: Arc<str>,
     pub detached: bool,
     pub status: SubagentStatus,
     pub started_at: SystemTime,
     pub finished_at: Option<SystemTime>,
-    pub activity: String,
-    pub result: Option<String>,
+    pub activity: Arc<String>,
+    pub result: Option<Arc<str>>,
     /// The model this run used, once its provider was minted (`None` until then).
-    pub model: Option<String>,
+    pub model: Option<Arc<str>>,
     /// The `agent` tool call that launched this run, so the TUI can surface
     /// run details (e.g. the model) on that call's detail view.
-    pub tool_call_id: Option<String>,
+    pub tool_call_id: Option<Arc<str>>,
     /// Parent launch fan-out this run belongs to, once its tool result is attached.
-    pub launch_group_id: Option<String>,
+    pub launch_group_id: Option<Arc<str>>,
 }
 
 impl SubagentSnapshot {
@@ -498,14 +498,14 @@ impl SubagentRegistry {
             inner.subagents.insert(
                 seq,
                 SubagentRecord {
-                    id: id.clone(),
-                    agent: agent.to_string(),
-                    prompt: compact(prompt, PROMPT_CAP_CHARS),
+                    id: Arc::from(id.clone()),
+                    agent: Arc::from(agent),
+                    prompt: Arc::from(compact(prompt, PROMPT_CAP_CHARS)),
                     detached,
                     status: SubagentStatus::Running,
                     started_at: SystemTime::now(),
                     finished_at: None,
-                    activity: String::new(),
+                    activity: Arc::new(String::new()),
                     result: None,
                     tool_call_id: None,
                     launch_group_id: None,
@@ -545,8 +545,8 @@ impl SubagentRegistry {
             let mut inner = self.lock();
             let seq = subtask_seq(id)?;
             let record = inner.subagents.get_mut(&seq)?;
-            record.tool_call_id = Some(tool_call_id);
-            record.launch_group_id = launch_group_id.clone();
+            record.tool_call_id = Some(Arc::from(tool_call_id));
+            record.launch_group_id = launch_group_id.as_deref().map(Arc::<str>::from);
             if let Some(parent_tool_call_id) = record.tool_call_id.as_deref() {
                 for turn in &mut record.usage_turns {
                     turn.attach_parent_context(parent_tool_call_id, launch_group_id.as_deref());
@@ -572,7 +572,12 @@ impl SubagentRegistry {
         inner
             .subagents
             .values()
-            .filter_map(|record| Some((record.tool_call_id.clone()?, record.model.clone()?)))
+            .filter_map(|record| {
+                Some((
+                    record.tool_call_id.as_ref()?.to_string(),
+                    record.model.as_ref()?.to_string(),
+                ))
+            })
             .collect()
     }
 
@@ -586,7 +591,7 @@ impl SubagentRegistry {
             let Some(record) = inner.subagents.get_mut(&seq) else {
                 return;
             };
-            record.model = Some(model);
+            record.model = Some(Arc::from(model));
         }
         let _ = self.events.send(SubagentEvent::Activity);
     }
@@ -601,8 +606,9 @@ impl SubagentRegistry {
             let Some(record) = inner.subagents.get_mut(&seq) else {
                 return;
             };
-            record.activity.push_str(text);
-            trim_front(&mut record.activity, ACTIVITY_CAP_CHARS);
+            let activity = Arc::make_mut(&mut record.activity);
+            activity.push_str(text);
+            trim_front(activity, ACTIVITY_CAP_CHARS);
         }
         let _ = self.events.send(SubagentEvent::Activity);
     }
@@ -650,7 +656,7 @@ impl SubagentRegistry {
                 // Length-cap but keep newlines: the conclusion is shown in the
                 // `/subagents` detail pane, where a flattened single line (what
                 // `compact` would produce) is unreadable for structured output.
-                record.result = Some(cap_chars(&result, RESULT_CAP_CHARS));
+                record.result = Some(Arc::from(cap_chars(&result, RESULT_CAP_CHARS)));
             }
         }
         let _ = self.events.send(SubagentEvent::Finished);
@@ -671,7 +677,7 @@ impl SubagentRegistry {
         record.delegated_read_evidence = evidence
             .into_iter()
             .map(|mut evidence| {
-                evidence.launch_group_id = record.launch_group_id.clone();
+                evidence.launch_group_id = record.launch_group_id.as_deref().map(str::to_string);
                 evidence
             })
             .collect();
@@ -737,7 +743,7 @@ impl SubagentRegistry {
                     .tool_call_id
                     .as_ref()
                     .map(|tool_call_id| SubagentToolCompletion {
-                        tool_call_id: tool_call_id.clone(),
+                        tool_call_id: tool_call_id.to_string(),
                         snapshot: record.snapshot(),
                     })
             })
@@ -1120,7 +1126,7 @@ mod tests {
         let reg = SubagentRegistry::new();
         let id = reg.register("explore", "find the thing", false);
         let snap = reg.snapshot(&id).unwrap();
-        assert_eq!(snap.agent, "explore");
+        assert_eq!(snap.agent.as_ref(), "explore");
         assert_eq!(snap.status, SubagentStatus::Running);
         assert!(snap.prompt.contains("find the thing"));
 
@@ -1133,6 +1139,25 @@ mod tests {
         assert_eq!(snap.status, SubagentStatus::Succeeded);
         assert_eq!(snap.result.as_deref(), Some("found at a.rs:1"));
         assert!(snap.finished_at.is_some());
+    }
+
+    #[test]
+    fn snapshots_share_immutable_text_payloads() {
+        let reg = SubagentRegistry::new();
+        let id = reg.register("explore", "find the thing", false);
+        reg.finish(&id, SubagentStatus::Succeeded, Some("found it".into()));
+
+        let first = reg.snapshot(&id).unwrap();
+        let second = reg.snapshot(&id).unwrap();
+
+        assert!(Arc::ptr_eq(&first.id, &second.id));
+        assert!(Arc::ptr_eq(&first.agent, &second.agent));
+        assert!(Arc::ptr_eq(&first.prompt, &second.prompt));
+        assert!(Arc::ptr_eq(&first.activity, &second.activity));
+        assert!(Arc::ptr_eq(
+            first.result.as_ref().unwrap(),
+            second.result.as_ref().unwrap()
+        ));
     }
 
     #[test]
@@ -1214,7 +1239,7 @@ mod tests {
         assert!(reg.agent_wake_ready());
         let completed = reg.drain_completed_for_agent();
         assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0].snapshot.id, id);
+        assert_eq!(completed[0].snapshot.id.as_ref(), id);
         assert_eq!(completed[0].snapshot.result.as_deref(), Some("done"));
         assert!(!reg.agent_wake_ready());
         assert!(reg.drain_completed_for_agent().is_empty());
@@ -1401,7 +1426,7 @@ mod tests {
         reg.register("explore", "a", false);
         reg.register("review", "b", false);
         let ids: Vec<_> = reg.list().into_iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec!["sub-1".to_string(), "sub-2".to_string()]);
+        assert_eq!(ids, vec![Arc::from("sub-1"), Arc::from("sub-2")]);
     }
 
     #[test]
@@ -1413,10 +1438,10 @@ mod tests {
             reg.register("explore", "p", false);
         }
         let ids: Vec<_> = reg.list().into_iter().map(|s| s.id).collect();
-        assert_eq!(ids.first().map(String::as_str), Some("sub-1"));
-        assert_eq!(ids.get(1).map(String::as_str), Some("sub-2"));
-        assert_eq!(ids.get(9).map(String::as_str), Some("sub-10"));
-        assert_eq!(ids.last().map(String::as_str), Some("sub-11"));
+        assert_eq!(ids.first().map(Arc::as_ref), Some("sub-1"));
+        assert_eq!(ids.get(1).map(Arc::as_ref), Some("sub-2"));
+        assert_eq!(ids.get(9).map(Arc::as_ref), Some("sub-10"));
+        assert_eq!(ids.last().map(Arc::as_ref), Some("sub-11"));
     }
 
     #[test]

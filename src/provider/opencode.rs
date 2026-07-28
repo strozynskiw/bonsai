@@ -2384,14 +2384,11 @@ mod tests {
 
     #[tokio::test]
     async fn authorize_from_env_reads_key() {
-        unsafe {
-            std::env::set_var("OPENCODE_API_KEY", "sk-oc-env");
-        }
-        let outcome = OpenCodeFactory.authorize(AuthInput::FromEnv).await.unwrap();
-        assert_eq!(outcome.api_key, "sk-oc-env");
-        unsafe {
-            std::env::remove_var("OPENCODE_API_KEY");
-        }
+        crate::util::test_env::with_var_async("OPENCODE_API_KEY", Some("sk-oc-env"), async {
+            let outcome = OpenCodeFactory.authorize(AuthInput::FromEnv).await.unwrap();
+            assert_eq!(outcome.api_key, "sk-oc-env");
+        })
+        .await;
     }
 
     #[tokio::test]

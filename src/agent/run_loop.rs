@@ -2446,6 +2446,27 @@ mod tests {
         cancellation: Arc<StdMutex<Option<CancellationToken>>>,
     }
 
+    struct ReadyTool;
+
+    #[async_trait]
+    impl crate::tool::Tool for ReadyTool {
+        fn name(&self) -> &str {
+            "ready"
+        }
+
+        fn description(&self) -> &str {
+            "Return immediately"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::Text("completed".to_string()))
+        }
+    }
+
     #[async_trait]
     impl crate::tool::Tool for SlowTool {
         fn name(&self) -> &str {
@@ -2522,6 +2543,27 @@ mod tests {
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
         );
+    }
+
+    #[tokio::test]
+    async fn zero_duration_budget_wins_over_ready_tool_execution() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ReadyTool));
+
+        let (_, output, status) = Agent::execute_single_tool_call(
+            call("ready", "{}"),
+            Arc::new(registry),
+            ToolRejections::default(),
+            Arc::new(crate::output::StdoutSink),
+            CancellationToken::new(),
+            Arc::new(crate::hooks::HookEngine::disabled()),
+            None,
+            Some(Duration::ZERO),
+        )
+        .await;
+
+        assert_eq!(status, crate::output::ToolExecutionStatus::Interrupted);
+        assert!(output.rendered_summary().contains("runtime budget"));
     }
 
     #[test]
@@ -3369,7 +3411,7 @@ mod tests {
             .next()
             .expect("run should be registered")
             .id;
-        (runner, subagents, subtask_id)
+        (runner, subagents, subtask_id.to_string())
     }
 
     #[tokio::test]

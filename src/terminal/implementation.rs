@@ -1,3 +1,5 @@
+//! Process-local pseudo-terminal lifecycle and bounded terminal output.
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};

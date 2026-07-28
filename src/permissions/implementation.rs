@@ -1,3 +1,5 @@
+//! Persistent permission rules and command authorization matching.
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;

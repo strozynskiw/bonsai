@@ -1200,7 +1200,7 @@ mod tests {
             None,
         );
         let sandbox = crate::sandbox::CommandSandbox::new(
-            crate::sandbox::SandboxBackend::SeatbeltExec,
+            crate::sandbox::SandboxBackend::test_seatbelt(),
             std::path::Path::new("."),
         );
         sandbox.set_enabled(true);

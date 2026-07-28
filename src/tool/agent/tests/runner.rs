@@ -157,7 +157,7 @@ async fn read_only_agent_can_run_in_background() {
     .unwrap();
     let completed = tool.runner.subagents().drain_completed_for_agent();
     assert_eq!(completed.len(), 1);
-    assert_eq!(completed[0].snapshot.id, subtask_id);
+    assert_eq!(completed[0].snapshot.id.as_ref(), subtask_id);
     assert_eq!(completed[0].usage_turns[0].lane_id, subtask_id);
     assert_eq!(
         completed[0].usage_turns[0].parent_tool_call_id.as_deref(),

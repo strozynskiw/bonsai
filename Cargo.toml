@@ -105,3 +105,4 @@ wiremock = "0.6.5"
 tokio = { version = "1", features = ["test-util"] }
 # In-process fake MCP server for src/mcp/tests.rs (M5.2).
 rmcp = { version = "2.1.0", default-features = false, features = ["server", "transport-io"] }
+temp-env = { version = "0.3.6", features = ["async_closure"] }

@@ -1,3 +1,5 @@
+//! Git-backed workspace recovery points and isolation commands.
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Output;
