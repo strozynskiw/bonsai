@@ -197,7 +197,7 @@ impl Agent {
     pub(super) async fn refresh_background_context(&mut self, sink: &SharedSink) -> bool {
         let drained = self.drain_background_completions(sink).await;
         let drained_terminals = self.drain_terminal_updates(sink).await;
-        let drained_subagents = self.drain_subagent_completions(sink).await;
+        let drained_subagents = self.drain_subagent_completions().await;
         let synced = self.sync_running_background_status().await;
         let synced_terminals = self.sync_running_terminal_status().await;
         let synced_subagents = self.sync_running_subagent_status().await;
@@ -315,7 +315,7 @@ impl Agent {
         true
     }
 
-    pub(super) async fn drain_subagent_completions(&mut self, sink: &SharedSink) -> bool {
+    pub(super) async fn drain_subagent_completions(&mut self) -> bool {
         let Some(subagents) = self
             .subagent_runner
             .as_ref()
@@ -338,7 +338,6 @@ impl Agent {
 
         self.refresh_stale_read_advisory();
 
-        sink.status(&crate::subagent::subagent_completion_status(&completed));
         self.push_untrusted_runtime_note(
             MessageProvenance::Background,
             "background subagent completion",

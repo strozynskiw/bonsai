@@ -399,12 +399,20 @@ async fn completed_subagent_result_uses_one_escaped_untrusted_frame() {
     .build()
     .unwrap();
 
+    let sink = Arc::new(CaptureSink::default());
     let result = agent
-        .run("hello", CancellationToken::new(), Arc::new(StdoutSink))
+        .run("hello", CancellationToken::new(), sink.clone())
         .await
         .unwrap();
 
     assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+    assert!(
+        sink.statuses()
+            .iter()
+            .all(|status| !status.starts_with("[subagents]")),
+        "statuses: {:?}",
+        sink.statuses()
+    );
     let requests = requests.lock().await;
     let completion = user_messages_in(&requests[0])
         .into_iter()

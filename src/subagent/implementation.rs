@@ -914,34 +914,6 @@ fn ready_launch_groups(inner: &SubagentInner) -> HashSet<String> {
         .collect()
 }
 
-pub(crate) fn subagent_completion_status(completions: &[SubagentCompletion]) -> String {
-    match completions {
-        [] => "[subagents] no completed background subagents".to_string(),
-        [completion] => format!(
-            "[subagents] {} {}",
-            completion.snapshot.id,
-            completion.snapshot.status.label()
-        ),
-        completions => {
-            let summary = completions
-                .iter()
-                .map(|completion| {
-                    format!(
-                        "{} {}",
-                        completion.snapshot.id,
-                        completion.snapshot.status.label()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "[subagents] {} background subagents finished: {summary}",
-                completions.len()
-            )
-        }
-    }
-}
-
 pub(crate) fn format_subagent_list(subagents: &[SubagentSnapshot]) -> String {
     if subagents.is_empty() {
         return "No background subagents".to_string();
