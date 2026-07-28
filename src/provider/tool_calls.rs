@@ -35,7 +35,13 @@ pub(crate) struct ChatToolCallAccumulator {
     // Keyed by the delta `index` and ordered by it: `into_tool_calls` must yield
     // parallel tool calls in their wire order deterministically (a `HashMap`
     // would iterate in arbitrary order).
-    calls: BTreeMap<usize, (String, String, String)>,
+    calls: BTreeMap<usize, (String, String, String, Option<Value>)>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ChatToolCall {
+    pub(crate) call: ToolCall,
+    pub(crate) extra_content: Option<Value>,
 }
 
 impl ChatToolCallAccumulator {
@@ -44,7 +50,7 @@ impl ChatToolCallAccumulator {
         let entry = self
             .calls
             .entry(index)
-            .or_insert_with(|| (String::new(), String::new(), String::new()));
+            .or_insert_with(|| (String::new(), String::new(), String::new(), None));
 
         if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
             entry.0 = id.to_string();
@@ -57,9 +63,23 @@ impl ChatToolCallAccumulator {
                 entry.2.push_str(arguments);
             }
         }
+        if let Some(extra_content) = tool_call
+            .get("extra_content")
+            .filter(|value| !value.is_null())
+        {
+            entry.3 = Some(extra_content.clone());
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn into_tool_calls(self) -> Vec<ToolCall> {
+        self.into_tool_calls_with_extra_content()
+            .into_iter()
+            .map(|tool_call| tool_call.call)
+            .collect()
+    }
+
+    pub(crate) fn into_tool_calls_with_extra_content(self) -> Vec<ChatToolCall> {
         // Kimi K2 mints deterministic `name:index` ids and can hand two
         // parallel calls in one message the same id (observed live:
         // `project_info:1` twice). Duplicates break the same downstream id
@@ -69,7 +89,7 @@ impl ChatToolCallAccumulator {
         let mut seen = std::collections::HashSet::new();
         self.calls
             .into_iter()
-            .map(|(_, (id, name, arguments))| {
+            .map(|(_, (id, name, arguments, extra_content))| {
                 let mut id = ensure_call_id(id);
                 if !seen.insert(id.clone()) {
                     let mut suffix = 2usize;
@@ -81,10 +101,13 @@ impl ChatToolCallAccumulator {
                         suffix += 1;
                     };
                 }
-                ToolCall {
-                    id,
-                    name,
-                    arguments,
+                ChatToolCall {
+                    call: ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    },
+                    extra_content,
                 }
             })
             .collect()
@@ -149,6 +172,29 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "read");
         assert_eq!(calls[0].arguments, "{\"path\":\"Cargo.toml\"}");
+    }
+
+    #[test]
+    fn chat_tool_call_accumulator_preserves_provider_extra_content() {
+        let mut accumulator = ChatToolCallAccumulator::default();
+        accumulator.push_delta(&serde_json::json!({
+            "index": 0,
+            "id": "call_1",
+            "function": {"name": "read", "arguments": "{}"},
+            "extra_content": {
+                "google": {"thought_signature": "encrypted-signature"}
+            }
+        }));
+
+        let calls = accumulator.into_tool_calls_with_extra_content();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.id, "call_1");
+        assert_eq!(
+            calls[0].extra_content,
+            Some(serde_json::json!({
+                "google": {"thought_signature": "encrypted-signature"}
+            }))
+        );
     }
 
     #[test]

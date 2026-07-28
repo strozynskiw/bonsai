@@ -83,8 +83,9 @@ impl ProviderPreset {
                 Some(Self::AnthropicCompatible)
             }
             (DiscoveryKind::Generic, TransportProtocol::CodexResponses) => None,
-            // The local wizard never creates `Static` (curated-catalog) connections.
-            (DiscoveryKind::Static, _) => None,
+            // The local wizard never creates provider-specific or curated
+            // discovery connections.
+            (DiscoveryKind::Gemini | DiscoveryKind::Static, _) => None,
         }
     }
 

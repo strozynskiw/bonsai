@@ -49,8 +49,8 @@ pub(crate) use crate::mention::{
 use crate::output::{OutputSink, SharedSink, ToolCallStart};
 use crate::provider::{
     DEFAULT_CONTEXT_WINDOW_TOKENS, EstimateConfidence, InputCacheUsage, ModelPricing,
-    PromptEstimate, PromptEstimator, PromptEstimatorCacheKey, Provider, ProviderFailure,
-    ReasoningSelection, StreamedResponse, TokenCounterKind, TokenUsage, ToolCall,
+    ModelPricingSchedule, PromptEstimate, PromptEstimator, PromptEstimatorCacheKey, Provider,
+    ProviderFailure, ReasoningSelection, StreamedResponse, TokenCounterKind, TokenUsage, ToolCall,
 };
 use crate::resource::agent::AgentRegistry;
 use crate::resource::skill::{SharedSkillRegistry, SkillRegistry};
@@ -627,7 +627,6 @@ impl Agent {
         provider_attempts: Vec<ProviderAttemptReport>,
         effective_reasoning: ReasoningSelection,
     ) {
-        let pricing = self.prompt_estimator.pricing();
         let prompt_estimate = self.caches.last_sent_prompt_estimate.clone();
         let (cacheable_prefix_tokens, volatile_tail_tokens) = self
             .caches
@@ -727,7 +726,11 @@ impl Agent {
             ttft_ms,
             prefix_hash,
         };
-        self.usage.record(usage, pricing, diagnostics);
+        self.usage.record_with_pricing_schedule(
+            usage,
+            self.prompt_estimator.pricing(),
+            diagnostics,
+        );
     }
 
     fn new_cache_warning(&mut self) -> Option<String> {

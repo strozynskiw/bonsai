@@ -8,7 +8,8 @@ Mirrors bonsai's own lookup rules:
     (models_dev.rs::insert_with_direct_provider_precedence)
   - a target's metadata key = `metadata_model` if set, else `model`
     (mod.rs resolve())
-  - `pinned = true` marks a deliberate divergence (spec.rs::TargetSpec)
+  - `pinned = true` and `pinned_fields` mark deliberate divergences
+    (spec.rs::TargetSpec)
 
 The builtin file list and each connection's models.dev block are DISCOVERED
 from the catalog, not hardcoded — every `models/builtin/<id>.toml` is audited,
@@ -174,27 +175,49 @@ def audit_target(t: dict, m: dict | None, key: str) -> list[str]:
             f"NOT IN models.dev under `{key}` — wrong/missing metadata_model, "
             "or a provider-invented model (then pin it)"
         ]
+    pinned_fields = set(t.get("pinned_fields") or [])
     issues = []
+    if pinned_fields:
+        issues.append(f"PINNED fields {','.join(sorted(pinned_fields))}")
     lim = m.get("limit") or {}
     cost = m.get("cost") or {}
     pr = t.get("pricing") or {}
     pairs = [
-        ("context_window", t.get("context_window"), lim.get("context")),
-        ("output_limit", t.get("output_limit"), lim.get("output")),
-        ("price.input", pr.get("input_micros_per_million"), micros(cost.get("input"))),
-        ("price.output", pr.get("output_micros_per_million"), micros(cost.get("output"))),
+        (
+            "context_window",
+            "context-window",
+            t.get("context_window"),
+            lim.get("context"),
+        ),
+        ("output_limit", "output-limit", t.get("output_limit"), lim.get("output")),
+        (
+            "price.input",
+            "pricing",
+            pr.get("input_micros_per_million"),
+            micros(cost.get("input")),
+        ),
+        (
+            "price.output",
+            "pricing",
+            pr.get("output_micros_per_million"),
+            micros(cost.get("output")),
+        ),
         (
             "price.cache_read",
+            "pricing",
             pr.get("cache_read_micros_per_million"),
             micros(cost.get("cache_read")),
         ),
         (
             "price.cache_write",
+            "pricing",
             pr.get("cache_write_micros_per_million"),
             micros(cost.get("cache_write")),
         ),
     ]
-    for field, tv, mv in pairs:
+    for field, pin, tv, mv in pairs:
+        if pin in pinned_fields:
+            continue
         if tv is not None and mv is not None and tv != mv:
             issues.append(f"{field}: toml={tv} models.dev={mv}")
         # bonsai's Rust drift check compares whole pricing structs, so a rate
@@ -202,15 +225,56 @@ def audit_target(t: dict, m: dict | None, key: str) -> list[str]:
         # still warns at startup. Only applies when the TOML has ANY pricing.
         elif field.startswith("price.") and pr and tv is None and mv is not None:
             issues.append(f"{field}: missing in toml, models.dev has {mv}")
-    if t.get("context_window") is None and lim.get("context") is None:
+    if (
+        "context-window" not in pinned_fields
+        and t.get("context_window") is None
+        and lim.get("context") is None
+    ):
         issues.append("context_window: MISSING EVERYWHERE (falls back to 120k)")
+
+    if "pricing" not in pinned_fields and t.get("pricing_tiers"):
+        toml_tiers = {
+            tier["above_input_tokens"]: tier.get("pricing") or {}
+            for tier in t["pricing_tiers"]
+        }
+        models_dev_tiers = {
+            selector["size"]: tier
+            for tier in cost.get("tiers") or []
+            if isinstance(tier, dict)
+            and isinstance((selector := tier.get("tier")), dict)
+            and selector.get("type") == "context"
+            and selector.get("size")
+        }
+        if set(toml_tiers) != set(models_dev_tiers):
+            issues.append(
+                "pricing tier thresholds: "
+                f"toml={sorted(toml_tiers)} models.dev={sorted(models_dev_tiers)}"
+            )
+        for threshold in sorted(set(toml_tiers) & set(models_dev_tiers)):
+            toml_rates = toml_tiers[threshold]
+            models_dev_rates = models_dev_tiers[threshold]
+            for field, toml_key, models_dev_key in [
+                ("input", "input_micros_per_million", "input"),
+                ("output", "output_micros_per_million", "output"),
+                ("cache_read", "cache_read_micros_per_million", "cache_read"),
+                ("cache_write", "cache_write_micros_per_million", "cache_write"),
+            ]:
+                tv = toml_rates.get(toml_key)
+                mv = micros(models_dev_rates.get(models_dev_key))
+                if tv != mv and (tv is not None or mv is not None):
+                    issues.append(
+                        f"price tier >{threshold}.{field}: "
+                        f"toml={tv} models.dev={mv}"
+                    )
 
     raw_opts = t.get("reasoning_options")
     md_reasoning = bool(m.get("reasoning"))
     # `reasoning_options = []` is the deliberate "no thinking UI" marker
     # (free tiers, highspeed variants, non-thinking lanes); models.dev
     # disagreeing is expected there, so it's a note, never a counted problem.
-    if raw_opts == [] and md_reasoning:
+    if "reasoning" in pinned_fields:
+        pass
+    elif raw_opts == [] and md_reasoning:
         issues.append("note: toml disables reasoning (explicit []); models.dev says true")
     elif isinstance(raw_opts, list) and raw_opts and not md_reasoning:
         issues.append("reasoning: toml declares options, models.dev says false — verify")

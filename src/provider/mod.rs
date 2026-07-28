@@ -41,7 +41,8 @@ pub(crate) use request_preview::{
 };
 pub(crate) use token::PromptEstimatorCacheKey;
 pub use token::{
-    EstimateConfidence, ModelPricing, PromptEstimate, PromptEstimator, TokenCounterKind,
+    EstimateConfidence, ModelPricing, ModelPricingSchedule, ModelPricingTier, PromptEstimate,
+    PromptEstimator, TokenCounterKind,
 };
 
 use std::error::Error as StdError;
@@ -200,6 +201,8 @@ pub enum ProviderFailure {
         provider_type: Option<String>,
         provider_code: Option<String>,
         retry_after_secs: Option<u64>,
+        #[source]
+        source: Option<ProviderFailureSource>,
     },
     #[error("provider transport error: {message}")]
     Transport {
@@ -308,6 +311,7 @@ impl ProviderFailure {
             error_type.map(str::to_owned),
             error_code.map(str::to_owned),
             None,
+            None,
         )
     }
 
@@ -362,6 +366,7 @@ impl ProviderFailure {
             None,
             None,
             retry_after_secs,
+            None,
         )
     }
 
@@ -372,6 +377,7 @@ impl ProviderFailure {
         provider_type: Option<String>,
         provider_code: Option<String>,
         retry_after_secs: Option<u64>,
+        source: Option<ProviderFailureSource>,
     ) -> Self {
         Self::Http {
             status,
@@ -380,6 +386,7 @@ impl ProviderFailure {
             provider_type,
             provider_code,
             retry_after_secs,
+            source,
         }
     }
 
@@ -555,6 +562,7 @@ mod provider_failure_tests {
             ProviderErrorCode::Quota,
             None,
             Some("insufficient_quota".to_string()),
+            None,
             None,
         );
         assert_eq!(quota.limit_kind(), Some(ProviderLimitKind::Quota));

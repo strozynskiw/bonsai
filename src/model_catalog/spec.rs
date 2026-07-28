@@ -3,8 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model_role::LegacyModelRole;
 use crate::provider::{
-    ModelPricing, ReasoningCodec, ReasoningEffort, ReasoningOption, ReasoningSelection,
-    TokenCounterKind,
+    ModelPricing, ModelPricingTier, ReasoningCodec, ReasoningEffort, ReasoningOption,
+    ReasoningSelection, TokenCounterKind,
 };
 
 use super::*;
@@ -25,6 +25,7 @@ const fn default_enabled() -> bool {
 pub(crate) enum DiscoveryKind {
     #[default]
     Generic,
+    Gemini,
     LmStudio,
     Ollama,
     Static,
@@ -380,6 +381,8 @@ pub(crate) struct TargetSpec {
     #[serde(default)]
     pub pricing: Option<ModelPricing>,
     #[serde(default)]
+    pub pricing_tiers: Vec<ModelPricingTier>,
+    #[serde(default)]
     pub roles: Vec<LegacyModelRole>,
     /// Marks a deliberate divergence from refreshed metadata (working-window
     /// caps, price-tier pins, beta-gated limits). Pinned values remain
@@ -451,6 +454,8 @@ struct RawTargetSpecPatch {
     #[serde(default)]
     pricing: Option<ModelPricing>,
     #[serde(default)]
+    pricing_tiers: Option<Vec<ModelPricingTier>>,
+    #[serde(default)]
     roles: Option<Vec<LegacyModelRole>>,
     #[serde(default)]
     pinned: Option<bool>,
@@ -482,6 +487,7 @@ pub(crate) struct TargetSpecPatch {
     pub reasoning_options: Option<Vec<ReasoningOption>>,
     pub features: Option<Vec<ModelFeature>>,
     pub pricing: Option<ModelPricing>,
+    pub pricing_tiers: Option<Vec<ModelPricingTier>>,
     pub roles: Option<Vec<LegacyModelRole>>,
     pub pinned: Option<bool>,
     pub pinned_fields: Option<Vec<ModelMetadataField>>,
@@ -518,6 +524,7 @@ impl<'de> Deserialize<'de> for TargetSpecPatch {
             reasoning_options: raw.reasoning_options,
             features: raw.features,
             pricing: raw.pricing,
+            pricing_tiers: raw.pricing_tiers,
             roles: raw.roles,
             pinned: raw.pinned,
             pinned_fields: raw.pinned_fields,
@@ -550,6 +557,7 @@ impl TargetSpecPatch {
             reasoning_options: self.reasoning_options,
             features: self.features.unwrap_or_default(),
             pricing: self.pricing,
+            pricing_tiers: self.pricing_tiers.unwrap_or_default(),
             roles: self.roles.unwrap_or_default(),
             pinned: self.pinned.unwrap_or(false),
             pinned_fields: self.pinned_fields.unwrap_or_default(),
@@ -622,6 +630,9 @@ impl TargetSpec {
         }
         if let Some(pricing) = patch.pricing {
             self.pricing = Some(pricing);
+        }
+        if let Some(pricing_tiers) = patch.pricing_tiers {
+            self.pricing_tiers = pricing_tiers;
         }
         if let Some(roles) = patch.roles {
             self.roles = roles;

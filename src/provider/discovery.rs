@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::model_catalog::{AvailableModel, DiscoveryKind, LiveModelAvailability, ModelFeature};
 use crate::provider::anthropic::ANTHROPIC_API_VERSION;
-use crate::provider::openai_catalog::available_models_from_response;
+use crate::provider::openai_catalog::{available_models_from_response, is_coding_model_id};
 use crate::provider::{Protocol, ProviderMetadata, sse};
 
 /// Per-request timeout for native discovery probes. Local servers answer in
@@ -81,6 +81,7 @@ pub(crate) async fn fetch_models_with_discovery(
         // before reaching here; this arm only guards the wizard/local path,
         // which never selects it. No network list to fetch.
         DiscoveryKind::Static => return Ok(LiveModelAvailability::default()),
+        DiscoveryKind::Gemini => fetch_gemini_models(base_url, api_key).await,
         DiscoveryKind::LmStudio => fetch_lm_studio_models(base_url, api_key).await,
         DiscoveryKind::Ollama => fetch_ollama_models(base_url).await,
     };
@@ -164,6 +165,116 @@ async fn fetch_generic_models(
         models,
         ..LiveModelAvailability::default()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Google Gemini native model probe
+// ---------------------------------------------------------------------------
+
+/// Fetch Gemini's native paginated model catalog. The OpenAI-compatible
+/// `/models` shim reports only ids; the native endpoint also supplies input
+/// and output limits and the supported generation methods.
+async fn fetch_gemini_models(base_url: &str, api_key: &str) -> Result<LiveModelAvailability> {
+    let endpoint = gemini_models_endpoint(base_url);
+    let mut models = Vec::new();
+    let mut page_token: Option<String> = None;
+
+    loop {
+        let mut url = reqwest::Url::parse(&endpoint)
+            .with_context(|| format!("Invalid Gemini models endpoint {endpoint}"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("pageSize", "1000");
+            if let Some(token) = page_token.as_deref() {
+                query.append_pair("pageToken", token);
+            }
+        }
+
+        let mut builder = crate::provider::http_client()
+            .get(url)
+            .timeout(PROBE_TIMEOUT)
+            .header("Accept", "application/json");
+        let api_key = api_key.trim();
+        if !api_key.is_empty() {
+            builder = builder.header("x-goog-api-key", api_key);
+        }
+        let response = builder
+            .send()
+            .await
+            .context("Failed to fetch Gemini native model list")?;
+        if !response.status().is_success() {
+            return Err(sse::error_from_response(response).await.into());
+        }
+        let value: Value = response
+            .json()
+            .await
+            .context("Failed to parse Gemini native model list")?;
+        models.extend(gemini_models_from_response(&value)?);
+        page_token = value
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|token| !token.is_empty());
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    sort_models(&mut models);
+    models.dedup_by(|left, right| left.remote_model_id == right.remote_model_id);
+    Ok(LiveModelAvailability {
+        models,
+        ..LiveModelAvailability::default()
+    })
+}
+
+fn gemini_models_endpoint(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let native_root = base.strip_suffix("/openai").unwrap_or(base);
+    format!("{native_root}/models")
+}
+
+fn gemini_models_from_response(value: &Value) -> Result<Vec<AvailableModel>> {
+    let Some(items) = value.get("models").and_then(Value::as_array) else {
+        anyhow::bail!("Gemini native model list response has no `models` array");
+    };
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let supports_generate_content = item
+                .get("supportedGenerationMethods")
+                .and_then(Value::as_array)
+                .is_some_and(|methods| {
+                    methods
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|method| method == "generateContent")
+                });
+            if !supports_generate_content {
+                return None;
+            }
+            let name = item.get("name").and_then(Value::as_str)?;
+            let id = name.strip_prefix("models/").unwrap_or(name);
+            if !is_coding_model_id(id) {
+                return None;
+            }
+            let context_window = item
+                .get("inputTokenLimit")
+                .and_then(positive_u32_from_value);
+            let output_limit = item
+                .get("outputTokenLimit")
+                .and_then(positive_u32_from_value);
+            let display_name = item
+                .get("displayName")
+                .and_then(Value::as_str)
+                .filter(|display_name| !display_name.trim().is_empty() && *display_name != id)
+                .map(str::to_string);
+            Some(
+                AvailableModel::with_metadata(id, context_window, display_name, Vec::new())
+                    .with_output_limit(output_limit),
+            )
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +590,134 @@ fn sort_models(models: &mut [AvailableModel]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn gemini_native_response_keeps_only_generate_content_models() {
+        let value = serde_json::json!({
+            "models": [
+                {
+                    "name": "models/gemini-3.6-flash",
+                    "displayName": "Gemini 3.6 Flash",
+                    "inputTokenLimit": 1_048_576,
+                    "outputTokenLimit": 65_536,
+                    "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                    "name": "models/text-embedding-004",
+                    "inputTokenLimit": 2_048,
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                {
+                    "name": "models/veo-3.1",
+                    "supportedGenerationMethods": ["generateContent"]
+                }
+            ]
+        });
+
+        let models = gemini_models_from_response(&value).unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].remote_model_id.as_ref(), "gemini-3.6-flash");
+        assert_eq!(models[0].display_name.as_deref(), Some("Gemini 3.6 Flash"));
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[0].output_limit, Some(65_536));
+    }
+
+    #[tokio::test]
+    async fn gemini_native_discovery_is_authenticated_and_paginated() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .and(header("x-goog-api-key", "gemini-key"))
+            .and(query_param("pageSize", "1000"))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{
+                    "name": "models/gemini-3.6-flash",
+                    "inputTokenLimit": 1_048_576,
+                    "outputTokenLimit": 65_536,
+                    "supportedGenerationMethods": ["generateContent"]
+                }],
+                "nextPageToken": "next-page"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .and(header("x-goog-api-key", "gemini-key"))
+            .and(query_param("pageSize", "1000"))
+            .and(query_param("pageToken", "next-page"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{
+                    "name": "models/gemini-3.5-flash-lite",
+                    "inputTokenLimit": 1_048_576,
+                    "outputTokenLimit": 65_536,
+                    "supportedGenerationMethods": ["generateContent"]
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::Gemini,
+            Protocol::OpenAiChat,
+            "Google Gemini",
+            &format!("{}/v1beta/openai", server.uri()),
+            "gemini-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let ids = availability
+            .models
+            .iter()
+            .map(|model| model.remote_model_id.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["gemini-3.5-flash-lite", "gemini-3.6-flash"]);
+    }
+
+    #[tokio::test]
+    async fn gemini_discovery_falls_back_to_compatible_models_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/openai/models"))
+            .and(header("authorization", "Bearer gemini-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{"id": "gemini-3.6-flash", "object": "model"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::Gemini,
+            Protocol::OpenAiChat,
+            "Google Gemini",
+            &format!("{}/v1beta/openai", server.uri()),
+            "gemini-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(availability.models.len(), 1);
+        assert_eq!(
+            availability.models[0].remote_model_id.as_ref(),
+            "gemini-3.6-flash"
+        );
+    }
 
     #[test]
     fn lm_studio_v1_response_parses_metadata_and_filters_embeddings() {

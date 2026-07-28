@@ -392,12 +392,16 @@ default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key_env = "GEMINI_API_KEY"
 model_env = "GEMINI_MODEL"
 base_url_env = "GEMINI_BASE_URL"
-default_model = "gemini/gemini-3.1-pro-preview"
+default_model = "gemini/gemini-3.1-pro-preview-customtools"
 default_endpoint_path = "chat/completions"
 default_token_counter = "heuristic"
 # Gemini takes OpenAI's top-level `reasoning_effort` on this endpoint (see
 # gemini.toml); it does NOT use the `reasoning: {effort}` envelope.
 reasoning_codec = "openai-chat-completions"
+# The native API is paginated and includes input/output limits and generation
+# method support; `/refresh` falls back to the compat `/models` endpoint if it
+# is unavailable.
+discovery = "gemini"
 # Gemini caches implicitly and automatically — there is NO client-sent routing
 # key. Its OpenAI-compat layer also strictly rejects unknown request fields, so
 # emitting `prompt_cache_key` (what `prompt_cache = true` sends on openai-chat)

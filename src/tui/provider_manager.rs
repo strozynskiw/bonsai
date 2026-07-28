@@ -63,6 +63,7 @@ impl ProviderManagerRow {
         match self.discovery {
             DiscoveryKind::LmStudio => parts.push("LM Studio".to_string()),
             DiscoveryKind::Ollama => parts.push("Ollama".to_string()),
+            DiscoveryKind::Gemini => parts.push("Gemini API".to_string()),
             DiscoveryKind::Static => parts.push("curated models".to_string()),
             DiscoveryKind::Generic => {}
         }
