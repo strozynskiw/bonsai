@@ -470,6 +470,104 @@ mod tests {
     }
 
     #[test]
+    fn builtin_catalog_exposes_deepseek_connection_contract() {
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin()
+            .expect("builtin catalog should load");
+        let registry = ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("deepseek").expect("DeepSeek API provider");
+        let metadata = factory.metadata();
+
+        assert_eq!(metadata.id.as_ref(), "deepseek");
+        assert_eq!(metadata.display_name.as_ref(), "DeepSeek API");
+        assert_eq!(metadata.auth_requirement, AuthRequirement::ApiKeyRequired);
+        assert_eq!(metadata.protocol, Protocol::OpenAiChat);
+        assert_eq!(
+            metadata.default_base_url.as_ref(),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
+            metadata.default_model.as_ref(),
+            "deepseek/deepseek-v4-flash"
+        );
+        assert_eq!(metadata.endpoint_path.as_ref(), "chat/completions");
+        assert_eq!(
+            metadata.env_var_api_key.as_deref(),
+            Some("DEEPSEEK_API_KEY")
+        );
+        assert_eq!(metadata.env_var_model.as_deref(), Some("DEEPSEEK_MODEL"));
+        assert_eq!(
+            metadata.env_var_base_url.as_deref(),
+            Some("DEEPSEEK_BASE_URL")
+        );
+        assert_eq!(
+            metadata.seed_model_list(),
+            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+        );
+        assert!(metadata.capabilities.supports_prompt_cache);
+        assert!(metadata.capabilities.echoes_reasoning_content);
+        assert!(!metadata.capabilities.supports_vision);
+    }
+
+    #[tokio::test]
+    async fn deepseek_refresh_uses_authenticated_models_listing() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer sk-deepseek-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "deepseek-v4-flash",
+                        "object": "model",
+                        "owned_by": "deepseek"
+                    },
+                    {
+                        "id": "deepseek-v4-pro",
+                        "object": "model",
+                        "owned_by": "deepseek"
+                    },
+                    {
+                        "id": "deepseek-v4-turbo",
+                        "object": "model",
+                        "owned_by": "deepseek"
+                    },
+                    {
+                        "id": "deepseek-embedding-v1",
+                        "object": "model",
+                        "owned_by": "deepseek"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin()
+            .expect("builtin catalog should load");
+        let registry = ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("deepseek").expect("DeepSeek API provider");
+        let session = ProviderSession::new(
+            "sk-deepseek-test".to_string(),
+            server.uri(),
+            "deepseek-v4-flash".to_string(),
+        );
+
+        let availability = factory.list_available_models(&session).await.unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string(),
+                "deepseek-v4-turbo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn builtin_catalog_exposes_separate_vendor_api_and_plan_factories() {
         let catalog = crate::model_catalog::ModelCatalog::load_builtin()
             .expect("builtin catalog should load");

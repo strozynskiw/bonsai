@@ -3688,6 +3688,151 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
+    fn deepseek_builtin_refreshes_metadata_without_losing_safety_caps() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let deepseek_id = connection_id("deepseek");
+        let connection = catalog.connection(&deepseek_id).unwrap();
+        assert_eq!(
+            connection.default_model.as_ref().map(ModelId::as_str),
+            Some("deepseek/deepseek-v4-flash")
+        );
+        assert_eq!(
+            catalog.available_models_for_connection(&deepseek_id, Vec::new()),
+            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+        );
+
+        for (model, input, output, cache_read) in [
+            ("deepseek/deepseek-v4-flash", 140_000, 280_000, 2_800),
+            ("deepseek/deepseek-v4-pro", 435_000, 870_000, 3_625),
+        ] {
+            let resolved = catalog
+                .resolve(&deepseek_id, &model_id(model))
+                .unwrap_or_else(|_| panic!("{model} must resolve"));
+            assert_eq!(resolved.context_window, Some(1_000_000), "{model}");
+            assert_eq!(resolved.output_limit, Some(32_000), "{model}");
+            assert_eq!(
+                resolved.reasoning_codec,
+                ReasoningCodec::ZaiThinking,
+                "{model}"
+            );
+            assert_eq!(
+                resolved.pricing,
+                Some(ModelPricing {
+                    input_micros_per_million: input,
+                    output_micros_per_million: output,
+                    cache_read_micros_per_million: Some(cache_read),
+                    cache_write_micros_per_million: None,
+                }),
+                "{model}"
+            );
+            assert_eq!(
+                resolved.reasoning_selections(),
+                vec![
+                    ReasoningSelection::Default,
+                    ReasoningSelection::Off,
+                    ReasoningSelection::High,
+                    ReasoningSelection::Max,
+                ],
+                "{model}"
+            );
+            for feature in [
+                ModelFeature::ToolCall,
+                ModelFeature::Reasoning,
+                ModelFeature::StructuredOutput,
+            ] {
+                assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
+            }
+            assert_eq!(
+                resolved.prompt_cache_policy,
+                PromptCachePolicy::RollingHistory
+            );
+        }
+
+        catalog
+            .write_live_availability(
+                &deepseek_id,
+                LiveModelAvailability::from_remote_ids([
+                    "deepseek-v4-flash".to_string(),
+                    "deepseek-v4-turbo".to_string(),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog.available_models_for_connection(&deepseek_id, Vec::new()),
+            vec!["deepseek-v4-flash", "deepseek-v4-turbo"],
+            "live refresh must add unseen models and retire absent ones"
+        );
+
+        catalog.replace_models_dev_metadata(
+            parse_models_dev_catalog(
+                "deepseek-refresh.json",
+                r#"{
+                    "deepseek": {
+                        "models": {
+                            "deepseek-v4-flash": {
+                                "id": "deepseek-v4-flash",
+                                "name": "DeepSeek V4 Flash refreshed",
+                                "reasoning": true,
+                                "reasoning_options": [
+                                    { "type": "effort", "values": ["minimal", "xhigh"] }
+                                ],
+                                "tool_call": true,
+                                "structured_output": true,
+                                "attachment": true,
+                                "cost": {
+                                    "input": 0.15,
+                                    "output": 0.30,
+                                    "cache_read": 0.003
+                                },
+                                "limit": { "context": 1100000, "output": 384000 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let refreshed = catalog
+            .resolve(&deepseek_id, &model_id("deepseek/deepseek-v4-flash"))
+            .unwrap();
+
+        assert_eq!(refreshed.context_window, Some(1_100_000));
+        assert_eq!(
+            refreshed.output_limit,
+            Some(32_000),
+            "the deliberate rumination cap is pinned"
+        );
+        assert_eq!(
+            refreshed.pricing,
+            Some(ModelPricing {
+                input_micros_per_million: 150_000,
+                output_micros_per_million: 300_000,
+                cache_read_micros_per_million: Some(3_000),
+                cache_write_micros_per_million: None,
+            }),
+            "unlike the safety cap, prices must update through /refresh"
+        );
+        assert!(
+            refreshed.features.contains(&ModelFeature::Attachment),
+            "capabilities remain refreshable"
+        );
+        assert_eq!(
+            refreshed.reasoning_selections(),
+            vec![
+                ReasoningSelection::Default,
+                ReasoningSelection::Off,
+                ReasoningSelection::High,
+                ReasoningSelection::Max,
+            ],
+            "provider aliases must not invent extra effective effort levels"
+        );
+        assert_eq!(
+            refreshed.metadata_sources.pricing,
+            Some(ModelMetadataSource::ModelsDev)
+        );
+    }
+
+    #[test]
     fn codex_builtin_matches_current_live_working_lineup() {
         let catalog = ModelCatalog::load_builtin().unwrap();
         let codex_id = connection_id("codex");

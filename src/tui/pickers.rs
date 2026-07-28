@@ -529,7 +529,7 @@ mod tests {
         // struct): the picker must surface reasoning from the catalog target,
         // not the flat registry metadata, whose capabilities are minted with
         // NO_REASONING (`build_provider_metadata`). DeepSeek is the canary: a
-        // thinking toggle plus low/medium/high/max efforts.
+        // thinking toggle plus its two distinct high/max efforts.
         let catalog = ModelCatalog::load_builtin().unwrap();
         let registry = crate::provider::ProviderRegistry::from_catalog(&catalog);
         let factory = registry.get("deepseek").unwrap();
@@ -554,8 +554,6 @@ mod tests {
 
         for expected in [
             ReasoningSelection::Off,
-            ReasoningSelection::Low,
-            ReasoningSelection::Medium,
             ReasoningSelection::High,
             ReasoningSelection::Max,
         ] {
@@ -565,6 +563,16 @@ mod tests {
                 option.supported_reasoning
             );
         }
+        assert!(
+            !option
+                .supported_reasoning
+                .contains(&ReasoningSelection::Low)
+        );
+        assert!(
+            !option
+                .supported_reasoning
+                .contains(&ReasoningSelection::Medium)
+        );
         // The saved effort must survive normalization instead of being clamped
         // to Default by the metadata-only path.
         assert_eq!(option.reasoning, ReasoningSelection::High);

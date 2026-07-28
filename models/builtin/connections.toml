@@ -302,6 +302,9 @@ transport = "openai-chat"
 default_base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 model_env = "DEEPSEEK_MODEL"
+# The official English and Chinese API docs advertise this same endpoint.
+# Keep regional/private deployments configurable without duplicating the
+# provider: DEEPSEEK_BASE_URL overrides it for authorization and refresh.
 base_url_env = "DEEPSEEK_BASE_URL"
 default_model = "deepseek/deepseek-v4-flash"
 default_endpoint_path = "chat/completions"
