@@ -1,0 +1,114 @@
+# Local patch of model2vec-rs 0.2.1: its upstream `fancy-regex` feature also
+# activates tokenizers/progressbar, pulling unmaintained number_prefix. Remove
+# this patch once https://github.com/MinishLab/model2vec-rs separates the features.
+
+[package]
+edition = "2021"
+name = "model2vec-rs"
+version = "0.2.1"
+authors = [
+    "Thomas van Dongen <thomas123@live.nl>",
+    "Stéphan Tulkens <stephantul@gmail.com>",
+]
+build = false
+exclude = [
+    "tests/*",
+    "assets/*",
+    "local/*",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Official Rust Implementation of Model2Vec"
+homepage = "https://github.com/MinishLab/model2vec-rs"
+readme = "README.md"
+keywords = [
+    "embeddings",
+    "model2vec",
+    "nlp",
+    "rust",
+]
+categories = [
+    "science",
+    "text-processing",
+]
+license-file = "LICENSE"
+repository = "https://github.com/MinishLab/model2vec-rs"
+
+[features]
+default = [
+    "onig",
+    "hf-hub",
+]
+fancy-regex = [
+    "tokenizers/fancy-regex",
+    "tokenizers/esaxx_fast",
+]
+hf-hub = [
+    "dep:hf-hub",
+    "dep:ureq",
+]
+local-only = []
+onig = [
+    "tokenizers/onig",
+    "tokenizers/esaxx_fast",
+]
+wasm = [
+    "local-only",
+    "tokenizers/unstable_wasm",
+]
+
+[lib]
+name = "model2vec_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "model2vec-rs"
+path = "src/main.rs"
+
+[dependencies.anyhow]
+version = "1.0"
+
+[dependencies.clap]
+version = "4.0"
+features = ["derive"]
+
+[dependencies.half]
+version = "2.0"
+
+[dependencies.hf-hub]
+version = "0.4"
+features = ["ureq"]
+optional = true
+default-features = false
+
+[dependencies.ndarray]
+version = "0.15"
+
+[dependencies.safetensors]
+version = "0.5"
+
+[dependencies.serde]
+version = "1.0"
+
+[dependencies.serde_json]
+version = "1.0"
+
+[dependencies.tokenizers]
+version = "0.21"
+default-features = false
+
+[dependencies.ureq]
+version = "2"
+optional = true
+
+[dev-dependencies.approx]
+version = "0.5"
+
+[dev-dependencies.serde_json]
+version = "1.0"
+
+[dev-dependencies.tempfile]
+version = "3"

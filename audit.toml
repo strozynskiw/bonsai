@@ -1,0 +1,5 @@
+[advisories]
+# Hugging Face Tokenizers retains the stable, dependency-free `paste` macro after
+# deliberately reverting its pastey migration: https://github.com/huggingface/tokenizers/issues/1833.
+# Remove this exception when upstream releases a maintained replacement.
+ignore = ["RUSTSEC-2024-0436"]
