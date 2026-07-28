@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of rendered diff lines kept for preview.
@@ -313,10 +315,72 @@ fn compute_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk> {
     if old_lines == new_lines {
         return Vec::new();
     }
-    if lcs_cell_count_exceeds_budget(old_lines.len(), new_lines.len()) {
-        return compute_coarse_hunks(old_lines, new_lines);
+
+    let mut hunks = HunkBuilder::default();
+    let mut remaining_lcs_cells = DIFF_LCS_MAX_CELLS;
+    emit_diff(
+        old_lines,
+        new_lines,
+        0,
+        0,
+        &mut remaining_lcs_cells,
+        &mut hunks,
+    );
+    hunks.finish()
+}
+
+/// Compute diff lines while bounding the LCS matrix allocation.
+///
+/// For inputs too large for one LCS matrix, unique common lines partition the
+/// file into independently diffed gaps. This retains accurate stats for small,
+/// separated edits in a large file instead of reporting its entire middle as a
+/// replacement. A gap with no usable anchors falls back to a coarse diff.
+fn emit_diff(
+    old_lines: &[&str],
+    new_lines: &[&str],
+    old_offset: usize,
+    new_offset: usize,
+    remaining_lcs_cells: &mut usize,
+    hunks: &mut HunkBuilder,
+) {
+    if old_lines == new_lines {
+        for (index, line) in old_lines.iter().enumerate() {
+            hunks.push(DiffLine {
+                kind: DiffLineKind::Context,
+                content: (*line).to_string(),
+                old_line: Some((old_offset + index + 1) as u32),
+                new_line: Some((new_offset + index + 1) as u32),
+            });
+        }
+        return;
     }
 
+    if let Some(cells) = lcs_cell_count(old_lines.len(), new_lines.len())
+        && cells <= *remaining_lcs_cells
+    {
+        *remaining_lcs_cells -= cells;
+        for line in compute_lcs_diff_lines(old_lines, new_lines, old_offset, new_offset) {
+            hunks.push(line);
+        }
+        return;
+    }
+
+    emit_anchored_diff(
+        old_lines,
+        new_lines,
+        old_offset,
+        new_offset,
+        remaining_lcs_cells,
+        hunks,
+    );
+}
+
+fn compute_lcs_diff_lines(
+    old_lines: &[&str],
+    new_lines: &[&str],
+    old_offset: usize,
+    new_offset: usize,
+) -> Vec<DiffLine> {
     let table = lcs_table(old_lines, new_lines);
     let mut old_idx = old_lines.len();
     let mut new_idx = new_lines.len();
@@ -326,8 +390,8 @@ fn compute_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk> {
             pending.push(DiffLine {
                 kind: DiffLineKind::Context,
                 content: old_lines[old_idx - 1].to_string(),
-                old_line: Some(old_idx as u32),
-                new_line: Some(new_idx as u32),
+                old_line: Some((old_offset + old_idx) as u32),
+                new_line: Some((new_offset + new_idx) as u32),
             });
             old_idx -= 1;
             new_idx -= 1;
@@ -338,67 +402,175 @@ fn compute_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk> {
                 kind: DiffLineKind::Added,
                 content: new_lines[new_idx - 1].to_string(),
                 old_line: None,
-                new_line: Some(new_idx as u32),
+                new_line: Some((new_offset + new_idx) as u32),
             });
             new_idx -= 1;
         } else {
             pending.push(DiffLine {
                 kind: DiffLineKind::Removed,
                 content: old_lines[old_idx - 1].to_string(),
-                old_line: Some(old_idx as u32),
+                old_line: Some((old_offset + old_idx) as u32),
                 new_line: None,
             });
             old_idx -= 1;
         }
     }
     pending.reverse();
-    group_into_hunks(pending)
+    pending
 }
 
-fn group_into_hunks(lines: Vec<DiffLine>) -> Vec<DiffHunk> {
-    if lines.is_empty() {
-        return Vec::new();
+fn emit_anchored_diff(
+    old_lines: &[&str],
+    new_lines: &[&str],
+    old_offset: usize,
+    new_offset: usize,
+    remaining_lcs_cells: &mut usize,
+    hunks: &mut HunkBuilder,
+) {
+    let anchors = unique_anchors(old_lines, new_lines);
+    if anchors.is_empty() {
+        emit_coarse_diff(old_lines, new_lines, old_offset, new_offset, hunks);
+        return;
     }
-    let mut hunks: Vec<DiffHunk> = Vec::new();
-    let mut current: Vec<DiffLine> = Vec::new();
-    let mut leading_context: std::collections::VecDeque<DiffLine> =
-        std::collections::VecDeque::with_capacity(DIFF_CONTEXT_LINES + 1);
-    let mut trailing_context: usize = 0;
 
-    for line in lines {
+    let (mut old_cursor, mut new_cursor) = (0, 0);
+    for (old_index, new_index) in anchors {
+        emit_diff(
+            &old_lines[old_cursor..old_index],
+            &new_lines[new_cursor..new_index],
+            old_offset + old_cursor,
+            new_offset + new_cursor,
+            remaining_lcs_cells,
+            hunks,
+        );
+        hunks.push(DiffLine {
+            kind: DiffLineKind::Context,
+            content: old_lines[old_index].to_string(),
+            old_line: Some((old_offset + old_index + 1) as u32),
+            new_line: Some((new_offset + new_index + 1) as u32),
+        });
+        old_cursor = old_index + 1;
+        new_cursor = new_index + 1;
+    }
+    emit_diff(
+        &old_lines[old_cursor..],
+        &new_lines[new_cursor..],
+        old_offset + old_cursor,
+        new_offset + new_cursor,
+        remaining_lcs_cells,
+        hunks,
+    );
+}
+
+/// Return an order-preserving set of lines that occur once in each input.
+///
+/// This is the patience-diff anchor selection: matching unique lines are
+/// candidates, and a longest-increasing subsequence of their new-file indices
+/// ensures the selected anchors preserve both files' order.
+fn unique_anchors(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize)> {
+    let old_positions = unique_line_positions(old_lines);
+    let new_positions = unique_line_positions(new_lines);
+    let candidates = old_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(old_index, line)| {
+            matches!(old_positions.get(line), Some(Some(_)))
+                .then(|| new_positions.get(line).and_then(|position| *position))
+                .flatten()
+                .map(|new_index| (old_index, new_index))
+        })
+        .collect();
+
+    longest_increasing_anchors(candidates)
+}
+
+fn unique_line_positions<'a>(lines: &[&'a str]) -> HashMap<&'a str, Option<usize>> {
+    let mut positions = HashMap::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        positions
+            .entry(*line)
+            .and_modify(|position| *position = None)
+            .or_insert(Some(index));
+    }
+    positions
+}
+
+fn longest_increasing_anchors(candidates: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let mut tails: Vec<usize> = Vec::new();
+    let mut predecessors = vec![None; candidates.len()];
+
+    for (index, &(_, new_index)) in candidates.iter().enumerate() {
+        let position = tails.partition_point(|&tail_index| candidates[tail_index].1 < new_index);
+        if position > 0 {
+            predecessors[index] = Some(tails[position - 1]);
+        }
+        if position == tails.len() {
+            tails.push(index);
+        } else {
+            tails[position] = index;
+        }
+    }
+
+    let Some(mut index) = tails.last().copied() else {
+        return Vec::new();
+    };
+    let mut anchors = Vec::with_capacity(tails.len());
+    loop {
+        anchors.push(candidates[index]);
+        let Some(previous) = predecessors[index] else {
+            break;
+        };
+        index = previous;
+    }
+    anchors.reverse();
+    anchors
+}
+
+#[derive(Default)]
+struct HunkBuilder {
+    hunks: Vec<DiffHunk>,
+    current: Vec<DiffLine>,
+    leading_context: std::collections::VecDeque<DiffLine>,
+    trailing_context: usize,
+}
+
+impl HunkBuilder {
+    fn push(&mut self, line: DiffLine) {
         let is_change = matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed);
         if is_change {
-            if current.is_empty() {
-                current.extend(leading_context.drain(..));
+            if self.current.is_empty() {
+                self.current.extend(self.leading_context.drain(..));
             }
-            current.push(line);
-            trailing_context = 0;
-            continue;
+            self.current.push(line);
+            self.trailing_context = 0;
+            return;
         }
 
-        if current.is_empty() {
-            leading_context.push_back(line);
-            if leading_context.len() > DIFF_CONTEXT_LINES {
-                leading_context.pop_front();
+        if self.current.is_empty() {
+            self.leading_context.push_back(line);
+            if self.leading_context.len() > DIFF_CONTEXT_LINES {
+                self.leading_context.pop_front();
             }
-            continue;
+            return;
         }
 
-        trailing_context += 1;
-        if trailing_context <= DIFF_CONTEXT_LINES {
-            current.push(line);
+        self.trailing_context += 1;
+        if self.trailing_context <= DIFF_CONTEXT_LINES {
+            self.current.push(line);
         } else {
-            push_hunk(&mut hunks, std::mem::take(&mut current));
-            leading_context.clear();
-            leading_context.push_back(line);
-            trailing_context = 0;
+            push_hunk(&mut self.hunks, std::mem::take(&mut self.current));
+            self.leading_context.clear();
+            self.leading_context.push_back(line);
+            self.trailing_context = 0;
         }
     }
 
-    if !current.is_empty() {
-        push_hunk(&mut hunks, current);
+    fn finish(mut self) -> Vec<DiffHunk> {
+        if !self.current.is_empty() {
+            push_hunk(&mut self.hunks, self.current);
+        }
+        self.hunks
     }
-    hunks
 }
 
 fn push_hunk(hunks: &mut Vec<DiffHunk>, lines: Vec<DiffLine>) {
@@ -416,7 +588,13 @@ fn push_hunk(hunks: &mut Vec<DiffHunk>, lines: Vec<DiffLine>) {
     }
 }
 
-fn compute_coarse_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk> {
+fn emit_coarse_diff(
+    old_lines: &[&str],
+    new_lines: &[&str],
+    old_offset: usize,
+    new_offset: usize,
+    hunks: &mut HunkBuilder,
+) {
     let prefix_len = common_prefix_len(old_lines, new_lines);
     let suffix_len = common_suffix_len(&old_lines[prefix_len..], &new_lines[prefix_len..]);
 
@@ -425,18 +603,17 @@ fn compute_coarse_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk>
     let prefix_context_start = prefix_len.saturating_sub(DIFF_CONTEXT_LINES);
     let suffix_context_len = suffix_len.min(DIFF_CONTEXT_LINES);
 
-    let mut lines = Vec::new();
     for (idx, line) in old_lines
         .iter()
         .enumerate()
         .take(prefix_len)
         .skip(prefix_context_start)
     {
-        lines.push(DiffLine {
+        hunks.push(DiffLine {
             kind: DiffLineKind::Context,
             content: (*line).to_string(),
-            old_line: Some((idx + 1) as u32),
-            new_line: Some((idx + 1) as u32),
+            old_line: Some((old_offset + idx + 1) as u32),
+            new_line: Some((new_offset + idx + 1) as u32),
         });
     }
     for (idx, line) in old_lines
@@ -445,10 +622,10 @@ fn compute_coarse_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk>
         .take(old_change_end)
         .skip(prefix_len)
     {
-        lines.push(DiffLine {
+        hunks.push(DiffLine {
             kind: DiffLineKind::Removed,
             content: (*line).to_string(),
-            old_line: Some((idx + 1) as u32),
+            old_line: Some((old_offset + idx + 1) as u32),
             new_line: None,
         });
     }
@@ -458,27 +635,23 @@ fn compute_coarse_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk>
         .take(new_change_end)
         .skip(prefix_len)
     {
-        lines.push(DiffLine {
+        hunks.push(DiffLine {
             kind: DiffLineKind::Added,
             content: (*line).to_string(),
             old_line: None,
-            new_line: Some((idx + 1) as u32),
+            new_line: Some((new_offset + idx + 1) as u32),
         });
     }
     for offset in 0..suffix_context_len {
         let old_idx = old_change_end + offset;
         let new_idx = new_change_end + offset;
-        lines.push(DiffLine {
+        hunks.push(DiffLine {
             kind: DiffLineKind::Context,
             content: old_lines[old_idx].to_string(),
-            old_line: Some((old_idx + 1) as u32),
-            new_line: Some((new_idx + 1) as u32),
+            old_line: Some((old_offset + old_idx + 1) as u32),
+            new_line: Some((new_offset + new_idx + 1) as u32),
         });
     }
-
-    let mut hunks = Vec::new();
-    push_hunk(&mut hunks, lines);
-    hunks
 }
 
 fn common_prefix_len(old_lines: &[&str], new_lines: &[&str]) -> usize {
@@ -498,17 +671,8 @@ fn common_suffix_len(old_tail: &[&str], new_tail: &[&str]) -> usize {
         .count()
 }
 
-fn lcs_cell_count_exceeds_budget(old_len: usize, new_len: usize) -> bool {
-    let Some(rows) = old_len.checked_add(1) else {
-        return true;
-    };
-    let Some(cols) = new_len.checked_add(1) else {
-        return true;
-    };
-    match rows.checked_mul(cols) {
-        Some(cells) => cells > DIFF_LCS_MAX_CELLS,
-        None => true,
-    }
+fn lcs_cell_count(old_len: usize, new_len: usize) -> Option<usize> {
+    old_len.checked_add(1)?.checked_mul(new_len.checked_add(1)?)
 }
 
 fn lcs_table(a: &[&str], b: &[&str]) -> Vec<Vec<usize>> {
@@ -649,6 +813,30 @@ mod tests {
             !hunk.lines.iter().any(|line| line.content == "line-1"),
             "distant context should be omitted from coarse hunks"
         );
+    }
+
+    #[test]
+    fn large_file_with_separated_edits_keeps_local_change_counts() {
+        let old_lines = (1..=2_600)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>();
+        let old = old_lines.join("\n");
+        let mut new_lines = old_lines;
+        for index in [100, 600, 1_100, 1_600, 2_100] {
+            new_lines[index] = format!("changed-{index}");
+        }
+        let new = new_lines.join("\n");
+
+        let diff = build_file_diff("large.txt".to_string(), Some(&old), &new);
+
+        assert_eq!(
+            diff.stats(),
+            DiffStats {
+                added: 5,
+                removed: 5,
+            }
+        );
+        assert_eq!(diff.hunks.len(), 5);
     }
 
     #[test]
