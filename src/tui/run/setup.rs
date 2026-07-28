@@ -22,23 +22,7 @@ impl TerminalSession {
             let _ = disable_raw_mode();
             return Err(err).context("failed to enter alternate screen");
         }
-        if mouse_capture && let Err(err) = enable_mouse_capture(&mut stdout) {
-            // The first command may have enabled a prefix of the mouse modes
-            // before the final 1003-disable write failed. Undo the whole group
-            // while raw mode still contains any resulting input bytes.
-            let _ = execute!(stdout, DisableMouseCapture);
-            if alternate_screen {
-                let _ = execute!(stdout, LeaveAlternateScreen);
-            }
-            let _ = stdout.flush();
-            drain_pending_terminal_events();
-            let _ = disable_raw_mode();
-            return Err(err).context("failed to enable mouse capture");
-        }
         if let Err(err) = execute!(stdout, EnableBracketedPaste) {
-            if mouse_capture {
-                let _ = execute!(stdout, DisableMouseCapture);
-            }
             if alternate_screen {
                 let _ = execute!(stdout, LeaveAlternateScreen);
             }
@@ -61,6 +45,9 @@ impl TerminalSession {
         // byte — the user's first keystroke. The probe itself is a
         // query/reply round-trip crossterm parses safely (raw mode is
         // already on), so nothing leaks into the event queue.
+        // Probe before enabling mouse reporting. A click interleaved with the
+        // keyboard query can be consumed as part of its reply, leaving the SGR
+        // mouse bytes to surface later as literal composer input.
         let keyboard_enhanced = match crossterm::terminal::supports_keyboard_enhancement() {
             Ok(true) => match execute!(
                 stdout,
@@ -84,6 +71,22 @@ impl TerminalSession {
                 false
             }
         };
+        if mouse_capture && let Err(err) = enable_mouse_capture(&mut stdout) {
+            // A short write can enable only a prefix of the mouse modes. Undo
+            // the whole group while raw mode still contains resulting bytes.
+            let _ = execute!(stdout, DisableMouseCapture);
+            if keyboard_enhanced {
+                let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+            }
+            let _ = execute!(stdout, DisableBracketedPaste);
+            if alternate_screen {
+                let _ = execute!(stdout, LeaveAlternateScreen);
+            }
+            let _ = stdout.flush();
+            drain_pending_terminal_events();
+            let _ = disable_raw_mode();
+            return Err(err).context("failed to enable mouse capture");
+        }
 
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::with_options(
@@ -267,6 +270,7 @@ struct EnableButtonEventMouseCapture;
 impl crossterm::Command for EnableButtonEventMouseCapture {
     fn write_ansi(&self, writer: &mut impl std::fmt::Write) -> std::fmt::Result {
         writer.write_str(concat!(
+            "\x1b[?1003l", // Clear stale any-motion mode from a prior crash.
             "\x1b[?1000h", // Press, release, and wheel events.
             "\x1b[?1002h", // Pointer movement while a button is held.
             "\x1b[?1015h", // Extended RXVT coordinates.
@@ -507,8 +511,16 @@ mod tests {
 
         enable_mouse_capture(&mut output).unwrap();
 
+        let stale_motion_reset = output
+            .windows(8)
+            .position(|window| window == b"\x1b[?1003l")
+            .expect("mouse capture should clear stale any-motion mode");
+        let button_capture = output
+            .windows(8)
+            .position(|window| window == b"\x1b[?1002h")
+            .expect("mouse capture should enable button-motion mode");
+        assert!(stale_motion_reset < button_capture);
         assert!(output.windows(8).any(|window| window == b"\x1b[?1000h"));
-        assert!(output.windows(8).any(|window| window == b"\x1b[?1002h"));
         assert!(!output.windows(8).any(|window| window == b"\x1b[?1003h"));
     }
 
