@@ -14,6 +14,11 @@ pub(crate) enum ReasoningCodec {
     /// that accept a `reasoning: { effort }` envelope.
     #[serde(rename = "openai-chat-completions", alias = "open-ai-chat-completions")]
     OpenAiChatCompletions,
+    /// Mistral's current hybrid reasoning models accept the top-level
+    /// `reasoning_effort` field, but only expose the `none`/`high` choices.
+    /// The distinct codec also gates Mistral's structured thinking-content
+    /// stream parsing and replay in the shared Chat Completions transport.
+    MistralChatCompletions,
     CodexResponses,
     AnthropicThinking,
     /// Claude Opus 4.5 combines legacy `budget_tokens` thinking with the
@@ -52,7 +57,7 @@ impl ReasoningCodec {
     pub(crate) fn encode_json(self, selection: ReasoningSelection) -> Option<Value> {
         match self {
             Self::OpenAiCompatible => openai_compatible_reasoning(selection),
-            Self::OpenAiChatCompletions => None,
+            Self::OpenAiChatCompletions | Self::MistralChatCompletions => None,
             Self::CodexResponses => codex_responses_reasoning(selection),
             Self::AnthropicThinking | Self::AnthropicThinkingWithEffort => {
                 anthropic_thinking(selection)
@@ -69,6 +74,9 @@ impl ReasoningCodec {
     ) {
         match self {
             Self::OpenAiChatCompletions => apply_openai_chat_completions_fields(body, selection),
+            Self::MistralChatCompletions => {
+                apply_mistral_chat_completions_fields(body, selection);
+            }
             Self::KimiThinking => apply_kimi_thinking_fields(body, selection),
             Self::ZaiThinking => apply_zai_thinking_fields(body, selection),
             Self::ZaiReasoningEffort => apply_zai_reasoning_effort_fields(body, selection),
@@ -94,6 +102,25 @@ fn apply_openai_chat_completions_fields(body: &mut Value, selection: ReasoningSe
         ReasoningSelection::On => "medium",
         ReasoningSelection::Ultra => "max",
         explicit => explicit.as_str(),
+    };
+    body["reasoning_effort"] = json!(effort);
+}
+
+fn apply_mistral_chat_completions_fields(body: &mut Value, selection: ReasoningSelection) {
+    let effort = match selection {
+        ReasoningSelection::Default | ReasoningSelection::BudgetTokens(_) => return,
+        ReasoningSelection::Off => "none",
+        // Current Mistral Medium 3.5 and Small 4 expose only `none` and `high`.
+        // Treat the portable toggle and any stale persisted enabled effort as
+        // `high` instead of sending a value the API rejects.
+        ReasoningSelection::On
+        | ReasoningSelection::Minimal
+        | ReasoningSelection::Low
+        | ReasoningSelection::Medium
+        | ReasoningSelection::High
+        | ReasoningSelection::XHigh
+        | ReasoningSelection::Max
+        | ReasoningSelection::Ultra => "high",
     };
     body["reasoning_effort"] = json!(effort);
 }
@@ -337,6 +364,30 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ReasoningCodec>("\"openai-chat-completions\"").unwrap(),
             ReasoningCodec::OpenAiChatCompletions
+        );
+    }
+
+    #[test]
+    fn mistral_chat_completions_uses_only_documented_none_and_high_efforts() {
+        for (selection, expected) in [
+            (ReasoningSelection::Off, "none"),
+            (ReasoningSelection::On, "high"),
+            (ReasoningSelection::Medium, "high"),
+            (ReasoningSelection::High, "high"),
+        ] {
+            let mut body = json!({});
+            ReasoningCodec::MistralChatCompletions
+                .apply_chat_completions_fields(&mut body, selection);
+            assert_eq!(body, json!({ "reasoning_effort": expected }));
+        }
+
+        let mut body = json!({});
+        ReasoningCodec::MistralChatCompletions
+            .apply_chat_completions_fields(&mut body, ReasoningSelection::Default);
+        assert_eq!(body, json!({}));
+        assert_eq!(
+            serde_json::from_str::<ReasoningCodec>("\"mistral-chat-completions\"").unwrap(),
+            ReasoningCodec::MistralChatCompletions
         );
     }
 

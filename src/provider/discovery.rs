@@ -89,6 +89,7 @@ pub(crate) async fn fetch_models_with_discovery(
         DiscoveryKind::Static => return Ok(LiveModelAvailability::default()),
         DiscoveryKind::Gemini => fetch_gemini_models(base_url, api_key).await,
         DiscoveryKind::LmStudio => fetch_lm_studio_models(base_url, api_key).await,
+        DiscoveryKind::Mistral => fetch_mistral_models(base_url, api_key).await,
         DiscoveryKind::Ollama => fetch_ollama_models(base_url).await,
     };
     match native {
@@ -171,6 +172,97 @@ async fn fetch_generic_models(
         models,
         ..LiveModelAvailability::default()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Mistral native model probe
+// ---------------------------------------------------------------------------
+
+/// Fetch Mistral's model cards rather than treating `/models` as an OpenAI
+/// list. The native response identifies archived/non-chat entries, aliases,
+/// context limits, function calling, and vision support. Bonsai is a tool-using
+/// coding agent, so a model must support both chat completions and function
+/// calling to be selectable.
+async fn fetch_mistral_models(base_url: &str, api_key: &str) -> Result<LiveModelAvailability> {
+    let base = base_url.trim_end_matches('/');
+    let mut builder = crate::provider::http_client()
+        .get(format!("{base}/models"))
+        .timeout(PROBE_TIMEOUT)
+        .header("Accept", "application/json");
+    let api_key = api_key.trim();
+    if !api_key.is_empty() {
+        builder = builder.bearer_auth(api_key);
+    }
+    let response = builder
+        .send()
+        .await
+        .context("Failed to fetch Mistral native model list")?;
+    if !response.status().is_success() {
+        return Err(sse::error_from_response(response).await.into());
+    }
+    let value: Value = response
+        .json()
+        .await
+        .context("Failed to parse Mistral native model list")?;
+    let mut models = mistral_models_from_response(&value)?;
+    sort_models(&mut models);
+    models.dedup_by(|left, right| left.remote_model_id == right.remote_model_id);
+    Ok(LiveModelAvailability {
+        models,
+        ..LiveModelAvailability::default()
+    })
+}
+
+fn mistral_models_from_response(value: &Value) -> Result<Vec<AvailableModel>> {
+    let Some(items) = value.get("data").and_then(Value::as_array) else {
+        anyhow::bail!("Mistral native model list response has no `data` array");
+    };
+    Ok(items
+        .iter()
+        .filter(|item| item.get("archived").and_then(Value::as_bool) != Some(true))
+        .filter_map(|item| {
+            let capabilities = item.get("capabilities")?;
+            let supports_chat = capabilities
+                .get("completion_chat")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let supports_tools = capabilities
+                .get("function_calling")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            (supports_chat && supports_tools).then_some((item, capabilities))
+        })
+        .flat_map(|(item, capabilities)| {
+            let mut features = vec![ModelFeature::ToolCall];
+            if capabilities
+                .get("vision")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                features.push(ModelFeature::Attachment);
+            }
+            if capabilities
+                .get("reasoning")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                features.push(ModelFeature::Reasoning);
+            }
+            let context_window = item
+                .get("max_context_length")
+                .and_then(positive_u32_from_value);
+            let ids = item.get("id").and_then(Value::as_str).into_iter().chain(
+                item.get("aliases")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str),
+            );
+            ids.map(move |id| {
+                AvailableModel::with_metadata(id, context_window, None, features.clone())
+            })
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +690,117 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn mistral_native_response_keeps_current_tool_capable_chat_models_and_aliases() {
+        let value = serde_json::json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "mistral-small-2603",
+                    "aliases": ["mistral-small-latest"],
+                    "archived": false,
+                    "max_context_length": 256_000,
+                    "capabilities": {
+                        "completion_chat": true,
+                        "function_calling": true,
+                        "vision": true,
+                        "reasoning": true
+                    }
+                },
+                {
+                    "id": "devstral-2512",
+                    "aliases": ["devstral-latest"],
+                    "archived": true,
+                    "max_context_length": 262_144,
+                    "capabilities": {
+                        "completion_chat": true,
+                        "function_calling": true
+                    }
+                },
+                {
+                    "id": "mistral-embed",
+                    "archived": false,
+                    "capabilities": {
+                        "completion_chat": false,
+                        "function_calling": false
+                    }
+                },
+                {
+                    "id": "chat-without-tools",
+                    "archived": false,
+                    "capabilities": {
+                        "completion_chat": true,
+                        "function_calling": false
+                    }
+                }
+            ]
+        });
+
+        let models = mistral_models_from_response(&value).unwrap();
+        let ids = models
+            .iter()
+            .map(|model| model.remote_model_id.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, ["mistral-small-2603", "mistral-small-latest"]);
+        for model in models {
+            assert_eq!(model.context_window, Some(256_000));
+            assert_eq!(
+                model.features,
+                vec![
+                    ModelFeature::ToolCall,
+                    ModelFeature::Attachment,
+                    ModelFeature::Reasoning
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mistral_native_discovery_uses_bearer_auth_and_rich_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer mistral-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{
+                    "id": "mistral-medium-2604",
+                    "aliases": ["mistral-medium-latest"],
+                    "archived": false,
+                    "max_context_length": 262_144,
+                    "capabilities": {
+                        "completion_chat": true,
+                        "function_calling": true,
+                        "vision": true,
+                        "reasoning": true
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::Mistral,
+            Protocol::OpenAiChat,
+            "Mistral AI",
+            &format!("{}/v1", server.uri()),
+            "mistral-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let ids = availability
+            .models
+            .iter()
+            .map(|model| model.remote_model_id.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["mistral-medium-2604", "mistral-medium-latest"]);
+        assert_eq!(availability.models[0].context_window, Some(262_144));
+    }
 
     #[test]
     fn gemini_native_response_keeps_only_generate_content_models() {

@@ -85,7 +85,7 @@ impl ProviderPreset {
             (DiscoveryKind::Generic, TransportProtocol::CodexResponses) => None,
             // The local wizard never creates provider-specific or curated
             // discovery connections.
-            (DiscoveryKind::Gemini | DiscoveryKind::Static, _) => None,
+            (DiscoveryKind::Gemini | DiscoveryKind::Mistral | DiscoveryKind::Static, _) => None,
         }
     }
 

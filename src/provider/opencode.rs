@@ -171,7 +171,19 @@ pub struct OpenAiCompatibleProvider {
     /// on the matching assistant tool-call entry. Gemini 3 places its required
     /// encrypted thought signature under `extra_content`.
     tool_call_extra_content_by_id: std::sync::Mutex<HashMap<String, Value>>,
+    /// Mistral reasoning arrives as structured assistant content rather than a
+    /// side-channel field. Keep each completed native content array so later
+    /// requests can replace Bonsai's text-only history projection with the
+    /// exact thinking/text shape required by Mistral.
+    mistral_content_replay: std::sync::Mutex<Vec<MistralContentReplay>>,
     last_request_diagnostics: std::sync::Mutex<Option<ProviderRequestDiagnostics>>,
+}
+
+#[derive(Debug, Clone)]
+struct MistralContentReplay {
+    visible_content: String,
+    tool_call_ids: Vec<String>,
+    parts: Vec<Value>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -216,6 +228,7 @@ impl OpenAiCompatibleProvider {
             prompt_cache_header: target.prompt_cache_header.clone(),
             reasoning_by_call_id: std::sync::Mutex::new(HashMap::new()),
             tool_call_extra_content_by_id: std::sync::Mutex::new(HashMap::new()),
+            mistral_content_replay: std::sync::Mutex::new(Vec::new()),
             last_request_diagnostics: std::sync::Mutex::new(None),
         }
     }
@@ -326,6 +339,13 @@ impl OpenAiCompatibleProvider {
                 .map_err(|_| anyhow::anyhow!("tool-call metadata replay state lock is poisoned"))?;
             ensure_tool_call_extra_content(&mut body, &extra_content_by_call_id);
         }
+        if self.reasoning_codec == ReasoningCodec::MistralChatCompletions {
+            let replay = self
+                .mistral_content_replay
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Mistral content replay state lock is poisoned"))?;
+            ensure_mistral_structured_content(&mut body, &replay);
+        }
         // After the reasoning echo: `reasoning_by_call_id` is keyed by original
         // wire ids, so the lookup must run before duplicates are renamed.
         dedupe_request_tool_call_ids(&mut body);
@@ -399,6 +419,78 @@ impl OpenAiCompatibleProvider {
             sections,
         )
     }
+}
+
+/// Restore Mistral's structured assistant content on the text-only message
+/// history retained by the agent. Tool-call turns use their stable call ids;
+/// plain assistant turns match visible content in chronological order.
+fn ensure_mistral_structured_content(body: &mut Value, replay: &[MistralContentReplay]) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut used = HashSet::new();
+    for message in messages {
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let call_ids = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|call| call.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let visible_content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let match_index = replay.iter().enumerate().find_map(|(index, entry)| {
+            if used.contains(&index) {
+                return None;
+            }
+            let calls_match = !call_ids.is_empty()
+                && call_ids
+                    .iter()
+                    .any(|call_id| entry.tool_call_ids.iter().any(|stored| stored == call_id));
+            let text_match = call_ids.is_empty()
+                && entry.tool_call_ids.is_empty()
+                && entry.visible_content == visible_content;
+            (calls_match || text_match).then_some(index)
+        });
+        if let Some(index) = match_index {
+            used.insert(index);
+            message.insert(
+                "content".to_string(),
+                Value::Array(replay[index].parts.clone()),
+            );
+        }
+    }
+}
+
+fn append_mistral_text_part(parts: &mut Vec<Value>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = parts.last_mut()
+        && last.get("type").and_then(Value::as_str) == Some("text")
+        && let Some(existing) = last.get_mut("text").and_then(|value| value.as_str())
+    {
+        let mut combined = existing.to_string();
+        combined.push_str(text);
+        last["text"] = Value::String(combined);
+        return;
+    }
+    parts.push(serde_json::json!({ "type": "text", "text": text }));
+}
+
+fn mistral_thinking_text(thinking: &[Value]) -> String {
+    thinking
+        .iter()
+        .filter_map(|chunk| chunk.get("text").and_then(Value::as_str))
+        .collect()
 }
 
 /// Give every assistant message that carries `tool_calls` its captured
@@ -722,6 +814,8 @@ impl Provider for OpenAiCompatibleProvider {
         let mut finish_reason: Option<crate::provider::FinishReason> = None;
         let mut reasoning_chars = 0usize;
         let mut reasoning_for_replay = String::new();
+        let mut mistral_content_parts = Vec::new();
+        let mut saw_mistral_structured_content = false;
         // Open models on this transport (DeepSeek, Qwen, GLM, …) emit reasoning
         // inline as `<think>…</think>` in the content channel; route it to the
         // reasoning channel rather than letting the tags leak into the answer.
@@ -770,11 +864,55 @@ impl Provider for OpenAiCompatibleProvider {
                     }
                     let delta = &choice["delta"];
 
+                    if self.reasoning_codec == ReasoningCodec::MistralChatCompletions
+                        && let Some(parts) = delta["content"].as_array()
+                    {
+                        saw_mistral_structured_content = true;
+                        for part in parts {
+                            match part.get("type").and_then(Value::as_str) {
+                                Some("thinking") => {
+                                    if let Some(thinking) =
+                                        part.get("thinking").and_then(Value::as_array)
+                                    {
+                                        let text = mistral_thinking_text(thinking);
+                                        if !text.is_empty() {
+                                            reasoning_chars = reasoning_chars
+                                                .saturating_add(text.chars().count());
+                                            sink.reasoning_delta(&text);
+                                        }
+                                    } else if let Some(text) =
+                                        part.get("thinking").and_then(Value::as_str)
+                                    {
+                                        reasoning_chars =
+                                            reasoning_chars.saturating_add(text.chars().count());
+                                        sink.reasoning_delta(text);
+                                    }
+                                }
+                                Some("text") => {
+                                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                        content.push_str(text);
+                                        sink.assistant_delta(text);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            // Preserve the provider's entire chunk, including
+                            // opaque `p`/signature fields, in wire order.
+                            mistral_content_parts.push(part.clone());
+                        }
+                    }
+
                     if let Some(text) = delta["content"].as_str() {
                         let split = splitter.push(text);
                         if !split.visible.is_empty() {
                             content.push_str(&split.visible);
                             sink.assistant_delta(&split.visible);
+                            if self.reasoning_codec == ReasoningCodec::MistralChatCompletions {
+                                append_mistral_text_part(
+                                    &mut mistral_content_parts,
+                                    &split.visible,
+                                );
+                            }
                         }
                         if !split.reasoning.is_empty() {
                             reasoning_chars =
@@ -878,6 +1016,24 @@ impl Provider for OpenAiCompatibleProvider {
                 &tool_calls,
                 (!reasoning_for_replay.is_empty()).then_some(reasoning_for_replay),
             )?;
+        }
+        if self.reasoning_codec == ReasoningCodec::MistralChatCompletions
+            && saw_mistral_structured_content
+            && !interrupted
+        {
+            let entry = MistralContentReplay {
+                visible_content: content.clone(),
+                tool_call_ids: tool_calls.iter().map(|call| call.id.clone()).collect(),
+                parts: mistral_content_parts,
+            };
+            self.mistral_content_replay
+                .lock()
+                .map_err(|_| {
+                    crate::provider::ProviderFailure::transport(
+                        "Mistral content replay state lock is poisoned",
+                    )
+                })?
+                .push(entry);
         }
         let terminal = if interrupted {
             crate::provider::StreamTerminal::Interrupted
@@ -2219,6 +2375,163 @@ mod tests {
             provider.request_body(&[], &[]).unwrap()
         );
         assert_eq!(provider.take_last_request_diagnostics(), None);
+    }
+
+    #[tokio::test]
+    async fn mistral_structured_thinking_is_streamed_and_replayed_exactly() {
+        use std::sync::Mutex;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[derive(Default)]
+        struct RecordingSink {
+            assistant: Mutex<String>,
+            reasoning: Mutex<String>,
+        }
+        impl crate::output::OutputSink for RecordingSink {
+            fn assistant_delta(&self, text: &str) {
+                self.assistant.lock().unwrap().push_str(text);
+            }
+            fn reasoning_delta(&self, text: &str) {
+                self.reasoning.lock().unwrap().push_str(text);
+            }
+        }
+
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\",\"thinking\":[{\"type\":\"text\",\"text\":\"inspect \"}],\"p\":\"opaque-a\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\",\"thinking\":[{\"type\":\"text\",\"text\":\"carefully\"}],\"p\":\"opaque-b\"},{\"type\":\"text\",\"text\":\"Answer\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" done\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server)
+            .await;
+
+        let session = provider_session("mistral-key", &server.uri(), "mistral-medium-latest");
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
+        let connection_id = "mistral".parse().unwrap();
+        let resolved = catalog
+            .resolve_connection_model(&connection_id, "mistral/mistral-medium-latest")
+            .unwrap();
+        let mut target = resolved.run_target(
+            server.uri().into(),
+            crate::provider::ReasoningSelection::High,
+        );
+        target.endpoint_path = Some("chat/completions".into());
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            "mistral",
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            CACHING,
+        );
+
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let response = provider
+            .chat_stream(&[], &[], CancellationToken::new(), sink.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(response.content, "Answer done");
+        assert_eq!(
+            response.reasoning_chars,
+            "inspect carefully".chars().count()
+        );
+        assert_eq!(*sink.assistant.lock().unwrap(), "Answer done");
+        assert_eq!(*sink.reasoning.lock().unwrap(), "inspect carefully");
+
+        let assistant = ChatCompletionRequestMessage::Assistant(
+            async_openai::types::chat::ChatCompletionRequestAssistantMessageArgs::default()
+                .content(response.content.as_str())
+                .build()
+                .unwrap(),
+        );
+        let body = provider.request_body(&[assistant], &[]).unwrap();
+        assert_eq!(body["reasoning_effort"], serde_json::json!("high"));
+        assert_eq!(body["max_tokens"], serde_json::json!(32_000));
+        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([
+                {
+                    "type": "thinking",
+                    "thinking": [{"type": "text", "text": "inspect "}],
+                    "p": "opaque-a"
+                },
+                {
+                    "type": "thinking",
+                    "thinking": [{"type": "text", "text": "carefully"}],
+                    "p": "opaque-b"
+                },
+                {"type": "text", "text": "Answer done"}
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn mistral_tool_round_replays_thinking_by_call_id() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\",\"thinking\":[{\"type\":\"text\",\"text\":\"use the tool\"}],\"p\":\"opaque-tool\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server)
+            .await;
+
+        let session = provider_session("mistral-key", &server.uri(), "mistral-medium-latest");
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
+        let connection_id = "mistral".parse().unwrap();
+        let resolved = catalog
+            .resolve_connection_model(&connection_id, "mistral/mistral-medium-latest")
+            .unwrap();
+        let mut target = resolved.run_target(
+            server.uri().into(),
+            crate::provider::ReasoningSelection::High,
+        );
+        target.endpoint_path = Some("chat/completions".into());
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            "mistral",
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            CACHING,
+        );
+
+        let response = provider
+            .chat_stream(
+                &[],
+                &[],
+                CancellationToken::new(),
+                std::sync::Arc::new(crate::output::StdoutSink),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.tool_calls[0].id, "call_1");
+
+        let history = [
+            tool_call_message("call_1", "read", "{\"path\":\"Cargo.toml\"}"),
+            tool_result_message("call_1", "contents"),
+        ];
+        let body = provider.request_body(&history, &[]).unwrap();
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([{
+                "type": "thinking",
+                "thinking": [{"type": "text", "text": "use the tool"}],
+                "p": "opaque-tool"
+            }])
+        );
     }
 
     #[tokio::test]

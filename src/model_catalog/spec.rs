@@ -27,6 +27,7 @@ pub(crate) enum DiscoveryKind {
     Generic,
     Gemini,
     LmStudio,
+    Mistral,
     Ollama,
     Static,
 }

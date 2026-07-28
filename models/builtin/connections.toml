@@ -452,14 +452,19 @@ default_base_url = "https://api.mistral.ai/v1"
 api_key_env = "MISTRAL_API_KEY"
 model_env = "MISTRAL_MODEL"
 base_url_env = "MISTRAL_BASE_URL"
-default_model = "mistral/devstral-medium-latest"
+default_model = "mistral/mistral-medium-latest"
 default_endpoint_path = "chat/completions"
 default_token_counter = "tiktoken"
-# Mistral caches on an explicit `prompt_cache_key` (what openai-chat sends when
-# this is on), reporting hits in prompt_tokens_details.cached_tokens at ~10% of
-# input price. Magistral reasoning uses a `prompt_mode` wire bonsai has no codec
-# for, so no reasoning models are shipped (see mistral.toml).
+# Mistral's native model cards expose archive state, aliases, context windows,
+# function calling, and vision support. `/refresh` filters archived/non-tool
+# products before models.dev enriches current prices and capabilities.
+discovery = "mistral"
+reasoning_codec = "mistral-chat-completions"
+# Mistral caches on an explicit stable `prompt_cache_key`, reporting hits in
+# prompt_tokens_details.cached_tokens and billing cached input at 10%. Exact
+# append-only prefixes preserve warm reuse across agent turns.
 prompt_cache = true
+prompt_cache_policy = "rolling-history"
 
 [[connections]]
 id = "tencent"
