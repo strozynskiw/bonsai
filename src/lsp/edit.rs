@@ -81,7 +81,7 @@ fn grouped_project_edits(
 ) -> Result<BTreeMap<PathBuf, Vec<LspTextEdit>>> {
     let mut grouped = BTreeMap::new();
     for (uri, edits) in &edit.changes {
-        let path = uri_to_path(uri).map_err(LspError::from)?;
+        let path = uri_to_path(uri)?;
         let canonical = path
             .canonicalize()
             .with_context(|| format!("failed to canonicalize edit path {}", path.display()))?;
@@ -112,16 +112,13 @@ async fn unread_or_stale_paths(
     unread
 }
 
-fn apply_text_edits(
-    content: &str,
-    edits: &[LspTextEdit],
-) -> Result<String, protocol::ProtocolError> {
+fn apply_text_edits(content: &str, edits: &[LspTextEdit]) -> Result<String, LspError> {
     let mut ranges = Vec::with_capacity(edits.len());
     for edit in edits {
         let start = protocol::offset_at_position(content, edit.range.start)?;
         let end = protocol::offset_at_position(content, edit.range.end)?;
         if start > end {
-            return Err(protocol::ProtocolError::Message(
+            return Err(LspError::Protocol(
                 "text edit range starts after it ends".into(),
             ));
         }
@@ -131,7 +128,7 @@ fn apply_text_edits(
     let mut previous_end = 0usize;
     for (index, (start, end, _)) in ranges.iter().enumerate() {
         if index > 0 && *start < previous_end {
-            return Err(protocol::ProtocolError::Message(
+            return Err(LspError::Protocol(
                 "language server returned overlapping text edits".into(),
             ));
         }
@@ -217,7 +214,10 @@ mod tests {
                 new_text: "y".to_string(),
             },
         ];
-        assert!(apply_text_edits("abcd", &edits).is_err());
+        assert!(matches!(
+            apply_text_edits("abcd", &edits),
+            Err(LspError::Protocol(message)) if message == "language server returned overlapping text edits"
+        ));
     }
 
     #[tokio::test]

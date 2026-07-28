@@ -45,6 +45,10 @@ pub use token::{
     PromptEstimator, TokenCounterKind,
 };
 
+use std::error::Error as StdError;
+use std::fmt;
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool};
 use async_trait::async_trait;
@@ -89,20 +93,129 @@ pub(crate) fn metadata_for(id: &str) -> Option<&'static ProviderMetadata> {
     all_metadata().into_iter().find(|meta| meta.is_known_id(id))
 }
 
+/// Normalized provider error class, independent of the wire protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProviderErrorCode {
+    Authentication,
+    Permission,
+    NotFound,
+    InvalidRequest,
+    RateLimit,
+    Quota,
+    Overloaded,
+    Server,
+    Unknown,
+}
+
+impl ProviderErrorCode {
+    pub(crate) fn from_provider_fields(error_type: Option<&str>, error_code: Option<&str>) -> Self {
+        [error_code, error_type]
+            .into_iter()
+            .flatten()
+            .find_map(|value| match value {
+                "invalid_api_key" | "authentication_error" => Some(Self::Authentication),
+                "permission_error" => Some(Self::Permission),
+                "model_not_found" | "not_found_error" => Some(Self::NotFound),
+                "invalid_request_error" => Some(Self::InvalidRequest),
+                "rate_limit_error" | "rate_limit_exceeded" | "rate_limited" => {
+                    Some(Self::RateLimit)
+                }
+                "insufficient_quota" => Some(Self::Quota),
+                "overloaded_error" => Some(Self::Overloaded),
+                "api_error" | "internal_server_error" | "server_error" => Some(Self::Server),
+                _ => None,
+            })
+            .unwrap_or(Self::Unknown)
+    }
+
+    pub(crate) const fn from_status(status: u16) -> Self {
+        match status {
+            401 => Self::Authentication,
+            402 => Self::Quota,
+            403 => Self::Permission,
+            404 => Self::NotFound,
+            400 | 422 => Self::InvalidRequest,
+            429 => Self::RateLimit,
+            529 => Self::Overloaded,
+            500..=599 => Self::Server,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub(crate) const fn status_hint(self) -> Option<u16> {
+        match self {
+            Self::Authentication => Some(401),
+            Self::Permission => Some(403),
+            Self::NotFound => Some(404),
+            Self::InvalidRequest => Some(400),
+            Self::RateLimit => Some(429),
+            Self::Quota => Some(402),
+            Self::Overloaded => Some(529),
+            Self::Server => Some(503),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// Cloneable diagnostic cause retained by a provider failure.
+#[derive(Clone)]
+pub struct ProviderFailureSource(Arc<dyn StdError + Send + Sync>);
+
+impl ProviderFailureSource {
+    pub(crate) fn new(source: impl StdError + Send + Sync + 'static) -> Self {
+        Self(Arc::new(source))
+    }
+}
+
+impl fmt::Debug for ProviderFailureSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("ProviderFailureSource")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for ProviderFailureSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl StdError for ProviderFailureSource {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 /// Failure returned by a provider while preparing or streaming a response.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone)]
 #[non_exhaustive]
 pub enum ProviderFailure {
     #[error("provider HTTP error ({status}): {message}")]
     Http {
         status: u16,
         message: String,
+        code: ProviderErrorCode,
+        provider_type: Option<String>,
+        provider_code: Option<String>,
         retry_after_secs: Option<u64>,
+        #[source]
+        source: Option<ProviderFailureSource>,
     },
     #[error("provider transport error: {message}")]
-    Transport { message: String },
+    Transport {
+        message: String,
+        #[source]
+        source: Option<ProviderFailureSource>,
+    },
     #[error("provider response decode error: {message}")]
-    Decode { message: String },
+    Decode {
+        message: String,
+        #[source]
+        source: Option<ProviderFailureSource>,
+    },
     #[error("provider configuration error: {message}")]
     Configuration { message: String },
 }
@@ -139,25 +252,41 @@ impl ProviderFailure {
         // 529 is Anthropic's overload status (also emitted as an
         // `overloaded_error` frame mid-stream); treat it like the other
         // transient classes.
-        matches!(self, Self::Http { status, .. } if matches!(*status, 429 | 500 | 502 | 503 | 504 | 529))
-            || matches!(self, Self::Transport { .. } | Self::Decode { .. })
+        matches!(
+            self,
+            Self::Http {
+                code: ProviderErrorCode::RateLimit
+                    | ProviderErrorCode::Overloaded
+                    | ProviderErrorCode::Server,
+                ..
+            } | Self::Http {
+                status: 429 | 500 | 502 | 503 | 504 | 529,
+                ..
+            } | Self::Transport { .. }
+                | Self::Decode { .. }
+        )
     }
 
     /// Classify provider-enforced rate and account limits without exposing the
     /// provider's response body to terminal-state persistence.
     pub(crate) fn limit_kind(&self) -> Option<ProviderLimitKind> {
         let Self::Http {
-            status, message, ..
+            status,
+            message,
+            code,
+            ..
         } = self
         else {
             return None;
         };
-        if *status == 402 || message_signals_quota_exhaustion(message) {
-            Some(ProviderLimitKind::Quota)
-        } else if *status == 429 {
-            Some(ProviderLimitKind::RateLimit)
-        } else {
-            None
+        match code {
+            ProviderErrorCode::Quota => Some(ProviderLimitKind::Quota),
+            _ if *status == 402 || message_signals_quota_exhaustion(message) => {
+                Some(ProviderLimitKind::Quota)
+            }
+            ProviderErrorCode::RateLimit => Some(ProviderLimitKind::RateLimit),
+            _ if *status == 429 => Some(ProviderLimitKind::RateLimit),
+            _ => None,
         }
     }
 
@@ -173,23 +302,17 @@ impl ProviderFailure {
         error_code: Option<&str>,
         message: impl Into<String>,
     ) -> Self {
-        fn classify(class: &str) -> Option<u16> {
-            match class {
-                "overloaded_error" => Some(529),
-                "rate_limit_error" | "rate_limit_exceeded" | "rate_limited" => Some(429),
-                "api_error" | "internal_server_error" | "server_error" => Some(503),
-                _ => None,
-            }
-        }
-        let status = error_type
-            .and_then(classify)
-            .or_else(|| error_code.and_then(classify))
-            .unwrap_or(400);
-        Self::Http {
+        let code = ProviderErrorCode::from_provider_fields(error_type, error_code);
+        let status = code.status_hint().unwrap_or(400);
+        Self::http_with_details(
             status,
-            message: message.into(),
-            retry_after_secs: None,
-        }
+            message,
+            code,
+            error_type.map(str::to_owned),
+            error_code.map(str::to_owned),
+            None,
+            None,
+        )
     }
 
     /// A retryable error for a corrupt or truncated stream frame (malformed JSON,
@@ -197,6 +320,17 @@ impl ProviderFailure {
     pub fn stream_decode(message: impl Into<String>) -> Self {
         Self::Decode {
             message: message.into(),
+            source: None,
+        }
+    }
+
+    pub(crate) fn stream_decode_with_source(
+        message: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::Decode {
+            message: message.into(),
+            source: Some(ProviderFailureSource::new(source)),
         }
     }
 
@@ -209,6 +343,50 @@ impl ProviderFailure {
     pub fn transport(message: impl Into<String>) -> Self {
         Self::Transport {
             message: message.into(),
+            source: None,
+        }
+    }
+
+    pub(crate) fn transport_with_source(
+        message: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::Transport {
+            message: message.into(),
+            source: Some(ProviderFailureSource::new(source)),
+        }
+    }
+
+    /// Build an HTTP failure when only status, message, and retry timing are known.
+    pub fn http(status: u16, message: impl Into<String>, retry_after_secs: Option<u64>) -> Self {
+        Self::http_with_details(
+            status,
+            message,
+            ProviderErrorCode::from_status(status),
+            None,
+            None,
+            retry_after_secs,
+            None,
+        )
+    }
+
+    pub(crate) fn http_with_details(
+        status: u16,
+        message: impl Into<String>,
+        code: ProviderErrorCode,
+        provider_type: Option<String>,
+        provider_code: Option<String>,
+        retry_after_secs: Option<u64>,
+        source: Option<ProviderFailureSource>,
+    ) -> Self {
+        Self::Http {
+            status,
+            message: message.into(),
+            code,
+            provider_type,
+            provider_code,
+            retry_after_secs,
+            source,
         }
     }
 
@@ -233,13 +411,25 @@ impl ProviderFailure {
     /// failures are still retried first by the agent's bounded retry policy.
     pub(crate) fn user_action_hint(&self) -> Option<&'static str> {
         match self {
-            Self::Http { status: 401, .. } => Some(
+            Self::Http {
+                code: ProviderErrorCode::Authentication,
+                ..
+            }
+            | Self::Http { status: 401, .. } => Some(
                 "The provider rejected the active credential. Run /authorize to replace it; for Codex, run `codex login` first.",
             ),
-            Self::Http { status: 403, .. } => Some(
+            Self::Http {
+                code: ProviderErrorCode::Permission,
+                ..
+            }
+            | Self::Http { status: 403, .. } => Some(
                 "The account cannot access this request or model. Check account permissions, or choose another model with /model.",
             ),
-            Self::Http { status: 404, .. } => Some(
+            Self::Http {
+                code: ProviderErrorCode::NotFound,
+                ..
+            }
+            | Self::Http { status: 404, .. } => Some(
                 "The selected model or provider endpoint is no longer available. Choose an available target with /model or /provider, then retry.",
             ),
             Self::Transport { .. } => Some(
@@ -268,7 +458,7 @@ fn message_signals_quota_exhaustion(message: &str) -> bool {
 
 #[cfg(test)]
 mod provider_failure_tests {
-    use super::{ProviderFailure, ProviderLimitKind};
+    use super::{ProviderErrorCode, ProviderFailure, ProviderLimitKind};
 
     fn status(error: &ProviderFailure) -> u16 {
         let ProviderFailure::Http { status, .. } = error else {
@@ -279,26 +469,10 @@ mod provider_failure_tests {
 
     #[test]
     fn permanent_provider_failures_include_actionable_hints() {
-        let unauthorized = ProviderFailure::Http {
-            status: 401,
-            message: "expired".to_string(),
-            retry_after_secs: None,
-        };
-        let forbidden = ProviderFailure::Http {
-            status: 403,
-            message: "denied".to_string(),
-            retry_after_secs: None,
-        };
-        let unavailable = ProviderFailure::Http {
-            status: 503,
-            message: "down".to_string(),
-            retry_after_secs: None,
-        };
-        let removed_target = ProviderFailure::Http {
-            status: 404,
-            message: "model not found".to_string(),
-            retry_after_secs: None,
-        };
+        let unauthorized = ProviderFailure::http(401, "expired", None);
+        let forbidden = ProviderFailure::http(403, "denied", None);
+        let unavailable = ProviderFailure::http(503, "down", None);
+        let removed_target = ProviderFailure::http(404, "model not found", None);
         let offline = ProviderFailure::transport("offline");
 
         assert!(
@@ -335,29 +509,29 @@ mod provider_failure_tests {
             ProviderFailure::from_stream_error(Some("requests"), Some("rate_limit_exceeded"), "x");
         assert_eq!(status(&by_code), 429);
         assert!(by_code.is_retryable());
+        let ProviderFailure::Http {
+            code,
+            provider_type,
+            provider_code,
+            ..
+        } = by_code
+        else {
+            panic!("expected HTTP failure")
+        };
+        assert_eq!(code, ProviderErrorCode::RateLimit);
+        assert_eq!(provider_type.as_deref(), Some("requests"));
+        assert_eq!(provider_code.as_deref(), Some("rate_limit_exceeded"));
     }
 
     #[test]
     fn provider_limits_distinguish_transient_rate_limits_from_quota_walls() {
-        let rate_limit = ProviderFailure::Http {
-            status: 429,
-            message: "requests per minute exceeded".to_string(),
-            retry_after_secs: Some(10),
-        };
+        let rate_limit = ProviderFailure::http(429, "requests per minute exceeded", Some(10));
         assert_eq!(rate_limit.limit_kind(), Some(ProviderLimitKind::RateLimit));
         assert!(rate_limit.is_retryable());
 
         for quota in [
-            ProviderFailure::Http {
-                status: 429,
-                message: "code=insufficient_quota".to_string(),
-                retry_after_secs: None,
-            },
-            ProviderFailure::Http {
-                status: 402,
-                message: "payment required".to_string(),
-                retry_after_secs: None,
-            },
+            ProviderFailure::http(429, "code=insufficient_quota", None),
+            ProviderFailure::http(402, "payment required", None),
         ] {
             assert_eq!(quota.limit_kind(), Some(ProviderLimitKind::Quota));
             assert!(!quota.is_retryable());
@@ -376,12 +550,23 @@ mod provider_failure_tests {
 
     #[test]
     fn http_529_is_retryable() {
-        let overloaded = ProviderFailure::Http {
-            status: 529,
-            message: "overloaded".to_string(),
-            retry_after_secs: None,
-        };
+        let overloaded = ProviderFailure::http(529, "overloaded", None);
         assert!(overloaded.is_retryable());
+    }
+
+    #[test]
+    fn structured_codes_take_precedence_over_http_status() {
+        let quota = ProviderFailure::http_with_details(
+            429,
+            "requests blocked",
+            ProviderErrorCode::Quota,
+            None,
+            Some("insufficient_quota".to_string()),
+            None,
+            None,
+        );
+        assert_eq!(quota.limit_kind(), Some(ProviderLimitKind::Quota));
+        assert!(!quota.is_retryable());
     }
 
     #[test]

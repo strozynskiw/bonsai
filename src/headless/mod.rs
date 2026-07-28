@@ -1383,21 +1383,17 @@ mod tests {
                 .lock()
                 .expect("provider scenario lock should remain available");
             match scenario {
-                ProviderScenario::ExpiredAuthorization => Err(ProviderFailure::Http {
-                    status: 401,
-                    message: "credential expired".to_string(),
-                    retry_after_secs: None,
-                }),
+                ProviderScenario::ExpiredAuthorization => {
+                    Err(ProviderFailure::http(401, "credential expired", None))
+                }
                 ProviderScenario::Offline => Err(ProviderFailure::transport("offline")),
                 ProviderScenario::DisconnectAfterOutput => {
                     sink.assistant_delta("discarded partial response");
                     Err(ProviderFailure::transport("connection lost mid-stream"))
                 }
-                ProviderScenario::RemovedTarget => Err(ProviderFailure::Http {
-                    status: 404,
-                    message: "selected model not found".to_string(),
-                    retry_after_secs: None,
-                }),
+                ProviderScenario::RemovedTarget => {
+                    Err(ProviderFailure::http(404, "selected model not found", None))
+                }
                 ProviderScenario::Success => {
                     sink.assistant_delta("recovered response");
                     sink.assistant_done();
@@ -1915,11 +1911,8 @@ mod tests {
 
     #[test]
     fn provider_auth_failure_detail_includes_recovery_action() {
-        let error = anyhow::Error::new(crate::provider::ProviderFailure::Http {
-            status: 401,
-            message: "expired".to_string(),
-            retry_after_secs: None,
-        });
+        let error =
+            anyhow::Error::new(crate::provider::ProviderFailure::http(401, "expired", None));
 
         let detail = crate::provider::agent_failure_detail(&error);
 

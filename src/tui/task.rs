@@ -1455,11 +1455,8 @@ mod tests {
 
     #[test]
     fn provider_auth_failure_detail_includes_recovery_action() {
-        let error = anyhow::Error::new(crate::provider::ProviderFailure::Http {
-            status: 401,
-            message: "expired".to_string(),
-            retry_after_secs: None,
-        });
+        let error =
+            anyhow::Error::new(crate::provider::ProviderFailure::http(401, "expired", None));
 
         let detail = crate::provider::agent_failure_detail(&error);
 

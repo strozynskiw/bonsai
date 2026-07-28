@@ -40,23 +40,23 @@ impl fmt::Display for ModelId {
 }
 
 impl FromStr for ModelId {
-    type Err = ModelIdError;
+    type Err = IdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         if value.trim() != value || value.is_empty() {
-            return Err(ModelIdError::Invalid(value.to_string()));
+            return Err(IdError::InvalidModel(value.to_string()));
         }
         let Some((provider, model)) = value.split_once('/') else {
-            return Err(ModelIdError::MissingSeparator(value.to_string()));
+            return Err(IdError::ModelMissingSeparator(value.to_string()));
         };
         if value.matches('/').count() != 1 {
-            return Err(ModelIdError::ExtraSeparator(value.to_string()));
+            return Err(IdError::ModelExtraSeparator(value.to_string()));
         }
         if provider.is_empty() || model.is_empty() {
-            return Err(ModelIdError::EmptyPart(value.to_string()));
+            return Err(IdError::ModelEmptyPart(value.to_string()));
         }
         if value.chars().any(char::is_whitespace) {
-            return Err(ModelIdError::Invalid(value.to_string()));
+            return Err(IdError::InvalidModel(value.to_string()));
         }
         Ok(Self(value.into()))
     }
@@ -82,15 +82,17 @@ impl<'de> Deserialize<'de> for ModelId {
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub(crate) enum ModelIdError {
+pub(crate) enum IdError {
     #[error("model id must be `provider/model`, got `{0}`")]
-    MissingSeparator(String),
+    ModelMissingSeparator(String),
     #[error("model id must contain exactly one `/`, got `{0}`")]
-    ExtraSeparator(String),
+    ModelExtraSeparator(String),
     #[error("model id must have non-empty provider and model parts, got `{0}`")]
-    EmptyPart(String),
+    ModelEmptyPart(String),
     #[error("model id is invalid: `{0}`")]
-    Invalid(String),
+    InvalidModel(String),
+    #[error("connection id is invalid: `{0}`")]
+    InvalidConnection(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -119,14 +121,14 @@ impl fmt::Display for ConnectionId {
 }
 
 impl FromStr for ConnectionId {
-    type Err = ConnectionIdError;
+    type Err = IdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         if value.trim() != value || value.is_empty() {
-            return Err(ConnectionIdError::Invalid(value.to_string()));
+            return Err(IdError::InvalidConnection(value.to_string()));
         }
         if value.chars().any(char::is_whitespace) || value.contains(['/', ':']) {
-            return Err(ConnectionIdError::Invalid(value.to_string()));
+            return Err(IdError::InvalidConnection(value.to_string()));
         }
         Ok(Self(value.into()))
     }
@@ -151,12 +153,6 @@ impl<'de> Deserialize<'de> for ConnectionId {
     }
 }
 
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub(crate) enum ConnectionIdError {
-    #[error("connection id is invalid: `{0}`")]
-    Invalid(String),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,19 +168,34 @@ mod tests {
 
     #[test]
     fn model_id_rejects_bare_or_malformed_ids() {
-        for value in ["gpt-5.5", "/gpt-5.5", "openai/", "a/b/c", " openai/gpt"] {
-            assert!(
-                value.parse::<ModelId>().is_err(),
-                "{value} should be rejected"
-            );
-        }
+        assert_eq!(
+            "gpt-5.5".parse::<ModelId>(),
+            Err(IdError::ModelMissingSeparator("gpt-5.5".to_string()))
+        );
+        assert_eq!(
+            "/gpt-5.5".parse::<ModelId>(),
+            Err(IdError::ModelEmptyPart("/gpt-5.5".to_string()))
+        );
+        assert_eq!(
+            "openai/".parse::<ModelId>(),
+            Err(IdError::ModelEmptyPart("openai/".to_string()))
+        );
+        assert_eq!(
+            "a/b/c".parse::<ModelId>(),
+            Err(IdError::ModelExtraSeparator("a/b/c".to_string()))
+        );
+        assert_eq!(
+            " openai/gpt".parse::<ModelId>(),
+            Err(IdError::InvalidModel(" openai/gpt".to_string()))
+        );
     }
 
     #[test]
     fn connection_id_rejects_empty_whitespace_and_ambiguous_ids() {
         for value in ["", " ", "open ai", "codex/openai", "codex:openai"] {
-            assert!(
-                value.parse::<ConnectionId>().is_err(),
+            assert_eq!(
+                value.parse::<ConnectionId>(),
+                Err(IdError::InvalidConnection(value.to_string())),
                 "{value} should be rejected"
             );
         }

@@ -86,7 +86,7 @@ impl LspHub {
                 TOOL_REQUEST_TIMEOUT,
             )
             .await?;
-        Ok(protocol::parse_locations(result)?)
+        protocol::parse_locations(result)
     }
 
     pub(crate) async fn references(
@@ -110,7 +110,7 @@ impl LspHub {
                 TOOL_REQUEST_TIMEOUT,
             )
             .await?;
-        Ok(protocol::parse_locations(result)?)
+        protocol::parse_locations(result)
     }
 
     pub(crate) async fn hover(
@@ -132,7 +132,7 @@ impl LspHub {
                 TOOL_REQUEST_TIMEOUT,
             )
             .await?;
-        Ok(protocol::parse_hover(result)?)
+        protocol::parse_hover(result)
     }
 
     pub(crate) async fn workspace_symbol(
@@ -150,7 +150,7 @@ impl LspHub {
                 TOOL_REQUEST_TIMEOUT,
             )
             .await?;
-        Ok(protocol::parse_workspace_symbols(result)?)
+        protocol::parse_workspace_symbols(result)
     }
 
     pub(crate) async fn prepare_rename(
@@ -203,7 +203,7 @@ impl LspHub {
                 TOOL_REQUEST_TIMEOUT,
             )
             .await?;
-        Ok(protocol::parse_workspace_edit(result)?)
+        protocol::parse_workspace_edit(result)
     }
 
     pub(crate) async fn sync_after_files_changed(&self, files: &[PathBuf]) -> Result<(), LspError> {
@@ -401,12 +401,6 @@ pub(crate) enum LspError {
         #[source]
         source: std::io::Error,
     },
-}
-
-impl From<protocol::ProtocolError> for LspError {
-    fn from(value: protocol::ProtocolError) -> Self {
-        Self::Protocol(value.to_string())
-    }
 }
 
 impl From<std::io::Error> for LspError {

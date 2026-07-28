@@ -59,11 +59,11 @@ async fn surface_acceptance_snapshot(surface: SurfaceKind) -> SurfaceAcceptanceS
     let run_cancellation = cancellation.child_token();
     cancellation.cancel();
 
-    let provider_error = anyhow::Error::new(crate::provider::ProviderFailure::Http {
-        status: 401,
-        message: "expired acceptance credential".to_string(),
-        retry_after_secs: None,
-    });
+    let provider_error = anyhow::Error::new(crate::provider::ProviderFailure::http(
+        401,
+        "expired acceptance credential",
+        None,
+    ));
     // A detected loop (repeated identical failure), not mere tool noise: a
     // single unresolved failure no longer demotes a completed run, so the
     // fixture exercises the strong-signal path both surfaces must agree on.

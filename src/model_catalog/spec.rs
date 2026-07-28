@@ -674,10 +674,10 @@ impl TargetSpec {
 fn normalize_target_model(
     connection: &ConnectionId,
     value: &str,
-) -> Result<(ModelId, Option<Box<str>>), ModelIdError> {
+) -> Result<(ModelId, Option<Box<str>>), IdError> {
     match value.parse::<ModelId>() {
         Ok(model) => Ok((model, None)),
-        Err(ModelIdError::MissingSeparator(_)) if is_bare_target_model_alias(value) => {
+        Err(IdError::ModelMissingSeparator(_)) if is_bare_target_model_alias(value) => {
             let model = format!("{}/{}", connection.as_str(), value).parse::<ModelId>()?;
             Ok((model, Some(value.into())))
         }
