@@ -44,7 +44,7 @@ futures = "0.3.33"
 dotenvy = "0.15.7"
 tiktoken-rs = { version = "0.12.0", default-features = false }
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
-base64 = "0.22.1"
+base64 = "0.23.0"
 blake3 = "1"
 ring = "0.17.14"
 semver = "1.0.27"
