@@ -285,14 +285,10 @@ fn drag_action(
 }
 
 fn transcript_drag_action(column: u16, row: u16, app: &AppState, area: Rect) -> Option<AppAction> {
-    if area.contains((column, row).into())
-        && let Some(position) = transcript::position_at(app, area, column, row)
-    {
-        return Some(AppAction::TranscriptDrag {
-            position,
-            scroll_delta: 0,
-        });
-    }
+    // Check the inner viewport before its full frame. Terminal mouse coordinates
+    // cannot travel beyond the screen, and the frame itself is still inside
+    // `area`; treating its top and bottom rows as edge zones keeps selection
+    // scrolling available when the viewport abuts another pane or screen edge.
     if horizontal_contains(area, column)
         && let Some((position, scroll_delta)) = transcript_edge_drag(app, area, column, row)
     {
@@ -301,24 +297,34 @@ fn transcript_drag_action(column: u16, row: u16, app: &AppState, area: Rect) -> 
             scroll_delta,
         });
     }
-    None
-}
-
-fn plan_drag_action(column: u16, row: u16, app: &AppState, area: Rect) -> Option<AppAction> {
     if area.contains((column, row).into())
-        && let Some(position) = plan::position_at(app, area, column, row)
+        && let Some(position) = transcript::position_at(app, area, column, row)
     {
-        return Some(AppAction::PlanDrag {
+        return Some(AppAction::TranscriptDrag {
             position,
             scroll_delta: 0,
         });
     }
+    None
+}
+
+fn plan_drag_action(column: u16, row: u16, app: &AppState, area: Rect) -> Option<AppAction> {
+    // See `transcript_drag_action`: the frame rows must be edge zones too so
+    // selection scrolling works at a screen or adjacent-pane boundary.
     if horizontal_contains(area, column)
         && let Some((position, scroll_delta)) = plan_edge_drag(app, area, column, row)
     {
         return Some(AppAction::PlanDrag {
             position,
             scroll_delta,
+        });
+    }
+    if area.contains((column, row).into())
+        && let Some(position) = plan::position_at(app, area, column, row)
+    {
+        return Some(AppAction::PlanDrag {
+            position,
+            scroll_delta: 0,
         });
     }
     None

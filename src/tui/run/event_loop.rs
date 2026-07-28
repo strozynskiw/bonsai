@@ -24,6 +24,10 @@ const FINAL_PERSISTENCE_TIMEOUT: Duration = Duration::from_millis(1000);
 const EVENT_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 const ACTIVE_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 const IDLE_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
+/// Cadence for continuing a pointer selection held beyond a text viewport edge.
+/// This stays below the active redraw interval so the selection tracks the
+/// pointer without making an idle terminal redraw unnecessarily often.
+const SELECTION_AUTO_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
 const TERMINAL_FAST_EMPTY_POLL: Duration = Duration::from_millis(5);
 const TERMINAL_FAST_EMPTY_POLL_LIMIT: u8 = 16;
 /// Consecutive full-length empty polls that *burned CPU instead of sleeping*
@@ -64,6 +68,12 @@ struct PendingPeerWake {
 struct PendingPeerWaitRecheck {
     wait: crate::agent::PeerWait,
     deadline: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingSelectionAutoScroll {
+    mouse: crossterm::event::MouseEvent,
+    due_at: Instant,
 }
 
 impl PendingPeerWaitRecheck {
@@ -491,17 +501,91 @@ async fn handle_mouse_event(
     terminal: &mut TerminalSession,
     agent: &Arc<Mutex<Agent>>,
     tasks: &TaskController,
-) -> Result<()> {
+) -> Result<Option<crossterm::event::MouseEvent>> {
     clear_ctrl_c_prompt(app, ctrl_c_prompt);
     let area = terminal.terminal_mut().size()?.into();
-    if let Some(action) = map_mouse(mouse, app, area) {
-        if matches!(action, AppAction::OpenContextModal) {
-            open_context_modal_with_preview(app, agent.clone(), tasks.is_busy(), true).await;
-        } else {
-            apply_action_with_task_side_effects(action, app, tasks);
-        }
+    let Some(action) = map_mouse(mouse, app, area) else {
+        return Ok(None);
+    };
+    let selection_scroll_before = selection_auto_scroll_surface(&action)
+        .map(|surface| (surface, selection_surface_scroll(app, surface)));
+    if matches!(action, AppAction::OpenContextModal) {
+        open_context_modal_with_preview(app, agent.clone(), tasks.is_busy(), true).await;
+    } else {
+        apply_action_with_task_side_effects(action, app, tasks);
     }
-    Ok(())
+    let progressed = selection_scroll_before
+        .is_some_and(|(surface, before)| selection_surface_scroll(app, surface) != before);
+    Ok(progressed.then_some(mouse))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelectionAutoScrollSurface {
+    Transcript,
+    Plan,
+}
+
+fn selection_auto_scroll_surface(action: &AppAction) -> Option<SelectionAutoScrollSurface> {
+    match action {
+        AppAction::TranscriptDrag { scroll_delta, .. } if *scroll_delta != 0 => {
+            Some(SelectionAutoScrollSurface::Transcript)
+        }
+        AppAction::PlanDrag { scroll_delta, .. } if *scroll_delta != 0 => {
+            Some(SelectionAutoScrollSurface::Plan)
+        }
+        _ => None,
+    }
+}
+
+fn selection_surface_scroll(app: &AppState, surface: SelectionAutoScrollSurface) -> u16 {
+    match surface {
+        SelectionAutoScrollSurface::Transcript => app.current_scroll(),
+        SelectionAutoScrollSurface::Plan => app.plan_scroll,
+    }
+}
+
+#[cfg(test)]
+mod selection_auto_scroll_tests {
+    use super::*;
+    use crate::tui::app::{PlanPosition, TranscriptPosition};
+
+    #[test]
+    fn identifies_only_edge_drag_actions() {
+        let transcript_edge = AppAction::TranscriptDrag {
+            position: TranscriptPosition {
+                item: 0,
+                grapheme: 0,
+                width: 80,
+            },
+            scroll_delta: 1,
+        };
+        let transcript_in_view = AppAction::TranscriptDrag {
+            position: TranscriptPosition {
+                item: 0,
+                grapheme: 0,
+                width: 80,
+            },
+            scroll_delta: 0,
+        };
+        let plan_edge = AppAction::PlanDrag {
+            position: PlanPosition {
+                line: 0,
+                grapheme: 0,
+                width: 80,
+            },
+            scroll_delta: -1,
+        };
+
+        assert!(matches!(
+            selection_auto_scroll_surface(&transcript_edge),
+            Some(SelectionAutoScrollSurface::Transcript)
+        ));
+        assert!(selection_auto_scroll_surface(&transcript_in_view).is_none());
+        assert!(matches!(
+            selection_auto_scroll_surface(&plan_edge),
+            Some(SelectionAutoScrollSurface::Plan)
+        ));
+    }
 }
 
 /// Handle a bracketed-paste event for the frame: route it to the active modal's
@@ -2474,6 +2558,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     let mut next_persistence_flush = Instant::now();
     let mut redraw_requested = true;
     let mut next_redraw_at = Instant::now();
+    let mut pending_selection_auto_scroll: Option<PendingSelectionAutoScroll> = None;
     let mut last_active_persona = app.active_persona.clone();
     let mut persisted_signatures = PersistedSnapshotSignatures {
         transcript: transcript_signature(app.transcript.as_slice()),
@@ -2595,6 +2680,27 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             break 'run Ok(());
         }
         clear_expired_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt, Instant::now());
+        if let Some(pending) = pending_selection_auto_scroll
+            && app.pointer_selecting
+            && Instant::now() >= pending.due_at
+        {
+            pending_selection_auto_scroll = handle_mouse_event(
+                pending.mouse,
+                &mut app,
+                &mut ctrl_c_prompt,
+                &mut terminal,
+                &agent,
+                &tasks,
+            )
+            .await?
+            .map(|mouse| PendingSelectionAutoScroll {
+                mouse,
+                due_at: Instant::now() + SELECTION_AUTO_SCROLL_INTERVAL,
+            });
+            frame_needs_redraw = true;
+        } else if !app.pointer_selecting {
+            pending_selection_auto_scroll = None;
+        }
         let mut changed_files = Vec::new();
         frame_needs_redraw |= apply_ui_events_for_frame(
             &mut app,
@@ -2943,8 +3049,9 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             // Pointer motion is discarded wholesale (see
             // `terminal_event_is_pointer_motion`): it must not request a
             // redraw, clear the Ctrl+C prompt, or pay the terminal-size ioctl.
-            let terminal_event =
-                terminal_event.filter(|event| !terminal_event_is_pointer_motion(event));
+            let terminal_event = terminal_event.filter(|event| {
+                pending_selection_auto_scroll.is_some() || !terminal_event_is_pointer_motion(event)
+            });
             if let Some(terminal_event) = terminal_event {
                 redraw_requested = true;
                 if terminal_event_requests_immediate_redraw(&terminal_event) {
@@ -3096,15 +3203,34 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                         }
                     }
                     Event::Mouse(mouse) => {
-                        handle_mouse_event(
-                            mouse,
-                            &mut app,
-                            &mut ctrl_c_prompt,
-                            &mut terminal,
-                            &agent,
-                            &tasks,
-                        )
-                        .await?;
+                        // While edge auto-scroll is armed, all-motion events update
+                        // its stored pointer position. The timer above applies the
+                        // drag at a fixed cadence, rather than scrolling at the
+                        // terminal's potentially much higher motion-event rate.
+                        if matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
+                            && let Some(pending) = pending_selection_auto_scroll.as_mut()
+                        {
+                            pending.mouse = crossterm::event::MouseEvent {
+                                kind: crossterm::event::MouseEventKind::Drag(
+                                    crossterm::event::MouseButton::Left,
+                                ),
+                                ..mouse
+                            };
+                        } else {
+                            pending_selection_auto_scroll = handle_mouse_event(
+                                mouse,
+                                &mut app,
+                                &mut ctrl_c_prompt,
+                                &mut terminal,
+                                &agent,
+                                &tasks,
+                            )
+                            .await?
+                            .map(|mouse| PendingSelectionAutoScroll {
+                                mouse,
+                                due_at: Instant::now() + SELECTION_AUTO_SCROLL_INTERVAL,
+                            });
+                        }
                     }
                     Event::Paste(text) => {
                         handle_paste_event(

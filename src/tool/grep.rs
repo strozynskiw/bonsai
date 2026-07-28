@@ -84,15 +84,16 @@ fn default_max_chars() -> usize {
 /// ripgrep-flavored schemas other harnesses import), mapped onto bonsai's
 /// canonical field names. Models trained on those harnesses send these names
 /// with identical semantics — `output_mode` carries bonsai's `mode` enum
-/// values, `include` carries a `glob`. Without the mapping the call is bounced
-/// with a rejected-fields error, wasting the turn and feeding the completion
-/// report's failure evidence — and a model that keeps resending the same alias
-/// shape trips the repeated-failure loop signal (see
-/// `completion_report::classify_completion_status`). Both aliases observed
-/// live during SWE-bench canary
-/// runs (mimo). Deliberate coerce-or-guide accommodation of a cross-harness
-/// naming split — do not "simplify" away. Mirrors `coerce_line_range_aliases`
-/// in read.rs.
+/// values, `include` carries a `glob`, and `head_limit` carries `limit` (often
+/// encoded as a numeric string). Without the mapping the call is bounced with a
+/// rejected-fields error, wasting the turn and feeding the completion report's
+/// failure evidence — and a model that keeps resending the same alias shape
+/// trips the repeated-failure loop signal (see
+/// `completion_report::classify_completion_status`). `output_mode` and
+/// `include` were observed during live SWE-bench canary runs (mimo);
+/// `head_limit` appeared in persisted coding sessions. Deliberate
+/// coerce-or-guide accommodation of a cross-harness naming split — do not
+/// "simplify" away. Mirrors `coerce_line_range_aliases` in read.rs.
 const GREP_ALIASES: &[(&str, &str)] = &[("output_mode", "mode"), ("include", "glob")];
 
 fn coerce_grep_aliases(args: &mut serde_json::Value) -> Vec<RepairNote> {
@@ -117,6 +118,23 @@ fn coerce_grep_aliases(args: &mut serde_json::Value) -> Vec<RepairNote> {
         }
         notes.push(RepairNote {
             field: (*alias).to_string(),
+            action: RepairAction::MappedAliasField,
+        });
+    }
+    let head_limit = object.get("head_limit").and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+        })
+    });
+    if let Some(head_limit) = head_limit {
+        object.remove("head_limit");
+        if !object.contains_key("limit") {
+            object.insert("limit".to_string(), head_limit.into());
+        }
+        notes.push(RepairNote {
+            field: "head_limit".to_string(),
             action: RepairAction::MappedAliasField,
         });
     }
@@ -582,14 +600,22 @@ mod tests {
     }
 
     #[test]
+    fn head_limit_alias_maps_numeric_string_onto_limit() {
+        let mut args = json!({"pattern": "needle", "head_limit": "25"});
+        let notes = coerce_grep_aliases(&mut args);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(args, json!({"pattern": "needle", "limit": 25}));
+    }
+
+    #[test]
     fn canonical_grep_fields_win_over_aliases() {
         // Canonical fields win; the redundant aliases are dropped so they can't
         // bounce an otherwise-correct call on rejected-fields.
-        let mut args = json!({"pattern": "n", "mode": "count", "output_mode": "content", "glob": "*.rs", "include": "*.py"});
+        let mut args = json!({"pattern": "n", "mode": "count", "output_mode": "content", "glob": "*.rs", "include": "*.py", "limit": 7, "head_limit": "25"});
         coerce_grep_aliases(&mut args);
         assert_eq!(
             args,
-            json!({"pattern": "n", "mode": "count", "glob": "*.rs"})
+            json!({"pattern": "n", "mode": "count", "glob": "*.rs", "limit": 7})
         );
     }
 
