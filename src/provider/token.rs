@@ -119,6 +119,68 @@ pub struct ModelPricing {
     pub cache_write_micros_per_million: Option<u64>,
 }
 
+/// One context-length pricing tier for a model.
+///
+/// The tier applies to the entire request when the provider-reported prompt
+/// token count is strictly greater than `above_input_tokens`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelPricingTier {
+    pub above_input_tokens: u32,
+    pub pricing: ModelPricing,
+}
+
+/// A model's base token rates plus any prompt-length-dependent tiers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPricingSchedule {
+    base: ModelPricing,
+    tiers: Box<[ModelPricingTier]>,
+}
+
+impl ModelPricingSchedule {
+    /// Builds a schedule from base rates and ordered input-size tiers.
+    pub fn new(base: ModelPricing, mut tiers: Vec<ModelPricingTier>) -> Self {
+        tiers.retain(|tier| tier.above_input_tokens > 0);
+        tiers.sort_by_key(|tier| tier.above_input_tokens);
+        tiers.dedup_by_key(|tier| tier.above_input_tokens);
+        Self {
+            base,
+            tiers: tiers.into_boxed_slice(),
+        }
+    }
+
+    /// Builds a schedule with one rate at every prompt length.
+    pub fn flat(pricing: ModelPricing) -> Self {
+        Self::new(pricing, Vec::new())
+    }
+
+    /// Returns the rates used at and below the first tier threshold.
+    pub const fn base(&self) -> ModelPricing {
+        self.base
+    }
+
+    /// Selects rates from the provider-reported prompt-token count.
+    pub fn pricing_for_prompt_tokens(&self, prompt_tokens: u32) -> ModelPricing {
+        self.tiers
+            .iter()
+            .rev()
+            .find(|tier| prompt_tokens > tier.above_input_tokens)
+            .map(|tier| tier.pricing)
+            .unwrap_or(self.base)
+    }
+
+    /// Selects the display rate appropriate for a configured context window.
+    pub fn pricing_for_context_window(&self, context_window: Option<u32>) -> ModelPricing {
+        context_window
+            .map(|tokens| self.pricing_for_prompt_tokens(tokens))
+            .unwrap_or(self.base)
+    }
+
+    /// Selects rates from the prompt-token count in one completed response.
+    pub fn pricing_for_usage(&self, usage: TokenUsage) -> ModelPricing {
+        self.pricing_for_prompt_tokens(usage.prompt_tokens)
+    }
+}
+
 impl ModelPricing {
     pub const fn new(input_micros_per_million: u64, output_micros_per_million: u64) -> Self {
         Self {
@@ -204,7 +266,7 @@ impl ModelPricing {
 pub struct PromptEstimator {
     model: String,
     kind: TokenCounterKind,
-    pricing: Option<ModelPricing>,
+    pricing: Option<ModelPricingSchedule>,
     anthropic: Option<AnthropicCountTokensClient>,
 }
 
@@ -225,7 +287,7 @@ impl PromptEstimator {
         Self {
             model,
             kind,
-            pricing: metadata.pricing,
+            pricing: metadata.pricing.map(ModelPricingSchedule::flat),
             anthropic,
         }
     }
@@ -243,7 +305,7 @@ impl PromptEstimator {
         Self {
             model: resolved.remote_model_id.to_string(),
             kind,
-            pricing: resolved.pricing,
+            pricing: resolved.pricing_schedule.clone(),
             anthropic,
         }
     }
@@ -266,13 +328,13 @@ impl PromptEstimator {
         Self {
             model: model.into(),
             kind,
-            pricing,
+            pricing: pricing.map(ModelPricingSchedule::flat),
             anthropic: None,
         }
     }
 
-    pub const fn pricing(&self) -> Option<ModelPricing> {
-        self.pricing
+    pub fn pricing(&self) -> Option<&ModelPricingSchedule> {
+        self.pricing.as_ref()
     }
 
     pub(crate) fn cache_key(&self) -> PromptEstimatorCacheKey {
@@ -856,6 +918,31 @@ mod tests {
         };
 
         assert_eq!(pricing.cost_micros_for_usage(usage), 3_997_500);
+    }
+
+    #[test]
+    fn pricing_schedule_switches_only_above_each_input_threshold() {
+        let base = ModelPricing::new(1_000_000, 2_000_000);
+        let medium = ModelPricing::new(3_000_000, 4_000_000);
+        let high = ModelPricing::new(5_000_000, 6_000_000);
+        let schedule = ModelPricingSchedule::new(
+            base,
+            vec![
+                ModelPricingTier {
+                    above_input_tokens: 400_000,
+                    pricing: high,
+                },
+                ModelPricingTier {
+                    above_input_tokens: 200_000,
+                    pricing: medium,
+                },
+            ],
+        );
+
+        assert_eq!(schedule.pricing_for_prompt_tokens(200_000), base);
+        assert_eq!(schedule.pricing_for_prompt_tokens(200_001), medium);
+        assert_eq!(schedule.pricing_for_prompt_tokens(400_000), medium);
+        assert_eq!(schedule.pricing_for_prompt_tokens(400_001), high);
     }
 
     #[test]

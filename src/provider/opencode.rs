@@ -163,6 +163,10 @@ pub struct OpenAiCompatibleProvider {
     /// Native reasoning captured for assistant tool-call turns, keyed by the
     /// first call id so it can be restored when that turn re-enters history.
     reasoning_by_call_id: std::sync::Mutex<HashMap<String, String>>,
+    /// Provider-specific metadata captured on streamed tool calls and replayed
+    /// on the matching assistant tool-call entry. Gemini 3 places its required
+    /// encrypted thought signature under `extra_content`.
+    tool_call_extra_content_by_id: std::sync::Mutex<HashMap<String, Value>>,
     last_request_diagnostics: std::sync::Mutex<Option<ProviderRequestDiagnostics>>,
 }
 
@@ -206,6 +210,7 @@ impl OpenAiCompatibleProvider {
             supports_vision: target.supports_vision || capabilities.supports_vision,
             prompt_cache_key: crate::provider::new_conversation_cache_key(),
             reasoning_by_call_id: std::sync::Mutex::new(HashMap::new()),
+            tool_call_extra_content_by_id: std::sync::Mutex::new(HashMap::new()),
             last_request_diagnostics: std::sync::Mutex::new(None),
         }
     }
@@ -308,6 +313,13 @@ impl OpenAiCompatibleProvider {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("reasoning replay state lock is poisoned"))?;
             ensure_reasoning_content_on_tool_call_messages(&mut body, &reasoning_by_call_id);
+        }
+        {
+            let extra_content_by_call_id = self
+                .tool_call_extra_content_by_id
+                .lock()
+                .map_err(|_| anyhow::anyhow!("tool-call metadata replay state lock is poisoned"))?;
+            ensure_tool_call_extra_content(&mut body, &extra_content_by_call_id);
         }
         // After the reasoning echo: `reasoning_by_call_id` is keyed by original
         // wire ids, so the lookup must run before duplicates are renamed.
@@ -435,6 +447,34 @@ fn ensure_reasoning_content_on_tool_call_messages(
         message
             .entry("reasoning_content")
             .or_insert_with(|| Value::String(reasoning));
+    }
+}
+
+/// Replay provider-returned tool-call metadata on its exact assistant call.
+///
+/// Gemini 3 validates the encrypted `extra_content.google.thought_signature`
+/// on every function-call step in the current user turn. Other compatible
+/// providers either omit `extra_content` or receive only fields they returned,
+/// so preserving it is safe and protocol-generic.
+fn ensure_tool_call_extra_content(
+    body: &mut Value,
+    extra_content_by_call_id: &HashMap<String, Value>,
+) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(tool_calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for tool_call in tool_calls {
+            let Some(id) = tool_call.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(extra_content) = extra_content_by_call_id.get(id) {
+                tool_call["extra_content"] = extra_content.clone();
+            }
+        }
     }
 }
 
@@ -796,7 +836,26 @@ impl Provider for OpenAiCompatibleProvider {
             &sink,
         ));
 
-        let tool_calls = tool_call_accumulator.into_tool_calls();
+        let accumulated_tool_calls = tool_call_accumulator.into_tool_calls_with_extra_content();
+        let mut captured_extra_content = Vec::new();
+        let tool_calls = accumulated_tool_calls
+            .into_iter()
+            .map(|tool_call| {
+                if let Some(extra_content) = tool_call.extra_content {
+                    captured_extra_content.push((tool_call.call.id.clone(), extra_content));
+                }
+                tool_call.call
+            })
+            .collect::<Vec<_>>();
+        if !interrupted && !captured_extra_content.is_empty() {
+            let mut extra_content_by_call_id =
+                self.tool_call_extra_content_by_id.lock().map_err(|_| {
+                    crate::provider::ProviderFailure::transport(
+                        "tool-call metadata replay state lock is poisoned",
+                    )
+                })?;
+            extra_content_by_call_id.extend(captured_extra_content);
+        }
         // Only `reasoning_content`-echoing backends replay reasoning (see
         // `streaming::stash_reasoning_for_replay` for the keying contract).
         if self.echoes_reasoning_content && !interrupted {
@@ -2193,6 +2252,56 @@ mod tests {
         assert_eq!(
             body["messages"][0]["reasoning_content"],
             serde_json::json!("inspect the file")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_tool_call_extra_content_is_replayed_with_its_turn() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"encrypted-signature\"}}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server)
+            .await;
+
+        let session = provider_session("sk-test", &server.uri(), "gemini-3.6-flash");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN,
+        );
+
+        let response = provider
+            .chat_stream(
+                &[],
+                &[],
+                CancellationToken::new(),
+                std::sync::Arc::new(crate::output::StdoutSink),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.tool_calls[0].id, "call_1");
+
+        let history = [
+            tool_call_message("call_1", "read", "{\"path\":\"Cargo.toml\"}"),
+            crate::provider::test_utils::tool_result_message("call_1", "contents"),
+        ];
+        let body = provider.request_body(&history, &[]).unwrap();
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["extra_content"],
+            serde_json::json!({
+                "google": {"thought_signature": "encrypted-signature"}
+            })
         );
     }
 

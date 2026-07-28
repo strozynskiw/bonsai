@@ -274,8 +274,11 @@ impl Agent {
             ttft_ms: None,
             prefix_hash: None,
         };
-        self.usage
-            .record(call.usage, self.prompt_estimator.pricing(), diagnostics);
+        self.usage.record_with_pricing_schedule(
+            call.usage,
+            self.prompt_estimator.pricing(),
+            diagnostics,
+        );
         if call.interrupted {
             return Err(CompactionCancelled.into());
         }

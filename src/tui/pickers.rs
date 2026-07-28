@@ -462,6 +462,7 @@ mod tests {
                 reasoning_options: None,
                 features: Vec::new(),
                 pricing: None,
+                pricing_tiers: Vec::new(),
                 roles: Vec::new(),
                 pinned: false,
                 pinned_fields: Vec::new(),

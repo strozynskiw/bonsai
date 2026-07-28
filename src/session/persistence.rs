@@ -658,6 +658,7 @@ mod tests {
                 reasoning_options: None,
                 features: vec![crate::model_catalog::ModelFeature::ToolCall],
                 pricing: None,
+                pricing_tiers: Vec::new(),
                 roles: Vec::new(),
                 pinned: false,
                 pinned_fields: Vec::new(),

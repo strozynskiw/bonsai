@@ -41,7 +41,8 @@ pub(crate) use request_preview::{
 };
 pub(crate) use token::PromptEstimatorCacheKey;
 pub use token::{
-    EstimateConfidence, ModelPricing, PromptEstimate, PromptEstimator, TokenCounterKind,
+    EstimateConfidence, ModelPricing, ModelPricingSchedule, ModelPricingTier, PromptEstimate,
+    PromptEstimator, TokenCounterKind,
 };
 
 use anyhow::Result;

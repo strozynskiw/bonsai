@@ -162,12 +162,28 @@ impl SessionUsage {
     /// Record real token usage from a provider response into the last-turn and
     /// session totals. `pricing` prices the turn when the model has pricing
     /// metadata; its absence marks the session cost as no longer fully known.
+    #[cfg(test)]
     pub(super) fn record(
         &mut self,
         usage: Option<TokenUsage>,
         pricing: Option<ModelPricing>,
         diagnostics: UsageTurnDiagnostics,
     ) {
+        let schedule = pricing.map(ModelPricingSchedule::flat);
+        self.record_with_pricing_schedule(usage, schedule.as_ref(), diagnostics);
+    }
+
+    pub(super) fn record_with_pricing_schedule(
+        &mut self,
+        usage: Option<TokenUsage>,
+        pricing: Option<&ModelPricingSchedule>,
+        diagnostics: UsageTurnDiagnostics,
+    ) {
+        let pricing = pricing.map(|schedule| {
+            usage
+                .map(|usage| schedule.pricing_for_usage(usage))
+                .unwrap_or_else(|| schedule.base())
+        });
         self.last_usage = usage;
         self.last_turn_cost_micros = None;
         self.last_turn_no_cache_cost_micros = None;
@@ -639,7 +655,9 @@ mod tests {
         ContextRewriteKind, ExecutionLane, ExecutionLaneKind, UsageTotals, UsageTurn,
         UsageTurnStatus,
     };
-    use crate::provider::{InputCacheUsage, ModelPricing, TokenUsage};
+    use crate::provider::{
+        InputCacheUsage, ModelPricing, ModelPricingSchedule, ModelPricingTier, TokenUsage,
+    };
 
     fn pricing() -> ModelPricing {
         ModelPricing::new(3_000_000, 15_000_000).with_cache_rates(Some(300_000), Some(3_750_000))
@@ -690,6 +708,40 @@ mod tests {
             UsageTurnDiagnostics::default(),
         );
         assert_eq!(usage.last_turn_savings_micros(), Some(0));
+    }
+
+    #[test]
+    fn tiered_pricing_uses_actual_prompt_tokens_for_the_whole_turn() {
+        let base = ModelPricing::new(2_000_000, 12_000_000).with_cache_rates(Some(200_000), None);
+        let high = ModelPricing::new(4_000_000, 18_000_000).with_cache_rates(Some(400_000), None);
+        let schedule = ModelPricingSchedule::new(
+            base,
+            vec![ModelPricingTier {
+                above_input_tokens: 200_000,
+                pricing: high,
+            }],
+        );
+        let high_tier_usage = TokenUsage {
+            prompt_tokens: 300_000,
+            completion_tokens: 100_000,
+            input_cache: Some(InputCacheUsage::new(100_000, 0, 300_000)),
+        };
+        let mut usage = SessionUsage::default();
+
+        usage.record_with_pricing_schedule(
+            Some(high_tier_usage),
+            Some(&schedule),
+            UsageTurnDiagnostics::default(),
+        );
+
+        assert_eq!(
+            usage.last_turn_cost_micros,
+            Some(high.cost_micros_for_usage(high_tier_usage))
+        );
+        assert_ne!(
+            usage.last_turn_cost_micros,
+            Some(base.cost_micros_for_usage(high_tier_usage))
+        );
     }
 
     #[test]

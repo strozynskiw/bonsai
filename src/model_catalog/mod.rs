@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::model_role::LegacyModelRole;
 use crate::provider::{
-    ModelPricing, ParameterPreview, ProviderMetadata, ReasoningCodec, ReasoningEffort,
-    ReasoningOption, ReasoningSelection, TokenCounterKind,
+    ModelPricing, ModelPricingSchedule, ParameterPreview, ProviderMetadata, ReasoningCodec,
+    ReasoningEffort, ReasoningOption, ReasoningSelection, TokenCounterKind,
 };
 
 mod availability;
@@ -281,6 +281,12 @@ pub(crate) enum CatalogError {
         connection_id: ConnectionId,
         first: ModelId,
         second: ModelId,
+    },
+    #[error("target `{connection_id}:{model_id}` has invalid pricing tiers: {message}")]
+    InvalidPricingTiers {
+        connection_id: ConnectionId,
+        model_id: ModelId,
+        message: String,
     },
     #[error("unknown connection `{id}`")]
     UnknownConnection { id: ConnectionId },
@@ -671,6 +677,7 @@ impl ModelCatalog {
             reasoning_options: None,
             features,
             pricing: None,
+            pricing_tiers: Vec::new(),
             roles: Vec::new(),
             pinned: false,
             pinned_fields: Vec::new(),
@@ -1191,6 +1198,7 @@ pub(crate) struct ResolvedModel {
     pub output_limit: Option<u32>,
     pub token_counter: Option<TokenCounterKind>,
     pub pricing: Option<ModelPricing>,
+    pub pricing_schedule: Option<ModelPricingSchedule>,
     pub reasoning_options: Vec<ReasoningOption>,
     pub parameter_preview: Vec<ParameterPreview>,
     pub features: Vec<ModelFeature>,
@@ -1313,14 +1321,22 @@ fn models_dev_drift_lines(target: &TargetSpec, models_dev_model: &ModelsDevModel
     {
         mismatches.push(format!("output_limit {toml} vs models.dev {live}"));
     }
-    if !target.pins(ModelMetadataField::Pricing)
-        && let (Some(toml), Some(live)) = (
-            target.pricing,
-            models_dev_model.pricing_for_context_window(target.context_window),
-        )
-        && toml != live
-    {
-        mismatches.push("pricing differs from models.dev".to_string());
+    if !target.pins(ModelMetadataField::Pricing) {
+        let toml_schedule = target
+            .pricing
+            .map(|base| ModelPricingSchedule::new(base, target.pricing_tiers.clone()));
+        let live_schedule = models_dev_model.pricing_schedule();
+        let differs = match (toml_schedule, live_schedule) {
+            (Some(toml), Some(live)) if target.pricing_tiers.is_empty() => {
+                toml.pricing_for_context_window(target.context_window)
+                    != live.pricing_for_context_window(target.context_window)
+            }
+            (Some(toml), Some(live)) => toml != live,
+            _ => false,
+        };
+        if differs {
+            mismatches.push("pricing differs from models.dev".to_string());
+        }
     }
     mismatches
 }
@@ -1527,12 +1543,22 @@ fn resolve_target(
         live.and_then(|model| model.context_window),
         models_dev.and_then(|model| model.context_window),
     );
-    let (pricing, pricing_source) = choose_refreshed_metadata(
+    let catalog_pricing = target
+        .pricing
+        .map(|base| ModelPricingSchedule::new(base, target.pricing_tiers.clone()));
+    let live_pricing = live
+        .and_then(|model| model.pricing)
+        .map(ModelPricingSchedule::flat);
+    let models_dev_pricing = models_dev.and_then(ModelsDevModel::pricing_schedule);
+    let (pricing_schedule, pricing_source) = choose_refreshed_metadata(
         target.pins(ModelMetadataField::Pricing),
-        target.pricing,
-        live.and_then(|model| model.pricing),
-        models_dev.and_then(|model| model.pricing_for_context_window(context_window)),
+        catalog_pricing,
+        live_pricing,
+        models_dev_pricing,
     );
+    let pricing = pricing_schedule
+        .as_ref()
+        .map(|schedule| schedule.pricing_for_context_window(context_window));
     let (display_name, display_name_source) = choose_refreshed_metadata(
         target.pins(ModelMetadataField::DisplayName),
         target.display_name.clone(),
@@ -1565,6 +1591,7 @@ fn resolve_target(
         // fallback. This makes `/refresh` update prices without sacrificing a
         // usable catalog when every remote source is unavailable.
         pricing,
+        pricing_schedule,
         reasoning_options,
         parameter_preview,
         features,
@@ -1624,6 +1651,33 @@ fn validate_catalog(
             });
         }
 
+        if !target.pricing_tiers.is_empty() {
+            if target.pricing.is_none() {
+                return Err(CatalogError::InvalidPricingTiers {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: "tiered rates require base pricing".to_string(),
+                });
+            }
+            let mut thresholds = HashSet::new();
+            for tier in &target.pricing_tiers {
+                if tier.above_input_tokens == 0 {
+                    return Err(CatalogError::InvalidPricingTiers {
+                        connection_id: target.connection.clone(),
+                        model_id: target.model.clone(),
+                        message: "thresholds must be greater than zero".to_string(),
+                    });
+                }
+                if !thresholds.insert(tier.above_input_tokens) {
+                    return Err(CatalogError::InvalidPricingTiers {
+                        connection_id: target.connection.clone(),
+                        model_id: target.model.clone(),
+                        message: format!("duplicate threshold {}", tier.above_input_tokens),
+                    });
+                }
+            }
+        }
+
         if target.enabled
             && target.is_default
             && let Some(first) =
@@ -1661,7 +1715,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 195);
+        assert_eq!(catalog.targets.len(), 201);
         assert!(
             catalog
                 .connections
@@ -2452,7 +2506,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 195);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 201);
 
         let cases = [
             EquivalenceCase {
@@ -3685,6 +3739,105 @@ default_base_url = "http://localhost:11434/v1"
             .expect("the previous default selector must keep working");
         assert_eq!(legacy.model_id.as_str(), "openai/gpt-5.6-sol");
         assert_eq!(legacy.remote_model_id.as_ref(), "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn gemini_builtin_exposes_current_lineup_context_profiles_and_tier_pricing() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let gemini_id = connection_id("gemini");
+        let connection = catalog.connection(&gemini_id).unwrap();
+        assert_eq!(connection.discovery, DiscoveryKind::Gemini);
+        assert!(!connection.prompt_cache);
+        assert_eq!(
+            connection.default_model.as_ref().map(ModelId::as_str),
+            Some("gemini/gemini-3.1-pro-preview-customtools")
+        );
+        assert_eq!(
+            catalog.available_models_for_connection(&gemini_id, Vec::new()),
+            vec![
+                "gemini-3.1-pro-preview-customtools",
+                "gemini/gemini-3.1-pro-preview-customtools-1m",
+                "gemini-3.1-pro-preview",
+                "gemini/gemini-3.1-pro-preview-1m",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
+                "gemini-3.5-flash-lite",
+                "gemini-3.1-flash-lite",
+                "gemini-2.5-pro",
+                "gemini/gemini-2.5-pro-1m",
+                "gemini-2.5-flash",
+            ]
+        );
+
+        let short = catalog
+            .resolve(
+                &gemini_id,
+                &model_id("gemini/gemini-3.1-pro-preview-customtools"),
+            )
+            .unwrap();
+        let long = catalog
+            .resolve(
+                &gemini_id,
+                &model_id("gemini/gemini-3.1-pro-preview-customtools-1m"),
+            )
+            .unwrap();
+        assert_eq!(short.remote_model_id, long.remote_model_id);
+        assert_eq!(short.context_window, Some(200_000));
+        assert_eq!(long.context_window, Some(1_048_576));
+        assert_eq!(
+            short
+                .pricing
+                .map(|pricing| pricing.input_micros_per_million),
+            Some(2_000_000)
+        );
+        assert_eq!(
+            long.pricing.map(|pricing| pricing.input_micros_per_million),
+            Some(4_000_000)
+        );
+        let schedule = long.pricing_schedule.as_ref().expect("tier pricing");
+        assert_eq!(
+            schedule
+                .pricing_for_prompt_tokens(200_000)
+                .input_micros_per_million,
+            2_000_000
+        );
+        assert_eq!(
+            schedule
+                .pricing_for_prompt_tokens(200_001)
+                .input_micros_per_million,
+            4_000_000
+        );
+        assert!(
+            !long
+                .reasoning_selections()
+                .contains(&ReasoningSelection::Off)
+        );
+
+        let flash = catalog
+            .resolve(&gemini_id, &model_id("gemini/gemini-3.6-flash"))
+            .unwrap();
+        assert!(
+            flash
+                .reasoning_selections()
+                .contains(&ReasoningSelection::Minimal)
+        );
+        for feature in [
+            ModelFeature::ToolCall,
+            ModelFeature::Reasoning,
+            ModelFeature::StructuredOutput,
+            ModelFeature::Attachment,
+        ] {
+            assert!(flash.features.contains(&feature), "{feature:?}");
+        }
+
+        let legacy_flash = catalog
+            .resolve(&gemini_id, &model_id("gemini/gemini-2.5-flash"))
+            .unwrap();
+        assert!(
+            legacy_flash
+                .reasoning_selections()
+                .contains(&ReasoningSelection::Off)
+        );
     }
 
     #[test]

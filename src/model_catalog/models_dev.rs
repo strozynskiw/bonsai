@@ -3,7 +3,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::de;
 use serde::{Deserialize, Deserializer};
 
-use crate::provider::{ModelPricing, ReasoningEffort, ReasoningOption, ReasoningSelection};
+use crate::provider::{
+    ModelPricing, ModelPricingSchedule, ModelPricingTier, ReasoningEffort, ReasoningOption,
+    ReasoningSelection,
+};
 
 use super::*;
 
@@ -59,7 +62,7 @@ pub(crate) struct ModelsDevModel {
     pub context_window: Option<u32>,
     pub output_limit: Option<u32>,
     pub pricing: Option<ModelPricing>,
-    context_pricing: Vec<ContextPricingTier>,
+    context_pricing: Vec<ModelPricingTier>,
 }
 
 impl ModelsDevModel {
@@ -106,33 +109,20 @@ impl ModelsDevModel {
         reasoning_options_for_transport(&self.reasoning_options, transport)
     }
 
-    /// Return the price that applies to a target's configured context window.
-    ///
-    /// Models.dev publishes threshold tiers for models whose entire request is
-    /// repriced above a prompt-size boundary (OpenAI's 1.05M models are the
-    /// first direct-provider example). Bonsai represents each price band as a
-    /// separate target, so `/refresh` must choose the matching tier instead of
-    /// applying the base price to every target.
+    /// Return the display price for a configured context-window profile.
+    #[cfg(test)]
     pub(crate) fn pricing_for_context_window(
         &self,
         context_window: Option<u32>,
     ) -> Option<ModelPricing> {
-        context_window
-            .and_then(|window| {
-                self.context_pricing
-                    .iter()
-                    .filter(|tier| window > tier.above_tokens)
-                    .max_by_key(|tier| tier.above_tokens)
-                    .map(|tier| tier.pricing)
-            })
-            .or(self.pricing)
+        self.pricing_schedule()
+            .map(|schedule| schedule.pricing_for_context_window(context_window))
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ContextPricingTier {
-    above_tokens: u32,
-    pricing: ModelPricing,
+    pub(crate) fn pricing_schedule(&self) -> Option<ModelPricingSchedule> {
+        self.pricing
+            .map(|base| ModelPricingSchedule::new(base, self.context_pricing.clone()))
+    }
 }
 
 pub(crate) fn reasoning_selections_from_options(
@@ -630,7 +620,7 @@ struct RawModelsDevTierSelector {
 }
 
 impl RawModelsDevCost {
-    fn into_pricing(self) -> (Option<ModelPricing>, Vec<ContextPricingTier>) {
+    fn into_pricing(self) -> (Option<ModelPricing>, Vec<ModelPricingTier>) {
         let pricing = self.rates.pricing();
         let mut context_pricing = self
             .tiers
@@ -642,13 +632,13 @@ impl RawModelsDevCost {
                 }
                 let above_tokens = selector.size.filter(|size| *size > 0)?;
                 let pricing = tier.rates.pricing()?;
-                Some(ContextPricingTier {
-                    above_tokens,
+                Some(ModelPricingTier {
+                    above_input_tokens: above_tokens,
                     pricing,
                 })
             })
             .collect::<Vec<_>>();
-        context_pricing.sort_by_key(|tier| tier.above_tokens);
+        context_pricing.sort_by_key(|tier| tier.above_input_tokens);
         (pricing, context_pricing)
     }
 }
@@ -1092,6 +1082,9 @@ mod tests {
             model.pricing_for_context_window(Some(1_050_000)),
             Some(long)
         );
+        let schedule = model.pricing_schedule().expect("pricing schedule");
+        assert_eq!(schedule.pricing_for_prompt_tokens(272_000), base);
+        assert_eq!(schedule.pricing_for_prompt_tokens(272_001), long);
     }
 
     #[test]

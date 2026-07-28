@@ -240,3 +240,41 @@ pub(crate) fn binding_matches_binding(
 ) -> bool {
     left.matches_binding(right)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_shortcut_keeps_exact_gemini_context_profile_and_reasoning() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let registry = ProviderRegistry::from_catalog(&catalog);
+        let key = ModelShortcutKey::new('g').unwrap();
+        let mut store = SessionStore::default();
+        store.set_model_shortcut_binding(
+            key,
+            ModelShortcutBinding {
+                provider_id: "gemini".parse().unwrap(),
+                connection_id: Some("gemini".parse().unwrap()),
+                model_id: Some(
+                    "gemini/gemini-3.1-pro-preview-customtools-1m"
+                        .parse()
+                        .unwrap(),
+                ),
+                model: "gemini/gemini-3.1-pro-preview-customtools-1m".to_string(),
+                reasoning: ReasoningSelection::High,
+            },
+        );
+        let encoded = serde_json::to_string(&store).unwrap();
+        let restored: SessionStore = serde_json::from_str(&encoded).unwrap();
+
+        let selection = resolve_model_shortcut(&registry, &restored, Some(&catalog), key).unwrap();
+
+        assert_eq!(
+            selection.model_id.as_ref().map(ModelId::as_str),
+            Some("gemini/gemini-3.1-pro-preview-customtools-1m")
+        );
+        assert_eq!(selection.context_window, Some(1_048_576));
+        assert_eq!(selection.reasoning, ReasoningSelection::High);
+    }
+}
