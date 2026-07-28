@@ -8,7 +8,7 @@ fn context_modal_control_legend_stays_on_bottom_row() {
     let footer = row_text(&buffer, area.height.saturating_sub(2));
 
     assert!(
-        footer.contains("p pin") && footer.contains("Tab wire"),
+        footer.contains("p/d/s/r edit") && footer.contains("Tab/Shift+Tab wire"),
         "context control legend should stay in the bottom modal row: {footer}"
     );
 }
@@ -97,7 +97,7 @@ fn context_wire_view_renders_serialized_body_order_separately_from_ledger_order(
     );
     assert!(wire.contains("chars"));
     assert!(wire.contains("bytes"));
-    assert!(wire.contains("p/d/s/r disabled"));
+    assert!(wire.contains("Tab/Shift+Tab turns"));
     assert!(
         !wire.contains("\"name\": \"read\""),
         "wire sections should be collapsed by default"

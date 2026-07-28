@@ -101,6 +101,6 @@ mod tests {
         assert!(text.contains("> reviewer"));
         assert!(text.contains("project · subagent"));
         assert!(text.contains("Reviews the current diff"));
-        assert!(text.contains("Space enable/disable"));
+        assert!(text.contains("Space/t enable/disable"));
     }
 }
