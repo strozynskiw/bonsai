@@ -231,9 +231,13 @@ struct ReplaceDraftArgs {
     title: String,
     #[serde(default, rename = "episode_action")]
     _episode_action: EpisodeAction,
+    #[serde(default)]
     sections: Vec<DraftSectionArgs>,
+    #[serde(default)]
     tasks: Vec<String>,
+    #[serde(default)]
     phases: Vec<DraftPhaseArgs>,
+    #[serde(default)]
     questions: Vec<String>,
 }
 
@@ -335,10 +339,10 @@ impl Tool for PlanReplaceDraftTool {
     fn description(&self) -> &str {
         "Write a complete plan draft atomically in one call: title, ordered sections, open \
          questions, and either flat tasks or phases. Use this for the initial canvas and \
-         wholesale restructuring; it preserves structured review findings. Pass every array, \
-         using [] when empty. Declare whether the plan starts a distinct user topic; corrections \
-         and restructuring of the current request are same_topic. Use granular plan tools only \
-         for later corrections."
+         wholesale restructuring; it preserves structured review findings. Empty collection \
+         fields may be omitted. Declare whether the plan starts a distinct user topic; \
+         corrections and restructuring of the current request are same_topic. Use granular plan \
+         tools only for later corrections."
     }
 
     fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
@@ -410,14 +414,7 @@ impl Tool for PlanReplaceDraftTool {
                     ),
                 ),
             ],
-            &[
-                "title",
-                "episode_action",
-                "sections",
-                "tasks",
-                "phases",
-                "questions",
-            ],
+            &["title", "episode_action"],
         )
     }
 
@@ -1241,6 +1238,35 @@ mod tests {
                 .as_array()
                 .is_some_and(|required| required.contains(&serde_json::json!("episode_action")))
         );
+    }
+
+    #[tokio::test]
+    async fn replace_draft_defaults_omitted_empty_collections() {
+        let store = store();
+        let tool = plan_replace_tool(store.clone()).await;
+        let schema = tool.parameters_schema();
+        let required = schema["required"].as_array().unwrap();
+
+        for optional in ["sections", "tasks", "phases", "questions"] {
+            assert!(
+                !required.contains(&serde_json::json!(optional)),
+                "{optional} should default to an empty collection"
+            );
+        }
+
+        tool.execute(serde_json::json!({
+            "title": "Flat plan",
+            "episode_action": "same_topic",
+            "tasks": ["Implement the change"]
+        }))
+        .await
+        .unwrap();
+
+        let plan = store.lock().await;
+        assert_eq!(plan.tasks.len(), 1);
+        assert!(plan.sections.is_empty());
+        assert!(plan.phases.is_empty());
+        assert!(plan.questions.is_empty());
     }
 
     #[tokio::test]
