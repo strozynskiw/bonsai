@@ -4167,6 +4167,71 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
+    fn tencent_builtin_exposes_current_hy3_contract_and_preview_target() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let tencent_id = connection_id("tencent");
+        let connection = catalog.connection(&tencent_id).unwrap();
+
+        assert_eq!(connection.discovery, DiscoveryKind::Tencent);
+        assert_eq!(
+            connection
+                .models_dev_provider
+                .as_ref()
+                .map(ConnectionId::as_str),
+            Some("tencent-tokenhub")
+        );
+        assert_eq!(connection.reasoning_codec, Some(ReasoningCodec::Hunyuan));
+        assert!(connection.prompt_cache);
+        assert_eq!(
+            connection.prompt_cache_header.as_deref(),
+            Some("X-Session-ID")
+        );
+        assert_eq!(connection.prompt_cache_policy, PromptCachePolicy::TokenHub);
+        assert!(connection.reasoning_content_echo);
+
+        let hy3 = catalog
+            .resolve(&tencent_id, &model_id("tencent/hy3"))
+            .unwrap();
+        assert_eq!(hy3.remote_model_id.as_ref(), "hy3");
+        assert_eq!(hy3.context_window, Some(256_000));
+        assert_eq!(hy3.output_limit, Some(128_000));
+        assert_eq!(hy3.reasoning_codec, ReasoningCodec::Hunyuan);
+        assert_eq!(
+            hy3.reasoning_selections(),
+            vec![
+                ReasoningSelection::Default,
+                ReasoningSelection::Off,
+                ReasoningSelection::Low,
+                ReasoningSelection::High
+            ]
+        );
+        assert_eq!(
+            hy3.pricing.map(|pricing| (
+                pricing.input_micros_per_million,
+                pricing.output_micros_per_million,
+                pricing.cache_read_micros_per_million,
+            )),
+            Some((132_000, 528_000, Some(33_000)))
+        );
+        for feature in [
+            ModelFeature::ToolCall,
+            ModelFeature::Reasoning,
+            ModelFeature::StructuredOutput,
+            ModelFeature::Temperature,
+        ] {
+            assert!(hy3.features.contains(&feature), "{feature:?}");
+        }
+
+        let preview = catalog
+            .resolve_connection_model(&tencent_id, "hy3-preview")
+            .unwrap();
+        assert_eq!(preview.model_id.as_str(), "tencent/hy3-preview");
+        assert_eq!(preview.remote_model_id.as_ref(), "hy3-preview");
+        assert_eq!(preview.output_limit, Some(128_000));
+        assert_eq!(preview.pricing, None);
+    }
+
+    #[test]
     fn catalog_rejects_empty_live_model_exclusion_prefixes() {
         let catalog = load_builtin_catalog().unwrap();
         let mut connections = catalog.connections;

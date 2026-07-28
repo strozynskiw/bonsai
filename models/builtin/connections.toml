@@ -482,11 +482,9 @@ id = "tencent"
 display_name = "Tencent Hunyuan"
 auth = "api-key"
 transport = "openai-chat"
-# Defaults to Tencent's TokenHub INTERNATIONAL host, the verified OpenAI-compat
-# surface that serves Hy3 (OpenRouter's #1 model). Mainland accounts can override
-# HUNYUAN_BASE_URL to https://api.hunyuan.cloud.tencent.com/v1. Bearer auth (no
-# TC3-HMAC on the OpenAI-compat path). prompt_cache is left OFF: the cached-token
-# usage field is unverified. See tencent.toml for the full verify-live list.
+# TokenHub is Tencent's current OpenAI-compatible Hunyuan platform. The legacy
+# Hunyuan platform is scheduled for shutdown on 2026-09-30, so Bonsai defaults
+# to the international TokenHub host and uses its authenticated model catalog.
 default_base_url = "https://tokenhub-intl.tencentmaas.com/v1"
 api_key_env = "HUNYUAN_API_KEY"
 model_env = "HUNYUAN_MODEL"
@@ -494,3 +492,14 @@ base_url_env = "HUNYUAN_BASE_URL"
 default_model = "tencent/hy3"
 default_endpoint_path = "chat/completions"
 default_token_counter = "heuristic"
+models_dev_provider = "tencent-tokenhub"
+discovery = "tencent"
+reasoning_codec = "hunyuan"
+# TokenHub recommends both controls: a stable X-Session-ID for the conversation
+# route and a prompt_cache_key for the exact reusable prompt lane.
+prompt_cache = true
+prompt_cache_header = "X-Session-ID"
+prompt_cache_policy = "token-hub"
+# Hy3 preserved thinking requires every returned reasoning_content value to be
+# replayed exactly on its assistant turn, including plain non-tool replies.
+reasoning_content_echo = true

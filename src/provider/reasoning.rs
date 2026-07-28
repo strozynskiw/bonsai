@@ -25,6 +25,10 @@ pub(crate) enum ReasoningCodec {
     /// The distinct codec also gates Mistral's structured thinking-content
     /// stream parsing and replay in the shared Chat Completions transport.
     MistralChatCompletions,
+    /// Tencent Hunyuan Hy3 accepts a top-level `reasoning_effort`, but uses
+    /// the vendor-specific `no_think` spelling for an explicit opt-out and
+    /// exposes only low/high thinking depth.
+    Hunyuan,
     CodexResponses,
     AnthropicThinking,
     /// Claude Opus 4.5 combines legacy `budget_tokens` thinking with the
@@ -64,7 +68,7 @@ impl ReasoningCodec {
         match self {
             Self::OpenAiCompatible => openai_compatible_reasoning(selection),
             Self::OpenRouter => openrouter_reasoning(selection),
-            Self::OpenAiChatCompletions | Self::MistralChatCompletions => None,
+            Self::OpenAiChatCompletions | Self::MistralChatCompletions | Self::Hunyuan => None,
             Self::CodexResponses => codex_responses_reasoning(selection),
             Self::AnthropicThinking | Self::AnthropicThinkingWithEffort => {
                 anthropic_thinking(selection)
@@ -84,6 +88,7 @@ impl ReasoningCodec {
             Self::MistralChatCompletions => {
                 apply_mistral_chat_completions_fields(body, selection);
             }
+            Self::Hunyuan => apply_hunyuan_fields(body, selection),
             Self::KimiThinking => apply_kimi_thinking_fields(body, selection),
             Self::ZaiThinking => apply_zai_thinking_fields(body, selection),
             Self::ZaiReasoningEffort => apply_zai_reasoning_effort_fields(body, selection),
@@ -125,6 +130,20 @@ fn apply_mistral_chat_completions_fields(body: &mut Value, selection: ReasoningS
         | ReasoningSelection::Minimal
         | ReasoningSelection::Low
         | ReasoningSelection::Medium
+        | ReasoningSelection::High
+        | ReasoningSelection::XHigh
+        | ReasoningSelection::Max
+        | ReasoningSelection::Ultra => "high",
+    };
+    body["reasoning_effort"] = json!(effort);
+}
+
+fn apply_hunyuan_fields(body: &mut Value, selection: ReasoningSelection) {
+    let effort = match selection {
+        ReasoningSelection::Default | ReasoningSelection::BudgetTokens(_) => return,
+        ReasoningSelection::Off => "no_think",
+        ReasoningSelection::On | ReasoningSelection::Minimal | ReasoningSelection::Low => "low",
+        ReasoningSelection::Medium
         | ReasoningSelection::High
         | ReasoningSelection::XHigh
         | ReasoningSelection::Max
@@ -432,6 +451,31 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ReasoningCodec>("\"mistral-chat-completions\"").unwrap(),
             ReasoningCodec::MistralChatCompletions
+        );
+    }
+
+    #[test]
+    fn hunyuan_codec_uses_exact_no_think_low_high_values() {
+        for (selection, expected) in [
+            (ReasoningSelection::Off, "no_think"),
+            (ReasoningSelection::On, "low"),
+            (ReasoningSelection::Low, "low"),
+            (ReasoningSelection::Medium, "high"),
+            (ReasoningSelection::High, "high"),
+            (ReasoningSelection::Ultra, "high"),
+        ] {
+            let mut body = json!({});
+            ReasoningCodec::Hunyuan.apply_chat_completions_fields(&mut body, selection);
+            assert_eq!(body, json!({ "reasoning_effort": expected }));
+        }
+
+        let mut body = json!({});
+        ReasoningCodec::Hunyuan
+            .apply_chat_completions_fields(&mut body, ReasoningSelection::Default);
+        assert_eq!(body, json!({}));
+        assert_eq!(
+            serde_json::from_str::<ReasoningCodec>("\"hunyuan\"").unwrap(),
+            ReasoningCodec::Hunyuan
         );
     }
 

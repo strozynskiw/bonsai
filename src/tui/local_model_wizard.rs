@@ -89,6 +89,7 @@ impl ProviderPreset {
                 DiscoveryKind::Gemini
                 | DiscoveryKind::Mistral
                 | DiscoveryKind::OpenRouter
+                | DiscoveryKind::Tencent
                 | DiscoveryKind::Static,
                 _,
             ) => None,

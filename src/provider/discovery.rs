@@ -99,6 +99,7 @@ pub(crate) async fn fetch_models_with_discovery(
         DiscoveryKind::Mistral => fetch_mistral_models(base_url, api_key).await,
         DiscoveryKind::Ollama => fetch_ollama_models(base_url).await,
         DiscoveryKind::OpenRouter => fetch_openrouter_models(base_url, api_key).await,
+        DiscoveryKind::Tencent => fetch_tencent_models(base_url, api_key).await,
     };
     match native {
         Ok(availability) => Ok(availability),
@@ -180,6 +181,144 @@ async fn fetch_generic_models(
         models,
         ..LiveModelAvailability::default()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Tencent TokenHub native model probe
+// ---------------------------------------------------------------------------
+
+/// Fetch TokenHub's authenticated catalog and retain only online Tencent
+/// Hunyuan language models. TokenHub is a multi-vendor, multi-modal gateway;
+/// exposing its entire `/models` payload under the Tencent connection would
+/// mix unrelated vendors and non-chat assets into the coding-model picker.
+async fn fetch_tencent_models(base_url: &str, api_key: &str) -> Result<LiveModelAvailability> {
+    let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut builder = crate::provider::http_client()
+        .get(endpoint)
+        .timeout(REMOTE_CATALOG_TIMEOUT)
+        .header("Accept", "application/json");
+    let api_key = api_key.trim();
+    if !api_key.is_empty() {
+        builder = builder.bearer_auth(api_key);
+    }
+    let response = builder
+        .send()
+        .await
+        .context("Failed to fetch Tencent TokenHub model list")?;
+    if !response.status().is_success() {
+        return Err(sse::error_from_response(response).await.into());
+    }
+    let value: Value = response
+        .json()
+        .await
+        .context("Failed to parse Tencent TokenHub model list")?;
+    let models = tencent_models_from_response(&value)?;
+    Ok(LiveModelAvailability {
+        models,
+        ..LiveModelAvailability::default()
+    })
+}
+
+fn tencent_models_from_response(value: &Value) -> Result<Vec<AvailableModel>> {
+    let Some(items) = value.get("data").and_then(Value::as_array) else {
+        anyhow::bail!("Tencent TokenHub model list response has no `data` array");
+    };
+    let mut models = items
+        .iter()
+        .filter(|item| {
+            item.get("status")
+                .and_then(Value::as_str)
+                .is_none_or(|status| status.eq_ignore_ascii_case("online"))
+        })
+        .filter_map(tencent_model_from_item)
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        tencent_model_rank(&left.remote_model_id)
+            .cmp(&tencent_model_rank(&right.remote_model_id))
+            .then_with(|| left.remote_model_id.cmp(&right.remote_model_id))
+    });
+    models.dedup_by(|left, right| left.remote_model_id == right.remote_model_id);
+    Ok(models)
+}
+
+fn tencent_model_from_item(item: &Value) -> Option<AvailableModel> {
+    let id = item.get("id").and_then(Value::as_str)?;
+    if !is_hunyuan_language_model(id) {
+        return None;
+    }
+    let display_name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty() && !name.eq_ignore_ascii_case(id))
+        .map(str::to_string);
+
+    let mut model = AvailableModel::with_metadata(id, None, display_name, Vec::new())
+        .with_token_counter(Some(TokenCounterKind::Heuristic));
+    let known_output_limit = match id.to_ascii_lowercase().as_str() {
+        "hy3" => Some(128_000),
+        "hy3-preview" => Some(128_000),
+        _ => None,
+    };
+    if let Some(output_limit) = known_output_limit {
+        model.context_window = Some(256_000);
+        model.output_limit = Some(output_limit);
+        model.features = vec![
+            ModelFeature::ToolCall,
+            ModelFeature::Reasoning,
+            ModelFeature::StructuredOutput,
+            ModelFeature::Temperature,
+        ];
+        model = model
+            .with_reasoning_codec(ReasoningCodec::Hunyuan)
+            .with_reasoning(
+                vec![
+                    ReasoningSelection::Off,
+                    ReasoningSelection::Low,
+                    ReasoningSelection::High,
+                ],
+                Some(ReasoningSelection::High),
+            );
+    }
+    Some(model)
+}
+
+fn is_hunyuan_language_model(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    let family = id
+        .strip_prefix("hy")
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(|first| first.is_ascii_digit())
+        || id.starts_with("hunyuan-");
+    family
+        && ![
+            "embedding",
+            "image",
+            "video",
+            "vision",
+            "translation",
+            "role",
+            "tts",
+            "asr",
+            "3d",
+        ]
+        .iter()
+        .any(|excluded| id.contains(excluded))
+}
+
+fn tencent_model_rank(id: &str) -> u8 {
+    let id = id.to_ascii_lowercase();
+    match id.as_str() {
+        "hy3" => 0,
+        "hy3-preview" => 1,
+        _ if id
+            .strip_prefix("hy")
+            .and_then(|suffix| suffix.chars().next())
+            .is_some_and(|first| first.is_ascii_digit()) =>
+        {
+            2
+        }
+        _ => 3,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +1017,91 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn tencent_response_keeps_online_hunyuan_language_models_with_known_metadata() {
+        let value = serde_json::json!({
+            "data": [
+                {"id": "deepseek-v4", "name": "DeepSeek V4", "status": "online"},
+                {"id": "hy4", "name": "Future Hy4", "status": "online"},
+                {"id": "hy3-preview", "name": "Hy3 Preview", "status": "online"},
+                {"id": "hy3", "name": "Hy3", "status": "online"},
+                {"id": "hy3", "name": "duplicate", "status": "online"},
+                {"id": "hunyuan-translation", "status": "online"},
+                {"id": "hunyuan-turbos-latest", "status": "online"},
+                {"id": "hunyuan-vision", "status": "online"},
+                {"id": "hy2", "status": "pre-offline"}
+            ]
+        });
+
+        let models = tencent_models_from_response(&value).unwrap();
+        let ids = models
+            .iter()
+            .map(|model| model.remote_model_id.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, ["hy3", "hy3-preview", "hy4", "hunyuan-turbos-latest"]);
+        assert_eq!(models[0].context_window, Some(256_000));
+        assert_eq!(models[0].output_limit, Some(128_000));
+        assert_eq!(models[0].reasoning_codec, Some(ReasoningCodec::Hunyuan));
+        assert_eq!(
+            models[0].supported_reasoning,
+            vec![
+                ReasoningSelection::Off,
+                ReasoningSelection::Low,
+                ReasoningSelection::High
+            ]
+        );
+        assert_eq!(
+            models[0].recommended_reasoning,
+            Some(ReasoningSelection::High)
+        );
+        assert_eq!(
+            models[0].features,
+            vec![
+                ModelFeature::ToolCall,
+                ModelFeature::Reasoning,
+                ModelFeature::StructuredOutput,
+                ModelFeature::Temperature
+            ]
+        );
+        assert_eq!(models[1].output_limit, Some(128_000));
+        assert_eq!(models[2].context_window, None);
+        assert!(models[2].features.is_empty());
+        assert_eq!(models[2].token_counter, Some(TokenCounterKind::Heuristic));
+    }
+
+    #[tokio::test]
+    async fn tencent_discovery_uses_tokenhub_models_endpoint_and_bearer_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer hunyuan-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "hy3", "name": "Hy3", "status": "online"},
+                    {"id": "hy3-video", "status": "online"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::Tencent,
+            Protocol::OpenAiChat,
+            "Tencent Hunyuan",
+            &format!("{}/v1", server.uri()),
+            "hunyuan-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(availability.remote_model_ids(), vec!["hy3".to_string()]);
+        assert_eq!(availability.models[0].context_window, Some(256_000));
+        assert_eq!(availability.models[0].output_limit, Some(128_000));
+    }
 
     #[test]
     fn openrouter_response_filters_and_preserves_popularity_order() {

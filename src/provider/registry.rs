@@ -578,6 +578,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tencent_refresh_uses_catalog_discovery_and_filters_tokenhub_products() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer sk-hunyuan-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "hy3", "name": "Hy3", "status": "online"},
+                    {"id": "hy4", "name": "Hy4", "status": "online"},
+                    {"id": "hy3-preview", "name": "Hy3 Preview", "status": "pre-offline"},
+                    {"id": "deepseek-v4", "name": "DeepSeek V4", "status": "online"},
+                    {"id": "hunyuan-video", "status": "online"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin()
+            .expect("builtin catalog should load");
+        let registry = ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("tencent").expect("Tencent Hunyuan provider");
+        assert_eq!(
+            factory.metadata().discovery,
+            crate::model_catalog::DiscoveryKind::Tencent
+        );
+        assert!(factory.metadata().capabilities.supports_prompt_cache);
+        assert!(factory.metadata().capabilities.echoes_reasoning_content);
+        let session = ProviderSession::new(
+            "sk-hunyuan-test".to_string(),
+            format!("{}/v1", server.uri()),
+            "hy3".to_string(),
+        );
+
+        let availability = factory.list_available_models(&session).await.unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec!["hy3".to_string(), "hy4".to_string()]
+        );
+        assert_eq!(availability.models[0].output_limit, Some(128_000));
+        assert!(availability.models[1].features.is_empty());
+    }
+
+    #[tokio::test]
     async fn xai_refresh_discovers_new_language_models_without_excluded_variants() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};

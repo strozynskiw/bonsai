@@ -1,56 +1,54 @@
-# Tencent Hunyuan, OpenAI Chat Completions wire, Bearer auth (no TC3-HMAC signing
-# on the OpenAI-compatible path). Auth is `Authorization: Bearer <HUNYUAN_API_KEY>`.
+# Tencent TokenHub, OpenAI Chat Completions wire, Bearer auth. `/refresh` reads
+# the authenticated TokenHub `/models` catalog, filters offline/non-Hunyuan
+# products, then models.dev enriches newly served Hunyuan ids where available.
 #
-# ENDPOINT CHOICE — the default base URL is Tencent's TokenHub international host
-# (https://tokenhub-intl.tencentmaas.com/v1), which is the verified international
-# OpenAI-compatible surface that serves Hy3 (the model that motivates this
-# connection; it is OpenRouter's #1 by usage). models.dev carries this as the
-# `tencent-tokenhub` block, which serves ONLY hy3 and hy3-preview — so those are
-# the only targets here (hunyuan-a13b-instruct / turbos / t1 live on the mainland
-# first-party endpoint, not TokenHub, and would 404). Alternatives via
-# HUNYUAN_BASE_URL:
-#   - first-party (mainland account, real-name verified):
-#     https://api.hunyuan.cloud.tencent.com/v1  (classic hunyuan-turbos/-t1 slugs)
-#   - OpenRouter aggregator: model becomes `tencent/hy3` via the openrouter connection.
+# Hy3's current official specification is text-only, 256K context, up to 192K
+# input and 128K output. Its exact reasoning values are no_think/low/high.
+# TokenHub preserved thinking requires reasoning_content replay on every
+# assistant turn, and its prompt cache uses both prompt_cache_key and
+# X-Session-ID. The transport implements those connection-level contracts.
 #
-# PRICING — TokenHub's own per-token pricing is UNPUBLISHED (models.dev
-# tencent-tokenhub lists $0 for hy3/hy3-preview). The rates below are estimates
-# carried over from OpenRouter's `tencent/hy3` listing so cost accounting is not
-# silently zero; VERIFY against a real TokenHub invoice/usage before trusting them.
-#
-# VERIFY LIVE before relying on this (all flagged uncertain at add time):
-#   (a) the exact `hy3` slug on the chosen host, (b) whether responses report
-#   cached tokens and under what usage field (prompt_cache is therefore left OFF),
-#   (c) whether reasoning_content is echoed / streaming finish_reason behavior,
-#   (d) the pricing above.
-#
-# Reasoning: Hy3 is a hybrid model whose depth rides a NON-standard
-# `reasoning_effort` with values no_think (default) / low / high — which does not
-# match bonsai's openai-chat-completions codec (none/low/medium/high). So no
-# reasoning options are exposed: Hy3 runs in its no_think default. Add a
-# dedicated hunyuan codec (no_think/low/high) to expose the thinking modes.
+# The official international price list (updated 2026-07-20) publishes USD
+# rates of $0.132/M input, $0.528/M output, and $0.033/M cached input. TokenHub
+# does not expose prices in `/models`, so these official rates stay pinned while
+# `/refresh` updates availability and other model metadata.
 
 [[targets]]
 connection = "tencent"
 model = "tencent/hy3"
 remote_model = "hy3"
 metadata_model = "tencent-tokenhub/hy3"
+display_name = "Hy3"
 recommended = true
 default = true
+recommended_effort = "high"
 token_counter = "heuristic"
-pinned = true
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
 context_window = 256000
-output_limit = 32000
-pricing = { input_micros_per_million = 140000, output_micros_per_million = 580000 }
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "temperature"]
+pricing = { input_micros_per_million = 132000, output_micros_per_million = 528000, cache_read_micros_per_million = 33000 }
 
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "high"]
+
+# Preview remains a distinct TokenHub model id. Tencent publishes the same
+# 256K/128K limits, but its current international price sheet has no standalone
+# Preview rate. Leave pricing unknown instead of inheriting models.dev's zero
+# placeholders or carrying an obsolete third-party estimate.
 [[targets]]
 connection = "tencent"
 model = "tencent/hy3-preview"
 remote_model = "hy3-preview"
-metadata_model = "tencent-tokenhub/hy3-preview"
-roles = ["cheap"]
+display_name = "Hy3 Preview"
+recommended_effort = "high"
 token_counter = "heuristic"
-pinned = true
+pinned_fields = ["display-name", "context-window", "output-limit", "features", "reasoning"]
 context_window = 256000
-output_limit = 32000
-pricing = { input_micros_per_million = 63000, output_micros_per_million = 210000 }
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "temperature"]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "high"]

@@ -161,12 +161,16 @@ pub struct OpenAiCompatibleProvider {
     supports_vision: bool,
     prompt_cache_key: String,
     /// Chat Completions backends whose sticky cache route is an HTTP header
-    /// (xAI uses `x-grok-conv-id`) set it here. Its presence suppresses the
-    /// Responses-only `prompt_cache_key` body field.
+    /// set it here. Its presence normally suppresses the body
+    /// `prompt_cache_key`; TokenHub's explicit policy sends both.
     prompt_cache_header: Option<Box<str>>,
     /// Native reasoning captured for assistant tool-call turns, keyed by the
     /// first call id so it can be restored when that turn re-enters history.
     reasoning_by_call_id: std::sync::Mutex<HashMap<String, String>>,
+    /// Hunyuan preserved thinking applies to every assistant turn, including
+    /// plain text replies without tool calls. Match exact visible content and
+    /// call ids in history order so its native trace can be replayed.
+    hunyuan_reasoning_replay: std::sync::Mutex<Vec<HunyuanReasoningReplay>>,
     /// Provider-specific metadata captured on streamed tool calls and replayed
     /// on the matching assistant tool-call entry. Gemini 3 places its required
     /// encrypted thought signature under `extra_content`.
@@ -196,6 +200,13 @@ struct OpenRouterReasoningReplay {
     tool_call_ids: Vec<String>,
     reasoning_details: Vec<Value>,
     legacy_reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct HunyuanReasoningReplay {
+    visible_content: String,
+    tool_call_ids: Vec<String>,
+    reasoning_content: String,
 }
 
 impl OpenAiCompatibleProvider {
@@ -239,6 +250,7 @@ impl OpenAiCompatibleProvider {
             prompt_cache_key: crate::provider::new_conversation_cache_key(),
             prompt_cache_header: target.prompt_cache_header.clone(),
             reasoning_by_call_id: std::sync::Mutex::new(HashMap::new()),
+            hunyuan_reasoning_replay: std::sync::Mutex::new(Vec::new()),
             tool_call_extra_content_by_id: std::sync::Mutex::new(HashMap::new()),
             mistral_content_replay: std::sync::Mutex::new(Vec::new()),
             openrouter_reasoning_replay: std::sync::Mutex::new(Vec::new()),
@@ -338,7 +350,13 @@ impl OpenAiCompatibleProvider {
 
         let mut body = serde_json::to_value(&request)?;
         normalize_request_tool_call_arguments(&mut body);
-        if self.echoes_reasoning_content {
+        if self.echoes_reasoning_content && self.reasoning_codec == ReasoningCodec::Hunyuan {
+            let replay = self
+                .hunyuan_reasoning_replay
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Hunyuan reasoning replay state lock is poisoned"))?;
+            ensure_hunyuan_reasoning_content(&mut body, &replay);
+        } else if self.echoes_reasoning_content {
             let reasoning_by_call_id = self
                 .reasoning_by_call_id
                 .lock()
@@ -376,7 +394,10 @@ impl OpenAiCompatibleProvider {
         // hashing it keeps plan-mode and coding-mode turns on separate cache
         // routes. Only verified backends receive the field, so strict servers
         // never see it.
-        if self.supports_prompt_cache && self.prompt_cache_header.is_none() {
+        if self.supports_prompt_cache
+            && (self.prompt_cache_header.is_none()
+                || self.prompt_cache_policy.emits_body_key_with_header())
+        {
             let lane = request_messages
                 .first()
                 .and_then(|message| serde_json::to_value(message).ok())
@@ -618,6 +639,62 @@ fn ensure_reasoning_content_on_tool_call_messages(
         message
             .entry("reasoning_content")
             .or_insert_with(|| Value::String(reasoning));
+    }
+}
+
+/// Restore Hunyuan's preserved thinking on every matching assistant turn.
+///
+/// Unlike DeepSeek-style tool-only replay, Hy3 requires the exact
+/// `reasoning_content` returned for plain assistant replies too. Tool rounds
+/// match their complete call-id sequence; plain replies match visible content
+/// from newest to oldest so compaction cannot assign an omitted older turn's
+/// trace to a retained duplicate.
+fn ensure_hunyuan_reasoning_content(body: &mut Value, replay: &[HunyuanReasoningReplay]) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut replay_upper_bound = replay.len();
+    for message in messages.iter_mut().rev() {
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let call_ids = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|call| call.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let visible_content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let match_index = replay[..replay_upper_bound].iter().rposition(|entry| {
+            let calls_match = !call_ids.is_empty()
+                && call_ids.len() == entry.tool_call_ids.len()
+                && call_ids
+                    .iter()
+                    .zip(&entry.tool_call_ids)
+                    .all(|(current, stored)| *current == stored);
+            let text_match = call_ids.is_empty()
+                && entry.tool_call_ids.is_empty()
+                && entry.visible_content == visible_content;
+            calls_match || text_match
+        });
+        let reasoning = match_index
+            .map(|index| {
+                replay_upper_bound = index;
+                replay[index].reasoning_content.clone()
+            })
+            .unwrap_or_default();
+        if match_index.is_some() || !call_ids.is_empty() {
+            message
+                .entry("reasoning_content")
+                .or_insert_with(|| Value::String(reasoning));
+        }
     }
 }
 
@@ -1131,9 +1208,27 @@ impl Provider for OpenAiCompatibleProvider {
                 })?
                 .push(entry);
         }
-        // Only `reasoning_content`-echoing backends replay reasoning (see
-        // `streaming::stash_reasoning_for_replay` for the keying contract).
-        if self.echoes_reasoning_content && !interrupted {
+        if self.reasoning_codec == ReasoningCodec::Hunyuan
+            && self.echoes_reasoning_content
+            && !interrupted
+            && !reasoning_for_replay.is_empty()
+        {
+            let entry = HunyuanReasoningReplay {
+                visible_content: content.clone(),
+                tool_call_ids: tool_calls.iter().map(|call| call.id.clone()).collect(),
+                reasoning_content: std::mem::take(&mut reasoning_for_replay),
+            };
+            self.hunyuan_reasoning_replay
+                .lock()
+                .map_err(|_| {
+                    crate::provider::ProviderFailure::transport(
+                        "Hunyuan reasoning replay state lock is poisoned",
+                    )
+                })?
+                .push(entry);
+        // Other `reasoning_content`-echoing backends replay only tool-call
+        // turns (see `streaming::stash_reasoning_for_replay`).
+        } else if self.echoes_reasoning_content && !interrupted {
             streaming::stash_reasoning_for_replay(
                 &self.reasoning_by_call_id,
                 &tool_calls,
@@ -1620,6 +1715,137 @@ mod tests {
                 .iter()
                 .all(|message| message.get("reasoning_content").is_none()),
             "the off-schema field stays off backends that have not asked for it",
+        );
+    }
+
+    #[test]
+    fn hunyuan_replays_plain_and_tool_reasoning_content_in_order() {
+        let replay = vec![
+            HunyuanReasoningReplay {
+                visible_content: "same answer".to_string(),
+                tool_call_ids: Vec::new(),
+                reasoning_content: "first trace".to_string(),
+            },
+            HunyuanReasoningReplay {
+                visible_content: "same answer".to_string(),
+                tool_call_ids: Vec::new(),
+                reasoning_content: "second trace".to_string(),
+            },
+            HunyuanReasoningReplay {
+                visible_content: String::new(),
+                tool_call_ids: vec!["call-1".to_string()],
+                reasoning_content: "tool trace".to_string(),
+            },
+        ];
+        let mut body = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": "same answer"},
+                {"role": "user", "content": "again"},
+                {"role": "assistant", "content": "same answer"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{"id": "call-1", "type": "function"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{"id": "restored-call", "type": "function"}]
+                }
+            ]
+        });
+
+        ensure_hunyuan_reasoning_content(&mut body, &replay);
+
+        assert_eq!(body["messages"][0]["reasoning_content"], "first trace");
+        assert_eq!(body["messages"][2]["reasoning_content"], "second trace");
+        assert_eq!(body["messages"][3]["reasoning_content"], "tool trace");
+        assert_eq!(
+            body["messages"][4]["reasoning_content"], "",
+            "restored tool turns still need the required field"
+        );
+        assert!(body["messages"][1].get("reasoning_content").is_none());
+
+        let mut compacted = serde_json::json!({
+            "messages": [{"role": "assistant", "content": "same answer"}]
+        });
+        ensure_hunyuan_reasoning_content(&mut compacted, &replay);
+        assert_eq!(
+            compacted["messages"][0]["reasoning_content"], "second trace",
+            "a retained duplicate must replay its latest matching trace"
+        );
+    }
+
+    #[tokio::test]
+    async fn hunyuan_sends_both_cache_routes_and_replays_plain_thinking() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer hunyuan-key"))
+            .and(header("x-session-id", "bonsai-tokenhub-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"inspect exactly\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
+        let connection_id = "tencent".parse().unwrap();
+        let resolved = catalog
+            .resolve_connection_model(&connection_id, "tencent/hy3")
+            .unwrap();
+        let mut session = provider_session("hunyuan-key", &server.uri(), "tencent/hy3");
+        session.reasoning = crate::provider::ReasoningSelection::High;
+        let mut target = resolved.run_target(server.uri().into(), session.reasoning);
+        target.endpoint_path = Some("chat/completions".into());
+        let mut provider = OpenAiCompatibleProvider::with_api_key_policy(
+            "tencent",
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            CACHING.with_reasoning_content_echo(),
+        );
+        provider.set_conversation_cache_key("bonsai-tokenhub-session");
+
+        let request_messages = [system_message("stable"), user_message("hello")];
+        let response = provider
+            .chat_stream(
+                &request_messages,
+                &[sample_tool()],
+                CancellationToken::new(),
+                std::sync::Arc::new(crate::output::StdoutSink),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.content, "Answer");
+        assert_eq!(response.reasoning_chars, "inspect exactly".chars().count());
+        let requests = server.received_requests().await.unwrap();
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent["reasoning_effort"], "high");
+        assert_eq!(sent["max_tokens"], 128_000);
+        assert_eq!(
+            sent["prompt_cache_key"],
+            crate::provider::lane_scoped_cache_key("bonsai-tokenhub-session", "stable")
+        );
+
+        let assistant = ChatCompletionRequestMessage::Assistant(
+            async_openai::types::chat::ChatCompletionRequestAssistantMessageArgs::default()
+                .content(response.content)
+                .build()
+                .unwrap(),
+        );
+        let replayed = provider.request_body(&[assistant], &[]).unwrap();
+        assert_eq!(
+            replayed["messages"][0]["reasoning_content"],
+            "inspect exactly"
         );
     }
 

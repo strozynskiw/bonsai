@@ -30,6 +30,7 @@ pub(crate) enum DiscoveryKind {
     Mistral,
     OpenRouter,
     Ollama,
+    Tencent,
     Static,
 }
 
@@ -61,6 +62,10 @@ pub(crate) enum PromptCachePolicy {
     /// OpenRouter's documented top-level automatic caching for Anthropic
     /// models, plus an explicit sticky session identity.
     OpenRouterAnthropic,
+    /// Tencent TokenHub uses both a lane-scoped `prompt_cache_key` request
+    /// field and a conversation-stable `X-Session-ID` header. The two values
+    /// have different scopes and are intentionally emitted together.
+    TokenHub,
 }
 
 impl PromptCachePolicy {
@@ -71,12 +76,21 @@ impl PromptCachePolicy {
     /// snapshots in place, while Anthropic puts the latest snapshot behind an
     /// explicit breakpoint.
     pub(crate) const fn uses_append_only_project_state(self) -> bool {
-        matches!(self, Self::RollingHistory | Self::OpenRouterAnthropic)
+        matches!(
+            self,
+            Self::RollingHistory | Self::OpenRouterAnthropic | Self::TokenHub
+        )
     }
 
     /// Whether to emit OpenRouter's Anthropic-only automatic cache controls.
     pub(crate) const fn uses_openrouter_anthropic_control(self) -> bool {
         matches!(self, Self::OpenRouterAnthropic)
+    }
+
+    /// Whether a Chat Completions cache header supplements, rather than
+    /// replaces, the body `prompt_cache_key`.
+    pub(crate) const fn emits_body_key_with_header(self) -> bool {
+        matches!(self, Self::TokenHub)
     }
 }
 
@@ -164,8 +178,8 @@ pub(crate) struct ConnectionSpec {
     #[serde(default)]
     pub prompt_cache: bool,
     /// Optional Chat Completions header carrying the stable conversation cache
-    /// route. When set, the transport sends this header instead of the
-    /// Responses-only `prompt_cache_key` request field.
+    /// route. By default this replaces the `prompt_cache_key` request field;
+    /// policies such as TokenHub can explicitly require both.
     #[serde(default)]
     pub prompt_cache_header: Option<Box<str>>,
     /// Prompt-cache policy inherited by every target unless that model declares
@@ -173,8 +187,9 @@ pub(crate) struct ConnectionSpec {
     #[serde(default)]
     pub prompt_cache_policy: PromptCachePolicy,
     /// Whether this backend needs `reasoning_content` echoed back on assistant
-    /// messages that carry `tool_calls`. Off-schema for Chat Completions, so it
-    /// is only sent where a backend has been verified to want it.
+    /// messages. Most compatible backends need it only with `tool_calls`;
+    /// provider-specific codecs may require replay on plain turns too.
+    /// Off-schema for Chat Completions, so it is only sent where verified.
     #[serde(default)]
     pub reasoning_content_echo: bool,
     /// Whether a terminal usage frame ends a stream that never sends
