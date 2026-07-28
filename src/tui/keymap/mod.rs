@@ -924,7 +924,14 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
             code: KeyCode::Char(ch),
             modifiers,
             ..
-        } if matches!(app.focus, Focus::Input) && !modifiers.contains(KeyModifiers::CONTROL) => {
+        } if matches!(app.focus, Focus::Input)
+            && !ch.is_control()
+            && !modifiers.contains(KeyModifiers::SUPER)
+            // Ctrl+Alt is how crossterm reports AltGr on some layouts, so it
+            // must remain text input. Ctrl-only combinations are shortcuts.
+            && (modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                == modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT)) =>
+        {
             KeyIntent::Insert(ch)
         }
         _ => KeyIntent::Noop,
@@ -1116,6 +1123,14 @@ mod tests {
         ));
         assert!(matches!(
             press(&app, KeyCode::BackTab),
+            KeyIntent::Action(AppAction::UsageDashboardCycleTab(-1))
+        ));
+        assert!(matches!(
+            press(&app, KeyCode::Char('l')),
+            KeyIntent::Action(AppAction::UsageDashboardCycleTab(1))
+        ));
+        assert!(matches!(
+            press(&app, KeyCode::Char('h')),
             KeyIntent::Action(AppAction::UsageDashboardCycleTab(-1))
         ));
         assert!(matches!(
@@ -1355,6 +1370,26 @@ mod tests {
         app.focus = Focus::Input;
         let intent = map_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE), &app);
         assert!(matches!(intent, KeyIntent::Insert('2')));
+    }
+
+    #[test]
+    fn modified_and_control_chars_do_not_enter_composer() {
+        let mut app = app();
+        app.focus = Focus::Input;
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER),
+            KeyEvent::new(KeyCode::Char('\u{1b}'), KeyModifiers::NONE),
+        ] {
+            assert!(matches!(map_key(key, &app), KeyIntent::Noop));
+        }
+
+        let alt_gr = KeyEvent::new(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert!(matches!(map_key(alt_gr, &app), KeyIntent::Insert('@')));
     }
 
     #[test]
@@ -1957,6 +1992,11 @@ mod tests {
 
         let page = map_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &app);
         assert!(matches!(page, KeyIntent::Action(AppAction::ScrollModal(8))));
+
+        for code in [KeyCode::Char('m'), KeyCode::Char('d')] {
+            let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
+            assert!(matches!(intent, KeyIntent::Noop));
+        }
 
         let left = map_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &app);
         assert!(matches!(
@@ -3017,6 +3057,35 @@ mod tests {
 
         let close = map_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &app);
         assert!(matches!(close, KeyIntent::Action(AppAction::CloseModal)));
+
+        assert!(matches!(
+            map_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &app),
+            KeyIntent::Action(AppAction::EpisodesMove(1))
+        ));
+        assert!(matches!(
+            map_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), &app),
+            KeyIntent::Action(AppAction::EpisodesMove(-1))
+        ));
+    }
+
+    #[test]
+    fn provider_detail_uses_arrow_keys_for_scrolling() {
+        assert!(matches!(
+            map_provider_detail_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            KeyIntent::Action(AppAction::ScrollModal(-1))
+        ));
+        assert!(matches!(
+            map_provider_detail_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            KeyIntent::Action(AppAction::ScrollModal(1))
+        ));
+        assert!(matches!(
+            map_provider_detail_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            KeyIntent::Action(AppAction::ScrollModal(1))
+        ));
+        assert!(matches!(
+            map_provider_detail_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            KeyIntent::Action(AppAction::ScrollModal(-1))
+        ));
     }
 
     #[test]

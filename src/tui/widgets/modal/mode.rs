@@ -114,8 +114,8 @@ fn mode_picker_footer() -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::tests::support::rendered_lines_text;
+    use super::*;
     use crate::tui::event::ModeAxisId;
 
     fn rows() -> Vec<ModeRow> {

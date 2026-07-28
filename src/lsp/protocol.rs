@@ -231,7 +231,8 @@ pub(crate) fn parse_workspace_symbols(value: Value) -> Result<Vec<LspSymbol>, Pr
     }
     let raw = serde_json::from_value::<Vec<RawWorkspaceSymbol>>(value)
         .map_err(|err| ProtocolError::Message(format!("invalid workspace symbols: {err}")))?;
-    raw.into_iter()
+    Ok(raw
+        .into_iter()
         .filter_map(|symbol| {
             let location = parse_symbol_location(symbol.location).ok()?;
             Some(LspSymbol {
@@ -241,8 +242,7 @@ pub(crate) fn parse_workspace_symbols(value: Value) -> Result<Vec<LspSymbol>, Pr
                 container_name: symbol.container_name,
             })
         })
-        .collect::<Vec<_>>()
-        .pipe(Ok)
+        .collect())
 }
 
 fn parse_symbol_location(value: Value) -> Result<LspLocation, ProtocolError> {
@@ -498,14 +498,6 @@ fn offset_in_line(
         character + 1
     )))
 }
-
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-
-impl<T> Pipe for T {}
 
 impl fmt::Display for LspLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

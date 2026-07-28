@@ -693,16 +693,16 @@ pub(super) fn subagent_snapshot(id: &str, agent: &str, activity_lines: usize) ->
         .collect::<Vec<_>>()
         .join("\n");
     SubagentSnapshot {
-        id: id.to_string(),
-        agent: agent.to_string(),
-        prompt: "Investigate the failing test".to_string(),
+        id: id.into(),
+        agent: agent.into(),
+        prompt: "Investigate the failing test".into(),
         detached: false,
         status: SubagentStatus::Running,
         started_at: SystemTime::now(),
         finished_at: None,
-        activity,
+        activity: activity.into(),
         result: None,
-        model: Some("gpt-5".to_string()),
+        model: Some("gpt-5".into()),
         tool_call_id: None,
         launch_group_id: None,
     }
@@ -809,7 +809,7 @@ pub(super) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
     text
 }
 
-pub(super) fn rendered_lines_text(lines: &[Line<'static>]) -> String {
+pub(crate) fn rendered_lines_text(lines: &[Line<'static>]) -> String {
     lines
         .iter()
         .map(|line| {

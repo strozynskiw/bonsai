@@ -643,7 +643,7 @@ mod tests {
             .await
             .expect_err("a live owner must keep the lock");
 
-        assert!(started.elapsed() < Duration::from_millis(300));
+        assert!(started.elapsed() < fast_timing().stale_wait);
         assert!(error.to_string().contains(&format!("session #{owner}")));
         assert!(error.to_string().contains("coordinate with it via peers"));
     }
