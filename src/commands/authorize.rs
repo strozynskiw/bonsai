@@ -409,7 +409,13 @@ mod tests {
 
         async fn authorize(&self, input: AuthInput) -> anyhow::Result<AuthorizeOutcome> {
             match input {
-                AuthInput::ApiKey { api_key, .. } => Ok(AuthorizeOutcome::new(api_key)),
+                AuthInput::ApiKey {
+                    api_key, base_url, ..
+                } => {
+                    let mut outcome = AuthorizeOutcome::new(api_key);
+                    outcome.base_url = base_url;
+                    Ok(outcome)
+                }
                 AuthInput::FromEnv
                 | AuthInput::FromCodexCache
                 | AuthInput::OpenAiCompatible { .. } => {
@@ -463,6 +469,7 @@ mod tests {
             AuthInput::ApiKey {
                 api_key: "sk-test".to_string(),
                 persistence: crate::session::CredentialPersistence::File,
+                base_url: None,
             },
             &mut store,
             Some(&catalog),
@@ -479,6 +486,43 @@ mod tests {
         assert_eq!(saves[0].1.current_kind_id(), "test-provider");
         assert_eq!(saves[0].1.session("test-provider").api_key, "sk-test");
         assert_eq!(store.current_kind_id(), "test-provider");
+    }
+
+    #[tokio::test]
+    async fn authorize_persists_selected_service_origin_before_refresh() {
+        let registry = ProviderRegistry::new(vec![Arc::new(TestProviderFactory(
+            TestCatalogBehavior::Fails,
+        ))]);
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
+        let mut store = SessionStore::default();
+        let mut saves = Vec::new();
+
+        authorize_provider_with_input_as_current_using_save(
+            &registry,
+            "test-provider",
+            AuthInput::ApiKey {
+                api_key: "sk-cn".to_string(),
+                persistence: crate::session::CredentialPersistence::File,
+                base_url: Some("https://china.example/v1".to_string()),
+            },
+            &mut store,
+            Some(&catalog),
+            |store, policy| {
+                saves.push((policy, store.clone()));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            saves[0].1.session("test-provider").base_url,
+            "https://china.example/v1"
+        );
+        assert_eq!(
+            store.session("test-provider").base_url,
+            "https://china.example/v1"
+        );
     }
 
     #[tokio::test]
@@ -501,6 +545,7 @@ mod tests {
             AuthInput::ApiKey {
                 api_key: "sk-cache-write".to_string(),
                 persistence: crate::session::CredentialPersistence::File,
+                base_url: None,
             },
             &mut store,
             Some(&catalog),
@@ -557,6 +602,7 @@ mod tests {
             AuthInput::ApiKey {
                 api_key: "sk-cache-clear".to_string(),
                 persistence: crate::session::CredentialPersistence::File,
+                base_url: None,
             },
             &mut store,
             None,
@@ -624,6 +670,7 @@ mod tests {
             AuthInput::ApiKey {
                 api_key: "sk-unsaved".to_string(),
                 persistence: crate::session::CredentialPersistence::Session,
+                base_url: None,
             },
             &mut store,
             None,

@@ -1676,6 +1676,54 @@ fn validate_catalog(
                 message: "model exclusion prefixes must not be empty".to_string(),
             });
         }
+        let mut origin_ids = HashSet::new();
+        let mut origin_urls = HashSet::new();
+        for origin in &connection.origins {
+            if origin.id.trim().is_empty()
+                || origin.display_name.trim().is_empty()
+                || origin.base_url.trim().is_empty()
+            {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: "origin id, display name, and base URL must not be empty".to_string(),
+                });
+            }
+            if !origin_ids.insert(origin.id.as_ref()) {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: format!("duplicate origin id `{}`", origin.id),
+                });
+            }
+            if !origin_urls.insert(origin.base_url.trim_end_matches('/')) {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: format!("duplicate origin base URL `{}`", origin.base_url),
+                });
+            }
+            let valid_url = reqwest::Url::parse(&origin.base_url)
+                .ok()
+                .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
+            if !valid_url {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: format!(
+                        "origin `{}` has invalid HTTP base URL `{}`",
+                        origin.id, origin.base_url
+                    ),
+                });
+            }
+        }
+        if !connection.origins.is_empty()
+            && !connection.origins.iter().any(|origin| {
+                origin.base_url.trim_end_matches('/')
+                    == connection.default_base_url.trim_end_matches('/')
+            })
+        {
+            return Err(CatalogError::InvalidConnection {
+                id: connection.id.clone(),
+                message: "default_base_url must match one of the configured origins".to_string(),
+            });
+        }
         if let Some(header) = &connection.prompt_cache_header {
             if !connection.prompt_cache {
                 return Err(CatalogError::InvalidConnection {
@@ -4188,6 +4236,29 @@ default_base_url = "http://localhost:11434/v1"
         );
         assert_eq!(connection.prompt_cache_policy, PromptCachePolicy::TokenHub);
         assert!(connection.reasoning_content_echo);
+        assert_eq!(
+            connection
+                .origins
+                .iter()
+                .map(|origin| (
+                    origin.id.as_ref(),
+                    origin.display_name.as_ref(),
+                    origin.base_url.as_ref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "international",
+                    "International (Singapore)",
+                    "https://tokenhub-intl.tencentmaas.com/v1"
+                ),
+                (
+                    "china",
+                    "China (Guangzhou)",
+                    "https://tokenhub.tencentmaas.com/v1"
+                ),
+            ]
+        );
 
         let hy3 = catalog
             .resolve(&tencent_id, &model_id("tencent/hy3"))
@@ -4229,6 +4300,107 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(preview.remote_model_id.as_ref(), "hy3-preview");
         assert_eq!(preview.output_limit, Some(128_000));
         assert_eq!(preview.pricing, None);
+    }
+
+    #[test]
+    fn builtin_connections_expose_documented_service_origins() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let origins = |id: &str| {
+            catalog
+                .connection(&connection_id(id))
+                .unwrap()
+                .origins
+                .iter()
+                .map(|origin| (origin.id.to_string(), origin.base_url.to_string()))
+                .collect::<Vec<_>>()
+        };
+
+        for (id, expected) in [
+            (
+                "minimax",
+                vec![
+                    ("global", "https://api.minimax.io/anthropic"),
+                    ("china", "https://api.minimaxi.com/anthropic"),
+                ],
+            ),
+            (
+                "minimax-coding-plan",
+                vec![
+                    ("global", "https://api.minimax.io/anthropic"),
+                    ("china", "https://api.minimaxi.com/anthropic"),
+                ],
+            ),
+            (
+                "zai",
+                vec![
+                    ("global", "https://api.z.ai/api/paas/v4"),
+                    ("china", "https://open.bigmodel.cn/api/paas/v4"),
+                ],
+            ),
+            (
+                "zai-coding-plan",
+                vec![
+                    ("global", "https://api.z.ai/api/coding/paas/v4"),
+                    ("china", "https://open.bigmodel.cn/api/coding/paas/v4"),
+                ],
+            ),
+            (
+                "moonshotai",
+                vec![
+                    ("international", "https://api.moonshot.ai/v1"),
+                    ("china", "https://api.moonshot.cn/v1"),
+                ],
+            ),
+            (
+                "qwencloud",
+                vec![
+                    (
+                        "singapore",
+                        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                    ),
+                    ("china", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                    ("us", "https://dashscope-us.aliyuncs.com/compatible-mode/v1"),
+                ],
+            ),
+            (
+                "qwencloud-token-plan",
+                vec![
+                    (
+                        "singapore",
+                        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                    ),
+                    (
+                        "china",
+                        "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                    ),
+                ],
+            ),
+            (
+                "tencent",
+                vec![
+                    ("international", "https://tokenhub-intl.tencentmaas.com/v1"),
+                    ("china", "https://tokenhub.tencentmaas.com/v1"),
+                ],
+            ),
+        ] {
+            assert_eq!(
+                origins(id),
+                expected
+                    .into_iter()
+                    .map(|(origin, url)| (origin.to_string(), url.to_string()))
+                    .collect::<Vec<_>>(),
+                "{id}"
+            );
+        }
+
+        let openai = origins("openai");
+        assert_eq!(openai.len(), 11);
+        assert!(openai.contains(&(
+            "default".to_string(),
+            "https://api.openai.com/v1".to_string()
+        )));
+        assert!(openai.contains(&("eu".to_string(), "https://eu.api.openai.com/v1".to_string())));
+        assert!(openai.contains(&("ae".to_string(), "https://ae.api.openai.com/v1".to_string())));
     }
 
     #[test]
@@ -4806,6 +4978,56 @@ default_base_url = "http://localhost:11434/v1"
         assert!(
             matches!(result, Err(CatalogError::DuplicateConnection { id }) if id.as_str() == "codex")
         );
+    }
+
+    #[test]
+    fn connection_origins_require_unique_ids_and_include_the_default() {
+        let duplicate = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "regional"
+                    display_name = "Regional"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    default_base_url = "https://global.example/v1"
+                    origins = [
+                      { id = "global", display_name = "Global", base_url = "https://global.example/v1" },
+                      { id = "global", display_name = "China", base_url = "https://china.example/v1" },
+                    ]
+                "#,
+            )],
+            &[],
+        );
+        assert!(matches!(
+            duplicate,
+            Err(CatalogError::InvalidConnection { message, .. })
+                if message == "duplicate origin id `global`"
+        ));
+
+        let missing_default = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "regional"
+                    display_name = "Regional"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    default_base_url = "https://other.example/v1"
+                    origins = [
+                      { id = "global", display_name = "Global", base_url = "https://global.example/v1" },
+                    ]
+                "#,
+            )],
+            &[],
+        );
+        assert!(matches!(
+            missing_default,
+            Err(CatalogError::InvalidConnection { message, .. })
+                if message == "default_base_url must match one of the configured origins"
+        ));
     }
 
     #[test]

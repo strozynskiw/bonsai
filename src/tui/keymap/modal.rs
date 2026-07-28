@@ -122,10 +122,16 @@ pub(super) fn map_api_key_prompt_key(key: KeyEvent, app: &AppState) -> KeyIntent
             KeyIntent::Action(AppAction::ApiKeyPersistenceToggle)
         }
         KeyCode::Enter => KeyIntent::Action(AppAction::ApiKeyInputSubmit),
-        KeyCode::Down | KeyCode::Tab if app.uses_endpoint_auth_form() => {
+        KeyCode::Left if app.origin_auth_field_active() => {
+            KeyIntent::Action(AppAction::ApiKeyOriginCycle(-1))
+        }
+        KeyCode::Right | KeyCode::Char(' ') if app.origin_auth_field_active() => {
+            KeyIntent::Action(AppAction::ApiKeyOriginCycle(1))
+        }
+        KeyCode::Down | KeyCode::Tab if app.uses_structured_auth_form() => {
             KeyIntent::Action(AppAction::ApiKeyInputMoveField(1))
         }
-        KeyCode::Up | KeyCode::BackTab if app.uses_endpoint_auth_form() => {
+        KeyCode::Up | KeyCode::BackTab if app.uses_structured_auth_form() => {
             KeyIntent::Action(AppAction::ApiKeyInputMoveField(-1))
         }
         KeyCode::Backspace => KeyIntent::Action(AppAction::ApiKeyInputBackspace),

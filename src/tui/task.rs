@@ -885,10 +885,9 @@ impl TaskController {
                             CommandModalRequest::ContextReport(report) => {
                                 ModalKind::Context(report)
                             }
-                            CommandModalRequest::Episodes(report) => ModalKind::Episodes {
-                                report,
-                                cursor: 0,
-                            },
+                            CommandModalRequest::Episodes(report) => {
+                                ModalKind::Episodes { report, cursor: 0 }
+                            }
                             CommandModalRequest::ModelPicker => ModalKind::ModelPicker {
                                 entries: model_entries,
                             },
@@ -907,28 +906,31 @@ impl TaskController {
                                 }
                             }
                             CommandModalRequest::ApiKeyPrompt { provider_id } => {
-                                let initial_form =
-                                    registry.lookup(&provider_id).and_then(|factory| {
-                                        factory
-                                            .metadata()
-                                            .auth_requirement
-                                            .uses_endpoint_setup()
-                                            .then(|| {
-                                                crate::tui::app::ProviderAuthForm::from_endpoint_session(
-                                                    session.session(&provider_id),
-                                                    credential_persistence,
-                                                )
-                                            })
+                                let endpoint_form =
+                                    registry.lookup(&provider_id).is_some_and(|factory| {
+                                        factory.metadata().auth_requirement.uses_endpoint_setup()
                                     });
+                                let origins = provider_id
+                                    .parse::<crate::model_catalog::ConnectionId>()
+                                    .ok()
+                                    .and_then(|id| model_catalog.connection(&id))
+                                    .map(|connection| connection.origins.clone())
+                                    .unwrap_or_default();
+                                let initial_form =
+                                    Some(crate::tui::app::ProviderAuthForm::from_provider_session(
+                                        session.session(&provider_id),
+                                        credential_persistence,
+                                        origins,
+                                        endpoint_form,
+                                    ));
                                 ModalKind::ApiKeyPrompt {
                                     provider_id,
                                     initial_form,
                                 }
                             }
-                            CommandModalRequest::McpServers { rows } => ModalKind::McpServers {
-                                rows,
-                                cursor: 0,
-                            },
+                            CommandModalRequest::McpServers { rows } => {
+                                ModalKind::McpServers { rows, cursor: 0 }
+                            }
                             CommandModalRequest::SandboxStatus => {
                                 ModalKind::SandboxStatus { cursor: 0 }
                             }

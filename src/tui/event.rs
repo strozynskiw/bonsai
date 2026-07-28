@@ -1195,6 +1195,7 @@ pub enum AppAction {
     ApiKeyInputSubmit,
     ApiKeyInputPaste(String),
     ApiKeyInputMoveField(i16),
+    ApiKeyOriginCycle(i16),
     ApiKeyPersistenceToggle,
     AuthorizeProviderPickerMove(i16),
     /// Append a typed character to the authorize picker's filter (resets cursor).

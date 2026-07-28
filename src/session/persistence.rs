@@ -620,6 +620,7 @@ mod tests {
                 auth: crate::model_catalog::ConnectionAuth::OptionalApiKey,
                 transport: crate::model_catalog::TransportProtocol::OpenAiChat,
                 default_base_url: "http://localhost:11434/v1".into(),
+                origins: Vec::new(),
                 api_key_env: Some("LOCAL_OPENAI_API_KEY".into()),
                 model_env: Some("LOCAL_OPENAI_MODEL".into()),
                 base_url_env: Some("LOCAL_OPENAI_BASE_URL".into()),

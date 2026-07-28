@@ -2522,6 +2522,7 @@ mod tests {
                     auth: crate::model_catalog::ConnectionAuth::ApiKey,
                     transport: crate::model_catalog::TransportProtocol::OpenAiChat,
                     default_base_url: server.uri().into(),
+                    origins: Vec::new(),
                     api_key_env: None,
                     model_env: None,
                     base_url_env: None,
@@ -3430,6 +3431,7 @@ mod tests {
             .authorize(AuthInput::ApiKey {
                 api_key: "sk-oc-pasted".to_string(),
                 persistence: crate::session::CredentialPersistence::File,
+                base_url: None,
             })
             .await
             .unwrap();
@@ -3442,6 +3444,7 @@ mod tests {
             .authorize(AuthInput::ApiKey {
                 api_key: "   ".to_string(),
                 persistence: crate::session::CredentialPersistence::File,
+                base_url: None,
             })
             .await;
         assert!(result.is_err());

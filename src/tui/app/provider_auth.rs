@@ -3,6 +3,7 @@ use crate::tui::event::ModalKind;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProviderAuthField {
+    Origin,
     #[default]
     BaseUrl,
     ApiKey,
@@ -21,16 +22,24 @@ pub struct ProviderAuthForm {
     pub context_window_input: String,
     pub provider_auth_field: ProviderAuthField,
     pub credential_persistence: crate::session::CredentialPersistence,
+    pub(crate) origins: Vec<crate::model_catalog::ServiceOrigin>,
+    pub(crate) origin_cursor: usize,
 }
 
 impl ProviderAuthField {
-    pub(super) fn moved(self, delta: i16) -> Self {
-        let fields = [
-            Self::BaseUrl,
-            Self::ApiKey,
-            Self::Model,
-            Self::ContextWindow,
-        ];
+    pub(super) fn moved(self, delta: i16, endpoint_form: bool, has_origins: bool) -> Self {
+        let fields: &[Self] = if endpoint_form {
+            &[
+                Self::BaseUrl,
+                Self::ApiKey,
+                Self::Model,
+                Self::ContextWindow,
+            ]
+        } else if has_origins {
+            &[Self::Origin, Self::ApiKey]
+        } else {
+            &[Self::ApiKey]
+        };
         let current = fields.iter().position(|field| *field == self).unwrap_or(0);
         let next = if delta.is_negative() {
             current.saturating_sub(delta.unsigned_abs() as usize)
@@ -78,7 +87,57 @@ impl ProviderAuthForm {
                 .unwrap_or_default(),
             provider_auth_field: ProviderAuthField::default(),
             credential_persistence,
+            origins: Vec::new(),
+            origin_cursor: 0,
         }
+    }
+
+    pub(crate) fn from_provider_session(
+        session: &crate::session::ProviderSession,
+        default_persistence: crate::session::CredentialPersistence,
+        mut origins: Vec<crate::model_catalog::ServiceOrigin>,
+        endpoint_form: bool,
+    ) -> Self {
+        let mut form = if endpoint_form {
+            Self::from_endpoint_session(session, default_persistence)
+        } else {
+            Self::with_persistence(default_persistence)
+        };
+        form.api_key_input = session.api_key.clone();
+        let configured_base_url = session.base_url.trim();
+        let mut origin_cursor = origins.iter().position(|origin| {
+            origin.base_url.trim_end_matches('/') == configured_base_url.trim_end_matches('/')
+        });
+        if origin_cursor.is_none() && !configured_base_url.is_empty() && !origins.is_empty() {
+            origins.push(crate::model_catalog::ServiceOrigin {
+                id: "configured".into(),
+                display_name: "Configured endpoint".into(),
+                base_url: configured_base_url.to_string().into_boxed_str(),
+            });
+            origin_cursor = Some(origins.len() - 1);
+        }
+        form.origin_cursor = origin_cursor.unwrap_or(0);
+        form.provider_auth_field = if !endpoint_form && !origins.is_empty() {
+            ProviderAuthField::Origin
+        } else if endpoint_form {
+            ProviderAuthField::BaseUrl
+        } else {
+            ProviderAuthField::ApiKey
+        };
+        form.origins = origins;
+        form
+    }
+
+    pub(crate) fn selected_origin(&self) -> Option<&crate::model_catalog::ServiceOrigin> {
+        self.origins.get(self.origin_cursor)
+    }
+
+    pub(crate) fn cycle_origin(&mut self, delta: i16) {
+        self.origin_cursor = super::move_index(
+            self.origin_cursor,
+            delta,
+            self.origins.len().saturating_sub(1),
+        );
     }
 
     pub(crate) fn parsed_context_window(&self) -> Result<Option<u32>, String> {
@@ -102,6 +161,8 @@ impl ProviderAuthForm {
         self.context_window_input.clear();
         self.provider_auth_field = ProviderAuthField::default();
         self.credential_persistence = credential_persistence;
+        self.origins.clear();
+        self.origin_cursor = 0;
     }
 }
 
@@ -126,18 +187,29 @@ impl AppState {
         )
     }
 
-    pub(super) fn active_auth_input_mut(&mut self) -> &mut String {
+    pub(crate) fn uses_structured_auth_form(&self) -> bool {
+        self.uses_endpoint_auth_form() || !self.provider_auth_form.origins.is_empty()
+    }
+
+    pub(crate) fn origin_auth_field_active(&self) -> bool {
+        self.provider_auth_form.provider_auth_field == ProviderAuthField::Origin
+    }
+
+    pub(super) fn active_auth_input_mut(&mut self) -> Option<&mut String> {
         if self.uses_endpoint_auth_form() {
-            match self.provider_auth_form.provider_auth_field {
+            Some(match self.provider_auth_form.provider_auth_field {
+                ProviderAuthField::Origin => return None,
                 ProviderAuthField::BaseUrl => &mut self.provider_auth_form.provider_base_url_input,
                 ProviderAuthField::ApiKey => &mut self.provider_auth_form.api_key_input,
                 ProviderAuthField::Model => &mut self.provider_auth_form.provider_model_input,
                 ProviderAuthField::ContextWindow => {
                     &mut self.provider_auth_form.context_window_input
                 }
-            }
+            })
+        } else if self.origin_auth_field_active() {
+            None
         } else {
-            &mut self.provider_auth_form.api_key_input
+            Some(&mut self.provider_auth_form.api_key_input)
         }
     }
 }
@@ -215,6 +287,81 @@ mod tests {
             app.provider_auth_form.provider_auth_field,
             ProviderAuthField::BaseUrl
         );
+    }
+
+    #[test]
+    fn origin_auth_form_restores_and_cycles_the_saved_origin() {
+        let mut app = app();
+        let session = crate::session::ProviderSession::new(
+            "sk-region".to_string(),
+            "https://china.example/v1".to_string(),
+            "example-model".to_string(),
+        );
+        let origins = vec![
+            crate::model_catalog::ServiceOrigin {
+                id: "global".into(),
+                display_name: "Global".into(),
+                base_url: "https://global.example/v1".into(),
+            },
+            crate::model_catalog::ServiceOrigin {
+                id: "china".into(),
+                display_name: "China".into(),
+                base_url: "https://china.example/v1".into(),
+            },
+        ];
+        let form = ProviderAuthForm::from_provider_session(
+            &session,
+            crate::session::CredentialPersistence::File,
+            origins,
+            false,
+        );
+        app.reduce(AppAction::OpenModal(ModalKind::ApiKeyPrompt {
+            provider_id: "regional".to_string(),
+            initial_form: Some(form),
+        }));
+
+        assert_eq!(
+            app.provider_auth_form
+                .selected_origin()
+                .map(|origin| origin.id.as_ref()),
+            Some("china")
+        );
+        app.reduce(AppAction::ApiKeyInputChar('x'));
+        assert_eq!(app.provider_auth_form.api_key_input, "sk-region");
+
+        app.reduce(AppAction::ApiKeyOriginCycle(-1));
+        assert_eq!(
+            app.provider_auth_form
+                .selected_origin()
+                .map(|origin| origin.id.as_ref()),
+            Some("global")
+        );
+        app.reduce(AppAction::ApiKeyInputMoveField(1));
+        app.reduce(AppAction::ApiKeyInputChar('x'));
+        assert_eq!(app.provider_auth_form.api_key_input, "sk-regionx");
+    }
+
+    #[test]
+    fn origin_auth_form_preserves_a_configured_non_catalog_endpoint() {
+        let session = crate::session::ProviderSession::new(
+            "sk-proxy".to_string(),
+            "https://proxy.example/v1".to_string(),
+            "example-model".to_string(),
+        );
+        let form = ProviderAuthForm::from_provider_session(
+            &session,
+            crate::session::CredentialPersistence::File,
+            vec![crate::model_catalog::ServiceOrigin {
+                id: "global".into(),
+                display_name: "Global".into(),
+                base_url: "https://global.example/v1".into(),
+            }],
+            false,
+        );
+
+        let selected = form.selected_origin().unwrap();
+        assert_eq!(selected.display_name.as_ref(), "Configured endpoint");
+        assert_eq!(selected.base_url.as_ref(), "https://proxy.example/v1");
     }
 
     #[test]

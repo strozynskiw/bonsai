@@ -102,6 +102,14 @@ pub(crate) enum ConnectionAuth {
     CodexCache,
 }
 
+/// One predefined service origin for a catalog connection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub(crate) struct ServiceOrigin {
+    pub id: Box<str>,
+    pub display_name: Box<str>,
+    pub base_url: Box<str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RunTarget {
     pub connection_id: ConnectionId,
@@ -140,6 +148,10 @@ pub(crate) struct ConnectionSpec {
     pub transport: TransportProtocol,
     #[serde(default)]
     pub default_base_url: Box<str>,
+    /// Named service endpoints that users can switch between while retaining
+    /// the same provider identity, credentials, model, and shortcuts.
+    #[serde(default)]
+    pub origins: Vec<ServiceOrigin>,
     #[serde(default)]
     pub api_key_env: Option<Box<str>>,
     #[serde(default)]
@@ -223,6 +235,8 @@ pub(crate) struct ConnectionSpecPatch {
     #[serde(default)]
     pub default_base_url: Option<Box<str>>,
     #[serde(default)]
+    pub origins: Option<Vec<ServiceOrigin>>,
+    #[serde(default)]
     pub api_key_env: Option<Box<str>>,
     #[serde(default)]
     pub model_env: Option<Box<str>>,
@@ -275,6 +289,7 @@ impl ConnectionSpecPatch {
             auth,
             transport,
             default_base_url: self.default_base_url.unwrap_or_default(),
+            origins: self.origins.unwrap_or_default(),
             api_key_env: self.api_key_env,
             model_env: self.model_env,
             base_url_env: self.base_url_env,
@@ -309,6 +324,7 @@ fn missing_connection_field(
 
 impl ConnectionSpec {
     pub(crate) fn apply_patch(&mut self, patch: ConnectionSpecPatch) {
+        let origins_supplied = patch.origins.is_some();
         if let Some(enabled) = patch.enabled {
             self.enabled = enabled;
         }
@@ -323,6 +339,17 @@ impl ConnectionSpec {
         }
         if let Some(default_base_url) = patch.default_base_url {
             self.default_base_url = default_base_url;
+            if !origins_supplied
+                && !self.origins.iter().any(|origin| {
+                    origin.base_url.trim_end_matches('/')
+                        == self.default_base_url.trim_end_matches('/')
+                })
+            {
+                self.origins.clear();
+            }
+        }
+        if let Some(origins) = patch.origins {
+            self.origins = origins;
         }
         if let Some(api_key_env) = patch.api_key_env {
             self.api_key_env = Some(api_key_env);

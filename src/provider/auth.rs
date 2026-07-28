@@ -11,6 +11,9 @@ pub enum AuthInput {
     ApiKey {
         api_key: String,
         persistence: CredentialPersistence,
+        /// Catalog-selected service origin. `None` keeps the connection's
+        /// default base URL (or an environment override).
+        base_url: Option<String>,
     },
     OpenAiCompatible {
         base_url: String,
@@ -49,19 +52,26 @@ pub(crate) fn authorize_api_key(
     metadata: &ProviderMetadata,
     input: AuthInput,
 ) -> Result<AuthorizeOutcome> {
-    let api_key = match input {
+    let (api_key, base_url) = match input {
         AuthInput::FromEnv => {
             let var = metadata
                 .env_var_api_key
                 .as_deref()
                 .with_context(|| format!("{} has no env var configured", metadata.display_name))?;
-            std::env::var(var).with_context(|| format!("{var} is not set"))?
+            (
+                std::env::var(var).with_context(|| format!("{var} is not set"))?,
+                None,
+            )
         }
-        AuthInput::ApiKey { api_key: key, .. } => {
+        AuthInput::ApiKey {
+            api_key: key,
+            base_url,
+            ..
+        } => {
             if key.trim().is_empty() {
                 anyhow::bail!("{} API key cannot be empty", metadata.display_name);
             }
-            key
+            (key, base_url)
         }
         AuthInput::FromCodexCache => {
             anyhow::bail!(
@@ -76,7 +86,9 @@ pub(crate) fn authorize_api_key(
             )
         }
     };
-    Ok(AuthorizeOutcome::new(api_key))
+    let mut outcome = AuthorizeOutcome::new(api_key);
+    outcome.base_url = base_url;
+    Ok(outcome)
 }
 
 /// Shared `is_authorized` for API-key providers: a non-empty key.
@@ -117,5 +129,24 @@ mod tests {
         assert!(outcome.base_url.is_none());
         assert!(outcome.account_id.is_empty());
         assert!(!outcome.is_fedramp);
+    }
+
+    #[test]
+    fn api_key_authorization_preserves_selected_service_origin() {
+        let metadata = crate::provider::metadata_for("anthropic").unwrap();
+        let outcome = authorize_api_key(
+            metadata,
+            AuthInput::ApiKey {
+                api_key: "token-123".to_string(),
+                persistence: CredentialPersistence::Session,
+                base_url: Some("https://regional.example/v1".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.base_url.as_deref(),
+            Some("https://regional.example/v1")
+        );
     }
 }

@@ -5298,7 +5298,7 @@ async fn authorize_command_task_opens_key_prompt_without_status_message() {
         open_modal:
             Some(ModalKind::ApiKeyPrompt {
                 provider_id,
-                initial_form: None,
+                initial_form: Some(initial_form),
             }),
         ..
     } = *event
@@ -5306,6 +5306,7 @@ async fn authorize_command_task_opens_key_prompt_without_status_message() {
         panic!("expected authorize key prompt event");
     };
     assert_eq!(provider_id, "opencode");
+    assert!(initial_form.origins.is_empty());
     assert!(messages.is_empty());
 }
 

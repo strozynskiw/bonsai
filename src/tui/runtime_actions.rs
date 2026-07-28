@@ -1198,6 +1198,10 @@ async fn submit_api_key_prompt(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
             AuthInput::ApiKey {
                 api_key,
                 persistence: credential_persistence,
+                base_url: app
+                    .provider_auth_form
+                    .selected_origin()
+                    .map(|origin| origin.base_url.to_string()),
             }
         }
         AuthRequirement::CodexCache => AuthInput::FromCodexCache,

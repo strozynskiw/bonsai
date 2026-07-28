@@ -80,6 +80,38 @@ impl ProviderFactory for MockCodexFactory {
     }
 }
 
+struct RecordingOriginFactory {
+    seen_base_url: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl ProviderFactory for RecordingOriginFactory {
+    fn metadata(&self) -> &ProviderMetadata {
+        crate::provider::metadata_for("codex").unwrap()
+    }
+
+    async fn authorize(&self, _input: AuthInput) -> anyhow::Result<AuthorizeOutcome> {
+        Ok(AuthorizeOutcome::default())
+    }
+
+    fn is_authorized(&self, session: &crate::session::ProviderSession) -> bool {
+        !session.api_key.trim().is_empty() && !session.account_id.trim().is_empty()
+    }
+
+    fn clear_authorization(&self, session: &mut crate::session::ProviderSession) {
+        session.api_key.clear();
+        session.account_id.clear();
+    }
+
+    async fn list_models(
+        &self,
+        session: &crate::session::ProviderSession,
+    ) -> anyhow::Result<Vec<String>> {
+        *self.seen_base_url.lock().unwrap() = Some(session.base_url.clone());
+        Ok(vec!["gpt-5.3-codex-spark".to_string()])
+    }
+}
+
 fn agent() -> Agent {
     let fixture = TestFixture::new();
     Agent::new(
@@ -2270,6 +2302,29 @@ async fn refresh_all_provider_models_covers_every_authorized_provider() {
     assert_eq!(
         catalog.available_models_for_connection(&codex, Vec::new()),
         vec!["gpt-5.3-codex-spark".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn refresh_routes_model_discovery_through_the_selected_origin() {
+    let seen_base_url = Arc::new(std::sync::Mutex::new(None));
+    let registry = ProviderRegistry::new(vec![Arc::new(RecordingOriginFactory {
+        seen_base_url: seen_base_url.clone(),
+    })]);
+    let mut store = session_store();
+    let catalog = test_catalog();
+    let session = store.session_mut("codex");
+    session.api_key = "token".to_string();
+    session.account_id = "account".to_string();
+    session.base_url = "https://eu.api.openai.com/v1".to_string();
+
+    crate::commands::providers::refresh_all_provider_models(&registry, &store, &catalog)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        seen_base_url.lock().unwrap().as_deref(),
+        Some("https://eu.api.openai.com/v1")
     );
 }
 

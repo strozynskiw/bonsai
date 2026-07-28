@@ -101,6 +101,10 @@ display_name = "MiniMax API"
 auth = "api-key"
 transport = "anthropic-messages"
 default_base_url = "https://api.minimax.io/anthropic"
+origins = [
+  { id = "global", display_name = "Global", base_url = "https://api.minimax.io/anthropic" },
+  { id = "china", display_name = "China", base_url = "https://api.minimaxi.com/anthropic" },
+]
 api_key_env = "MINIMAX_API_KEY"
 model_env = "MINIMAX_MODEL"
 base_url_env = "MINIMAX_BASE_URL"
@@ -117,6 +121,10 @@ display_name = "MiniMax Coding Plan"
 auth = "api-key"
 transport = "anthropic-messages"
 default_base_url = "https://api.minimax.io/anthropic"
+origins = [
+  { id = "global", display_name = "Global", base_url = "https://api.minimax.io/anthropic" },
+  { id = "china", display_name = "China", base_url = "https://api.minimaxi.com/anthropic" },
+]
 api_key_env = "MINIMAX_CODING_PLAN_API_KEY"
 model_env = "MINIMAX_CODING_PLAN_MODEL"
 base_url_env = "MINIMAX_CODING_PLAN_BASE_URL"
@@ -135,6 +143,10 @@ display_name = "Z.AI API"
 auth = "api-key"
 transport = "openai-chat"
 default_base_url = "https://api.z.ai/api/paas/v4"
+origins = [
+  { id = "global", display_name = "Global", base_url = "https://api.z.ai/api/paas/v4" },
+  { id = "china", display_name = "China", base_url = "https://open.bigmodel.cn/api/paas/v4" },
+]
 api_key_env = "ZAI_API_KEY"
 model_env = "ZAI_MODEL"
 base_url_env = "ZAI_BASE_URL"
@@ -150,6 +162,10 @@ display_name = "Z.AI Coding Plan"
 auth = "api-key"
 transport = "openai-chat"
 default_base_url = "https://api.z.ai/api/coding/paas/v4"
+origins = [
+  { id = "global", display_name = "Global", base_url = "https://api.z.ai/api/coding/paas/v4" },
+  { id = "china", display_name = "China", base_url = "https://open.bigmodel.cn/api/coding/paas/v4" },
+]
 api_key_env = "ZAI_CODING_PLAN_API_KEY"
 model_env = "ZAI_CODING_PLAN_MODEL"
 base_url_env = "ZAI_CODING_PLAN_BASE_URL"
@@ -164,6 +180,10 @@ display_name = "Moonshot AI API"
 auth = "api-key"
 transport = "openai-chat"
 default_base_url = "https://api.moonshot.ai/v1"
+origins = [
+  { id = "international", display_name = "International", base_url = "https://api.moonshot.ai/v1" },
+  { id = "china", display_name = "China", base_url = "https://api.moonshot.cn/v1" },
+]
 api_key_env = "MOONSHOT_API_KEY"
 model_env = "MOONSHOT_MODEL"
 base_url_env = "MOONSHOT_BASE_URL"
@@ -268,6 +288,19 @@ display_name = "OpenAI API"
 auth = "api-key"
 transport = "openai-chat"
 default_base_url = "https://api.openai.com/v1"
+origins = [
+  { id = "default", display_name = "Default", base_url = "https://api.openai.com/v1" },
+  { id = "us", display_name = "US data residency", base_url = "https://us.api.openai.com/v1" },
+  { id = "eu", display_name = "Europe data residency", base_url = "https://eu.api.openai.com/v1" },
+  { id = "gb", display_name = "UK data residency", base_url = "https://gb.api.openai.com/v1" },
+  { id = "au", display_name = "Australia data residency", base_url = "https://au.api.openai.com/v1" },
+  { id = "ca", display_name = "Canada data residency", base_url = "https://ca.api.openai.com/v1" },
+  { id = "jp", display_name = "Japan data residency", base_url = "https://jp.api.openai.com/v1" },
+  { id = "in", display_name = "India data residency", base_url = "https://in.api.openai.com/v1" },
+  { id = "sg", display_name = "Singapore data residency", base_url = "https://sg.api.openai.com/v1" },
+  { id = "kr", display_name = "South Korea data residency", base_url = "https://kr.api.openai.com/v1" },
+  { id = "ae", display_name = "UAE data residency", base_url = "https://ae.api.openai.com/v1" },
+]
 api_key_env = "OPENAI_API_KEY"
 model_env = "OPENAI_MODEL"
 base_url_env = "OPENAI_BASE_URL"
@@ -348,6 +381,11 @@ transport = "openai-chat"
 # call — polluting the picker with inaccessible entries.
 discovery = "static"
 default_base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+origins = [
+  { id = "singapore", display_name = "Singapore", base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" },
+  { id = "china", display_name = "China (Beijing)", base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { id = "us", display_name = "US (Virginia)", base_url = "https://dashscope-us.aliyuncs.com/compatible-mode/v1" },
+]
 api_key_env = "DASHSCOPE_API_KEY"
 model_env = "DASHSCOPE_MODEL"
 base_url_env = "DASHSCOPE_BASE_URL"
@@ -378,6 +416,10 @@ transport = "openai-chat"
 # not interchangeable (docs: token-plan/migrate-from-coding-plan). Host shape
 # verified live: a bad key returns a proper InvalidApiKey JSON error.
 default_base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+origins = [
+  { id = "singapore", display_name = "Singapore", base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" },
+  { id = "china", display_name = "China (Beijing)", base_url = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" },
+]
 api_key_env = "DASHSCOPE_TOKEN_PLAN_API_KEY"
 model_env = "DASHSCOPE_TOKEN_PLAN_MODEL"
 base_url_env = "DASHSCOPE_TOKEN_PLAN_BASE_URL"
@@ -486,6 +528,10 @@ transport = "openai-chat"
 # Hunyuan platform is scheduled for shutdown on 2026-09-30, so Bonsai defaults
 # to the international TokenHub host and uses its authenticated model catalog.
 default_base_url = "https://tokenhub-intl.tencentmaas.com/v1"
+origins = [
+  { id = "international", display_name = "International (Singapore)", base_url = "https://tokenhub-intl.tencentmaas.com/v1" },
+  { id = "china", display_name = "China (Guangzhou)", base_url = "https://tokenhub.tencentmaas.com/v1" },
+]
 api_key_env = "HUNYUAN_API_KEY"
 model_env = "HUNYUAN_MODEL"
 base_url_env = "HUNYUAN_BASE_URL"

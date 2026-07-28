@@ -424,6 +424,7 @@ mod tests {
                 auth: ConnectionAuth::OptionalApiKey,
                 transport: TransportProtocol::OpenAiChat,
                 default_base_url: "http://localhost:1234/v1".into(),
+                origins: Vec::new(),
                 api_key_env: None,
                 model_env: None,
                 base_url_env: None,

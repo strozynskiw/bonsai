@@ -2222,6 +2222,7 @@ mod tests {
             .authorize(AuthInput::ApiKey {
                 api_key: "token-abc".to_string(),
                 persistence: crate::session::CredentialPersistence::File,
+                base_url: None,
             })
             .await;
         assert!(result.is_err());

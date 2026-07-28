@@ -5,25 +5,38 @@ use super::ActionResult;
 
 pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
     match action {
-        AppAction::ApiKeyInputChar(ch) => app.active_auth_input_mut().push(ch),
+        AppAction::ApiKeyInputChar(ch) => {
+            if let Some(input) = app.active_auth_input_mut() {
+                input.push(ch);
+            }
+        }
         AppAction::ApiKeyInputBackspace => {
-            app.active_auth_input_mut().pop();
+            if let Some(input) = app.active_auth_input_mut() {
+                input.pop();
+            }
         }
         AppAction::ApiKeyInputPaste(text) => {
             let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
             for line in cleaned.split('\n') {
                 let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    app.active_auth_input_mut().push_str(trimmed);
+                if !trimmed.is_empty()
+                    && let Some(input) = app.active_auth_input_mut()
+                {
+                    input.push_str(trimmed);
                 }
             }
         }
         AppAction::ApiKeyInputMoveField(delta) => {
-            if app.uses_endpoint_auth_form() {
-                app.provider_auth_form.provider_auth_field =
-                    app.provider_auth_form.provider_auth_field.moved(delta);
+            if app.uses_structured_auth_form() {
+                let endpoint_form = app.uses_endpoint_auth_form();
+                let has_origins = !app.provider_auth_form.origins.is_empty();
+                app.provider_auth_form.provider_auth_field = app
+                    .provider_auth_form
+                    .provider_auth_field
+                    .moved(delta, endpoint_form, has_origins);
             }
         }
+        AppAction::ApiKeyOriginCycle(delta) => app.provider_auth_form.cycle_origin(delta),
         AppAction::ApiKeyPersistenceToggle => {
             app.provider_auth_form.credential_persistence =
                 app.provider_auth_form.credential_persistence.cycled();

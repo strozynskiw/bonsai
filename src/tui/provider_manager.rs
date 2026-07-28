@@ -227,7 +227,11 @@ pub(crate) fn provider_manager_rows(
                 current: current_id.eq_ignore_ascii_case(id),
                 model_count,
                 discovery: connection.discovery,
-                base_url: connection.default_base_url.to_string(),
+                base_url: provider_session
+                    .map(|session| session.base_url.trim())
+                    .filter(|base_url| !base_url.is_empty())
+                    .unwrap_or(&connection.default_base_url)
+                    .to_string(),
                 credential_label: credential_label(credential_source),
                 auth_hint: authorization_hint(id, credential_source, authorized),
             }
@@ -392,6 +396,23 @@ mod tests {
             .expect("builtin row");
         assert_eq!(builtin.origin, ProviderOrigin::BuiltIn);
         assert!(builtin.enabled);
+    }
+
+    #[test]
+    fn rows_show_the_persisted_service_origin_instead_of_the_default() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let registry = ProviderRegistry::from_catalog(&catalog);
+        let mut session = SessionStore::default();
+        session.ensure_provider("tencent");
+        session.session_mut("tencent").base_url = "https://tokenhub.tencentmaas.com/v1".to_string();
+
+        let rows = provider_manager_rows(&registry, &session, &catalog);
+        let tencent = rows
+            .iter()
+            .find(|row| row.connection_id == "tencent")
+            .expect("Tencent provider row");
+
+        assert_eq!(tencent.base_url, "https://tokenhub.tencentmaas.com/v1");
     }
 
     #[test]

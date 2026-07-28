@@ -9,6 +9,10 @@ pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, p
         render_openai_compatible_prompt(f, area, app, provider_id);
         return;
     }
+    if !app.provider_auth_form.origins.is_empty() {
+        render_origin_api_key_prompt(f, area, app, provider_id);
+        return;
+    }
 
     let block = theme::frame("Authorize Provider", true);
     let inner = block.inner(area);
@@ -54,6 +58,80 @@ pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, p
         inner.x + cursor_col,
         inner.y + field_start + cursor_row,
     ));
+}
+
+fn render_origin_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, provider_id: &str) {
+    let block = theme::frame("Authorize Provider", true);
+    let inner = block.inner(area);
+    let origin = app
+        .provider_auth_form
+        .selected_origin()
+        .map(|origin| origin.display_name.as_ref())
+        .unwrap_or("Default");
+    let masked_api_key = "*".repeat(app.provider_auth_form.api_key_input.chars().count());
+    let fields = [
+        (
+            ProviderAuthField::Origin,
+            "Origin",
+            format!("{origin}  ←/→"),
+        ),
+        (ProviderAuthField::ApiKey, "API key", masked_api_key),
+    ];
+    let form_fields = fields
+        .iter()
+        .map(|(field, label, value)| FormField {
+            label,
+            value,
+            active: app.provider_auth_form.provider_auth_field == *field,
+            caret: FieldCaret::End,
+            value_style: theme::body(theme::palette().text),
+        })
+        .collect::<Vec<_>>();
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Provider: {provider_id}"),
+            theme::body(theme::palette().text),
+        )),
+        Line::from(""),
+    ];
+    let header_offset = lines.len() as u16;
+    let (field_lines, cursor) = form_field_lines(&form_fields, AUTH_LABEL_PAD, inner.width);
+    lines.extend(field_lines);
+    if let Some(origin) = app.provider_auth_form.selected_origin() {
+        lines.push(Line::from(Span::styled(
+            origin.base_url.to_string(),
+            theme::dim(),
+        )));
+    }
+    lines.push(kv(
+        "Store",
+        app.provider_auth_form.credential_persistence.label(),
+        theme::palette().text,
+    ));
+    lines.push(Line::from(""));
+    lines.push(footer_hint_line(&[
+        ("Tab", "field"),
+        ("←/→", "origin"),
+        ("Ctrl+P", "storage"),
+        ("Enter", "submit"),
+        ("Esc", "cancel"),
+    ]));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(theme::panel())
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+    if let Some((row, col)) = cursor {
+        f.set_cursor_position(clamp_cursor(
+            inner,
+            inner.x + col,
+            inner.y + header_offset + row,
+        ));
+    }
 }
 
 pub(super) fn render_openai_compatible_prompt(
@@ -195,6 +273,32 @@ mod tests {
         assert!(!text.contains("secret"));
         assert!(text.contains("protected file"));
         assert!(text.contains("Tab field"));
+    }
+
+    #[test]
+    fn api_key_form_renders_predefined_origin_selector() {
+        let area = Rect::new(0, 0, 80, 14);
+        let mut app = app();
+        app.provider_auth_form.api_key_input = "secret".to_string();
+        app.provider_auth_form.provider_auth_field = ProviderAuthField::Origin;
+        app.provider_auth_form.origins = vec![crate::model_catalog::ServiceOrigin {
+            id: "china".into(),
+            display_name: "China (Guangzhou)".into(),
+            base_url: "https://tokenhub.tencentmaas.com/v1".into(),
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test backend should initialize");
+        terminal
+            .draw(|frame| render_api_key_prompt(frame, area, &app, "tencent"))
+            .expect("origin form should render");
+        let text = rendered_text(&terminal);
+
+        assert!(text.contains("Origin"));
+        assert!(text.contains("China (Guangzhou)"));
+        assert!(text.contains("https://tokenhub.tencentmaas.com/v1"));
+        assert!(text.contains("API key"));
+        assert!(text.contains("******"));
+        assert!(!text.contains("secret"));
     }
 
     #[test]
