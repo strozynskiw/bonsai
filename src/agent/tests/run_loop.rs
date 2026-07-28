@@ -34,11 +34,7 @@ impl Provider for PartialRetryProvider {
         if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             sink.reasoning_delta("discarded reasoning");
             sink.assistant_delta("discarded answer");
-            return Err(ProviderFailure::Http {
-                status: 503,
-                message: "stream reset".to_string(),
-                retry_after_secs: Some(1),
-            });
+            return Err(ProviderFailure::http(503, "stream reset", Some(1)));
         }
 
         sink.reasoning_delta("committed reasoning");
@@ -2093,11 +2089,11 @@ async fn failed_provider_call_replaces_stale_perf_with_failed_attempt() {
 #[tokio::test]
 async fn cancelled_retry_stops_early() {
     let fixture = TestFixture::new();
-    let provider = Box::new(MockProvider::new(vec![Err(ProviderFailure::Http {
-        status: 429,
-        message: "rate limited".to_string(),
-        retry_after_secs: Some(60),
-    })]));
+    let provider = Box::new(MockProvider::new(vec![Err(ProviderFailure::http(
+        429,
+        "rate limited",
+        Some(60),
+    ))]));
     let mut agent = Agent::new(
         provider,
         empty_registry(),
@@ -2121,11 +2117,7 @@ async fn cancelled_retry_stops_early() {
 async fn retry_status_labels_server_errors_as_provider_errors() {
     let fixture = TestFixture::new();
     let provider = Box::new(MockProvider::new(vec![
-        Err(ProviderFailure::Http {
-            status: 500,
-            message: "internal server error".to_string(),
-            retry_after_secs: Some(1),
-        }),
+        Err(ProviderFailure::http(500, "internal server error", Some(1))),
         Ok(StreamedResponse {
             content: "done".to_string(),
             tool_calls: vec![],
@@ -2163,11 +2155,7 @@ async fn retry_status_labels_server_errors_as_provider_errors() {
 async fn immediate_retry_backoff_recovers_without_wall_clock_delay() {
     let fixture = TestFixture::new();
     let provider = Box::new(MockProvider::new(vec![
-        Err(ProviderFailure::Http {
-            status: 503,
-            message: "transient failure".to_string(),
-            retry_after_secs: Some(60),
-        }),
+        Err(ProviderFailure::http(503, "transient failure", Some(60))),
         Ok(StreamedResponse {
             content: "recovered".to_string(),
             terminal: crate::provider::StreamTerminal::Completed(

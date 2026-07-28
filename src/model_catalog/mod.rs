@@ -210,7 +210,7 @@ pub(crate) enum CatalogError {
         source_name: String,
         provider_id: String,
         model_id: String,
-        source: ModelIdError,
+        source: IdError,
     },
     #[error("failed to read catalog directory `{path}`: {source}")]
     ReadDir {

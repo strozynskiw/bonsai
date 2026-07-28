@@ -15,25 +15,112 @@ use serde_json::Value;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::provider::{ProviderFailure, ProviderResult};
+use crate::provider::{ProviderErrorCode, ProviderFailure, ProviderResult};
 
 pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Map a non-2xx response to [`ProviderFailure::Http`], reading the status, the
-/// `retry-after` header, and a truncated body.
+const MAX_ERROR_MESSAGE_CHARS: usize = 500;
+const MAX_ERROR_IDENTIFIER_CHARS: usize = 128;
+const UNKNOWN_ERROR_MESSAGE: &str = "unrecognized provider error response";
+
+/// Map a non-2xx response to [`ProviderFailure::Http`], reading the status,
+/// numeric `retry-after`, and a recognized, bounded error envelope.
 pub(crate) async fn error_from_response(response: reqwest::Response) -> ProviderFailure {
     let status = response.status();
     let retry_after_secs = response
         .headers()
         .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok());
-    let text = response.text().await.unwrap_or_default();
-    ProviderFailure::Http {
-        status: status.as_u16(),
-        message: format!("{:.500}", text),
-        retry_after_secs,
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    let status_code = status.as_u16();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(error) => {
+            return ProviderFailure::http_with_details(
+                status_code,
+                UNKNOWN_ERROR_MESSAGE,
+                ProviderErrorCode::from_status(status_code),
+                None,
+                None,
+                retry_after_secs,
+                Some(crate::provider::ProviderFailureSource::new(error)),
+            );
+        }
+    };
+    let details = serde_json::from_str::<Value>(&text)
+        .ok()
+        .map(|value| error_details(value.get("error").unwrap_or(&value)))
+        .unwrap_or_else(ErrorDetails::unknown);
+    let code = if details.code == ProviderErrorCode::Unknown {
+        ProviderErrorCode::from_status(status.as_u16())
+    } else {
+        details.code
+    };
+    if details.provider_type.is_none() && details.provider_code.is_none() {
+        ProviderFailure::http(status_code, details.message, retry_after_secs)
+    } else {
+        ProviderFailure::http_with_details(
+            status_code,
+            details.message,
+            code,
+            details.provider_type,
+            details.provider_code,
+            retry_after_secs,
+            None,
+        )
     }
+}
+
+#[derive(Debug)]
+struct ErrorDetails {
+    message: String,
+    code: ProviderErrorCode,
+    provider_type: Option<String>,
+    provider_code: Option<String>,
+}
+
+impl ErrorDetails {
+    fn unknown() -> Self {
+        Self {
+            message: UNKNOWN_ERROR_MESSAGE.to_string(),
+            code: ProviderErrorCode::Unknown,
+            provider_type: None,
+            provider_code: None,
+        }
+    }
+}
+
+fn error_details(error: &Value) -> ErrorDetails {
+    let provider_type = error
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|value| sanitize_provider_text(value, MAX_ERROR_IDENTIFIER_CHARS));
+    let provider_code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .map(|value| sanitize_provider_text(value, MAX_ERROR_IDENTIFIER_CHARS));
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(|value| sanitize_provider_text(value, MAX_ERROR_MESSAGE_CHARS))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| UNKNOWN_ERROR_MESSAGE.to_string());
+    let code =
+        ProviderErrorCode::from_provider_fields(provider_type.as_deref(), provider_code.as_deref());
+    ErrorDetails {
+        message,
+        code,
+        provider_type,
+        provider_code,
+    }
+}
+
+fn sanitize_provider_text(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect()
 }
 
 /// Parse one SSE `data:` payload as JSON. Returns `Ok(None)` for keepalives,
@@ -44,24 +131,34 @@ pub(crate) async fn error_from_response(response: reqwest::Response) -> Provider
 pub(crate) fn parse_frame(data: &str) -> ProviderResult<Option<Value>> {
     match serde_json::from_str(data) {
         Ok(value) => Ok(Some(value)),
-        Err(err) if data.trim_start().starts_with('{') => Err(ProviderFailure::stream_decode(
-            format!("malformed stream frame: {err}"),
-        )),
+        Err(error) if data.trim_start().starts_with('{') => {
+            Err(ProviderFailure::stream_decode_with_source(
+                format!("malformed stream frame: {error}"),
+                error,
+            ))
+        }
         Err(_) => Ok(None),
     }
 }
 
-/// Build a retryable-classified error from an in-stream error frame: truncate
-/// `detail` to 500 chars, keep the structured `type`/`code`, and wrap via
-/// [`ProviderFailure::from_stream_error`] so transient overload/rate-limit classes
-/// are retried instead of failing the turn as a plain error.
+/// Build a retryable-classified error from an in-stream error frame, retaining
+/// normalized and raw provider codes while bounding provider-controlled detail.
 pub(crate) fn stream_error(
     error_type: Option<&str>,
     error_code: Option<&str>,
     prefix: &str,
     detail: &str,
 ) -> ProviderFailure {
-    ProviderFailure::from_stream_error(error_type, error_code, format!("{prefix}: {detail:.500}"))
+    let error_type =
+        error_type.map(|value| sanitize_provider_text(value, MAX_ERROR_IDENTIFIER_CHARS));
+    let error_code =
+        error_code.map(|value| sanitize_provider_text(value, MAX_ERROR_IDENTIFIER_CHARS));
+    let detail = sanitize_provider_text(detail, MAX_ERROR_MESSAGE_CHARS);
+    ProviderFailure::from_stream_error(
+        error_type.as_deref(),
+        error_code.as_deref(),
+        format!("{prefix}: {detail}"),
+    )
 }
 
 /// [`stream_error`] from a located in-stream error *object*: extract the
@@ -78,14 +175,23 @@ pub(crate) fn stream_error_from_object(
     prefix: &str,
     fallback: &Value,
 ) -> ProviderFailure {
-    let error_type = error.get("type").and_then(Value::as_str);
-    let error_code = error.get("code").and_then(Value::as_str);
-    let detail = error
-        .get("message")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| fallback.to_string());
-    stream_error(error_type, error_code, prefix, &detail)
+    let details = error_details(error);
+    let detail = if details.message == UNKNOWN_ERROR_MESSAGE {
+        fallback
+            .get("message")
+            .and_then(Value::as_str)
+            .map(|value| sanitize_provider_text(value, MAX_ERROR_MESSAGE_CHARS))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| UNKNOWN_ERROR_MESSAGE.to_string())
+    } else {
+        details.message
+    };
+    stream_error(
+        details.provider_type.as_deref(),
+        details.provider_code.as_deref(),
+        prefix,
+        &detail,
+    )
 }
 
 /// Send a request, honouring cancellation and a start-up timeout. Returns
@@ -121,13 +227,13 @@ fn request_start_failure(error: reqwest::Error) -> ProviderFailure {
     if error.is_builder() {
         ProviderFailure::configuration(message)
     } else if error.is_decode() {
-        ProviderFailure::stream_decode(message)
+        ProviderFailure::stream_decode_with_source(message, error)
     } else {
         // DNS, TCP connection, proxy, TLS, and pre-header request failures are
         // transport failures. Reqwest deliberately groups several of those
         // below `is_connect`, so retry policy belongs on this typed boundary
         // rather than on string matching at the caller.
-        ProviderFailure::transport(message)
+        ProviderFailure::transport_with_source(message, error)
     }
 }
 
@@ -171,8 +277,9 @@ where
         // A body read error (connection reset, HTTP/2 stream reset) is transient:
         // map it to a retryable transport error so `chat_stream_with_retry` backs
         // off instead of failing the turn on the first drop.
-        let chunk =
-            chunk.map_err(|err| ProviderFailure::transport(format!("Stream read error: {err}")))?;
+        let chunk = chunk.map_err(|error| {
+            ProviderFailure::transport_with_source(format!("Stream read error: {error}"), error)
+        })?;
         buffer.extend_from_slice(&chunk);
         drain_frames(&mut buffer, &mut on_event)?;
     }
@@ -294,8 +401,50 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(matches!(error, ProviderFailure::Transport { .. }));
+        assert!(matches!(
+            error,
+            ProviderFailure::Transport {
+                source: Some(_),
+                ..
+            }
+        ));
         assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn extracts_openai_anthropic_and_codex_error_envelopes() {
+        let openai = error_details(&serde_json::json!({
+            "type": "requests",
+            "code": "rate_limit_exceeded",
+            "message": "slow down"
+        }));
+        assert_eq!(openai.code, ProviderErrorCode::RateLimit);
+        assert_eq!(openai.provider_type.as_deref(), Some("requests"));
+        assert_eq!(openai.provider_code.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(openai.message, "slow down");
+
+        let anthropic = error_details(&serde_json::json!({
+            "type": "overloaded_error",
+            "message": "try again"
+        }));
+        assert_eq!(anthropic.code, ProviderErrorCode::Overloaded);
+
+        let codex = error_details(&serde_json::json!({
+            "code": "invalid_api_key",
+            "message": "credential rejected"
+        }));
+        assert_eq!(codex.code, ProviderErrorCode::Authentication);
+    }
+
+    #[test]
+    fn provider_error_text_is_bounded_sanitized_and_never_falls_back_to_json() {
+        let long = format!("ok\u{0000}{}", "x".repeat(MAX_ERROR_MESSAGE_CHARS));
+        let details = error_details(&serde_json::json!({ "message": long }));
+        assert_eq!(details.message.chars().count(), MAX_ERROR_MESSAGE_CHARS);
+        assert!(!details.message.contains('\u{0000}'));
+
+        let unknown = error_details(&serde_json::json!({ "secret": "do-not-echo" }));
+        assert_eq!(unknown.message, UNKNOWN_ERROR_MESSAGE);
     }
 
     #[tokio::test]

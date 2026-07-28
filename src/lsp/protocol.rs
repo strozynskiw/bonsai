@@ -4,13 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub(crate) enum ProtocolError {
-    #[error("{0}")]
-    Message(String),
-}
+use super::LspError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct LspPosition {
@@ -149,16 +144,16 @@ struct RawVersionedTextDocumentIdentifier {
     uri: String,
 }
 
-pub(crate) fn parse_locations(value: Value) -> Result<Vec<LspLocation>, ProtocolError> {
+pub(crate) fn parse_locations(value: Value) -> Result<Vec<LspLocation>, LspError> {
     if value.is_null() {
         return Ok(Vec::new());
     }
     if let Ok(location) = serde_json::from_value::<RawLocation>(value.clone()) {
         return Ok(vec![location_from_raw(location)?]);
     }
-    let array = value.as_array().ok_or_else(|| {
-        ProtocolError::Message("location result must be an object or array".into())
-    })?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| LspError::Protocol("location result must be an object or array".into()))?;
     let mut locations = Vec::new();
     for item in array {
         if let Ok(location) = serde_json::from_value::<RawLocation>(item.clone()) {
@@ -173,20 +168,20 @@ pub(crate) fn parse_locations(value: Value) -> Result<Vec<LspLocation>, Protocol
     Ok(locations)
 }
 
-fn location_from_raw(raw: RawLocation) -> Result<LspLocation, ProtocolError> {
+fn location_from_raw(raw: RawLocation) -> Result<LspLocation, LspError> {
     Ok(LspLocation {
         path: uri_to_path(&raw.uri)?,
         range: raw.range,
     })
 }
 
-pub(crate) fn parse_hover(value: Value) -> Result<Option<LspHover>, ProtocolError> {
+pub(crate) fn parse_hover(value: Value) -> Result<Option<LspHover>, LspError> {
     if value.is_null() {
         return Ok(None);
     }
     let contents = value
         .get("contents")
-        .ok_or_else(|| ProtocolError::Message("hover result missing contents".into()))?;
+        .ok_or_else(|| LspError::Protocol("hover result missing contents".into()))?;
     let text = hover_contents_to_string(contents);
     if text.trim().is_empty() {
         return Ok(None);
@@ -196,7 +191,7 @@ pub(crate) fn parse_hover(value: Value) -> Result<Option<LspHover>, ProtocolErro
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|err| ProtocolError::Message(format!("invalid hover range: {err}")))?;
+        .map_err(|err| LspError::Protocol(format!("invalid hover range: {err}")))?;
     Ok(Some(LspHover {
         contents: text,
         range,
@@ -225,12 +220,12 @@ fn hover_contents_to_string(value: &Value) -> String {
     }
 }
 
-pub(crate) fn parse_workspace_symbols(value: Value) -> Result<Vec<LspSymbol>, ProtocolError> {
+pub(crate) fn parse_workspace_symbols(value: Value) -> Result<Vec<LspSymbol>, LspError> {
     if value.is_null() {
         return Ok(Vec::new());
     }
     let raw = serde_json::from_value::<Vec<RawWorkspaceSymbol>>(value)
-        .map_err(|err| ProtocolError::Message(format!("invalid workspace symbols: {err}")))?;
+        .map_err(|err| LspError::Protocol(format!("invalid workspace symbols: {err}")))?;
     Ok(raw
         .into_iter()
         .filter_map(|symbol| {
@@ -245,42 +240,42 @@ pub(crate) fn parse_workspace_symbols(value: Value) -> Result<Vec<LspSymbol>, Pr
         .collect())
 }
 
-fn parse_symbol_location(value: Value) -> Result<LspLocation, ProtocolError> {
+fn parse_symbol_location(value: Value) -> Result<LspLocation, LspError> {
     if let Ok(location) = serde_json::from_value::<RawLocation>(value.clone()) {
         return location_from_raw(location);
     }
     let uri = value
         .get("uri")
         .and_then(Value::as_str)
-        .ok_or_else(|| ProtocolError::Message("symbol location missing uri".into()))?;
+        .ok_or_else(|| LspError::Protocol("symbol location missing uri".into()))?;
     let range = value
         .get("range")
         .cloned()
         .or_else(|| value.get("selectionRange").cloned())
-        .ok_or_else(|| ProtocolError::Message("symbol location missing range".into()))?;
+        .ok_or_else(|| LspError::Protocol("symbol location missing range".into()))?;
     Ok(LspLocation {
         path: uri_to_path(uri)?,
         range: serde_json::from_value(range)
-            .map_err(|err| ProtocolError::Message(format!("invalid symbol range: {err}")))?,
+            .map_err(|err| LspError::Protocol(format!("invalid symbol range: {err}")))?,
     })
 }
 
-pub(crate) fn parse_workspace_edit(value: Value) -> Result<LspWorkspaceEdit, ProtocolError> {
+pub(crate) fn parse_workspace_edit(value: Value) -> Result<LspWorkspaceEdit, LspError> {
     if value.is_null() {
         return Ok(LspWorkspaceEdit::default());
     }
     let raw = serde_json::from_value::<RawWorkspaceEdit>(value)
-        .map_err(|err| ProtocolError::Message(format!("invalid workspace edit: {err}")))?;
+        .map_err(|err| LspError::Protocol(format!("invalid workspace edit: {err}")))?;
     let mut changes = raw.changes.unwrap_or_default();
     if let Some(document_changes) = raw.document_changes {
         for change in document_changes {
             if change.get("kind").is_some() {
-                return Err(ProtocolError::Message(
+                return Err(LspError::Protocol(
                     "workspace edit contains file create/delete/rename operations, which are not supported yet".into(),
                 ));
             }
             let document_edit = serde_json::from_value::<RawTextDocumentEdit>(change)
-                .map_err(|err| ProtocolError::Message(format!("invalid document edit: {err}")))?;
+                .map_err(|err| LspError::Protocol(format!("invalid document edit: {err}")))?;
             let mut edits = Vec::new();
             for edit in document_edit.edits {
                 if edit.get("annotationId").is_some() {
@@ -302,16 +297,16 @@ pub(crate) fn parse_workspace_edit(value: Value) -> Result<LspWorkspaceEdit, Pro
     Ok(LspWorkspaceEdit { changes })
 }
 
-fn text_edit_from_value(value: Value) -> Result<LspTextEdit, ProtocolError> {
+fn text_edit_from_value(value: Value) -> Result<LspTextEdit, LspError> {
     serde_json::from_value::<LspTextEdit>(value)
-        .map_err(|err| ProtocolError::Message(format!("invalid text edit: {err}")))
+        .map_err(|err| LspError::Protocol(format!("invalid text edit: {err}")))
 }
 
 pub(crate) fn parse_publish_diagnostics(
     params: Value,
-) -> Result<(PathBuf, Vec<LspDiagnostic>), ProtocolError> {
+) -> Result<(PathBuf, Vec<LspDiagnostic>), LspError> {
     let raw = serde_json::from_value::<RawPublishDiagnosticsParams>(params)
-        .map_err(|err| ProtocolError::Message(format!("invalid diagnostics: {err}")))?;
+        .map_err(|err| LspError::Protocol(format!("invalid diagnostics: {err}")))?;
     let path = uri_to_path(&raw.uri)?;
     let diagnostics = raw
         .diagnostics
@@ -324,12 +319,12 @@ pub(crate) fn parse_publish_diagnostics(
 pub(crate) fn parse_document_diagnostic_report(
     file: &Path,
     value: Value,
-) -> Result<Vec<LspDiagnostic>, ProtocolError> {
+) -> Result<Vec<LspDiagnostic>, LspError> {
     if value.is_null() {
         return Ok(Vec::new());
     }
     let raw = serde_json::from_value::<RawDocumentDiagnosticReport>(value)
-        .map_err(|err| ProtocolError::Message(format!("invalid document diagnostics: {err}")))?;
+        .map_err(|err| LspError::Protocol(format!("invalid document diagnostics: {err}")))?;
     Ok(raw
         .items
         .into_iter()
@@ -394,19 +389,19 @@ fn symbol_kind_label(kind: u32) -> &'static str {
     }
 }
 
-pub(crate) fn path_to_file_uri(path: &Path) -> Result<String, ProtocolError> {
+pub(crate) fn path_to_file_uri(path: &Path) -> Result<String, LspError> {
     let path = path
         .canonicalize()
-        .map_err(|err| ProtocolError::Message(format!("failed to canonicalize path: {err}")))?;
+        .map_err(|err| LspError::Protocol(format!("failed to canonicalize path: {err}")))?;
     Ok(format!(
         "file://{}",
         percent_encode(path.to_string_lossy().as_bytes())
     ))
 }
 
-pub(crate) fn uri_to_path(uri: &str) -> Result<PathBuf, ProtocolError> {
+pub(crate) fn uri_to_path(uri: &str) -> Result<PathBuf, LspError> {
     let Some(path) = uri.strip_prefix("file://") else {
-        return Err(ProtocolError::Message(format!(
+        return Err(LspError::Protocol(format!(
             "unsupported LSP URI (expected file://): {uri}"
         )));
     };
@@ -427,19 +422,19 @@ fn percent_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn percent_decode(input: &str) -> Result<String, ProtocolError> {
+fn percent_decode(input: &str) -> Result<String, LspError> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
             if index + 2 >= bytes.len() {
-                return Err(ProtocolError::Message("truncated URI escape".into()));
+                return Err(LspError::Protocol("truncated URI escape".into()));
             }
             let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
-                .map_err(|err| ProtocolError::Message(format!("invalid URI escape: {err}")))?;
+                .map_err(|err| LspError::Protocol(format!("invalid URI escape: {err}")))?;
             let value = u8::from_str_radix(hex, 16)
-                .map_err(|err| ProtocolError::Message(format!("invalid URI escape: {err}")))?;
+                .map_err(|err| LspError::Protocol(format!("invalid URI escape: {err}")))?;
             out.push(value);
             index += 3;
         } else {
@@ -447,14 +442,10 @@ fn percent_decode(input: &str) -> Result<String, ProtocolError> {
             index += 1;
         }
     }
-    String::from_utf8(out)
-        .map_err(|err| ProtocolError::Message(format!("invalid UTF-8 in URI: {err}")))
+    String::from_utf8(out).map_err(|err| LspError::Protocol(format!("invalid UTF-8 in URI: {err}")))
 }
 
-pub(crate) fn offset_at_position(
-    text: &str,
-    position: LspPosition,
-) -> Result<usize, ProtocolError> {
+pub(crate) fn offset_at_position(text: &str, position: LspPosition) -> Result<usize, LspError> {
     let mut byte_offset = 0usize;
     for (line_index, segment) in text.split_inclusive('\n').enumerate() {
         if line_index as u32 == position.line {
@@ -466,18 +457,14 @@ pub(crate) fn offset_at_position(
     if position.line == text.lines().count() as u32 && position.character == 0 {
         return Ok(text.len());
     }
-    Err(ProtocolError::Message(format!(
+    Err(LspError::Protocol(format!(
         "position {}:{} is outside the file",
         position.line + 1,
         position.character + 1
     )))
 }
 
-fn offset_in_line(
-    line: &str,
-    line_start_offset: usize,
-    character: u32,
-) -> Result<usize, ProtocolError> {
+fn offset_in_line(line: &str, line_start_offset: usize, character: u32) -> Result<usize, LspError> {
     let mut utf16_units = 0u32;
     for (byte_index, ch) in line.char_indices() {
         if utf16_units == character {
@@ -485,7 +472,7 @@ fn offset_in_line(
         }
         utf16_units += ch.len_utf16() as u32;
         if utf16_units > character {
-            return Err(ProtocolError::Message(
+            return Err(LspError::Protocol(
                 "position falls inside a multi-unit UTF-16 character".into(),
             ));
         }
@@ -493,7 +480,7 @@ fn offset_in_line(
     if utf16_units == character {
         return Ok(line_start_offset + line.len());
     }
-    Err(ProtocolError::Message(format!(
+    Err(LspError::Protocol(format!(
         "character {} is outside the line",
         character + 1
     )))
@@ -539,15 +526,15 @@ mod tests {
             .unwrap(),
             "a😀".len()
         );
-        assert!(
+        assert!(matches!(
             offset_at_position(
                 text,
                 LspPosition {
                     line: 0,
                     character: 2
                 }
-            )
-            .is_err()
-        );
+            ),
+            Err(LspError::Protocol(message)) if message == "position falls inside a multi-unit UTF-16 character"
+        ));
     }
 }

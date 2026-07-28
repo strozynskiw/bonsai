@@ -646,8 +646,16 @@ fn retry_status_label(error: &ProviderFailure) -> &'static str {
         return "provider quota";
     }
     match error {
-        ProviderFailure::Http { status: 429, .. } => "rate limit",
-        ProviderFailure::Http { status: 529, .. } => "provider overloaded",
+        ProviderFailure::Http {
+            code: crate::provider::ProviderErrorCode::RateLimit,
+            ..
+        }
+        | ProviderFailure::Http { status: 429, .. } => "rate limit",
+        ProviderFailure::Http {
+            code: crate::provider::ProviderErrorCode::Overloaded,
+            ..
+        }
+        | ProviderFailure::Http { status: 529, .. } => "provider overloaded",
         ProviderFailure::Http { .. } => "provider error",
         ProviderFailure::Transport { .. } => "transport error",
         ProviderFailure::Decode { .. } => "decode error",
@@ -704,11 +712,7 @@ mod tests {
             let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
                 sink.assistant_delta("abc");
-                return Err(ProviderFailure::Http {
-                    status: 429,
-                    message: "retry".to_string(),
-                    retry_after_secs: None,
-                });
+                return Err(ProviderFailure::http(429, "retry", None));
             }
             sink.assistant_delta("def");
             Ok(StreamedResponse {
@@ -1222,9 +1226,7 @@ mod tests {
         let mut agent = Agent::new(
             Box::new(StreamingFailureProvider {
                 attempts: primary_attempts.clone(),
-                failure: ProviderFailure::Transport {
-                    message: "primary reset".to_string(),
-                },
+                failure: ProviderFailure::transport("primary reset"),
             }),
             Arc::new(ToolRegistry::new()),
             Arc::new(ToolRegistry::new()),
@@ -1245,9 +1247,7 @@ mod tests {
         let middle_config = fallback_config(
             Box::new(StreamingFailureProvider {
                 attempts: middle_attempts.clone(),
-                failure: ProviderFailure::Transport {
-                    message: "middle reset".to_string(),
-                },
+                failure: ProviderFailure::transport("middle reset"),
             }),
             "middle-provider",
             "middle-model",
@@ -1297,9 +1297,7 @@ mod tests {
         let mut agent = Agent::new(
             Box::new(StreamingFailureProvider {
                 attempts: primary_attempts.clone(),
-                failure: ProviderFailure::Transport {
-                    message: "reset".to_string(),
-                },
+                failure: ProviderFailure::transport("reset"),
             }),
             Arc::new(ToolRegistry::new()),
             Arc::new(ToolRegistry::new()),
@@ -1339,11 +1337,7 @@ mod tests {
         let mut agent = Agent::new(
             Box::new(StreamingFailureProvider {
                 attempts: attempts.clone(),
-                failure: ProviderFailure::Http {
-                    status: 429,
-                    message: "requests per minute exceeded".to_string(),
-                    retry_after_secs: None,
-                },
+                failure: ProviderFailure::http(429, "requests per minute exceeded", None),
             }),
             Arc::new(ToolRegistry::new()),
             Arc::new(ToolRegistry::new()),
@@ -1379,11 +1373,7 @@ mod tests {
         let mut agent = Agent::new(
             Box::new(StreamingFailureProvider {
                 attempts: attempts.clone(),
-                failure: ProviderFailure::Http {
-                    status: 429,
-                    message: "code=insufficient_quota".to_string(),
-                    retry_after_secs: None,
-                },
+                failure: ProviderFailure::http(429, "code=insufficient_quota", None),
             }),
             Arc::new(ToolRegistry::new()),
             Arc::new(ToolRegistry::new()),
