@@ -593,47 +593,45 @@ fn mistral_thinking_text(thinking: &[Value]) -> String {
         .collect()
 }
 
-/// Give every assistant message that carries `tool_calls` its captured
-/// `reasoning_content`, defaulting to an empty string when the provider did not
-/// return one (including history restored from disk).
+/// Replay MiMo's exact `reasoning_content` on assistant tool-call turns.
 ///
-/// The OpenCode Go gateway's DeepSeek adapter rejects a request whose assistant
-/// tool-call messages lack this field: the call fails with HTTP 400 `Error from
-/// provider (Console Go): Upstream request failed`, which names neither the
-/// field nor the message. Every agent turn after the first tool call replays
-/// those messages, so without this the deepseek-v4 models are unusable for tool
-/// work on that connection — the very first tool result 400s.
-///
-/// Deliberate, don't simplify:
-/// - The empty-string fallback is a real fix, not a placeholder. DeepSeek's
-///   adapter checks that the key is present even when no native trace exists.
-///   Kimi and GLM instead receive the exact trace captured during this provider
-///   instance's live tool round.
-/// - It must go on *every* assistant tool-call message in the history, not just
-///   the newest: a single message missing it 400s the whole request.
-/// - It stays gated on [`ProviderCapabilities::echoes_reasoning_content`]
-///   rather than being sent everywhere. The field is off-schema, and strict
-///   servers reject unknown message fields.
+/// Restored sessions cannot recover this provider-native field. Drop an entire
+/// unrecoverable assistant/tool exchange rather than inventing an empty trace
+/// or leaving orphan tool results that the API will reject.
 fn ensure_mimo_reasoning_content(body: &mut Value, reasoning_by_call_id: &HashMap<String, String>) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
+    let mut dropped_call_ids = HashSet::new();
     messages.retain_mut(|message| {
         let Some(message) = message.as_object_mut() else {
             return true;
         };
+        if message.get("role").and_then(Value::as_str) == Some("tool") {
+            return message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .is_none_or(|call_id| !dropped_call_ids.contains(call_id));
+        }
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             return true;
         }
-        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+        let Some(tool_calls) = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .filter(|tool_calls| !tool_calls.is_empty())
+        else {
             return true;
         };
-        let Some(reasoning) = tool_calls
+        let call_ids = tool_calls
+            .iter()
+            .filter_map(|tool_call| tool_call.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let Some(reasoning) = call_ids
             .first()
-            .and_then(|tool_call| tool_call.get("id"))
-            .and_then(Value::as_str)
-            .and_then(|call_id| reasoning_by_call_id.get(call_id))
+            .and_then(|call_id| reasoning_by_call_id.get(*call_id))
         else {
+            dropped_call_ids.extend(call_ids.into_iter().map(str::to_string));
             return false;
         };
         message.insert(
@@ -644,6 +642,12 @@ fn ensure_mimo_reasoning_content(body: &mut Value, reasoning_by_call_id: &HashMa
     });
 }
 
+/// Give every assistant message that carries non-empty `tool_calls` its
+/// captured `reasoning_content`, defaulting to an empty string when the
+/// provider did not return one (including history restored from disk).
+///
+/// The OpenCode Go gateway's DeepSeek adapter requires the field's presence;
+/// strict providers remain protected by the capability gate at the call site.
 fn ensure_reasoning_content_on_tool_call_messages(
     body: &mut Value,
     reasoning_by_call_id: &HashMap<String, String>,
@@ -1638,11 +1642,18 @@ mod tests {
         ensure_mimo_reasoning_content(&mut body, &replay);
 
         let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[1]["reasoning_content"], " exact trace ");
         assert!(messages.iter().all(|message| {
             message.pointer("/tool_calls/0/id").and_then(Value::as_str) != Some("lost")
+                && message.get("tool_call_id").and_then(Value::as_str) != Some("lost")
         }));
+
+        let mut empty = serde_json::json!({
+            "messages": [{"role": "assistant", "content": "done", "tool_calls": []}]
+        });
+        ensure_mimo_reasoning_content(&mut empty, &HashMap::new());
+        assert_eq!(empty["messages"].as_array().unwrap().len(), 1);
     }
 
     #[test]
