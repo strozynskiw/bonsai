@@ -14,15 +14,23 @@ use super::planning::{PlanningCommand, PlanningCommandKind};
 use super::session::EscapeApproval;
 use crate::interaction::{
     EscalationDecision, InteractionOutcome, InteractionStatus, PermissionDecision,
+    SandboxEscalationKind,
 };
 use crate::permissions::{Permission, PermissionMatch, PermissionMatchSource};
-use crate::tool::risk::{ApprovalLevel, classify_bash};
+use crate::tool::risk::{ApprovalLevel, RiskTier, classify_bash};
 use crate::tool::{
     ActionEffect, ActionPlan, AuthorizationVerdict, ToolExecutionContext, authorization_verdict,
 };
 
 /// Bash's name for the central authorization outcome.
 pub(super) type GateVerdict = AuthorizationVerdict;
+
+/// Whether the ordinary command gate should absorb a sandbox-escalation prompt
+/// into the same user decision.
+pub(super) enum CommandApprovalRequest<'a> {
+    CommandOnly,
+    CommandAndSandbox { cwd: &'a Path },
+}
 
 /// Decide how the permission/risk gate treats a command, purely from the
 /// permission lookup, the risk analysis, and the autonomy level — no I/O, so
@@ -63,7 +71,8 @@ impl BashTool {
         command: &str,
         analysis: &CommandAnalysis,
         origin: Option<&str>,
-    ) -> Result<()> {
+        request: CommandApprovalRequest<'_>,
+    ) -> Result<EscapeApproval> {
         let tier = classify_bash(analysis);
         let plan =
             ActionPlan::new("bash", command, [ActionEffect::CodeExecution]).with_risk_tier(tier);
@@ -75,7 +84,7 @@ impl BashTool {
             self.authorization_ledger
                 .record(&plan, permission, configured_level, "allow", "yolo bypass")
                 .await;
-            return Ok(());
+            return Ok(EscapeApproval::None);
         }
         let level = if configured_level == ApprovalLevel::AutoAccept && !self.sandbox.is_active() {
             // AutoAccept's high-risk tier is only meaningful with an actual OS
@@ -124,12 +133,21 @@ impl BashTool {
                         },
                     )
                     .await;
-                Ok(())
+                Ok(EscapeApproval::None)
             }
-            GateVerdict::NeedsPrompt => {
-                self.prompt_for_permission(command, analysis, origin, &plan, permission, level)
+            GateVerdict::NeedsPrompt => match request {
+                CommandApprovalRequest::CommandOnly => {
+                    self.prompt_for_permission(command, analysis, origin, &plan, permission, level)
+                        .await?;
+                    Ok(EscapeApproval::None)
+                }
+                CommandApprovalRequest::CommandAndSandbox { cwd } => {
+                    self.prompt_for_command_and_escape(
+                        cwd, command, analysis, origin, &plan, permission, level,
+                    )
                     .await
-            }
+                }
+            },
         }
     }
 
@@ -161,7 +179,14 @@ impl BashTool {
             anyhow::bail!("Command not allowed by permission rules: {command}");
         }
         if self.yolo_mode.level() < ApprovalLevel::Balanced {
-            return self.authorize_command(command, analysis, origin).await;
+            self.authorize_command(
+                command,
+                analysis,
+                origin,
+                CommandApprovalRequest::CommandOnly,
+            )
+            .await?;
+            return Ok(());
         }
         if planning.permits_network() && !self.sandbox.is_active() {
             anyhow::bail!(
@@ -292,6 +317,160 @@ impl BashTool {
         }
     }
 
+    /// Ask once for both command authorization and a sandbox bypass. The
+    /// sandbox prompt's narrower once/session scopes win: combined approvals
+    /// are never persisted to the project.
+    #[allow(clippy::too_many_arguments)]
+    async fn prompt_for_command_and_escape(
+        &self,
+        cwd: &Path,
+        command: &str,
+        analysis: &CommandAnalysis,
+        origin: Option<&str>,
+        command_plan: &ActionPlan,
+        permission: PermissionMatch,
+        level: ApprovalLevel,
+    ) -> Result<EscapeApproval> {
+        let escape_plan = escape_action_plan(cwd, command);
+        let request_command = command.to_string();
+        let origin = origin.map(str::to_string);
+        let outcome = self
+            .interaction
+            .request(
+                move |id| crate::interaction::InteractionRequest::SandboxEscalation {
+                    request_id: id,
+                    command: request_command,
+                    origin,
+                    kind: SandboxEscalationKind::CommandAndSandbox,
+                },
+            )
+            .await;
+        match outcome {
+            Ok(InteractionOutcome::SandboxEscalation(EscalationDecision::AllowOnce)) => {
+                self.authorization_ledger
+                    .record(
+                        command_plan,
+                        permission,
+                        level,
+                        "allow",
+                        "user allowed command and sandbox escape once",
+                    )
+                    .await;
+                self.authorization_ledger
+                    .record(
+                        &escape_plan,
+                        fallback_permission(),
+                        level,
+                        "allow",
+                        "user allowed command and sandbox escape once",
+                    )
+                    .await;
+                Ok(EscapeApproval::Once)
+            }
+            Ok(InteractionOutcome::SandboxEscalation(EscalationDecision::AllowForSession)) => {
+                self.permissions
+                    .allow_for_session(analysis.permission_command());
+                self.escape_grants.grant(cwd, command);
+                self.authorization_ledger
+                    .record(
+                        command_plan,
+                        permission,
+                        level,
+                        "allow",
+                        "user allowed command and sandbox escape for session",
+                    )
+                    .await;
+                self.authorization_ledger
+                    .record(
+                        &escape_plan,
+                        fallback_permission(),
+                        level,
+                        "allow",
+                        "user allowed command and sandbox escape for session",
+                    )
+                    .await;
+                Ok(EscapeApproval::Session)
+            }
+            Ok(InteractionOutcome::SandboxEscalation(EscalationDecision::Deny)) => {
+                self.authorization_ledger
+                    .record(
+                        command_plan,
+                        permission,
+                        level,
+                        "deny",
+                        "user denied command and sandbox escape",
+                    )
+                    .await;
+                anyhow::bail!("Command and sandbox escape denied by user for command: {command}");
+            }
+            Err(InteractionStatus::Noninteractive) => {
+                self.authorization_ledger
+                    .record(
+                        command_plan,
+                        permission,
+                        level,
+                        "deny",
+                        "combined prompt unavailable",
+                    )
+                    .await;
+                anyhow::bail!(
+                    "Command and sandbox escape prompt unavailable in noninteractive mode for command: {command}"
+                );
+            }
+            Err(_) => {
+                self.authorization_ledger
+                    .record(
+                        command_plan,
+                        permission,
+                        level,
+                        "deny",
+                        "combined prompt cancelled",
+                    )
+                    .await;
+                anyhow::bail!(
+                    "Command and sandbox escape denied (prompt cancelled) for command: {command}"
+                );
+            }
+            Ok(_) => {
+                self.authorization_ledger
+                    .record(
+                        command_plan,
+                        permission,
+                        level,
+                        "deny",
+                        "unexpected combined prompt response",
+                    )
+                    .await;
+                anyhow::bail!(
+                    "Command and sandbox escape prompt received an unexpected response for command: {command}"
+                );
+            }
+        }
+    }
+
+    /// Whether an escape still needs a user prompt. Automatic approval is
+    /// narrower than ordinary command auto-approval: the exact command must
+    /// already have failed under confinement, the session must be interactive,
+    /// the action must be no riskier than medium, and the user must have
+    /// selected an explicitly auto-accepting autonomy level.
+    pub(super) fn escape_requires_prompt(
+        &self,
+        cwd: &Path,
+        command: &str,
+        analysis: &CommandAnalysis,
+    ) -> bool {
+        if self.escape_grants.is_granted(cwd, command) {
+            return false;
+        }
+        let level = self.yolo_mode.level();
+        let auto_accepts_safe_retry =
+            matches!(level, ApprovalLevel::AutoAccept | ApprovalLevel::Yolo)
+                && classify_bash(analysis) <= RiskTier::Medium
+                && self.confined_failures.contains(cwd, command)
+                && !self.interaction.is_noninteractive();
+        !auto_accepts_safe_retry
+    }
+
     /// Prompt the user to run `command` (resolved to run in `cwd`) OUTSIDE the
     /// active sandbox. Mirrors [`prompt_for_permission`](Self::prompt_for_permission):
     /// fail-closed, and a `Deny` aborts the command rather than silently running
@@ -302,17 +481,11 @@ impl BashTool {
         &self,
         cwd: &Path,
         command: &str,
+        analysis: &CommandAnalysis,
         origin: Option<&str>,
     ) -> Result<EscapeApproval> {
-        let plan = ActionPlan::new(
-            "bash.escape",
-            format!("{}: {command}", cwd.display()),
-            [ActionEffect::ExternalWrite, ActionEffect::Network],
-        );
-        let permission = PermissionMatch {
-            permission: Permission::Ask,
-            source: PermissionMatchSource::Fallback,
-        };
+        let plan = escape_action_plan(cwd, command);
+        let permission = fallback_permission();
         let level = self.yolo_mode.level();
         if self.escape_grants.is_granted(cwd, command) {
             self.authorization_ledger
@@ -326,6 +499,18 @@ impl BashTool {
                 .await;
             return Ok(EscapeApproval::Cached);
         }
+        if !self.escape_requires_prompt(cwd, command, analysis) {
+            self.authorization_ledger
+                .record(
+                    &plan,
+                    permission,
+                    level,
+                    "allow",
+                    "automatic safe sandbox retry",
+                )
+                .await;
+            return Ok(EscapeApproval::Automatic);
+        }
         let request_command = command.to_string();
         let origin = origin.map(str::to_string);
         let outcome = self
@@ -335,6 +520,7 @@ impl BashTool {
                     request_id: id,
                     command: request_command,
                     origin,
+                    kind: SandboxEscalationKind::SandboxOnly,
                 },
             )
             .await;
@@ -393,6 +579,21 @@ impl BashTool {
                 );
             }
         }
+    }
+}
+
+fn escape_action_plan(cwd: &Path, command: &str) -> ActionPlan {
+    ActionPlan::new(
+        "bash.escape",
+        format!("{}: {command}", cwd.display()),
+        [ActionEffect::ExternalWrite, ActionEffect::Network],
+    )
+}
+
+fn fallback_permission() -> PermissionMatch {
+    PermissionMatch {
+        permission: Permission::Ask,
+        source: PermissionMatchSource::Fallback,
     }
 }
 

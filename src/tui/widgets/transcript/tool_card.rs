@@ -455,6 +455,11 @@ pub(super) fn pending_permission_command(app: &AppState) -> Option<&str> {
         Some(crate::tui::event::ModalKind::PermissionPrompt { command, .. }) => {
             Some(command.as_str())
         }
+        Some(crate::tui::event::ModalKind::SandboxEscalationPrompt {
+            command,
+            kind: crate::interaction::SandboxEscalationKind::CommandAndSandbox,
+            ..
+        }) => Some(command.as_str()),
         // Built-in web-tool domain prompts mark pending cards the same way, keyed
         // on the URL (the tool's `url` argument).
         Some(crate::tui::event::ModalKind::WebDomainPrompt { url, .. }) => Some(url.as_str()),

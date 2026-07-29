@@ -1085,6 +1085,7 @@ mod tests {
             request_id: 2,
             command: "curl https://example.com".to_string(),
             origin: None,
+            kind: crate::interaction::SandboxEscalationKind::SandboxOnly,
         });
         assert!(matches!(
             press(&escape, KeyCode::Char('n')),

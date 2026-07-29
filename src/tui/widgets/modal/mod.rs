@@ -245,12 +245,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             app.modal_scroll,
         ),
         ModalKind::SandboxEscalationPrompt {
-            command, origin, ..
+            command,
+            origin,
+            kind,
+            ..
         } => render_confirm_prompt(
             f,
             modal,
             app,
-            &sandbox_escalation_prompt(command, origin.as_deref()),
+            &sandbox_escalation_prompt(command, origin.as_deref(), *kind),
             app.modal_scroll,
         ),
         ModalKind::WebDomainPrompt {

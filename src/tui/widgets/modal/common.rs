@@ -163,10 +163,13 @@ pub(crate) fn max_modal_scroll(app: &AppState, area: Rect) -> Option<u16> {
             &permission_prompt(command, origin.as_deref()),
         )),
         ModalKind::SandboxEscalationPrompt {
-            command, origin, ..
+            command,
+            origin,
+            kind,
+            ..
         } => Some(confirm_prompt_max_scroll(
             modal,
-            &sandbox_escalation_prompt(command, origin.as_deref()),
+            &sandbox_escalation_prompt(command, origin.as_deref(), *kind),
         )),
         ModalKind::WebDomainPrompt {
             url,

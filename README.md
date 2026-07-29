@@ -392,6 +392,13 @@ Writable roots are resolved once at startup:
   installation/update requires an approved sandbox escape
 - extra roots from `BONSAI_SANDBOX_WRITABLE_ROOTS`
 
+When a command needs both ordinary approval and `escape_sandbox: true`, Bonsai
+shows one sandbox-warning modal that approves both. At `auto-accept` or `yolo`,
+an interactive command rated at most medium risk may retry outside the sandbox
+without prompting only after that exact command already failed with a
+sandbox-shaped denial; first attempts, higher-risk commands, and headless runs
+still prompt or fail closed.
+
 Environment defaults:
 
 - `BONSAI_SANDBOX=1|on|true|yes|enabled` starts with the sandbox enabled when a
@@ -975,7 +982,8 @@ Existing allow/deny permission rules apply. Commands that would require an
 interactive ask prompt are denied in headless mode, and the question tool fails
 instead of blocking. Raise autonomy explicitly with `--autonomy ask|conservative|balanced|auto-accept|yolo`,
 `--yolo`, or `BONSAI_AUTONOMY=<level>`. Sandbox escape prompts are still denied
-in headless mode at every autonomy level.
+in headless mode at every autonomy level; automatic evidenced retries are
+interactive-only.
 
 Use `--model <id>` and `--effort <level>` to select a model and reasoning effort for
 one headless run without changing the saved defaults.

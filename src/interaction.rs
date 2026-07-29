@@ -36,6 +36,7 @@ pub enum InteractionRequest {
         request_id: u64,
         command: String,
         origin: Option<String>,
+        kind: SandboxEscalationKind,
     },
     /// Approval to fetch from a web domain (WebSearch/WebFetch). Reuses
     /// [`PermissionDecision`] for the outcome (once / session / project / deny).
@@ -88,6 +89,15 @@ pub enum InteractionRequest {
         /// The command or URL, shown for context.
         action_preview: String,
     },
+}
+
+/// Whether a sandbox-escalation prompt approves only the confinement bypass or
+/// also replaces an ordinary command-permission prompt that would otherwise
+/// appear immediately before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxEscalationKind {
+    SandboxOnly,
+    CommandAndSandbox,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +197,10 @@ impl InteractionService {
             pending: Arc::new(Mutex::new(PendingState::default())),
             noninteractive: true,
         }
+    }
+
+    pub(crate) fn is_noninteractive(&self) -> bool {
+        self.noninteractive
     }
 
     pub async fn request(
@@ -321,6 +335,7 @@ mod tests {
                         request_id: id,
                         command: "curl https://example.com".to_string(),
                         origin: None,
+                        kind: SandboxEscalationKind::SandboxOnly,
                     })
                     .await
             }

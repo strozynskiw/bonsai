@@ -1377,7 +1377,11 @@ fn confirm_prompt_specs_render_expected_content() {
     );
 
     // Sandbox escalation: never offers project; subtitle warns about confinement.
-    let s = sandbox_escalation_prompt("rm -rf /", None);
+    let s = sandbox_escalation_prompt(
+        "rm -rf /",
+        None,
+        crate::interaction::SandboxEscalationKind::SandboxOnly,
+    );
     assert!(!s.scopes.project);
     let s_footer = rendered_lines_text(&approval_footer(&s.scopes));
     assert!(

@@ -265,6 +265,7 @@ pub enum ModalKind {
         request_id: u64,
         command: String,
         origin: Option<String>,
+        kind: crate::interaction::SandboxEscalationKind,
     },
     /// Approval to access a web domain (WebSearch/WebFetch). Offers once /
     /// session / project / deny, and warns when the host was reached via a

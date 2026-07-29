@@ -3917,6 +3917,7 @@ fn apply_interaction_request(
             request_id,
             command,
             origin,
+            kind,
         } => {
             app.pending_question_visibility = false;
             app.modal_scroll = 0;
@@ -3924,6 +3925,7 @@ fn apply_interaction_request(
                 request_id,
                 command,
                 origin,
+                kind,
             });
             app.focus = Focus::Modal;
         }

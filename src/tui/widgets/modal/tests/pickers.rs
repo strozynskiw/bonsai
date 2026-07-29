@@ -641,6 +641,40 @@ fn permission_prompt_long_command_still_shows_footer() {
 }
 
 #[test]
+fn combined_command_and_sandbox_prompt_shows_one_explicit_warning() {
+    let area = Rect::new(0, 0, 70, 14);
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+    let app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+    terminal
+        .draw(|frame| {
+            render_confirm_prompt(
+                frame,
+                area,
+                &app,
+                &sandbox_escalation_prompt(
+                    "cargo test",
+                    None,
+                    crate::interaction::SandboxEscalationKind::CommandAndSandbox,
+                ),
+                0,
+            );
+        })
+        .expect("combined prompt should render");
+    let text = buffer_text(terminal.backend().buffer());
+
+    assert!(text.contains("Allow this command to run OUTSIDE the sandbox?"));
+    assert!(text.contains("single decision approves both the command"));
+    assert!(text.contains("once"));
+    assert!(text.contains("session"));
+    assert!(text.contains("deny"));
+    assert!(
+        !text.contains("project"),
+        "combined sandbox approval must never become a persistent project rule"
+    );
+}
+
+#[test]
 fn help_modal_advertises_start_and_save() {
     let area = Rect::new(0, 0, 100, 40);
     let buffer = render_help_to_buffer(area);

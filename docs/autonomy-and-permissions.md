@@ -114,8 +114,10 @@ When an action prompts, you choose:
 `N` ("Never") is the mirror of `P`: where `P` remembers a "yes", `N` remembers a
 "no", so a request you keep rejecting stops asking. It is offered on every prompt
 that offers `P` (bash, domain, MCP, hook) but never on the sandbox-escape prompt —
-escaping the OS sandbox is the enforcement floor and is never made sticky. Lift a
-`Never` rule the same way as any other: `/permissions remove <id>`.
+escaping the OS sandbox is the enforcement floor and is never persisted. When a
+command needs both ordinary permission and a sandbox escape, one warning modal
+covers both decisions using the narrower once/session scopes. Lift a `Never` rule
+the same way as any other: `/permissions remove <id>`.
 
 Rules are glob patterns in **separate namespaces** so a bash pattern can
 never match a web domain or an MCP tool:
@@ -186,7 +188,8 @@ ledger and summarized in the [completion report](headless.md#the-completion-repo
 Headless runs cannot answer prompts: any action that would prompt is
 **denied** with a message pointing at `--autonomy`, `BONSAI_AUTONOMY`, or a
 project allow rule, and the `question` tool fails instead of blocking.
-Sandbox-escape prompts are denied in headless mode at every autonomy level.
+Sandbox escapes remain prompt-gated in headless mode at every autonomy level;
+the interactive safe-retry exception never applies.
 
 ## Where this lives in the code
 

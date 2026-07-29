@@ -95,16 +95,30 @@ pub(super) fn permission_prompt(command: &str, origin: Option<&str>) -> ConfirmP
     }
 }
 
-pub(super) fn sandbox_escalation_prompt(command: &str, origin: Option<&str>) -> ConfirmPrompt {
+pub(super) fn sandbox_escalation_prompt(
+    command: &str,
+    origin: Option<&str>,
+    kind: crate::interaction::SandboxEscalationKind,
+) -> ConfirmPrompt {
     let mut subtitle = origin_subtitle(origin);
     subtitle.push(Line::from(Span::styled(
         "Bypasses filesystem/network confinement for this one run.",
         theme::dim(),
     )));
+    if kind == crate::interaction::SandboxEscalationKind::CommandAndSandbox {
+        subtitle.push(Line::from(Span::styled(
+            "This single decision approves both the command and its sandbox escape.",
+            theme::body(theme::palette().todo),
+        )));
+    }
     ConfirmPrompt {
         title: "Sandbox escape",
         heading: Line::from(Span::styled(
-            "⚠ Run this command OUTSIDE the sandbox?",
+            if kind == crate::interaction::SandboxEscalationKind::CommandAndSandbox {
+                "⚠ Allow this command to run OUTSIDE the sandbox?"
+            } else {
+                "⚠ Run this command OUTSIDE the sandbox?"
+            },
             theme::label(theme::palette().error),
         )),
         subtitle,

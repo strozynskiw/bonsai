@@ -960,6 +960,7 @@ fn respond_to_sandbox_escalation(
     let Some(ModalKind::SandboxEscalationPrompt {
         request_id,
         command,
+        kind,
         ..
     }) = app.modal.clone()
     else {
@@ -978,10 +979,16 @@ fn respond_to_sandbox_escalation(
         EscalationDecision::Deny => None,
     };
     if let Some(scope) = scope {
+        let approval = match kind {
+            crate::interaction::SandboxEscalationKind::SandboxOnly => "Sandbox escape",
+            crate::interaction::SandboxEscalationKind::CommandAndSandbox => {
+                "Command and sandbox escape"
+            }
+        };
         push_command_message(
             app,
             CommandOutputKind::Status,
-            &format!("⚠ Sandbox escape approved ({scope}): {command}"),
+            &format!("⚠ {approval} approved ({scope}): {command}"),
         );
     }
 
@@ -3829,6 +3836,7 @@ mod tests {
                                 request_id,
                                 command: "rm -rf target".to_string(),
                                 origin: None,
+                                kind: crate::interaction::SandboxEscalationKind::SandboxOnly,
                             }
                         })
                         .await
@@ -3849,6 +3857,7 @@ mod tests {
             request_id,
             command,
             origin,
+            kind,
         } = request
         else {
             panic!("unexpected interaction request kind");
@@ -3859,6 +3868,7 @@ mod tests {
             request_id,
             command,
             origin,
+            kind,
         });
         app.focus = Focus::Modal;
         respond_to_sandbox_escalation(&mut app, service, decision);

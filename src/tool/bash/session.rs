@@ -25,6 +25,9 @@ pub(super) enum EscapeApproval {
     Session,
     /// A prior session grant matched — ran unconfined without re-prompting.
     Cached,
+    /// An exact, previously denied confined run was deterministically judged
+    /// safe enough for the active auto-accepting autonomy level.
+    Automatic,
 }
 
 impl EscapeApproval {
@@ -39,6 +42,7 @@ impl EscapeApproval {
             EscapeApproval::Once => "once",
             EscapeApproval::Session => "for session",
             EscapeApproval::Cached => "session (cached)",
+            EscapeApproval::Automatic => "automatic safe retry",
         }
     }
 }

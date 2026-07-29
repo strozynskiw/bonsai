@@ -41,7 +41,7 @@ mod process;
 use process::{CommandResult, CommandSummary, compact_summary_line};
 
 mod policy;
-use policy::emit_hook_warnings;
+use policy::{CommandApprovalRequest, emit_hook_warnings};
 
 #[derive(Deserialize)]
 struct BashArgs {
@@ -555,6 +555,11 @@ impl BashTool {
                 "interactive mode cannot be combined with parallel, run_in_background, or escape_sandbox"
             );
         }
+        if escape_sandbox && run_in_background {
+            anyhow::bail!(
+                "escape_sandbox is not supported for background tasks; run it in the foreground."
+            );
+        }
         let timeout_secs = effective_timeout_secs(args.timeout, run_in_background || interactive);
         let cwd = self.resolve_workdir(args.workdir.as_deref()).await?;
         let requested_command = self
@@ -581,13 +586,36 @@ impl BashTool {
             .unwrap_or_else(|| requested_command.clone());
         let analysis = analyze_command(&command);
 
+        // Resolve whether this call genuinely needs to leave confinement before
+        // command authorization. When both gates would prompt, the command gate
+        // absorbs the escape into one sandbox-warning decision.
+        let escape_requested = escape_sandbox && self.sandbox.is_active();
+        let escape_auto_declined = escape_requested
+            && escape_is_unnecessary(&analysis)
+            && !self.confined_failures.contains(&cwd, &command);
+        if escape_auto_declined {
+            tracing::debug!(
+                command = %command,
+                "declining unnecessary sandbox escape: workspace-only command"
+            );
+        }
+        let escape_needed = escape_requested && !escape_auto_declined;
+        let command_approval_request =
+            if escape_needed && self.escape_requires_prompt(&cwd, &command, &analysis) {
+                CommandApprovalRequest::CommandAndSandbox { cwd: &cwd }
+            } else {
+                CommandApprovalRequest::CommandOnly
+            };
+
         let origin = context.as_ref().and_then(|ctx| ctx.origin());
-        if let Some(planning_command) = &planning_command {
+        let combined_escape = if let Some(planning_command) = &planning_command {
             self.authorize_planning_command(&command, &analysis, planning_command, origin)
                 .await?;
+            EscapeApproval::None
         } else {
-            self.authorize_command(&command, &analysis, origin).await?;
-        }
+            self.authorize_command(&command, &analysis, origin, command_approval_request)
+                .await?
+        };
 
         let pre_outcome = self
             .hooks
@@ -603,15 +631,6 @@ impl BashTool {
         emit_hook_warnings(context.as_ref(), &pre_outcome.warnings);
         if let crate::hooks::HookDecision::Block { reason } = pre_outcome.decision {
             anyhow::bail!(reason);
-        }
-
-        // escape_sandbox is a foreground-only argument: reject the combination
-        // unconditionally (not only when the sandbox happens to be active), so the
-        // contract holds in the default sandbox-off configuration too.
-        if escape_sandbox && run_in_background {
-            anyhow::bail!(
-                "escape_sandbox is not supported for background tasks; run it in the foreground."
-            );
         }
 
         let verification_cache_key =
@@ -641,37 +660,14 @@ impl BashTool {
             });
         }
 
-        // Sandbox-escape gate. Independent of and *after* the permission/risk gate
-        // above: that decides whether the command may run (auto-approvable by the
-        // autonomy level); this decides whether it runs outside the sandbox, and is
-        // the enforcement floor — never auto-approved, even at yolo. A no-op unless
-        // the model explicitly asked and the sandbox is actually active. Resolved
-        // after `cwd` so the grant can be scoped to the directory the command runs
-        // in (an approval doesn't leak to a different cwd at an unclamped level).
-        let mut escape_auto_declined = false;
-        let escape = if escape_sandbox && self.sandbox.is_active() {
-            // The decline shortcut is lifted once this exact (cwd, command)
-            // failed confined with a sandbox-shaped error: the failure
-            // diagnostic tells the model to retry with escape_sandbox=true, so
-            // declining that retry too would loop it forever (e.g. a pre-commit
-            // hook writing temp files, or gpg-signed commits touching ~/.gnupg).
-            if escape_is_unnecessary(&analysis) && !self.confined_failures.contains(&cwd, &command)
-            {
-                // The model habitually asks to escape for `git add && git commit`,
-                // but those write only inside `.git/` — within the sandbox's
-                // writable roots — so they succeed confined. Decline the escape
-                // silently and run confined rather than prompting the user to step
-                // past the sandbox for a command that never needed it. Safe by
-                // construction: declining only *keeps* confinement.
-                tracing::debug!(
-                    command = %command,
-                    "declining unnecessary sandbox escape: workspace-only command"
-                );
-                escape_auto_declined = true;
-                EscapeApproval::None
-            } else {
-                self.authorize_escape(&cwd, &command, origin).await?
-            }
+        // A command that needed both approvals already received them in the
+        // combined modal. Otherwise resolve cached, automatic safe-retry, or
+        // standalone sandbox authorization now.
+        let escape = if combined_escape.escaped() {
+            combined_escape
+        } else if escape_needed {
+            self.authorize_escape(&cwd, &command, &analysis, origin)
+                .await?
         } else {
             EscapeApproval::None
         };
@@ -1706,6 +1702,110 @@ mod tests {
             .await
             .expect("an approved escape should run");
         assert!(rendered_command_output(output).contains("escaped-ok"));
+    }
+
+    #[tokio::test]
+    async fn command_and_escape_share_one_sandbox_warning_prompt() {
+        let fixture = TestFixture::new();
+        let (service, mut rx) = InteractionService::new();
+        let service = Arc::new(service);
+        let tool = BashTool::with_background_tasks_and_yolo_mode(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            service.clone(),
+            Arc::new(BackgroundTaskRegistry::new()),
+            YoloMode::new(),
+            active_sandbox(&fixture.project_root),
+        );
+        let handle = tokio::spawn(async move {
+            tool.execute(json!({
+                "command": "echo combined-approval",
+                "escape_sandbox": true
+            }))
+            .await
+        });
+
+        let request = rx.recv().await.expect("combined approval request");
+        let crate::interaction::InteractionRequest::SandboxEscalation {
+            request_id, kind, ..
+        } = request
+        else {
+            panic!("command and escape must not emit a separate permission prompt");
+        };
+        assert_eq!(
+            kind,
+            crate::interaction::SandboxEscalationKind::CommandAndSandbox
+        );
+        service
+            .respond(
+                request_id,
+                InteractionOutcome::SandboxEscalation(EscalationDecision::AllowOnce),
+            )
+            .await
+            .expect("combined decision should be delivered");
+
+        let output = handle
+            .await
+            .expect("command task should join")
+            .expect("combined approval should run the command");
+        assert!(rendered_command_output(output).contains("combined-approval"));
+        assert!(
+            rx.try_recv().is_err(),
+            "combined approval must not enqueue a second sandbox prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_accept_escapes_only_an_evidenced_safe_retry() {
+        let fixture = TestFixture::new();
+        let (service, mut rx) = InteractionService::new();
+        let tool = BashTool::with_background_tasks_and_yolo_mode(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(service),
+            Arc::new(BackgroundTaskRegistry::new()),
+            YoloMode::with_level(ApprovalLevel::AutoAccept),
+            active_sandbox(&fixture.project_root),
+        );
+        let command = "echo automatic-safe-retry";
+        tool.confined_failures
+            .record(&fixture.project_root, command);
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tool.execute(json!({
+                "command": command,
+                "escape_sandbox": true
+            })),
+        )
+        .await
+        .expect("safe retry should not wait for a prompt")
+        .expect("safe retry should run");
+        let rendered = rendered_command_output(output);
+        assert!(rendered.contains("automatic-safe-retry"));
+        assert!(
+            rx.try_recv().is_err(),
+            "an evidenced safe retry at auto-accept should not prompt"
+        );
+
+        let direct = analyze_command("echo first-attempt");
+        assert!(
+            tool.escape_requires_prompt(&fixture.project_root, "echo first-attempt", &direct),
+            "a first-attempt escape must still prompt"
+        );
+        let high_risk = analyze_command("curl https://example.com");
+        tool.confined_failures
+            .record(&fixture.project_root, "curl https://example.com");
+        assert!(
+            tool.escape_requires_prompt(
+                &fixture.project_root,
+                "curl https://example.com",
+                &high_risk
+            ),
+            "high-risk retries must still prompt"
+        );
     }
 
     #[tokio::test]

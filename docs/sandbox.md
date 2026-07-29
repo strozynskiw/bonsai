@@ -54,10 +54,18 @@ A confined command that legitimately needs to step outside (e.g.
 `rustup update`) can request `escape_sandbox: true` on the `bash` tool. This
 is a single audited step-past:
 
-- It prompts every time — **allow once**, **allow for this session**
-  (remembered for that exact working-directory + command pair), or **deny**.
+- When the command itself also needs permission, one sandbox-warning modal
+  approves both the command and its escape; Bonsai never stacks a separate
+  command prompt in front of it.
+- It normally offers **allow once**, **allow for this session** (remembered for
+  that exact working-directory + command pair), or **deny**.
   There is deliberately no "always for project" option; escapes are never
   persisted, so the floor is never permanently lowered.
+- At `auto-accept` or `yolo`, an interactive exact retry can proceed
+  automatically only after the same command already failed confined with a
+  sandbox-shaped denial and the command classifier rates it at most medium
+  risk. First attempts, high/destructive risk, and headless runs still prompt
+  or fail closed.
 - A denial **aborts** the command rather than silently running it confined
   (the model expects the unconfined semantics).
 - Escapes are foreground-only: they cannot combine with background,
