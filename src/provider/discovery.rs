@@ -148,7 +148,7 @@ async fn fetch_qwencloud_models(
 
 fn is_qwencloud_chat_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
-    id.starts_with("qwen3")
+    id.starts_with("qwen")
         && ![
             "embedding",
             "rerank",
@@ -156,7 +156,6 @@ fn is_qwencloud_chat_model(id: &str) -> bool {
             "asr",
             "audio",
             "omni",
-            "vl",
             "image",
         ]
         .iter()
@@ -1183,6 +1182,9 @@ mod tests {
                     {"id": "qwen3.8-max-preview"},
                     {"id": "qwen3.7-plus"},
                     {"id": "qwen3-vl-plus"},
+                    {"id": "qwen-max"},
+                    {"id": "qwen-plus"},
+                    {"id": "qwen-turbo"},
                     {"id": "qwen3-embedding-8b"},
                     {"id": "paraformer-v2"},
                     {"id": "deepseek-v4"}
@@ -1208,7 +1210,14 @@ mod tests {
                 .iter()
                 .map(|model| model.remote_model_id.as_ref())
                 .collect::<Vec<_>>(),
-            ["qwen3.7-plus", "qwen3.8-max-preview"]
+            [
+                "qwen-max",
+                "qwen-plus",
+                "qwen-turbo",
+                "qwen3-vl-plus",
+                "qwen3.7-plus",
+                "qwen3.8-max-preview"
+            ]
         );
     }
 
