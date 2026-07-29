@@ -25,7 +25,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
-        run: gh run download "$RUN_ID" --name homebrew-release-metadata --dir "$RUNNER_TEMP/release-metadata"
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name homebrew-release-metadata --dir "$RUNNER_TEMP/release-metadata"
 
       - name: Resolve release tag
         id: release
