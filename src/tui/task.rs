@@ -880,30 +880,43 @@ impl TaskController {
                     let memory_modal_open = memory_modal.is_some();
                     let open_modal = memory_modal.or(perf_report).or_else(|| {
                         outcome.modal.map(|modal| match modal {
-                            CommandModalRequest::CommandHelp => ModalKind::CommandHelp,
-                            CommandModalRequest::Keys => ModalKind::Help,
+                            CommandModalRequest::CommandHelp => {
+                                ModalKind::Detail(crate::tui::event::DetailModal::CommandHelp)
+                            }
+                            CommandModalRequest::Keys => {
+                                ModalKind::Detail(crate::tui::event::DetailModal::Help)
+                            }
                             CommandModalRequest::ContextReport(report) => {
-                                ModalKind::Context(report)
+                                ModalKind::Detail(crate::tui::event::DetailModal::Context(report))
                             }
                             CommandModalRequest::Episodes(report) => {
-                                ModalKind::Episodes { report, cursor: 0 }
-                            }
-                            CommandModalRequest::ModelPicker => ModalKind::ModelPicker {
-                                entries: model_entries,
-                            },
-                            CommandModalRequest::AuthorizeProviderPicker { providers } => {
-                                ModalKind::AuthorizeProviderPicker {
-                                    providers,
-                                    query: String::new(),
+                                ModalKind::Detail(crate::tui::event::DetailModal::Episodes {
+                                    report,
                                     cursor: 0,
-                                }
+                                })
+                            }
+                            CommandModalRequest::ModelPicker => {
+                                ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker {
+                                    entries: model_entries,
+                                })
+                            }
+                            CommandModalRequest::AuthorizeProviderPicker { providers } => {
+                                ModalKind::Picker(
+                                    crate::tui::event::PickerModal::AuthorizeProviderPicker {
+                                        providers,
+                                        query: String::new(),
+                                        cursor: 0,
+                                    },
+                                )
                             }
                             CommandModalRequest::UnauthorizeProviderPicker { providers } => {
-                                ModalKind::UnauthorizeProviderPicker {
-                                    providers,
-                                    query: String::new(),
-                                    cursor: 0,
-                                }
+                                ModalKind::Picker(
+                                    crate::tui::event::PickerModal::UnauthorizeProviderPicker {
+                                        providers,
+                                        query: String::new(),
+                                        cursor: 0,
+                                    },
+                                )
                             }
                             CommandModalRequest::ApiKeyPrompt { provider_id } => {
                                 let endpoint_form =
@@ -923,19 +936,27 @@ impl TaskController {
                                         origins,
                                         endpoint_form,
                                     ));
-                                ModalKind::ApiKeyPrompt {
+                                ModalKind::Detail(crate::tui::event::DetailModal::ApiKeyPrompt {
                                     provider_id,
                                     initial_form,
-                                }
+                                })
                             }
                             CommandModalRequest::McpServers { rows } => {
-                                ModalKind::McpServers { rows, cursor: 0 }
+                                ModalKind::Manager(crate::tui::event::ManagerModal::McpServers {
+                                    rows,
+                                    cursor: 0,
+                                })
                             }
                             CommandModalRequest::SandboxStatus => {
-                                ModalKind::SandboxStatus { cursor: 0 }
+                                ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus {
+                                    cursor: 0,
+                                })
                             }
                             CommandModalRequest::Doctor(report) => {
-                                ModalKind::Doctor { report, cursor: 0 }
+                                ModalKind::Manager(crate::tui::event::ManagerModal::Doctor {
+                                    report,
+                                    cursor: 0,
+                                })
                             }
                         })
                     });
@@ -1251,7 +1272,9 @@ pub(in crate::tui) fn memory_command_modal(
     let request = parse_memory_command(input).ok()?;
     let rows = memory.store().entries();
     match request {
-        MemoryCommandRequest::List => Some(ModalKind::MemoryManager { rows, cursor: 0 }),
+        MemoryCommandRequest::List => Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::MemoryManager { rows, cursor: 0 },
+        )),
         MemoryCommandRequest::View { name } => {
             let cursor = memory
                 .store()
@@ -1261,7 +1284,9 @@ pub(in crate::tui) fn memory_command_modal(
                         .position(|row| row.tier == entry.tier && row.name == entry.name)
                 })
                 .unwrap_or_else(|| rows.len().saturating_sub(1));
-            Some(ModalKind::MemoryManager { rows, cursor })
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::MemoryManager { rows, cursor },
+            ))
         }
         MemoryCommandRequest::Forget { .. } => None,
     }

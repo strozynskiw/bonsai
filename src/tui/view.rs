@@ -565,16 +565,18 @@ pub fn terminal_title(app: &AppState) -> String {
     let needs_attention = app.modal.as_ref().is_some_and(|m| {
         matches!(
             m,
-            ModalKind::PermissionPrompt { .. }
-                | ModalKind::SandboxEscalationPrompt { .. }
-                | ModalKind::WebDomainPrompt { .. }
-                | ModalKind::ExtensionToolPrompt { .. }
-                | ModalKind::HookTrustPrompt { .. }
-                | ModalKind::ApiKeyPrompt { .. }
-                | ModalKind::QuestionPrompt { .. }
-                | ModalKind::AuthorizeProviderPicker { .. }
-                | ModalKind::UnauthorizeProviderPicker { .. }
-                | ModalKind::UnauthorizeConfirm { .. }
+            ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::ApiKeyPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt { .. })
+                | ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker { .. })
+                | ModalKind::Picker(
+                    crate::tui::event::PickerModal::UnauthorizeProviderPicker { .. }
+                )
+                | ModalKind::Confirm(crate::tui::event::ConfirmModal::Unauthorize { .. })
         )
     });
 
@@ -649,11 +651,13 @@ mod tests {
         );
         app.current_session_summary = "Approve command".to_string();
         app.task_state = crate::tui::event::TaskState::Running;
-        app.modal = Some(crate::tui::event::ModalKind::PermissionPrompt {
-            request_id: 1,
-            command: "cargo test".to_string(),
-            origin: None,
-        });
+        app.modal = Some(crate::tui::event::ModalKind::Detail(
+            crate::tui::event::DetailModal::PermissionPrompt {
+                request_id: 1,
+                command: "cargo test".to_string(),
+                origin: None,
+            },
+        ));
 
         assert_eq!(terminal_title(&app), "[!] bonsai · Approve command");
     }
@@ -1252,8 +1256,8 @@ mod tests {
             session_input_cache: Some(crate::provider::InputCacheUsage::new(3_000, 500, 12_500)),
             ..Default::default()
         };
-        app.reduce(AppAction::OpenModal(crate::tui::event::ModalKind::Context(
-            Box::new(report),
+        app.reduce(AppAction::OpenModal(crate::tui::event::ModalKind::Detail(
+            crate::tui::event::DetailModal::Context(Box::new(report)),
         )));
         terminal
             .draw(|frame| draw(frame, &app))
@@ -1303,8 +1307,8 @@ mod tests {
             session_completion_tokens: 20,
             ..Default::default()
         };
-        app.reduce(AppAction::OpenModal(crate::tui::event::ModalKind::Context(
-            Box::new(report),
+        app.reduce(AppAction::OpenModal(crate::tui::event::ModalKind::Detail(
+            crate::tui::event::DetailModal::Context(Box::new(report)),
         )));
         terminal
             .draw(|frame| draw(frame, &app))

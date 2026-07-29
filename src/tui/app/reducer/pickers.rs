@@ -46,11 +46,13 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // authorizes the provider, and updates the running agent.
         }
         AppAction::AuthorizeProviderPickerMove(delta) => {
-            if let Some(ModalKind::AuthorizeProviderPicker {
-                providers,
-                query,
-                cursor,
-            }) = &mut app.modal
+            if let Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::AuthorizeProviderPicker {
+                    providers,
+                    query,
+                    cursor,
+                },
+            )) = &mut app.modal
             {
                 let max = crate::tui::pickers::filter_authorize_providers(providers, query)
                     .len()
@@ -59,13 +61,19 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::AuthorizeProviderPickerInputChar(ch) => {
-            if let Some(ModalKind::AuthorizeProviderPicker { query, cursor, .. }) = &mut app.modal {
+            if let Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::AuthorizeProviderPicker { query, cursor, .. },
+            )) = &mut app.modal
+            {
                 query.push(ch);
                 *cursor = 0;
             }
         }
         AppAction::AuthorizeProviderPickerInputBackspace => {
-            if let Some(ModalKind::AuthorizeProviderPicker { query, cursor, .. }) = &mut app.modal {
+            if let Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::AuthorizeProviderPicker { query, cursor, .. },
+            )) = &mut app.modal
+            {
                 query.pop();
                 *cursor = 0;
             }
@@ -75,11 +83,13 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // provider through the normal /authorize path.
         }
         AppAction::UnauthorizeProviderPickerMove(delta) => {
-            if let Some(ModalKind::UnauthorizeProviderPicker {
-                providers,
-                query,
-                cursor,
-            }) = &mut app.modal
+            if let Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::UnauthorizeProviderPicker {
+                    providers,
+                    query,
+                    cursor,
+                },
+            )) = &mut app.modal
             {
                 let max = crate::tui::pickers::filter_authorize_providers(providers, query)
                     .len()
@@ -88,14 +98,18 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::UnauthorizeProviderPickerInputChar(ch) => {
-            if let Some(ModalKind::UnauthorizeProviderPicker { query, cursor, .. }) = &mut app.modal
+            if let Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::UnauthorizeProviderPicker { query, cursor, .. },
+            )) = &mut app.modal
             {
                 query.push(ch);
                 *cursor = 0;
             }
         }
         AppAction::UnauthorizeProviderPickerInputBackspace => {
-            if let Some(ModalKind::UnauthorizeProviderPicker { query, cursor, .. }) = &mut app.modal
+            if let Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::UnauthorizeProviderPicker { query, cursor, .. },
+            )) = &mut app.modal
             {
                 query.pop();
                 *cursor = 0;
@@ -110,7 +124,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // /unauthorize <provider> command path.
         }
         AppAction::ReviewScopePickerMove(delta) => {
-            if let Some(ModalKind::ReviewScopePicker { cursor }) = &mut app.modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker {
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = crate::agent::ReviewScope::all().len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
             }
@@ -118,50 +135,70 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         AppAction::ReviewScopePickerSubmit => {
             // Runtime effect: `tui::runtime_actions` starts the review run.
         }
-        AppAction::LocalModelWizardInputChar(ch) => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::InputChar(ch)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 state.input_char(ch);
             }
         }
-        AppAction::LocalModelWizardBackspace => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Backspace) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 state.backspace();
             }
         }
-        AppAction::LocalModelWizardPaste(text) => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Paste(text)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 state.paste(&text);
             }
         }
-        AppAction::LocalModelWizardMoveField(delta) => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::MoveField(
+            delta,
+        )) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 state.move_field(delta);
             }
         }
-        AppAction::LocalModelWizardMoveModel(delta) => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::MoveModel(
+            delta,
+        )) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 state.move_model(delta);
             }
         }
-        AppAction::LocalModelWizardCycleChoice(delta) => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::CycleChoice(
+            delta,
+        )) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 state.cycle_setup_choice(delta);
             }
         }
-        AppAction::LocalModelWizardToggle => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Toggle) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 match state.step {
@@ -178,8 +215,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 }
             }
         }
-        AppAction::LocalModelWizardSubmit => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Submit) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 match state.step {
@@ -194,14 +233,16 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 }
             }
         }
-        AppAction::LocalModelWizardBack => {
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Back) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
                 && !state.loading
             {
                 state.back();
             }
         }
-        AppAction::ModelPickerInputChar(ch) => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::InputChar(ch)) => {
             app.model_picker.filter.push(ch);
             app.model_picker.active_pane = ModelPickerPane::Model;
             app.model_picker.model_offset = 0;
@@ -209,27 +250,36 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // Move the modal out rather than cloning its `entries` Vec on every
             // keystroke; restore it once the cursor sync is done.
             let modal = app.modal.take();
-            if let Some(ModalKind::ModelPicker { entries }) = &modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker {
+                entries,
+            })) = &modal
+            {
                 app.model_picker.cursor = app.model_picker_first_model_row(entries);
                 app.sync_model_picker_reasoning_cursor(entries);
             }
             app.modal = modal;
         }
-        AppAction::ModelPickerInputBackspace => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::InputBackspace) => {
             app.model_picker.filter.pop();
             app.model_picker.active_pane = ModelPickerPane::Model;
             app.model_picker.model_offset = 0;
             app.model_picker.reasoning_offset = 0;
             let modal = app.modal.take();
-            if let Some(ModalKind::ModelPicker { entries }) = &modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker {
+                entries,
+            })) = &modal
+            {
                 app.model_picker.cursor = app.model_picker_first_model_row(entries);
                 app.sync_model_picker_reasoning_cursor(entries);
             }
             app.modal = modal;
         }
-        AppAction::ModelPickerMove(delta) => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::Move(delta)) => {
             let modal = app.modal.take();
-            if let Some(ModalKind::ModelPicker { entries }) = &modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker {
+                entries,
+            })) = &modal
+            {
                 match app.model_picker.active_pane {
                     ModelPickerPane::Provider => {
                         let max = AppState::model_picker_provider_rows(entries)
@@ -259,18 +309,22 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
             app.modal = modal;
         }
-        AppAction::ModelPickerMovePane(delta) => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::MovePane(delta)) => {
             app.model_picker.active_pane = app.model_picker.active_pane.moved(delta);
         }
-        AppAction::ModelPickerAssignShortcut(_key) => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::AssignShortcut(_key)) => {
             // Runtime effect: persist the selected model/reasoning as a shortcut binding.
         }
-        AppAction::ModelPickerSubmit => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::Submit) => {
             // Runtime effect: `tui::runtime_actions` resolves the filtered
             // selection and switches provider/model.
         }
         AppAction::SessionPickerMove(delta) => {
-            if let Some(ModalKind::SessionPicker { sessions, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker {
+                sessions,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = sessions.len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
             }
@@ -279,24 +333,34 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // Runtime effect: `tui::runtime_actions` owns storage-backed
             // session picker transitions.
         }
-        AppAction::PlanPickerInputChar(ch) => {
-            if let Some(ModalKind::PlanPicker { query, cursor, .. }) = &mut app.modal {
+        AppAction::PlanPicker(crate::tui::event::PlanPickerAction::InputChar(ch)) => {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker {
+                query,
+                cursor,
+                ..
+            })) = &mut app.modal
+            {
                 query.push(ch);
                 *cursor = 0;
             }
         }
-        AppAction::PlanPickerInputBackspace => {
-            if let Some(ModalKind::PlanPicker { query, cursor, .. }) = &mut app.modal {
+        AppAction::PlanPicker(crate::tui::event::PlanPickerAction::InputBackspace) => {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker {
+                query,
+                cursor,
+                ..
+            })) = &mut app.modal
+            {
                 query.pop();
                 *cursor = 0;
             }
         }
-        AppAction::PlanPickerMove(delta) => {
-            if let Some(ModalKind::PlanPicker {
+        AppAction::PlanPicker(crate::tui::event::PlanPickerAction::Move(delta)) => {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker {
                 plans,
                 query,
                 cursor,
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 let max = AppState::plan_picker_filtered_plans(plans, query)
                     .len()
@@ -304,17 +368,25 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *cursor = move_index(*cursor, delta, max);
             }
         }
-        AppAction::PlanPickerSubmit | AppAction::PlanPickerDeleteSelected => {
+        AppAction::PlanPicker(crate::tui::event::PlanPickerAction::Submit)
+        | AppAction::PlanPicker(crate::tui::event::PlanPickerAction::DeleteSelected) => {
             // Runtime effect: `tui::runtime_actions` owns storage-backed
             // plan picker transitions.
         }
         AppAction::PlanOpenChoiceMove(delta) => {
-            if let Some(ModalKind::PlanOpenChoice { cursor, .. }) = &mut app.modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice {
+                cursor,
+                ..
+            })) = &mut app.modal
+            {
                 *cursor = move_index(*cursor, delta, 1);
             }
         }
         AppAction::StartPlanChoiceMove(delta) => {
-            if let Some(ModalKind::StartPlanChoice { cursor }) = &mut app.modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice {
+                cursor,
+            })) = &mut app.modal
+            {
                 *cursor = move_index(*cursor, delta, 1);
             }
         }
@@ -328,105 +400,121 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         AppAction::SetActiveSavedPlan(plan_id) => {
             app.active_saved_plan_session_id = plan_id;
         }
-        AppAction::AgentComposerInputChar(ch) => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::InputChar(ch)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.input_char(ch);
             }
         }
-        AppAction::AgentComposerBackspace => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Backspace) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.backspace();
             }
         }
-        AppAction::AgentComposerPaste(text) => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Paste(text)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.paste(&text);
             }
         }
-        AppAction::AgentComposerMove(delta) => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Move(delta)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.move_selection(delta);
             }
         }
-        AppAction::AgentComposerToggle(delta) => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Toggle(delta)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.toggle(delta);
             }
         }
-        AppAction::AgentComposerDeleteModel => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::DeleteModel) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.clear_focused_model();
             }
         }
-        AppAction::AgentComposerBack => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Back) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.back();
             }
         }
-        AppAction::AgentComposerNextPage => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::NextPage) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.next_page();
             }
         }
-        AppAction::AgentComposerSubmit => {
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Submit) => {
             // Runtime handles the terminal `Review` step (writes the file); for the
             // earlier steps it returns `Unhandled`, so advance the state here.
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.submit();
             }
         }
-        AppAction::AgentComposerCursor(motion) => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Cursor(motion)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.cursor(motion);
             }
         }
-        AppAction::AgentComposerDeleteForward => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::DeleteForward) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.delete_forward();
             }
         }
-        AppAction::AgentComposerInsertNewline => {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::InsertNewline) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+                &mut app.modal
                 && !state.generating
             {
                 state.insert_newline();
             }
         }
         AppAction::AgentBrowserMove(delta) => {
-            if let Some(ModalKind::AgentBrowser { rows, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::AgentBrowser {
+                rows,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = rows.len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
             }
         }
-        AppAction::ProviderManagerMove(delta) => {
-            if let Some(ModalKind::ProviderManager {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::Move(delta)) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
                 rows,
                 filter,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 let max = crate::tui::provider_manager::provider_manager_filtered(rows, filter)
                     .len()
@@ -434,62 +522,70 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *cursor = move_index(*cursor, delta, max);
             }
         }
-        AppAction::ProviderManagerBeginSearch => {
-            if let Some(ModalKind::ProviderManager { searching, .. }) = &mut app.modal {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::BeginSearch) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
+                searching,
+                ..
+            })) = &mut app.modal
+            {
                 *searching = true;
             }
         }
-        AppAction::ProviderManagerSearchChar(ch) => {
-            if let Some(ModalKind::ProviderManager {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::SearchChar(ch)) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
                 filter,
                 searching,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
                 && *searching
             {
                 filter.push(ch);
                 *cursor = 0;
             }
         }
-        AppAction::ProviderManagerSearchBackspace => {
-            if let Some(ModalKind::ProviderManager {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::SearchBackspace) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
                 filter,
                 searching,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
                 && *searching
             {
                 filter.pop();
                 *cursor = 0;
             }
         }
-        AppAction::ProviderManagerSearchExit => {
-            if let Some(ModalKind::ProviderManager { searching, .. }) = &mut app.modal {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::SearchExit) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
+                searching,
+                ..
+            })) = &mut app.modal
+            {
                 *searching = false;
             }
         }
-        AppAction::ProviderManagerClearFilter => {
-            if let Some(ModalKind::ProviderManager {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::ClearFilter) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
                 filter,
                 searching,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 filter.clear();
                 *searching = false;
                 *cursor = 0;
             }
         }
-        AppAction::PermissionsManagerMove(delta) => {
-            if let Some(ModalKind::PermissionsManager {
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::Move(delta)) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
                 rows,
                 filter,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 let max =
                     crate::tui::permissions_manager::permission_manager_filtered(rows, filter)
@@ -498,49 +594,61 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *cursor = move_index(*cursor, delta, max);
             }
         }
-        AppAction::PermissionsManagerBeginSearch => {
-            if let Some(ModalKind::PermissionsManager { searching, .. }) = &mut app.modal {
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::BeginSearch) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
+                searching,
+                ..
+            })) = &mut app.modal
+            {
                 *searching = true;
             }
         }
-        AppAction::PermissionsManagerSearchChar(ch) => {
-            if let Some(ModalKind::PermissionsManager {
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::SearchChar(
+            ch,
+        )) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
                 filter,
                 searching,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
                 && *searching
             {
                 filter.push(ch);
                 *cursor = 0;
             }
         }
-        AppAction::PermissionsManagerSearchBackspace => {
-            if let Some(ModalKind::PermissionsManager {
+        AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::SearchBackspace,
+        ) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
                 filter,
                 searching,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
                 && *searching
             {
                 filter.pop();
                 *cursor = 0;
             }
         }
-        AppAction::PermissionsManagerSearchExit => {
-            if let Some(ModalKind::PermissionsManager { searching, .. }) = &mut app.modal {
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::SearchExit) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
+                searching,
+                ..
+            })) = &mut app.modal
+            {
                 *searching = false;
             }
         }
-        AppAction::PermissionsManagerClearFilter => {
-            if let Some(ModalKind::PermissionsManager {
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::ClearFilter) => {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
                 filter,
                 searching,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 filter.clear();
                 *searching = false;
@@ -549,20 +657,29 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         }
         // The delete effect (storage/memory removal + list rebuild) is
         // runtime-owned; see `tui::runtime_actions`.
-        AppAction::PermissionsManagerDelete => {}
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::Delete) => {}
         AppAction::ProviderDetailBack => {
-            if let Some(ModalKind::ProviderDetail { detail }) = app.modal.take() {
-                app.reduce(AppAction::OpenModal(ModalKind::ProviderManager {
-                    rows: detail.return_rows,
-                    filter: detail.return_filter,
-                    // Return to the narrowed list with shortcuts live, not mid-type.
-                    searching: false,
-                    cursor: detail.return_cursor,
-                }));
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderDetail {
+                detail,
+            })) = app.modal.take()
+            {
+                app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                    crate::tui::event::ManagerModal::ProviderManager {
+                        rows: detail.return_rows,
+                        filter: detail.return_filter,
+                        // Return to the narrowed list with shortcuts live, not mid-type.
+                        searching: false,
+                        cursor: detail.return_cursor,
+                    },
+                )));
             }
         }
         AppAction::SkillManagerMove(delta) => {
-            if let Some(ModalKind::SkillManager { rows, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SkillManager {
+                rows,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = rows.len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
                 // Changing selection resets the detail pane to the top.

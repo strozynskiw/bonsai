@@ -127,9 +127,11 @@ impl ModelPickerPane {
 
 impl AppState {
     pub(crate) fn selected_session(&self) -> Option<crate::storage::SessionSummary> {
-        let Some(ModalKind::SessionPicker {
-            sessions, cursor, ..
-        }) = self.modal.as_ref()
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker {
+            sessions,
+            cursor,
+            ..
+        })) = self.modal.as_ref()
         else {
             return None;
         };
@@ -139,11 +141,11 @@ impl AppState {
     }
 
     pub(crate) fn selected_saved_plan(&self) -> Option<crate::storage::SavedPlanSummary> {
-        let Some(ModalKind::PlanPicker {
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker {
             plans,
             query,
             cursor,
-        }) = self.modal.as_ref()
+        })) = self.modal.as_ref()
         else {
             return None;
         };
@@ -156,7 +158,11 @@ impl AppState {
     pub(crate) fn selected_plan_open_mode(
         &self,
     ) -> Option<(crate::storage::SavedPlanSummary, PlanOpenMode)> {
-        let Some(ModalKind::PlanOpenChoice { plan, cursor }) = self.modal.as_ref() else {
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice {
+            plan,
+            cursor,
+        })) = self.modal.as_ref()
+        else {
             return None;
         };
         let mode = match (*cursor).min(1) {
@@ -167,7 +173,9 @@ impl AppState {
     }
 
     pub(crate) fn selected_start_plan_mode(&self) -> Option<crate::tui::event::StartPlanMode> {
-        let Some(ModalKind::StartPlanChoice { cursor }) = self.modal.as_ref() else {
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor })) =
+            self.modal.as_ref()
+        else {
             return None;
         };
         Some(match (*cursor).min(1) {
@@ -482,18 +490,24 @@ mod tests {
     #[test]
     fn model_picker_move_clamps_to_filtered_size() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker {
-            entries: vec![
-                model_entry("opencode", "OpenCode Go", "qwen3.7-max"),
-                model_entry("anthropic", "Anthropic", "claude"),
-            ],
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: vec![
+                    model_entry("opencode", "OpenCode Go", "qwen3.7-max"),
+                    model_entry("anthropic", "Anthropic", "claude"),
+                ],
+            },
+        )));
         // Filter down to a single entry, then overshoot the cursor.
         for ch in "qwen".chars() {
-            app.reduce(AppAction::ModelPickerInputChar(ch));
+            app.reduce(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::InputChar(ch),
+            ));
         }
         for _ in 0..40 {
-            app.reduce(AppAction::ModelPickerMove(1));
+            app.reduce(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::Move(1),
+            ));
         }
         assert_eq!(
             app.model_picker.cursor, 0,
@@ -505,11 +519,18 @@ mod tests {
     fn opening_model_picker_keeps_modal_and_caches_choices() {
         let mut app = app();
 
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker {
-            entries: vec![model_entry("opencode", "OpenCode Go", "qwen3.7-max")],
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: vec![model_entry("opencode", "OpenCode Go", "qwen3.7-max")],
+            },
+        )));
 
-        assert!(matches!(app.modal, Some(ModalKind::ModelPicker { .. })));
+        assert!(matches!(
+            app.modal,
+            Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::ModelPicker { .. }
+            ))
+        ));
         assert_eq!(app.cached_model_choices.len(), 1);
         assert_eq!(app.cached_model_choices[0].model, "qwen3.7-max");
     }
@@ -517,22 +538,26 @@ mod tests {
     #[test]
     fn plan_picker_search_filters_and_keeps_selected_plan() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::PlanPicker {
-            plans: vec![
-                saved_plan(1, "Parser cleanup", Some("main"), "draft"),
-                saved_plan(2, "Plan library", Some("feature/plans"), "started"),
-            ],
-            query: String::new(),
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanPicker {
+                plans: vec![
+                    saved_plan(1, "Parser cleanup", Some("main"), "draft"),
+                    saved_plan(2, "Plan library", Some("feature/plans"), "started"),
+                ],
+                query: String::new(),
+                cursor: 0,
+            },
+        )));
 
         for ch in "library".chars() {
-            app.reduce(AppAction::PlanPickerInputChar(ch));
+            app.reduce(AppAction::PlanPicker(
+                crate::tui::event::PlanPickerAction::InputChar(ch),
+            ));
         }
 
         assert!(matches!(
             app.modal,
-            Some(ModalKind::PlanPicker { ref query, cursor: 0, .. }) if query == "library"
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker { ref query, cursor: 0, .. })) if query == "library"
         ));
         let selected = app
             .selected_saved_plan()
@@ -540,20 +565,24 @@ mod tests {
         assert_eq!(selected.id, SavedPlanId::from_raw(2));
         assert_eq!(selected.title, "Plan library");
 
-        app.reduce(AppAction::PlanPickerInputBackspace);
+        app.reduce(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::InputBackspace,
+        ));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::PlanPicker { ref query, cursor: 0, .. }) if query == "librar"
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker { ref query, cursor: 0, .. })) if query == "librar"
         ));
     }
 
     #[test]
     fn plan_open_choice_defaults_to_clean_context_and_moves() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::PlanOpenChoice {
-            plan: saved_plan(7, "Saved workflow", Some("main"), "draft"),
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanOpenChoice {
+                plan: saved_plan(7, "Saved workflow", Some("main"), "draft"),
+                cursor: 0,
+            },
+        )));
 
         let (_, mode) = app
             .selected_plan_open_mode()
@@ -571,9 +600,9 @@ mod tests {
     #[test]
     fn start_plan_choice_defaults_to_clean_context_and_moves() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::StartPlanChoice {
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::StartPlanChoice { cursor: 0 },
+        )));
 
         assert_eq!(
             app.selected_start_plan_mode(),
@@ -591,18 +620,30 @@ mod tests {
         let mut app = app();
         let mut anthropic = model_entry("anthropic", "Anthropic", "claude");
         anthropic.supported_reasoning.clear();
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker {
-            entries: vec![model_entry("codex", "Codex", "gpt-5.5"), anthropic],
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: vec![model_entry("codex", "Codex", "gpt-5.5"), anthropic],
+            },
+        )));
 
-        app.reduce(AppAction::ModelPickerMovePane(-1));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::MovePane(-1),
+        ));
         assert_eq!(app.model_picker.active_pane, ModelPickerPane::Provider);
-        app.reduce(AppAction::ModelPickerMove(1));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(1),
+        ));
         assert_eq!(app.model_picker.provider_cursor, 1);
-        app.reduce(AppAction::ModelPickerMovePane(1));
-        app.reduce(AppAction::ModelPickerMovePane(1));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::MovePane(1),
+        ));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::MovePane(1),
+        ));
         assert_eq!(app.model_picker.active_pane, ModelPickerPane::Reasoning);
-        app.reduce(AppAction::ModelPickerMove(1));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(1),
+        ));
         assert_eq!(
             app.model_picker.reasoning_cursor, 0,
             "unsupported reasoning choices must not become selected"
@@ -613,7 +654,9 @@ mod tests {
     fn model_picker_uses_saved_effort_for_selected_model() {
         fn selected_reasoning(app: &AppState) -> ReasoningSelection {
             let entries = match &app.modal {
-                Some(ModalKind::ModelPicker { entries }) => entries,
+                Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker {
+                    entries,
+                })) => entries,
                 _ => panic!("model picker must be open"),
             };
             let entry = app
@@ -629,13 +672,17 @@ mod tests {
         let mut low = model_entry("codex", "Codex", "gpt-5.4-mini");
         low.reasoning = ReasoningSelection::from_effort(ReasoningEffort::Low);
 
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker {
-            entries: vec![high, low],
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: vec![high, low],
+            },
+        )));
         assert_eq!(app.model_picker.cursor, 1);
         assert_eq!(selected_reasoning(&app), ReasoningSelection::Low);
 
-        app.reduce(AppAction::ModelPickerMove(i16::MIN));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(i16::MIN),
+        ));
         assert_eq!(app.model_picker.cursor, 0);
         assert_eq!(selected_reasoning(&app), ReasoningSelection::High);
     }
@@ -714,21 +761,27 @@ mod tests {
             model_entry("codex", "Codex", "gpt-b"),
             model_entry("anthropic", "Anthropic", "claude"),
         ];
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker { entries }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker { entries },
+        )));
         assert_eq!(app.model_picker.provider_offset, 0);
         assert_eq!(app.model_picker.model_offset, 0);
         assert_eq!(app.model_picker.reasoning_offset, 0);
 
         app.model_picker.model_offset = 1;
         app.model_picker.reasoning_offset = 1;
-        app.reduce(AppAction::ModelPickerInputChar('g'));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::InputChar('g'),
+        ));
         assert_eq!(app.model_picker.model_offset, 0);
         assert_eq!(app.model_picker.reasoning_offset, 0);
 
         app.model_picker.active_pane = ModelPickerPane::Provider;
         app.model_picker.model_offset = 1;
         app.model_picker.reasoning_offset = 1;
-        app.reduce(AppAction::ModelPickerMove(1));
+        app.reduce(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(1),
+        ));
         assert_eq!(app.model_picker.model_offset, 0);
         assert_eq!(app.model_picker.reasoning_offset, 0);
     }
@@ -745,18 +798,22 @@ mod tests {
         app.pending_composer_state = Some(Box::new(state));
         app.model_picker.target = ModelPickerTarget::ComposerPrimary;
 
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker {
-            entries: vec![
-                model_entry("codex", "Codex", "gpt-a"),
-                model_entry("anthropic", "Anthropic", "claude-a"),
-                model_entry("anthropic", "Anthropic", "claude-b"),
-            ],
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: vec![
+                    model_entry("codex", "Codex", "gpt-a"),
+                    model_entry("anthropic", "Anthropic", "claude-a"),
+                    model_entry("anthropic", "Anthropic", "claude-b"),
+                ],
+            },
+        )));
 
         assert_eq!(app.model_picker.provider_cursor, 1);
         assert_eq!(app.model_picker.cursor, 2, "reset row occupies cursor zero");
         let entries = match app.modal.as_ref() {
-            Some(ModalKind::ModelPicker { entries }) => entries,
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) => {
+                entries
+            }
             _ => panic!("model picker should be open"),
         };
         let selected = app
@@ -780,16 +837,20 @@ mod tests {
             .set_focused_model_selection("anthropic:claude-b".to_string(), ReasoningSelection::Low);
         app.pending_composer_state = Some(Box::new(state));
         app.model_picker.target = ModelPickerTarget::ComposerBackup;
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker {
-            entries: vec![
-                model_entry("codex", "Codex", "gpt-a"),
-                model_entry("anthropic", "Anthropic", "claude-b"),
-            ],
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: vec![
+                    model_entry("codex", "Codex", "gpt-a"),
+                    model_entry("anthropic", "Anthropic", "claude-b"),
+                ],
+            },
+        )));
 
         app.reduce(AppAction::CloseModal);
 
-        let Some(ModalKind::AgentComposer { state }) = app.modal.as_ref() else {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+            app.modal.as_ref()
+        else {
             panic!("cancel should restore the composer");
         };
         assert_eq!(state.selected_model(), Some("codex:gpt-a"));
@@ -806,9 +867,11 @@ mod tests {
         ));
         app.model_picker.target = ModelPickerTarget::ComposerPrimary;
 
-        app.reduce(AppAction::OpenModal(ModalKind::ModelPicker {
-            entries: Vec::new(),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: Vec::new(),
+            },
+        )));
 
         assert!(app.model_picker_reset_selected());
         assert_eq!(app.model_picker_model_row_count(&[]), 1);

@@ -19,96 +19,144 @@ const MODAL_WIDTH_WIDE: u16 = 90; // reading surfaces and column tables
 
 pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
     match kind {
-        ModalKind::ToolDetail { .. }
-        | ModalKind::BlockDetail { .. }
-        | ModalKind::PlanFindingDetail { .. }
-        | ModalKind::DiffPreview { .. }
-        | ModalKind::Context(_)
-        | ModalKind::Episodes { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
-        ModalKind::PerfReport { .. } => centered_rect(area, MODAL_WIDTH_FORM, 62),
+        ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::BlockDetail { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::PlanFindingDetail { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::DiffPreview { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::Context(_))
+        | ModalKind::Detail(crate::tui::event::DetailModal::Episodes { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+        }
+        ModalKind::Detail(crate::tui::event::DetailModal::PerfReport { .. }) => {
+            centered_rect(area, MODAL_WIDTH_FORM, 62)
+        }
         // First-run setup owns the whole screen: nothing behind it matters
         // yet, and the growing bonsai deserves the canvas.
-        ModalKind::Onboarding { .. } => area,
-        ModalKind::QuestionPrompt { .. } => question_prompt_area(area),
-        ModalKind::PermissionPrompt { .. }
-        | ModalKind::SandboxEscalationPrompt { .. }
-        | ModalKind::WebDomainPrompt { .. }
-        | ModalKind::ExtensionToolPrompt { .. }
-        | ModalKind::HookTrustPrompt { .. } => {
+        ModalKind::Wizard(crate::tui::event::WizardModal::Onboarding { .. }) => area,
+        ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt { .. }) => {
+            question_prompt_area(area)
+        }
+        ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 90, 12)
         }
-        ModalKind::CommandHelp => centered_rect(area, MODAL_WIDTH_WIDE, 82),
-        ModalKind::AuthorizeProviderPicker { providers, .. } => {
+        ModalKind::Detail(crate::tui::event::DetailModal::CommandHelp) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 82)
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {
+            providers,
+            ..
+        }) => {
             // 2 frame + 1 search header + N provider rows (+2 picker padding)
             // + 2 footer.
             let rows = (providers.len().max(1) as u16).saturating_add(7);
             centered_rect_capped(area, MODAL_WIDTH_PICKER, 58, rows)
         }
-        ModalKind::UnauthorizeProviderPicker { providers, .. } => {
+        ModalKind::Picker(crate::tui::event::PickerModal::UnauthorizeProviderPicker {
+            providers,
+            ..
+        }) => {
             // Same footprint as the authorize picker.
             let rows = (providers.len().max(1) as u16).saturating_add(7);
             centered_rect_capped(area, MODAL_WIDTH_PICKER, 58, rows)
         }
-        ModalKind::UnauthorizeConfirm { .. } => {
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::Unauthorize { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }
-        ModalKind::ModelPicker { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 76),
-        ModalKind::McpServers { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 76),
-        ModalKind::SessionPicker { .. } => centered_rect(area, MODAL_WIDTH_FORM, 60),
-        ModalKind::PlanPicker { .. } => centered_rect(area, MODAL_WIDTH_FORM, 60),
-        ModalKind::PlanOpenChoice { .. } => centered_rect_capped(area, MODAL_WIDTH_PROMPT, 38, 7),
-        ModalKind::StartPlanChoice { .. } => centered_rect_capped(area, MODAL_WIDTH_PROMPT, 38, 7),
-        ModalKind::PlanDeleteConfirm { .. } => {
+        ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 76)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 76)
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { .. }) => {
+            centered_rect(area, MODAL_WIDTH_FORM, 60)
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker { .. }) => {
+            centered_rect(area, MODAL_WIDTH_FORM, 60)
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice { .. }) => {
+            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 38, 7)
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { .. }) => {
+            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 38, 7)
+        }
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }
-        ModalKind::SessionDeleteConfirm { .. } => {
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::SessionDelete { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }
-        ModalKind::PlanDiscardConfirm { .. } => {
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDiscard { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }
-        ModalKind::ReviewScopePicker { .. } => {
+        ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { .. }) => {
             // 2 frame + N scope rows (+2 picker padding) + 2 footer.
             let rows = (crate::agent::ReviewScope::all().len() as u16).saturating_add(6);
             centered_rect_capped(area, MODAL_WIDTH_PICKER, 44, rows)
         }
-        ModalKind::LocalModelWizard { .. } => centered_rect(area, MODAL_WIDTH_FORM, 68),
-        ModalKind::AgentBrowser { .. } => centered_rect(area, MODAL_WIDTH_FORM, 66),
-        ModalKind::SkillManager { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
-        ModalKind::ProviderDetail { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
-        ModalKind::MemoryManager { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
-        ModalKind::PermissionsManager { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
-        ModalKind::MemoryAddWizard { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 80),
-        ModalKind::Settings { .. } => area,
-        ModalKind::AgentComposer { .. } => centered_rect(area, MODAL_WIDTH_FORM, 72),
-        ModalKind::AgentDeleteConfirm { .. } => {
+        ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { .. }) => {
+            centered_rect(area, MODAL_WIDTH_FORM, 68)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::AgentBrowser { .. }) => {
+            centered_rect(area, MODAL_WIDTH_FORM, 66)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::SkillManager { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::ProviderDetail { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+        }
+        ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::Settings { .. }) => area,
+        ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { .. }) => {
+            centered_rect(area, MODAL_WIDTH_FORM, 72)
+        }
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::AgentDelete { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 34, 7)
         }
-        ModalKind::SandboxStatus { .. } => centered_rect_capped(area, MODAL_WIDTH_PROMPT, 52, 16),
-        ModalKind::Doctor { report, .. } => {
+        ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { .. }) => {
+            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 52, 16)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::Doctor { report, .. }) => {
             // 2 frame + 2 header + N check rows + 2 footer, capped so a long
             // check list scrolls internally instead of filling the screen.
             let rows = (report.checks.len().max(1) as u16).saturating_add(6);
             centered_rect_capped(area, MODAL_WIDTH_WIDE, 82, rows)
         }
-        ModalKind::ThemePicker { .. } => {
+        ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { .. }) => {
             let rows_height = (theme::theme_count().max(1) as u16).saturating_add(8);
             centered_rect_capped(area, MODAL_WIDTH_PICKER, 42, rows_height)
         }
-        ModalKind::ModePicker { rows, .. } => {
+        ModalKind::Picker(crate::tui::event::PickerModal::ModePicker { rows, .. }) => {
             // 2 frame + N rows (+2 picker padding) + 2 footer.
             let rows_height = (rows.len().max(1) as u16).saturating_add(6);
             centered_rect_capped(area, MODAL_WIDTH_PICKER, 52, rows_height)
         }
-        ModalKind::BusyCommand { rows, .. } => {
+        ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { rows, .. }) => {
             let rows_height = (rows.len().max(1) as u16).saturating_add(6);
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 44, rows_height)
         }
-        ModalKind::TaskList { .. } | ModalKind::SubtaskList { .. } | ModalKind::Refresh { .. } => {
+        ModalKind::Manager(crate::tui::event::ManagerModal::TaskList { .. })
+        | ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList { .. })
+        | ModalKind::Detail(crate::tui::event::DetailModal::Refresh { .. }) => {
             centered_rect(area, MODAL_WIDTH_WIDE, 82)
         }
-        ModalKind::UsageDashboard { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 82),
-        ModalKind::PeerList { peers, .. } => {
+        ModalKind::Detail(crate::tui::event::DetailModal::UsageDashboard { .. }) => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 82)
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::PeerList { peers, .. }) => {
             // 2 frame + N peer rows + 2 footer, capped so a crowded project
             // scrolls internally instead of filling the screen.
             let rows = (peers.len().max(1) as u16).saturating_add(4);
@@ -124,28 +172,36 @@ pub(crate) fn max_modal_scroll(app: &AppState, area: Rect) -> Option<u16> {
     let kind = app.modal.as_ref()?;
     let modal = modal_area(area, kind);
     match kind {
-        ModalKind::Context(_) => context_modal_metrics(app, area).map(|metrics| metrics.max_scroll),
-        ModalKind::Episodes { report, cursor } => Some(max_episode_detail_scroll(
-            modal,
-            &report.episodes,
-            (*cursor).min(report.episodes.len().saturating_sub(1)),
-        )),
-        ModalKind::PerfReport { lines, .. } => Some(perf_report_max_scroll(modal, lines)),
-        ModalKind::ToolDetail { tool_id } => app.tool_activity(tool_id).map(|activity| {
-            max_tool_detail_scroll(modal, activity, app.subagent_model_for(tool_id))
-        }),
-        ModalKind::DiffPreview { tool_id } => app
+        ModalKind::Detail(crate::tui::event::DetailModal::Context(_)) => {
+            context_modal_metrics(app, area).map(|metrics| metrics.max_scroll)
+        }
+        ModalKind::Detail(crate::tui::event::DetailModal::Episodes { report, cursor }) => {
+            Some(max_episode_detail_scroll(
+                modal,
+                &report.episodes,
+                (*cursor).min(report.episodes.len().saturating_sub(1)),
+            ))
+        }
+        ModalKind::Detail(crate::tui::event::DetailModal::PerfReport { lines, .. }) => {
+            Some(perf_report_max_scroll(modal, lines))
+        }
+        ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { tool_id }) => {
+            app.tool_activity(tool_id).map(|activity| {
+                max_tool_detail_scroll(modal, activity, app.subagent_model_for(tool_id))
+            })
+        }
+        ModalKind::Detail(crate::tui::event::DetailModal::DiffPreview { tool_id }) => app
             .tool_activity(tool_id)
             .and_then(|activity| activity.diff.as_ref())
             .map(|diff| max_diff_preview_scroll(modal, diff)),
-        ModalKind::QuestionPrompt {
+        ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
             prompt,
             origin,
             options,
             multiple,
             cursor,
             ..
-        } => Some(
+        }) => Some(
             question_prompt_metrics(
                 modal,
                 prompt,
@@ -156,92 +212,96 @@ pub(crate) fn max_modal_scroll(app: &AppState, area: Rect) -> Option<u16> {
             )
             .max_scroll,
         ),
-        ModalKind::PermissionPrompt {
-            command, origin, ..
-        } => Some(confirm_prompt_max_scroll(
+        ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt {
+            command,
+            origin,
+            ..
+        }) => Some(confirm_prompt_max_scroll(
             modal,
             &permission_prompt(command, origin.as_deref()),
         )),
-        ModalKind::SandboxEscalationPrompt {
+        ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt {
             command,
             origin,
             kind,
             ..
-        } => Some(confirm_prompt_max_scroll(
+        }) => Some(confirm_prompt_max_scroll(
             modal,
             &sandbox_escalation_prompt(command, origin.as_deref(), *kind),
         )),
-        ModalKind::WebDomainPrompt {
+        ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt {
             url,
             host,
             redirected_from,
             origin,
             ..
-        } => Some(confirm_prompt_max_scroll(
+        }) => Some(confirm_prompt_max_scroll(
             modal,
             &web_domain_prompt(host, url, redirected_from.as_deref(), origin.as_deref()),
         )),
-        ModalKind::ExtensionToolPrompt {
+        ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt {
             id,
             server,
             capabilities,
             args_preview,
             ..
-        } => Some(confirm_prompt_max_scroll(
+        }) => Some(confirm_prompt_max_scroll(
             modal,
             &extension_tool_prompt(id, server, capabilities, args_preview),
         )),
-        ModalKind::HookTrustPrompt {
+        ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt {
             name,
             event,
             action_kind,
             action_preview,
             ..
-        } => Some(confirm_prompt_max_scroll(
+        }) => Some(confirm_prompt_max_scroll(
             modal,
             &hook_trust_prompt(name, event, action_kind, action_preview),
         )),
-        ModalKind::TaskList { tasks, cursor } => Some(max_task_detail_scroll(
-            modal,
-            tasks,
-            (*cursor).min(tasks.len().saturating_sub(1)),
-        )),
-        ModalKind::Refresh {
+        ModalKind::Manager(crate::tui::event::ManagerModal::TaskList { tasks, cursor }) => Some(
+            max_task_detail_scroll(modal, tasks, (*cursor).min(tasks.len().saturating_sub(1))),
+        ),
+        ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
             sources, cursor, ..
-        } => Some(max_refresh_detail_scroll(
+        }) => Some(max_refresh_detail_scroll(
             modal,
             sources,
             (*cursor).min(sources.len().saturating_sub(1)),
         )),
-        ModalKind::SubtaskList {
-            subtasks, cursor, ..
-        } => Some(max_subtask_detail_scroll(
+        ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList {
+            subtasks,
+            cursor,
+            ..
+        }) => Some(max_subtask_detail_scroll(
             app,
             modal,
             subtasks,
             (*cursor).min(subtasks.len().saturating_sub(1)),
         )),
-        ModalKind::SkillManager { rows, cursor } => Some(skill_detail_max_scroll(
-            modal,
-            rows,
-            (*cursor).min(rows.len().saturating_sub(1)),
-        )),
-        ModalKind::ProviderDetail { detail } => Some(provider_detail_max_scroll(modal, detail)),
-        ModalKind::MemoryManager { rows, cursor } => Some(memory_detail_max_scroll(
-            modal,
-            rows,
-            (*cursor).min(rows.len().saturating_sub(1)),
-        )),
-        ModalKind::MemoryAddWizard { state } => Some(memory_wizard_max_scroll(modal, state)),
-        ModalKind::McpServers { rows, cursor } => Some(mcp_detail_max_scroll(
-            modal,
-            rows,
-            (*cursor).min(rows.len().saturating_sub(1)),
-        )),
-        ModalKind::UsageDashboard { dashboard, tab } => {
+        ModalKind::Manager(crate::tui::event::ManagerModal::SkillManager { rows, cursor }) => Some(
+            skill_detail_max_scroll(modal, rows, (*cursor).min(rows.len().saturating_sub(1))),
+        ),
+        ModalKind::Manager(crate::tui::event::ManagerModal::ProviderDetail { detail }) => {
+            Some(provider_detail_max_scroll(modal, detail))
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager { rows, cursor }) => {
+            Some(memory_detail_max_scroll(
+                modal,
+                rows,
+                (*cursor).min(rows.len().saturating_sub(1)),
+            ))
+        }
+        ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard { state }) => {
+            Some(memory_wizard_max_scroll(modal, state))
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { rows, cursor }) => Some(
+            mcp_detail_max_scroll(modal, rows, (*cursor).min(rows.len().saturating_sub(1))),
+        ),
+        ModalKind::Detail(crate::tui::event::DetailModal::UsageDashboard { dashboard, tab }) => {
             Some(usage_dashboard_max_scroll(modal, dashboard, *tab))
         }
-        ModalKind::SandboxStatus { .. } => None,
+        ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { .. }) => None,
         _ => None,
     }
 }
@@ -285,7 +345,9 @@ fn memory_wizard_max_scroll(
 }
 
 pub(crate) fn context_modal_metrics(app: &AppState, area: Rect) -> Option<ContextModalMetrics> {
-    let Some(ModalKind::Context(report)) = app.modal.as_ref() else {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(report))) =
+        app.modal.as_ref()
+    else {
         return None;
     };
     let modal = modal_area(area, app.modal.as_ref()?);
@@ -316,7 +378,9 @@ pub(crate) fn context_row_index_at(
     column: u16,
     row: u16,
 ) -> Option<usize> {
-    let Some(ModalKind::Context(report)) = app.modal.as_ref() else {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(report))) =
+        app.modal.as_ref()
+    else {
         return None;
     };
     let modal = modal_area(area, app.modal.as_ref()?);
@@ -1004,7 +1068,8 @@ mod tests {
     fn mode_modal_fits_all_rows_at_normal_terminal_height() {
         let area = Rect::new(0, 0, 100, 30);
         let rows = (0..7).map(|_| ModeRow::Header("axis")).collect();
-        let kind = ModalKind::ModePicker { rows, cursor: 0 };
+        let kind =
+            ModalKind::Picker(crate::tui::event::PickerModal::ModePicker { rows, cursor: 0 });
 
         assert_eq!(modal_area(area, &kind).height, 13);
     }
@@ -1012,10 +1077,10 @@ mod tests {
     #[test]
     fn settings_modal_uses_full_terminal_area() {
         let area = Rect::new(3, 4, 120, 30);
-        let kind = ModalKind::Settings {
+        let kind = ModalKind::Manager(crate::tui::event::ManagerModal::Settings {
             rows: Vec::new(),
             cursor: 0,
-        };
+        });
 
         assert_eq!(modal_area(area, &kind), area);
     }

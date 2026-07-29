@@ -18,7 +18,9 @@ fn modal_scrim_dismiss(kind: &ModalKind) -> AppAction {
         };
     }
     match kind {
-        ModalKind::QuestionPrompt { .. } => AppAction::QuestionCancel,
+        ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt { .. }) => {
+            AppAction::QuestionCancel
+        }
         _ => AppAction::CloseModal,
     }
 }
@@ -637,7 +639,7 @@ mod tests {
     #[test]
     fn wheel_in_composer_does_not_leak_to_modal_scroll() {
         let mut app = app_with_focus();
-        app.modal = Some(ModalKind::Help);
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
         let area = Rect::new(0, 0, 80, 24);
         let regions = crate::tui::layout::split(area, app.surface());
         let (col, row) = (regions.input.x + 2, regions.input.y + 1);
@@ -652,7 +654,9 @@ mod tests {
     #[test]
     fn left_click_context_modal_row_toggles_context_node() {
         let mut app = app_with_focus();
-        app.modal = Some(ModalKind::Context(Box::new(expandable_context_report())));
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(expandable_context_report()),
+        )));
         app.context_state.expanded.clear();
         let area = Rect::new(0, 0, 100, 40);
         let Some((col, row)) = first_context_row_point(&app, area) else {
@@ -1001,7 +1005,7 @@ mod tests {
         // (press, release, press, release) against an open Help modal and
         // assert the word selection survives the final release.
         let mut app = app_with_focus();
-        app.modal = Some(ModalKind::Help);
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
         let area = Rect::new(0, 0, 140, 40);
         let modal_rect = modal::modal_area(area, app.modal.as_ref().unwrap());
         *app.modal_body_lines.borrow_mut() = vec![ratatui::text::Line::from("hello world again")];

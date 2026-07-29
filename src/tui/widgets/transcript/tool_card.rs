@@ -452,22 +452,26 @@ pub(super) fn question_summary_spans(arguments: &str) -> Vec<Span<'static>> {
 
 pub(super) fn pending_permission_command(app: &AppState) -> Option<&str> {
     match app.modal.as_ref() {
-        Some(crate::tui::event::ModalKind::PermissionPrompt { command, .. }) => {
-            Some(command.as_str())
-        }
-        Some(crate::tui::event::ModalKind::SandboxEscalationPrompt {
-            command,
-            kind: crate::interaction::SandboxEscalationKind::CommandAndSandbox,
-            ..
-        }) => Some(command.as_str()),
+        Some(crate::tui::event::ModalKind::Detail(
+            crate::tui::event::DetailModal::PermissionPrompt { command, .. },
+        )) => Some(command.as_str()),
+        Some(crate::tui::event::ModalKind::Detail(
+            crate::tui::event::DetailModal::SandboxEscalationPrompt {
+                command,
+                kind: crate::interaction::SandboxEscalationKind::CommandAndSandbox,
+                ..
+            },
+        )) => Some(command.as_str()),
         // Built-in web-tool domain prompts mark pending cards the same way, keyed
         // on the URL (the tool's `url` argument).
-        Some(crate::tui::event::ModalKind::WebDomainPrompt { url, .. }) => Some(url.as_str()),
+        Some(crate::tui::event::ModalKind::Detail(
+            crate::tui::event::DetailModal::WebDomainPrompt { url, .. },
+        )) => Some(url.as_str()),
         // An extension tool prompt is keyed on its args preview,
         // matching the primary-arg text a generic tool card shows.
-        Some(crate::tui::event::ModalKind::ExtensionToolPrompt { args_preview, .. }) => {
-            Some(args_preview.as_str())
-        }
+        Some(crate::tui::event::ModalKind::Detail(
+            crate::tui::event::DetailModal::ExtensionToolPrompt { args_preview, .. },
+        )) => Some(args_preview.as_str()),
         _ => None,
     }
 }

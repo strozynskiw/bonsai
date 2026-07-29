@@ -65,7 +65,12 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.modal_scroll = clamped_scroll(app.modal_scroll, delta);
             if delta != 0 {
                 app.modal_selection = None;
-                if matches!(app.modal, Some(ModalKind::Context(_))) {
+                if matches!(
+                    app.modal,
+                    Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+                        _
+                    )))
+                ) {
                     app.context_state.manual_scroll = true;
                 }
             }

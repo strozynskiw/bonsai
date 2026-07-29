@@ -324,7 +324,9 @@ fn context_wire_mouse_hit_testing_counts_wrapped_rows() {
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "gpt-5".to_string(), ".".to_string(), None);
-    app.modal = Some(ModalKind::Context(Box::new(report)));
+    app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+        Box::new(report),
+    )));
     app.context_state.view_mode = ContextViewMode::Wire;
     terminal
         .draw(|frame| {
@@ -1044,11 +1046,13 @@ fn permission_prompt_terminal_size_matrix_keeps_footer_and_tail_reachable() {
         let area = Rect::new(0, 0, width, height);
         let command = format!("cargo test {} TAIL-MARKER", "--workspace ".repeat(48));
         let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-        app.modal = Some(ModalKind::PermissionPrompt {
-            request_id: 1,
-            command,
-            origin: Some("subagent explore with a deliberately long origin".to_string()),
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::PermissionPrompt {
+                request_id: 1,
+                command,
+                origin: Some("subagent explore with a deliberately long origin".to_string()),
+            },
+        ));
         let modal = modal_area(area, app.modal.as_ref().expect("modal"));
         assert!(modal.width <= area.width && modal.height <= area.height);
         assert!(modal.width >= MIN_MODAL_WIDTH.min(area.width));
@@ -1082,16 +1086,18 @@ fn question_prompt_terminal_size_matrix_keeps_selection_and_footer_visible() {
             .collect::<Vec<_>>();
         let last = options.len() - 1;
         let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-        app.modal = Some(ModalKind::QuestionPrompt {
-            request_id: 1,
-            prompt: prompt.to_string(),
-            header: Some("Matrix question".to_string()),
-            options,
-            multiple: false,
-            origin: Some("subagent explore with a deliberately long origin".to_string()),
-            cursor: last,
-            selected: vec![false; 20],
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::QuestionPrompt {
+                request_id: 1,
+                prompt: prompt.to_string(),
+                header: Some("Matrix question".to_string()),
+                options,
+                multiple: false,
+                origin: Some("subagent explore with a deliberately long origin".to_string()),
+                cursor: last,
+                selected: vec![false; 20],
+            },
+        ));
         let modal = modal_area(area, app.modal.as_ref().expect("modal"));
         assert!(modal.width <= area.width && modal.height <= area.height);
         assert!(modal.width >= MIN_MODAL_WIDTH.min(area.width));

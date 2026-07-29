@@ -39,7 +39,7 @@ fn reconcile_model_picker_offsets(app: &mut AppState, area: Rect) {
     let Some(kind) = app.modal.as_ref() else {
         return;
     };
-    let ModalKind::ModelPicker { entries } = kind else {
+    let ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries }) = kind else {
         return;
     };
     let modal_area = crate::tui::widgets::modal::modal_area(area, kind);
@@ -137,14 +137,14 @@ fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll:
 }
 
 fn resolve_question_scroll(app: &mut AppState, area: Rect) {
-    let Some(ModalKind::QuestionPrompt {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
         prompt,
         origin,
         options,
         multiple,
         cursor,
         ..
-    }) = app.modal.as_ref()
+    })) = app.modal.as_ref()
     else {
         app.pending_question_visibility = false;
         return;

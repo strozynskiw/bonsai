@@ -44,7 +44,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             {
                 app.modal_scroll = 0;
                 app.modal_return_focus = Some(Focus::Transcript);
-                app.modal = Some(ModalKind::ToolDetail { tool_id });
+                app.modal = Some(ModalKind::Detail(
+                    crate::tui::event::DetailModal::ToolDetail { tool_id },
+                ));
                 app.focus = Focus::Modal;
             }
         }
@@ -56,7 +58,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             {
                 app.modal_scroll = 0;
                 app.modal_return_focus = Some(Focus::Transcript);
-                app.modal = Some(ModalKind::DiffPreview { tool_id });
+                app.modal = Some(ModalKind::Detail(
+                    crate::tui::event::DetailModal::DiffPreview { tool_id },
+                ));
                 app.focus = Focus::Modal;
             }
         }

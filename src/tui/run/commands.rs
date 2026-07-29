@@ -144,10 +144,12 @@ pub(in crate::tui::run) fn spawn_update_command(
 pub(in crate::tui) fn open_theme_picker(app: &mut AppState) {
     rescan_themes_and_report(app);
     let original_theme = crate::tui::theme::current_theme_name().to_string();
-    app.reduce(AppAction::OpenModal(ModalKind::ThemePicker {
-        cursor: crate::tui::theme::current_theme_index(),
-        original_theme,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::ThemePicker {
+            cursor: crate::tui::theme::current_theme_index(),
+            original_theme,
+        },
+    )));
 }
 
 /// Rescans custom theme files (picking up newly added or edited ones) and
@@ -399,7 +401,9 @@ pub(in crate::tui::run) async fn apply_sandbox_command(
             }
         }
         Ok(SandboxCommandRequest::Status) => {
-            app.reduce(AppAction::OpenModal(ModalKind::SandboxStatus { cursor: 0 }));
+            app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                crate::tui::event::ManagerModal::SandboxStatus { cursor: 0 },
+            )));
         }
         Err(message) => push_command_message(app, CommandOutputKind::Error, &message),
     }
@@ -457,7 +461,9 @@ pub(in crate::tui::run) async fn apply_self_review_command(
                 return;
             }
             app.pending_self_review_model = true;
-            app.reduce(AppAction::OpenModal(ModalKind::ModelPicker { entries }));
+            app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                crate::tui::event::PickerModal::ModelPicker { entries },
+            )));
         }
         Ok(SelfReviewCommandRequest::ClearModel) => {
             let settings = crate::subagent::BuiltinSubagentSettings::default();
@@ -838,8 +844,12 @@ pub(in crate::tui) async fn apply_non_idle_read_only_command(
                 push_command_message(app, CommandOutputKind::Status, CTX_UNAVAILABLE_WHILE_BUSY);
             }
         }
-        "/keys" => app.reduce(AppAction::OpenModal(ModalKind::Help)),
-        "/help" => app.reduce(AppAction::OpenModal(ModalKind::CommandHelp)),
+        "/keys" => app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::Help,
+        ))),
+        "/help" => app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::CommandHelp,
+        ))),
         "/perf" | "/cost" => open_cached_usage_report_modal(app),
         "/model" => {
             open_cached_model_picker(
@@ -903,20 +913,18 @@ pub(in crate::tui) async fn apply_non_idle_read_only_command(
                 &crate::resource::agent::snapshot(&app.custom_agents),
                 &app.builtin_subagents.snapshot(),
             );
-            app.reduce(AppAction::OpenModal(ModalKind::AgentBrowser {
-                rows,
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                crate::tui::event::ManagerModal::AgentBrowser { rows, cursor: 0 },
+            )));
         }
         "/skills" => {
             let rows = crate::tui::skill_manager::skill_rows(
                 &crate::resource::skill::snapshot(&app.skills),
                 &app.loaded_skills,
             );
-            app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
-                rows,
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                crate::tui::event::ManagerModal::SkillManager { rows, cursor: 0 },
+            )));
         }
         "/providers" => {
             // Defense-in-depth: `/providers` is normally caught by the
@@ -997,10 +1005,12 @@ async fn apply_non_idle_immediate_command(
         "/remember" => apply_remember_command(input, app, deps.memory.as_deref()),
         "/memory" => apply_memory_forget_command(input, app, deps.memory.as_deref()).await,
         "/mode" => {
-            app.reduce(AppAction::OpenModal(ModalKind::ModePicker {
-                rows: Vec::new(),
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                crate::tui::event::PickerModal::ModePicker {
+                    rows: Vec::new(),
+                    cursor: 0,
+                },
+            )));
         }
         "/theme" => {
             let arg = theme_command_arg(input).unwrap_or("");
@@ -1011,9 +1021,9 @@ async fn apply_non_idle_immediate_command(
             }
         }
         "/review" => {
-            app.reduce(AppAction::OpenModal(ModalKind::ReviewScopePicker {
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                crate::tui::event::PickerModal::ReviewScopePicker { cursor: 0 },
+            )));
         }
         "/authorize" => {
             push_command_message(
@@ -1175,11 +1185,13 @@ fn open_busy_command_modal(
     behavior: crate::commands::BusyCommandBehavior,
 ) {
     let rows = busy_command_rows(behavior);
-    app.reduce(AppAction::OpenModal(ModalKind::BusyCommand {
-        input: input.trim().to_string(),
-        rows,
-        cursor: 0,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Detail(
+        crate::tui::event::DetailModal::BusyCommand {
+            input: input.trim().to_string(),
+            rows,
+            cursor: 0,
+        },
+    )));
 }
 
 pub(in crate::tui::run) fn busy_command_rows(
@@ -1439,7 +1451,9 @@ pub(in crate::tui) async fn open_cached_model_picker(
         return;
     }
 
-    app.reduce(AppAction::OpenModal(ModalKind::ModelPicker { entries }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::ModelPicker { entries },
+    )));
 }
 
 fn cached_model_picker_entries(
@@ -1864,9 +1878,9 @@ pub(in crate::tui) async fn open_start_plan_choice(
         });
         return;
     }
-    app.reduce(AppAction::OpenModal(ModalKind::StartPlanChoice {
-        cursor: 0,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::StartPlanChoice { cursor: 0 },
+    )));
 }
 
 pub(in crate::tui) async fn implement_plan_with_context(

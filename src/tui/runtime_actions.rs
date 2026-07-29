@@ -164,7 +164,11 @@ pub(super) async fn handle_runtime_action(
             // *old* `current` and re-apply the same label. Advance `current`
             // in place here, then dispatch the resolved label through the
             // shared holder. Mirrors the `CycleApprovalLevel` pattern.
-            let Some(ModalKind::ModePicker { rows, cursor }) = &mut app.modal else {
+            let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                rows,
+                cursor,
+            })) = &mut app.modal
+            else {
                 return RuntimeActionResult::Handled;
             };
             let Some(row) = rows.get_mut(*cursor) else {
@@ -198,7 +202,9 @@ pub(super) async fn handle_runtime_action(
             submit_first_run_step(app, deps).await;
         }
         AppAction::SandboxToggle => {
-            let Some(ModalKind::SandboxStatus { cursor }) = &app.modal else {
+            let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { cursor })) =
+                &app.modal
+            else {
                 return RuntimeActionResult::Handled;
             };
             let cursor = *cursor;
@@ -229,7 +235,10 @@ pub(super) async fn handle_runtime_action(
         }
         AppAction::ThemePickerMove(delta) => {
             app.reduce(AppAction::ThemePickerMove(delta));
-            if let Some(ModalKind::ThemePicker { cursor, .. }) = &app.modal
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker {
+                cursor,
+                ..
+            })) = &app.modal
                 && let Some(palette) = crate::tui::theme::theme_at(*cursor)
             {
                 crate::tui::theme::set_theme(palette.name);
@@ -274,23 +283,27 @@ pub(super) async fn handle_runtime_action(
         AppAction::ReviewScopePickerSubmit => {
             submit_review_scope_picker(app, tasks, deps).await;
         }
-        AppAction::LocalModelWizardSubmit => {
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Submit) => {
             if !submit_local_model_wizard(app, deps) {
-                return RuntimeActionResult::Unhandled(Box::new(AppAction::LocalModelWizardSubmit));
+                return RuntimeActionResult::Unhandled(Box::new(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::Submit,
+                )));
             }
         }
-        AppAction::AgentComposerSubmit => {
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Submit) => {
             if !submit_agent_composer(app, deps).await {
-                return RuntimeActionResult::Unhandled(Box::new(AppAction::AgentComposerSubmit));
+                return RuntimeActionResult::Unhandled(Box::new(AppAction::AgentComposer(
+                    crate::tui::event::AgentComposerAction::Submit,
+                )));
             }
         }
         AppAction::PasteFromClipboard => {
             paste_from_clipboard(app, &deps.registry, Some(deps.model_catalog.as_ref()));
         }
-        AppAction::AgentComposerGenerate => {
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Generate) => {
             start_agent_composer_generate(app, deps);
         }
-        AppAction::AgentComposerOpenModelPicker => {
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::OpenModelPicker) => {
             open_model_picker_for_composer(app, deps).await;
         }
         AppAction::AgentBrowserAdd => {
@@ -305,18 +318,20 @@ pub(super) async fn handle_runtime_action(
         AppAction::AgentBrowserToggleEnabled => {
             toggle_agent_enabled(app, deps).await;
         }
-        AppAction::ProviderManagerAdd => {
-            app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
-                state: Box::default(),
-            }));
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::Add) => {
+            app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+                crate::tui::event::WizardModal::LocalModelWizard {
+                    state: Box::default(),
+                },
+            )));
         }
-        AppAction::ProviderManagerEdit => {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::Edit) => {
             open_provider_manager_edit(app, &deps);
         }
-        AppAction::ProviderManagerShowDetail => {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::ShowDetail) => {
             open_provider_detail(app, &deps);
         }
-        AppAction::ProviderManagerRemove => {
+        AppAction::ProviderManager(crate::tui::event::ProviderManagerAction::Remove) => {
             provider_manager_remove_selected(app, deps);
         }
         AppAction::ProviderRemoveConfirmSubmit => {
@@ -348,10 +363,10 @@ pub(super) async fn handle_runtime_action(
         AppAction::MemoryManagerEdit => {
             open_memory_edit_wizard(app);
         }
-        AppAction::PermissionsManagerDelete => {
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::Delete) => {
             delete_selected_permission_rule(app, &deps).await;
         }
-        AppAction::MemoryAddWizardSubmit => {
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::Submit) => {
             submit_memory_add_wizard(app, deps).await;
         }
         AppAction::AgentDeleteConfirmSubmit => {
@@ -360,10 +375,10 @@ pub(super) async fn handle_runtime_action(
         AppAction::AgentDeleteConfirmCancel => {
             reopen_agent_browser(app, &deps, 0).await;
         }
-        AppAction::ModelPickerSubmit => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::Submit) => {
             submit_model_picker(app, deps).await;
         }
-        AppAction::ModelPickerAssignShortcut(key) => {
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::AssignShortcut(key)) => {
             assign_model_picker_shortcut(app, deps, key).await;
         }
         AppAction::BusyCommandSubmit => {
@@ -375,10 +390,10 @@ pub(super) async fn handle_runtime_action(
         AppAction::SessionPickerDeleteSelected => {
             open_selected_session_delete_confirm(app);
         }
-        AppAction::PlanPickerSubmit => {
+        AppAction::PlanPicker(crate::tui::event::PlanPickerAction::Submit) => {
             open_selected_plan_choice(app);
         }
-        AppAction::PlanPickerDeleteSelected => {
+        AppAction::PlanPicker(crate::tui::event::PlanPickerAction::DeleteSelected) => {
             open_selected_plan_delete_confirm(app);
         }
         AppAction::PlanOpenChoiceSubmit => {
@@ -475,7 +490,9 @@ pub(super) async fn handle_runtime_action(
 }
 
 async fn submit_first_run_step(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::Onboarding { step, cursor }) = app.modal.as_ref() else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::Onboarding { step, cursor })) =
+        app.modal.as_ref()
+    else {
         return;
     };
     let step = *step;
@@ -675,10 +692,12 @@ async fn submit_first_run_step(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
 
 pub(crate) fn open_first_run_step(app: &mut AppState, step: crate::onboarding::FirstRunStep) {
     app.first_run_step = Some(step);
-    app.reduce(AppAction::OpenModal(ModalKind::Onboarding {
-        step,
-        cursor: step.default_choice(),
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+        crate::tui::event::WizardModal::Onboarding {
+            step,
+            cursor: step.default_choice(),
+        },
+    )));
 }
 
 /// Open (or re-open) the `/permissions` manager built from the current bash and
@@ -696,12 +715,14 @@ pub(super) fn open_permissions_manager(
     let visible =
         crate::tui::permissions_manager::permission_manager_filtered(&rows, &filter).len();
     let cursor = cursor.min(visible.saturating_sub(1));
-    app.reduce(AppAction::OpenModal(ModalKind::PermissionsManager {
-        rows,
-        filter,
-        searching: false,
-        cursor,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::PermissionsManager {
+            rows,
+            filter,
+            searching: false,
+            cursor,
+        },
+    )));
 }
 
 /// Remove the selected rule from the `/permissions` manager: a persisted rule is
@@ -711,12 +732,12 @@ pub(super) fn open_permissions_manager(
 async fn delete_selected_permission_rule(app: &mut AppState, deps: &RuntimeActionDeps<'_>) {
     use crate::tui::permissions_manager::{RuleLane, permission_manager_filtered};
 
-    let Some(ModalKind::PermissionsManager {
+    let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
         rows,
         filter,
         cursor,
         ..
-    }) = app.modal.as_ref()
+    })) = app.modal.as_ref()
     else {
         return;
     };
@@ -881,29 +902,37 @@ fn respond_to_prompt_decision(
     let (request_id, command, label) = match (family, app.modal.clone()) {
         (
             PromptFamily::Permission,
-            Some(ModalKind::PermissionPrompt {
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt {
                 request_id,
                 command,
                 ..
-            }),
+            })),
         ) => (request_id, command, "permission"),
         // For web domains the timer reset is best-effort for redirecting
         // WebFetch: time spent at this prompt must not count as network time.
         (
             PromptFamily::WebDomain,
-            Some(ModalKind::WebDomainPrompt {
-                request_id, url, ..
-            }),
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt {
+                request_id,
+                url,
+                ..
+            })),
         ) => (request_id, url, "web domain"),
         (
             PromptFamily::ExtensionTool,
-            Some(ModalKind::ExtensionToolPrompt { request_id, id, .. }),
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt {
+                request_id,
+                id,
+                ..
+            })),
         ) => (request_id, id, "extension tool"),
         (
             PromptFamily::HookTrust,
-            Some(ModalKind::HookTrustPrompt {
-                request_id, name, ..
-            }),
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt {
+                request_id,
+                name,
+                ..
+            })),
         ) => (request_id, name, "hook trust"),
         _ => return,
     };
@@ -926,7 +955,9 @@ fn respond_to_prompt_decision(
 }
 
 async fn submit_theme_picker(app: &mut AppState, session_store: Arc<Mutex<SessionStore>>) {
-    let Some(ModalKind::ThemePicker { cursor, .. }) = app.modal.clone() else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { cursor, .. })) =
+        app.modal.clone()
+    else {
         return;
     };
     let Some(palette) = crate::tui::theme::theme_at(cursor) else {
@@ -945,7 +976,10 @@ async fn submit_theme_picker(app: &mut AppState, session_store: Arc<Mutex<Sessio
 }
 
 fn cancel_theme_picker(app: &mut AppState) {
-    let Some(ModalKind::ThemePicker { original_theme, .. }) = app.modal.clone() else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker {
+        original_theme, ..
+    })) = app.modal.clone()
+    else {
         return;
     };
     crate::tui::theme::set_theme(&original_theme);
@@ -957,12 +991,12 @@ fn respond_to_sandbox_escalation(
     interaction: Arc<InteractionService>,
     decision: EscalationDecision,
 ) {
-    let Some(ModalKind::SandboxEscalationPrompt {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt {
         request_id,
         command,
         kind,
         ..
-    }) = app.modal.clone()
+    })) = app.modal.clone()
     else {
         return;
     };
@@ -1003,14 +1037,14 @@ fn respond_to_sandbox_escalation(
 }
 
 fn respond_to_question_submit(app: &mut AppState, interaction: Arc<InteractionService>) {
-    let Some(ModalKind::QuestionPrompt {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
         request_id,
         cursor,
         selected,
         multiple,
         options: _options,
         ..
-    }) = app.modal.clone()
+    })) = app.modal.clone()
     else {
         return;
     };
@@ -1043,7 +1077,10 @@ fn respond_to_question_submit(app: &mut AppState, interaction: Arc<InteractionSe
 }
 
 fn respond_to_question_cancel(app: &mut AppState, interaction: Arc<InteractionService>) {
-    let Some(ModalKind::QuestionPrompt { request_id, .. }) = app.modal.clone() else {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
+        request_id, ..
+    })) = app.modal.clone()
+    else {
         return;
     };
 
@@ -1110,7 +1147,9 @@ async fn authorize_selected_mcp_server(app: &mut AppState, deps: RuntimeActionDe
 }
 
 fn selected_mcp_server(app: &AppState) -> Option<(String, McpServerStateKind, usize)> {
-    let ModalKind::McpServers { rows, cursor } = app.modal.as_ref()? else {
+    let ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { rows, cursor }) =
+        app.modal.as_ref()?
+    else {
         return None;
     };
     let cursor = (*cursor).min(rows.len().saturating_sub(1));
@@ -1148,11 +1187,16 @@ fn refresh_mcp_servers_modal(
         .iter()
         .position(|row| row.name == selected_server)
         .unwrap_or_else(|| fallback_cursor.min(rows.len().saturating_sub(1)));
-    app.reduce(AppAction::OpenModal(ModalKind::McpServers { rows, cursor }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::McpServers { rows, cursor },
+    )));
 }
 
 async fn submit_api_key_prompt(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::ApiKeyPrompt { provider_id, .. }) = app.modal.clone() else {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::ApiKeyPrompt {
+        provider_id, ..
+    })) = app.modal.clone()
+    else {
         return;
     };
     if app.task_state.is_busy() {
@@ -1324,11 +1368,11 @@ fn submit_authorize_provider_picker(
     tasks: &mut TaskController,
     deps: RuntimeActionDeps<'_>,
 ) {
-    let Some(ModalKind::AuthorizeProviderPicker {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {
         providers,
         query,
         cursor,
-    }) = app.modal.clone()
+    })) = app.modal.clone()
     else {
         tracing::debug!("AuthorizeProviderPickerSubmit ignored: no picker modal");
         return;
@@ -1369,11 +1413,11 @@ fn submit_authorize_provider_picker(
 }
 
 fn submit_unauthorize_provider_picker(app: &mut AppState) {
-    let Some(ModalKind::UnauthorizeProviderPicker {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::UnauthorizeProviderPicker {
         providers,
         query,
         cursor,
-    }) = app.modal.clone()
+    })) = app.modal.clone()
     else {
         tracing::debug!("UnauthorizeProviderPickerSubmit ignored: no picker modal");
         return;
@@ -1395,10 +1439,12 @@ fn submit_unauthorize_provider_picker(app: &mut AppState) {
         app.reduce(AppAction::CloseModal);
         return;
     };
-    app.reduce(AppAction::OpenModal(ModalKind::UnauthorizeConfirm {
-        provider_id: provider.provider_id.clone(),
-        display_name: provider.provider_label.clone(),
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+        crate::tui::event::ConfirmModal::Unauthorize {
+            provider_id: provider.provider_id.clone(),
+            display_name: provider.provider_label.clone(),
+        },
+    )));
 }
 
 fn submit_unauthorize_confirm(
@@ -1406,7 +1452,10 @@ fn submit_unauthorize_confirm(
     tasks: &mut TaskController,
     deps: RuntimeActionDeps<'_>,
 ) {
-    let Some(ModalKind::UnauthorizeConfirm { provider_id, .. }) = app.modal.clone() else {
+    let Some(ModalKind::Confirm(crate::tui::event::ConfirmModal::Unauthorize {
+        provider_id, ..
+    })) = app.modal.clone()
+    else {
         tracing::debug!("UnauthorizeConfirmSubmit ignored: no confirm modal");
         return;
     };
@@ -1438,7 +1487,9 @@ async fn submit_review_scope_picker(
     tasks: &mut TaskController,
     deps: RuntimeActionDeps<'_>,
 ) {
-    let Some(ModalKind::ReviewScopePicker { cursor }) = app.modal.clone() else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor })) =
+        app.modal.clone()
+    else {
         tracing::debug!("ReviewScopePickerSubmit ignored: no picker modal");
         return;
     };
@@ -1449,7 +1500,9 @@ async fn submit_review_scope_picker(
 }
 
 fn submit_local_model_wizard(app: &mut AppState, deps: RuntimeActionDeps<'_>) -> bool {
-    let Some(ModalKind::LocalModelWizard { state }) = app.modal.as_ref() else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+        app.modal.as_ref()
+    else {
         return true;
     };
     if state.loading {
@@ -1458,7 +1511,10 @@ fn submit_local_model_wizard(app: &mut AppState, deps: RuntimeActionDeps<'_>) ->
     match state.step {
         LocalModelWizardStep::Setup => {
             let request_id = app.next_local_model_wizard_request_id();
-            if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
+            {
                 start_local_model_fetch(state, request_id, deps.runtime_sender);
             }
             true
@@ -1502,7 +1558,9 @@ fn start_local_model_commit(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
         return;
     }
 
-    let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+        &mut app.modal
+    else {
         return;
     };
     let catalog_input = match state.catalog_input() {
@@ -1653,7 +1711,9 @@ impl crate::output::OutputSink for NoopSink {}
 /// Clone the selected browser row so the modal borrow is released before the
 /// caller mutates `app`.
 fn selected_browser_agent(app: &AppState) -> Option<AgentBrowserRow> {
-    let ModalKind::AgentBrowser { rows, cursor } = app.modal.as_ref()? else {
+    let ModalKind::Manager(crate::tui::event::ManagerModal::AgentBrowser { rows, cursor }) =
+        app.modal.as_ref()?
+    else {
         return None;
     };
     let row = rows.get(*cursor)?;
@@ -1661,9 +1721,11 @@ fn selected_browser_agent(app: &AppState) -> Option<AgentBrowserRow> {
 }
 
 fn open_agent_composer_new(app: &mut AppState) {
-    app.reduce(AppAction::OpenModal(ModalKind::AgentComposer {
-        state: Box::new(AgentComposerState::new()),
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+        crate::tui::event::WizardModal::AgentComposer {
+            state: Box::new(AgentComposerState::new()),
+        },
+    )));
 }
 
 /// Open the shared model picker for one composer model-chain slot. The composer
@@ -1671,7 +1733,7 @@ fn open_agent_composer_new(app: &mut AppState) {
 async fn open_model_picker_for_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     let on_model_field = matches!(
         app.modal.as_ref(),
-        Some(ModalKind::AgentComposer { state })
+        Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state }))
             if matches!(state.step, AgentComposerStep::Details)
                 && matches!(
                     state.field,
@@ -1688,7 +1750,9 @@ async fn open_model_picker_for_composer(app: &mut AppState, deps: RuntimeActionD
     };
     // Stash the composer while the picker is open; the picker submit/cancel path
     // reopens it. Taking the modal here replaces it with the picker below.
-    let Some(ModalKind::AgentComposer { state }) = app.modal.take() else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+        app.modal.take()
+    else {
         return;
     };
     let target = match state.field {
@@ -1698,7 +1762,9 @@ async fn open_model_picker_for_composer(app: &mut AppState, deps: RuntimeActionD
     };
     app.pending_composer_state = Some(state);
     app.model_picker.target = target;
-    app.reduce(AppAction::OpenModal(ModalKind::ModelPicker { entries }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::ModelPicker { entries },
+    )));
 }
 
 async fn open_agent_composer_edit(app: &mut AppState) {
@@ -1732,15 +1798,17 @@ async fn open_agent_composer_edit(app: &mut AppState) {
                 return;
             }
         };
-        app.reduce(AppAction::OpenModal(ModalKind::AgentComposer {
-            state: Box::new(AgentComposerState::edit_builtin_subagent(
-                id,
-                spec.description,
-                spec.instructions(),
-                &settings,
-                row.source_path,
-            )),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::AgentComposer {
+                state: Box::new(AgentComposerState::edit_builtin_subagent(
+                    id,
+                    spec.description,
+                    spec.instructions(),
+                    &settings,
+                    row.source_path,
+                )),
+            },
+        )));
         return;
     }
     let Some(path) = row.source_path else {
@@ -1752,9 +1820,11 @@ async fn open_agent_composer_edit(app: &mut AppState) {
         .map_err(|error| anyhow::anyhow!("agent read task failed: {error}"))
         .and_then(|result| result);
     match loaded {
-        Ok(state) => app.reduce(AppAction::OpenModal(ModalKind::AgentComposer {
-            state: Box::new(state),
-        })),
+        Ok(state) => app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::AgentComposer {
+                state: Box::new(state),
+            },
+        ))),
         Err(err) => push_command_message(
             app,
             CommandOutputKind::Error,
@@ -1836,14 +1906,18 @@ fn open_agent_delete_confirm(app: &mut AppState) {
     let Some(path) = row.source_path else {
         return;
     };
-    app.reduce(AppAction::OpenModal(ModalKind::AgentDeleteConfirm {
-        name: row.name,
-        path,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+        crate::tui::event::ConfirmModal::AgentDelete {
+            name: row.name,
+            path,
+        },
+    )));
 }
 
 async fn submit_agent_delete_confirm(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::AgentDeleteConfirm { name, path }) = app.modal.clone() else {
+    let Some(ModalKind::Confirm(crate::tui::event::ConfirmModal::AgentDelete { name, path })) =
+        app.modal.clone()
+    else {
         return;
     };
     let delete_path = path.clone();
@@ -1874,7 +1948,9 @@ async fn toggle_agent_enabled(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
         return;
     };
     let cursor = match app.modal.as_ref() {
-        Some(ModalKind::AgentBrowser { cursor, .. }) => *cursor,
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::AgentBrowser {
+            cursor, ..
+        })) => *cursor,
         _ => 0,
     };
     let toggled = if let Some(id) = row.builtin_id {
@@ -1987,10 +2063,9 @@ async fn reopen_agent_browser(app: &mut AppState, deps: &RuntimeActionDeps<'_>, 
             }
             normalize_active_persona_after_agent_reload(app);
             let cursor = cursor.min(rows.len().saturating_sub(1));
-            app.reduce(AppAction::OpenModal(ModalKind::AgentBrowser {
-                rows,
-                cursor,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                crate::tui::event::ManagerModal::AgentBrowser { rows, cursor },
+            )));
         }
         Err(error) => push_command_message(
             app,
@@ -2022,7 +2097,10 @@ fn normalize_active_persona_after_agent_reload(app: &mut AppState) {
 /// disablable) is a silent no-op; only a genuine filesystem failure surfaces.
 async fn toggle_skill_disabled(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     let (name, disable, disablable, cursor) = match app.modal.as_ref() {
-        Some(ModalKind::SkillManager { rows, cursor }) => match rows.get(*cursor) {
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::SkillManager {
+            rows,
+            cursor,
+        })) => match rows.get(*cursor) {
             Some(row) => (row.name.clone(), !row.disabled, row.disablable, *cursor),
             None => return,
         },
@@ -2078,10 +2156,9 @@ async fn toggle_skill_disabled(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
     }
     let rows = skill_rows_from_app(app);
     let cursor = cursor.min(rows.len().saturating_sub(1));
-    app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
-        rows,
-        cursor,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::SkillManager { rows, cursor },
+    )));
 }
 
 /// Load the selected skill's body into the conversation, or unload it if it is
@@ -2091,7 +2168,10 @@ async fn toggle_skill_disabled(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
 /// message — the modal's loaded marker is the feedback.
 async fn toggle_skill_loaded(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     let (name, loaded, cursor) = match app.modal.as_ref() {
-        Some(ModalKind::SkillManager { rows, cursor }) => match rows.get(*cursor) {
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::SkillManager {
+            rows,
+            cursor,
+        })) => match rows.get(*cursor) {
             Some(row) => (row.name.clone(), row.loaded, *cursor),
             None => return,
         },
@@ -2138,10 +2218,9 @@ async fn toggle_skill_loaded(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     }
     let rows = skill_rows_from_app(app);
     let cursor = cursor.min(rows.len().saturating_sub(1));
-    app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
-        rows,
-        cursor,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::SkillManager { rows, cursor },
+    )));
 }
 
 /// Rebuild the skills manager rows lock-free: the shared registry handle plus
@@ -2157,7 +2236,9 @@ fn skill_rows_from_app(app: &AppState) -> Vec<crate::tui::skill_manager::SkillRo
 /// Returns `true` when the submit was fully handled here (the `Review` commit);
 /// `false` for earlier steps, which the reducer advances.
 async fn submit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) -> bool {
-    let Some(ModalKind::AgentComposer { state }) = app.modal.as_ref() else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+        app.modal.as_ref()
+    else {
         return true;
     };
     if state.generating {
@@ -2179,11 +2260,15 @@ async fn commit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
         );
         return;
     }
-    let Some(ModalKind::AgentComposer { state }) = app.modal.as_ref() else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+        app.modal.as_ref()
+    else {
         return;
     };
     if let Err(message) = state.validate_for_save() {
-        if let Some(ModalKind::AgentComposer { state }) = &mut app.modal {
+        if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+            &mut app.modal
+        {
             state.error = Some(message);
         }
         return;
@@ -2196,7 +2281,10 @@ async fn commit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
         if let Err(err) =
             persist_builtin_subagent_settings(deps.storage, &handle, id, settings).await
         {
-            if let Some(ModalKind::AgentComposer { state }) = &mut app.modal {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer {
+                state,
+            })) = &mut app.modal
+            {
                 state.error = Some(format!("Failed to save built-in settings: {err:#}"));
             }
             return;
@@ -2217,7 +2305,9 @@ async fn commit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
     .map_err(|error| anyhow::anyhow!("agent save task failed: {error}"))
     .and_then(|result| result.map_err(anyhow::Error::from));
     if let Err(err) = write {
-        if let Some(ModalKind::AgentComposer { state }) = &mut app.modal {
+        if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+            &mut app.modal
+        {
             state.error = Some(format!("Failed to write {}: {err}", path.display()));
         }
         return;
@@ -2226,14 +2316,18 @@ async fn commit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
 }
 
 fn start_agent_composer_generate(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::AgentComposer { state }) = app.modal.as_ref() else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+        app.modal.as_ref()
+    else {
         return;
     };
     if state.generating || !matches!(state.step, AgentComposerStep::Prompt) {
         return;
     }
     if state.description.text.trim().is_empty() {
-        if let Some(ModalKind::AgentComposer { state }) = &mut app.modal {
+        if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+            &mut app.modal
+        {
             state.error = Some("Add a description first, then generate.".to_string());
         }
         return;
@@ -2241,7 +2335,9 @@ fn start_agent_composer_generate(app: &mut AppState, deps: RuntimeActionDeps<'_>
     let (system, user) = state.generation_messages();
     let model = state.selected_model().map(str::to_string);
     let request_id = app.next_local_model_wizard_request_id();
-    if let Some(ModalKind::AgentComposer { state }) = &mut app.modal {
+    if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+        &mut app.modal
+    {
         state.mark_generating(request_id);
     }
 
@@ -2326,11 +2422,15 @@ async fn override_selected_subtask_model(app: &mut AppState, deps: RuntimeAction
         return;
     }
     app.pending_agent_model_override = Some(agent.to_string());
-    app.reduce(AppAction::OpenModal(ModalKind::ModelPicker { entries }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::ModelPicker { entries },
+    )));
 }
 
 async fn submit_model_picker(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::ModelPicker { entries }) = app.modal.clone() else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+        app.modal.clone()
+    else {
         tracing::debug!("ModelPickerSubmit ignored: no picker modal");
         return;
     };
@@ -2509,11 +2609,11 @@ async fn start_refresh(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     app.modal_scroll = 0;
     app.pending_question_visibility = false;
     app.modal_return_focus = Some(app.focus);
-    app.modal = Some(ModalKind::Refresh {
+    app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
         sources,
         cursor: 0,
         generation,
-    });
+    }));
     app.focus = Focus::Modal;
 
     let catalog = deps.model_catalog.clone();
@@ -2582,7 +2682,9 @@ fn submit_composer_model_picker(app: &mut AppState, entries: &[ModelOption]) -> 
             crate::tui::app::ModelPickerTarget::Session
             | crate::tui::app::ModelPickerTarget::Subagent => {}
         }
-        app.reduce(AppAction::OpenModal(ModalKind::AgentComposer { state }));
+        app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::AgentComposer { state },
+        )));
         return true;
     }
 
@@ -2607,7 +2709,9 @@ fn submit_composer_model_picker(app: &mut AppState, entries: &[ModelOption]) -> 
             crate::tui::app::ModelPickerTarget::Session
             | crate::tui::app::ModelPickerTarget::Subagent => {}
         }
-        app.reduce(AppAction::OpenModal(ModalKind::AgentComposer { state }));
+        app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::AgentComposer { state },
+        )));
         return true;
     }
     true
@@ -2618,7 +2722,9 @@ async fn assign_model_picker_shortcut(
     deps: RuntimeActionDeps<'_>,
     key: ModelShortcutKey,
 ) {
-    let Some(ModalKind::ModelPicker { entries }) = app.modal.clone() else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+        app.modal.clone()
+    else {
         tracing::debug!("ModelPickerAssignShortcut ignored: no picker modal");
         return;
     };
@@ -2674,7 +2780,9 @@ async fn assign_model_picker_shortcut(
         });
         return;
     }
-    if let Some(ModalKind::ModelPicker { entries }) = &mut app.modal {
+    if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+        &mut app.modal
+    {
         *entries = refreshed_entries;
     }
 }
@@ -2708,11 +2816,11 @@ async fn submit_busy_command(
     deps: RuntimeActionDeps<'_>,
     state: &mut PersistenceCommandState<'_>,
 ) {
-    let Some(ModalKind::BusyCommand {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand {
         input,
         rows,
         cursor,
-    }) = app.modal.clone()
+    })) = app.modal.clone()
     else {
         tracing::debug!("BusyCommandSubmit ignored: no busy-command modal");
         return;
@@ -2770,7 +2878,9 @@ async fn submit_session_picker(
     deps: RuntimeActionDeps<'_>,
     state: &mut PersistenceCommandState<'_>,
 ) {
-    let Some(ModalKind::SessionPicker { sessions, cursor }) = app.modal.clone() else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { sessions, cursor })) =
+        app.modal.clone()
+    else {
         tracing::debug!("SessionPickerSubmit ignored: no picker modal");
         return;
     };
@@ -2795,17 +2905,18 @@ fn open_selected_plan_choice(app: &mut AppState) {
     let Some(plan) = app.selected_saved_plan() else {
         return;
     };
-    app.reduce(AppAction::OpenModal(ModalKind::PlanOpenChoice {
-        plan,
-        cursor: 0,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::PlanOpenChoice { plan, cursor: 0 },
+    )));
 }
 
 fn open_selected_plan_delete_confirm(app: &mut AppState) {
     let Some(plan) = app.selected_saved_plan() else {
         return;
     };
-    app.reduce(AppAction::OpenModal(ModalKind::PlanDeleteConfirm { plan }));
+    app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+        crate::tui::event::ConfirmModal::PlanDelete { plan },
+    )));
 }
 
 async fn submit_plan_open_choice(
@@ -2830,7 +2941,9 @@ async fn submit_plan_open_choice(
 }
 
 async fn submit_plan_delete_confirm(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::PlanDeleteConfirm { plan }) = app.modal.clone() else {
+    let Some(ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { plan })) =
+        app.modal.clone()
+    else {
         return;
     };
     if let Err(err) =
@@ -2853,13 +2966,15 @@ fn open_selected_session_delete_confirm(app: &mut AppState) {
         );
         return;
     }
-    app.reduce(AppAction::OpenModal(ModalKind::SessionDeleteConfirm {
-        session,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+        crate::tui::event::ConfirmModal::SessionDelete { session },
+    )));
 }
 
 async fn submit_session_delete_confirm(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::SessionDeleteConfirm { session }) = app.modal.clone() else {
+    let Some(ModalKind::Confirm(crate::tui::event::ConfirmModal::SessionDelete { session })) =
+        app.modal.clone()
+    else {
         return;
     };
     match deps
@@ -2884,10 +2999,12 @@ async fn submit_session_delete_confirm(app: &mut AppState, deps: RuntimeActionDe
                         .into_iter()
                         .filter(|s| Some(s.id) != active_id)
                         .collect();
-                    app.reduce(AppAction::OpenModal(ModalKind::SessionPicker {
-                        sessions,
-                        cursor: 0,
-                    }));
+                    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                        crate::tui::event::PickerModal::SessionPicker {
+                            sessions,
+                            cursor: 0,
+                        },
+                    )));
                     push_command_message(
                         app,
                         CommandOutputKind::Status,
@@ -2939,7 +3056,11 @@ async fn submit_session_delete_confirm(app: &mut AppState, deps: RuntimeActionDe
 /// the canvas. On a delete error the canvas is left intact so the user can retry
 /// rather than orphaning the working plan.
 async fn submit_plan_discard_confirm(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::PlanDiscardConfirm { saved_plan_id, .. }) = app.modal.clone() else {
+    let Some(ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDiscard {
+        saved_plan_id,
+        ..
+    })) = app.modal.clone()
+    else {
         return;
     };
     app.reduce(AppAction::CloseModal);
@@ -3093,7 +3214,9 @@ fn advance_selected_choice(
     app: &mut AppState,
     delta: i16,
 ) -> Option<(crate::tui::event::SettingId, String, usize)> {
-    let Some(ModalKind::Settings { rows, cursor }) = &mut app.modal else {
+    let Some(ModalKind::Manager(crate::tui::event::ManagerModal::Settings { rows, cursor })) =
+        &mut app.modal
+    else {
         return None;
     };
     let cursor = *cursor;
@@ -3243,7 +3366,9 @@ async fn reseed_settings(app: &mut AppState, deps: &RuntimeActionDeps<'_>, curso
     let smol_profile = deps.agent.lock().await.smol_profile();
     let rows = crate::tui::settings::seed_settings_rows(app, smol_profile);
     let cursor = cursor.min(rows.len().saturating_sub(1));
-    app.reduce(AppAction::OpenModal(ModalKind::Settings { rows, cursor }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::Settings { rows, cursor },
+    )));
 }
 
 /// Enter on a settings row: open the model/theme picker for an `Action`, or
@@ -3255,7 +3380,9 @@ async fn activate_setting(
 ) {
     use crate::tui::event::{SettingId, SettingsRow};
     let selected = match app.modal.as_ref() {
-        Some(ModalKind::Settings { rows, cursor }) => rows.get(*cursor).cloned(),
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::Settings { rows, cursor })) => {
+            rows.get(*cursor).cloned()
+        }
         _ => None,
     };
     match selected {
@@ -3313,7 +3440,9 @@ mod tests {
     fn app_with_picker(rows: Vec<ModeRow>) -> AppState {
         let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
         app.sandbox = Some(CommandSandbox::disabled());
-        app.modal = Some(ModalKind::ModePicker { rows, cursor: 0 });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModePicker { rows, cursor: 0 },
+        ));
         app
     }
 
@@ -3351,7 +3480,9 @@ mod tests {
 
         assert!(submit_composer_model_picker(&mut app, &[]));
 
-        let Some(ModalKind::AgentComposer { state }) = app.modal.as_ref() else {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+            app.modal.as_ref()
+        else {
             panic!("composer should reopen after reset");
         };
         assert_eq!(state.selected_model(), Some("codex:primary"));
@@ -3379,7 +3510,9 @@ mod tests {
 
         assert!(submit_composer_model_picker(&mut app, &entries));
 
-        let Some(ModalKind::AgentComposer { state }) = app.modal.as_ref() else {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+            app.modal.as_ref()
+        else {
             panic!("composer should reopen after selection");
         };
         assert_eq!(state.selected_model(), Some("codex:primary"));
@@ -3864,12 +3997,14 @@ mod tests {
         };
 
         let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-        app.modal = Some(ModalKind::SandboxEscalationPrompt {
-            request_id,
-            command,
-            origin,
-            kind,
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::SandboxEscalationPrompt {
+                request_id,
+                command,
+                origin,
+                kind,
+            },
+        ));
         app.focus = Focus::Modal;
         respond_to_sandbox_escalation(&mut app, service, decision);
 
@@ -3971,16 +4106,18 @@ mod tests {
             panic!("unexpected request kind");
         };
         let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-        app.modal = Some(ModalKind::QuestionPrompt {
-            request_id,
-            prompt,
-            header,
-            options,
-            multiple,
-            origin,
-            cursor: 0,
-            selected,
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::QuestionPrompt {
+                request_id,
+                prompt,
+                header,
+                options,
+                multiple,
+                origin,
+                cursor: 0,
+                selected,
+            },
+        ));
         respond_to_question_submit(&mut app, service);
         requester
             .await

@@ -11,7 +11,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.init_context_view_state(&report);
                 app.pending_question_visibility = false;
                 app.modal_return_focus = Some(app.focus);
-                app.modal = Some(ModalKind::Context(Box::new(report)));
+                app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+                    Box::new(report),
+                )));
                 app.focus = Focus::Modal;
             }
         }
@@ -20,10 +22,12 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.modal_scroll = 0;
                 app.pending_question_visibility = false;
                 app.modal_return_focus = Some(app.focus);
-                app.modal = Some(ModalKind::Episodes {
-                    report: Box::new(report),
-                    cursor: 0,
-                });
+                app.modal = Some(ModalKind::Detail(
+                    crate::tui::event::DetailModal::Episodes {
+                        report: Box::new(report),
+                        cursor: 0,
+                    },
+                ));
                 app.focus = Focus::Modal;
             }
         }
@@ -32,13 +36,22 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.init_context_view_state(&report);
             app.pending_question_visibility = false;
             app.modal_return_focus = Some(app.focus);
-            app.modal = Some(ModalKind::Context(Box::new(report)));
+            app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+                Box::new(report),
+            )));
             app.focus = Focus::Modal;
         }
         AppAction::RefreshContextModal(report) => {
             app.latest_context_report = Some(report.clone());
-            if matches!(app.modal, Some(ModalKind::Context(_))) {
-                app.modal = Some(ModalKind::Context(Box::new(report)));
+            if matches!(
+                app.modal,
+                Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+                    _
+                )))
+            ) {
+                app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+                    Box::new(report),
+                )));
                 app.clamp_context_cursor();
                 app.clamp_context_wire_cursor();
                 app.clamp_context_turns_cursor();
@@ -156,7 +169,12 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::ContextToggleView => {
-            if matches!(app.modal, Some(ModalKind::Context(_))) {
+            if matches!(
+                app.modal,
+                Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+                    _
+                )))
+            ) {
                 app.context_state.view_mode = app.context_state.view_mode.cycled();
                 app.modal_scroll = 0;
                 app.context_state.manual_scroll = false;

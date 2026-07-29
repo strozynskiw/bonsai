@@ -209,61 +209,97 @@ pub(super) fn map_review_scope_picker_key(key: KeyEvent) -> KeyIntent {
 fn wizard_choice_field_active(app: &AppState) -> bool {
     matches!(
         app.modal,
-        Some(ModalKind::LocalModelWizard { ref state }) if state.setup_field_is_choice()
+        Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { ref state })) if state.setup_field_is_choice()
     )
 }
 
 pub(super) fn map_local_model_wizard_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Enter => KeyIntent::Action(AppAction::LocalModelWizardSubmit),
-        KeyCode::Tab => KeyIntent::Action(AppAction::LocalModelWizardMoveField(1)),
-        KeyCode::BackTab => KeyIntent::Action(AppAction::LocalModelWizardMoveField(-1)),
+        KeyCode::Enter => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Submit,
+        )),
+        KeyCode::Tab => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveField(1),
+        )),
+        KeyCode::BackTab => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveField(-1),
+        )),
         // On a Setup choice field (Server preset, Store key) the horizontal
         // arrows cycle the options; elsewhere they keep their step semantics.
         KeyCode::Left => {
             if wizard_choice_field_active(app) {
-                KeyIntent::Action(AppAction::LocalModelWizardCycleChoice(-1))
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::CycleChoice(-1),
+                ))
             } else {
-                KeyIntent::Action(AppAction::LocalModelWizardBack)
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::Back,
+                ))
             }
         }
         KeyCode::Right => {
             if wizard_choice_field_active(app) {
-                KeyIntent::Action(AppAction::LocalModelWizardCycleChoice(1))
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::CycleChoice(1),
+                ))
             } else {
-                KeyIntent::Action(AppAction::LocalModelWizardMoveField(1))
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::MoveField(1),
+                ))
             }
         }
         KeyCode::Up => {
             if matches!(
                 app.modal,
-                Some(ModalKind::LocalModelWizard { ref state })
+                Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { ref state }))
                     if matches!(state.step, crate::tui::local_model_wizard::LocalModelWizardStep::Setup)
             ) {
-                KeyIntent::Action(AppAction::LocalModelWizardMoveField(-1))
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::MoveField(-1),
+                ))
             } else {
-                KeyIntent::Action(AppAction::LocalModelWizardMoveModel(-1))
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::MoveModel(-1),
+                ))
             }
         }
         KeyCode::Down => {
             if matches!(
                 app.modal,
-                Some(ModalKind::LocalModelWizard { ref state })
+                Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { ref state }))
                     if matches!(state.step, crate::tui::local_model_wizard::LocalModelWizardStep::Setup)
             ) {
-                KeyIntent::Action(AppAction::LocalModelWizardMoveField(1))
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::MoveField(1),
+                ))
             } else {
-                KeyIntent::Action(AppAction::LocalModelWizardMoveModel(1))
+                KeyIntent::Action(AppAction::LocalModelWizard(
+                    crate::tui::event::LocalModelWizardAction::MoveModel(1),
+                ))
             }
         }
-        KeyCode::PageUp => KeyIntent::Action(AppAction::LocalModelWizardMoveModel(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::LocalModelWizardMoveModel(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::LocalModelWizardMoveModel(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::LocalModelWizardMoveModel(i16::MAX)),
-        KeyCode::Backspace => KeyIntent::Action(AppAction::LocalModelWizardBackspace),
-        KeyCode::Char(' ') => KeyIntent::Action(AppAction::LocalModelWizardToggle),
-        KeyCode::Char(ch) => KeyIntent::Action(AppAction::LocalModelWizardInputChar(ch)),
+        KeyCode::PageUp => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveModel(-8),
+        )),
+        KeyCode::PageDown => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveModel(8),
+        )),
+        KeyCode::Home => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveModel(i16::MIN),
+        )),
+        KeyCode::End => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveModel(i16::MAX),
+        )),
+        KeyCode::Backspace => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Backspace,
+        )),
+        KeyCode::Char(' ') => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Toggle,
+        )),
+        KeyCode::Char(ch) => KeyIntent::Action(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::InputChar(ch),
+        )),
         _ => KeyIntent::Noop,
     }
 }
@@ -289,9 +325,11 @@ pub(super) fn map_agent_browser_key(key: KeyEvent) -> KeyIntent {
 
 pub(super) fn map_provider_manager_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     let (searching, filter_active) = match &app.modal {
-        Some(ModalKind::ProviderManager {
-            searching, filter, ..
-        }) => (*searching, !filter.is_empty()),
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
+            searching,
+            filter,
+            ..
+        })) => (*searching, !filter.is_empty()),
         _ => (false, false),
     };
 
@@ -300,35 +338,79 @@ pub(super) fn map_provider_manager_key(key: KeyEvent, app: &AppState) -> KeyInte
     // filter applied) rather than closing.
     if searching {
         return match key.code {
-            KeyCode::Esc => KeyIntent::Action(AppAction::ProviderManagerSearchExit),
-            KeyCode::Enter => KeyIntent::Action(AppAction::ProviderManagerShowDetail),
-            KeyCode::Backspace => KeyIntent::Action(AppAction::ProviderManagerSearchBackspace),
-            KeyCode::Up => KeyIntent::Action(AppAction::ProviderManagerMove(-1)),
-            KeyCode::Down => KeyIntent::Action(AppAction::ProviderManagerMove(1)),
-            KeyCode::PageUp => KeyIntent::Action(AppAction::ProviderManagerMove(-8)),
-            KeyCode::PageDown => KeyIntent::Action(AppAction::ProviderManagerMove(8)),
-            KeyCode::Home => KeyIntent::Action(AppAction::ProviderManagerMove(i16::MIN)),
-            KeyCode::End => KeyIntent::Action(AppAction::ProviderManagerMove(i16::MAX)),
-            KeyCode::Char(ch) => KeyIntent::Action(AppAction::ProviderManagerSearchChar(ch)),
+            KeyCode::Esc => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::SearchExit,
+            )),
+            KeyCode::Enter => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::ShowDetail,
+            )),
+            KeyCode::Backspace => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::SearchBackspace,
+            )),
+            KeyCode::Up => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::Move(-1),
+            )),
+            KeyCode::Down => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::Move(1),
+            )),
+            KeyCode::PageUp => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::Move(-8),
+            )),
+            KeyCode::PageDown => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::Move(8),
+            )),
+            KeyCode::Home => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::Move(i16::MIN),
+            )),
+            KeyCode::End => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::Move(i16::MAX),
+            )),
+            KeyCode::Char(ch) => KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::SearchChar(ch),
+            )),
             _ => KeyIntent::Noop,
         };
     }
 
     match key.code {
         // Three-step Esc: clear an applied filter first, then close.
-        KeyCode::Esc if filter_active => KeyIntent::Action(AppAction::ProviderManagerClearFilter),
+        KeyCode::Esc if filter_active => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::ClearFilter,
+        )),
         KeyCode::Esc | KeyCode::Char('q') => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Char('/') => KeyIntent::Action(AppAction::ProviderManagerBeginSearch),
-        KeyCode::Up => KeyIntent::Action(AppAction::ProviderManagerMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::ProviderManagerMove(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::ProviderManagerMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::ProviderManagerMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::ProviderManagerMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::ProviderManagerMove(i16::MAX)),
-        KeyCode::Char('a') => KeyIntent::Action(AppAction::ProviderManagerAdd),
-        KeyCode::Enter => KeyIntent::Action(AppAction::ProviderManagerShowDetail),
-        KeyCode::Char('e') => KeyIntent::Action(AppAction::ProviderManagerEdit),
-        KeyCode::Char('d') | KeyCode::Delete => KeyIntent::Action(AppAction::ProviderManagerRemove),
+        KeyCode::Char('/') => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::BeginSearch,
+        )),
+        KeyCode::Up => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Move(-1),
+        )),
+        KeyCode::Down => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Move(1),
+        )),
+        KeyCode::PageUp => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Move(-8),
+        )),
+        KeyCode::PageDown => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Move(8),
+        )),
+        KeyCode::Home => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Move(i16::MIN),
+        )),
+        KeyCode::End => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Move(i16::MAX),
+        )),
+        KeyCode::Char('a') => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Add,
+        )),
+        KeyCode::Enter => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::ShowDetail,
+        )),
+        KeyCode::Char('e') => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Edit,
+        )),
+        KeyCode::Char('d') | KeyCode::Delete => KeyIntent::Action(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Remove,
+        )),
         _ => KeyIntent::Noop,
     }
 }
@@ -340,9 +422,11 @@ pub(super) fn map_provider_manager_key(key: KeyEvent, app: &AppState) -> KeyInte
 /// applied filter before closing.
 pub(super) fn map_permissions_manager_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     let (searching, filter_active) = match &app.modal {
-        Some(ModalKind::PermissionsManager {
-            searching, filter, ..
-        }) => (*searching, !filter.is_empty()),
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
+            searching,
+            filter,
+            ..
+        })) => (*searching, !filter.is_empty()),
         _ => (false, false),
     };
 
@@ -350,37 +434,67 @@ pub(super) fn map_permissions_manager_key(key: KeyEvent, app: &AppState) -> KeyI
         return match key.code {
             // Esc/Enter both commit the query and drop back to shortcut mode,
             // keeping the filter applied (there is no per-row detail to open).
-            KeyCode::Esc | KeyCode::Enter => {
-                KeyIntent::Action(AppAction::PermissionsManagerSearchExit)
-            }
-            KeyCode::Backspace => KeyIntent::Action(AppAction::PermissionsManagerSearchBackspace),
-            KeyCode::Up => KeyIntent::Action(AppAction::PermissionsManagerMove(-1)),
-            KeyCode::Down => KeyIntent::Action(AppAction::PermissionsManagerMove(1)),
-            KeyCode::PageUp => KeyIntent::Action(AppAction::PermissionsManagerMove(-8)),
-            KeyCode::PageDown => KeyIntent::Action(AppAction::PermissionsManagerMove(8)),
-            KeyCode::Home => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MIN)),
-            KeyCode::End => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MAX)),
-            KeyCode::Char(ch) => KeyIntent::Action(AppAction::PermissionsManagerSearchChar(ch)),
+            KeyCode::Esc | KeyCode::Enter => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::SearchExit,
+            )),
+            KeyCode::Backspace => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::SearchBackspace,
+            )),
+            KeyCode::Up => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::Move(-1),
+            )),
+            KeyCode::Down => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::Move(1),
+            )),
+            KeyCode::PageUp => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::Move(-8),
+            )),
+            KeyCode::PageDown => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::Move(8),
+            )),
+            KeyCode::Home => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::Move(i16::MIN),
+            )),
+            KeyCode::End => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::Move(i16::MAX),
+            )),
+            KeyCode::Char(ch) => KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::SearchChar(ch),
+            )),
             _ => KeyIntent::Noop,
         };
     }
 
     match key.code {
         // Three-step Esc: clear an applied filter first, then close.
-        KeyCode::Esc if filter_active => {
-            KeyIntent::Action(AppAction::PermissionsManagerClearFilter)
-        }
+        KeyCode::Esc if filter_active => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::ClearFilter,
+        )),
         KeyCode::Esc | KeyCode::Char('q') => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Char('/') => KeyIntent::Action(AppAction::PermissionsManagerBeginSearch),
-        KeyCode::Up => KeyIntent::Action(AppAction::PermissionsManagerMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::PermissionsManagerMove(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::PermissionsManagerMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::PermissionsManagerMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::PermissionsManagerMove(i16::MAX)),
-        KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
-            KeyIntent::Action(AppAction::PermissionsManagerDelete)
-        }
+        KeyCode::Char('/') => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::BeginSearch,
+        )),
+        KeyCode::Up => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::Move(-1),
+        )),
+        KeyCode::Down => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::Move(1),
+        )),
+        KeyCode::PageUp => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::Move(-8),
+        )),
+        KeyCode::PageDown => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::Move(8),
+        )),
+        KeyCode::Home => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::Move(i16::MIN),
+        )),
+        KeyCode::End => KeyIntent::Action(AppAction::PermissionsManager(
+            crate::tui::event::PermissionsManagerAction::Move(i16::MAX),
+        )),
+        KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => KeyIntent::Action(
+            AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::Delete),
+        ),
         _ => KeyIntent::Noop,
     }
 }
@@ -452,40 +566,50 @@ pub(super) fn map_memory_manager_key(key: KeyEvent) -> KeyIntent {
 }
 
 pub(super) fn map_memory_add_wizard_key(key: KeyEvent, app: &AppState) -> KeyIntent {
-    let Some(ModalKind::MemoryAddWizard { state }) = &app.modal else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard { state })) =
+        &app.modal
+    else {
         return KeyIntent::Noop;
     };
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::BackTab => KeyIntent::Action(AppAction::MemoryAddWizardBack),
-        KeyCode::Tab => KeyIntent::Action(AppAction::MemoryAddWizardSubmit),
-        KeyCode::Enter if matches!(state.step, MemoryWizardStep::Body) => {
-            KeyIntent::Action(AppAction::MemoryAddWizardInputChar('\n'))
-        }
-        KeyCode::Enter => KeyIntent::Action(AppAction::MemoryAddWizardSubmit),
-        KeyCode::Up if matches!(state.step, MemoryWizardStep::Details) => {
-            KeyIntent::Action(AppAction::MemoryAddWizardMoveField(-1))
-        }
-        KeyCode::Down if matches!(state.step, MemoryWizardStep::Details) => {
-            KeyIntent::Action(AppAction::MemoryAddWizardMoveField(1))
-        }
-        KeyCode::Left if matches!(state.step, MemoryWizardStep::Details) => {
-            KeyIntent::Action(AppAction::MemoryAddWizardCycleValue(-1))
-        }
-        KeyCode::Right if matches!(state.step, MemoryWizardStep::Details) => {
-            KeyIntent::Action(AppAction::MemoryAddWizardCycleValue(1))
-        }
+        KeyCode::BackTab => KeyIntent::Action(AppAction::MemoryAddWizard(
+            crate::tui::event::MemoryAddWizardAction::Back,
+        )),
+        KeyCode::Tab => KeyIntent::Action(AppAction::MemoryAddWizard(
+            crate::tui::event::MemoryAddWizardAction::Submit,
+        )),
+        KeyCode::Enter if matches!(state.step, MemoryWizardStep::Body) => KeyIntent::Action(
+            AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::InputChar('\n')),
+        ),
+        KeyCode::Enter => KeyIntent::Action(AppAction::MemoryAddWizard(
+            crate::tui::event::MemoryAddWizardAction::Submit,
+        )),
+        KeyCode::Up if matches!(state.step, MemoryWizardStep::Details) => KeyIntent::Action(
+            AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::MoveField(-1)),
+        ),
+        KeyCode::Down if matches!(state.step, MemoryWizardStep::Details) => KeyIntent::Action(
+            AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::MoveField(1)),
+        ),
+        KeyCode::Left if matches!(state.step, MemoryWizardStep::Details) => KeyIntent::Action(
+            AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::CycleValue(-1)),
+        ),
+        KeyCode::Right if matches!(state.step, MemoryWizardStep::Details) => KeyIntent::Action(
+            AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::CycleValue(1)),
+        ),
         KeyCode::Char(' ') if matches!(state.step, MemoryWizardStep::Details) => {
             match state.field {
-                MemoryWizardField::Enabled => {
-                    KeyIntent::Action(AppAction::MemoryAddWizardToggleValue)
-                }
+                MemoryWizardField::Enabled => KeyIntent::Action(AppAction::MemoryAddWizard(
+                    crate::tui::event::MemoryAddWizardAction::ToggleValue,
+                )),
                 MemoryWizardField::Tier | MemoryWizardField::Type => {
-                    KeyIntent::Action(AppAction::MemoryAddWizardCycleValue(1))
+                    KeyIntent::Action(AppAction::MemoryAddWizard(
+                        crate::tui::event::MemoryAddWizardAction::CycleValue(1),
+                    ))
                 }
-                MemoryWizardField::Description => {
-                    KeyIntent::Action(AppAction::MemoryAddWizardInputChar(' '))
-                }
+                MemoryWizardField::Description => KeyIntent::Action(AppAction::MemoryAddWizard(
+                    crate::tui::event::MemoryAddWizardAction::InputChar(' '),
+                )),
             }
         }
         KeyCode::Char(ch)
@@ -493,11 +617,17 @@ pub(super) fn map_memory_add_wizard_key(key: KeyEvent, app: &AppState) -> KeyInt
                 && (matches!(state.step, MemoryWizardStep::Body)
                     || matches!(state.field, MemoryWizardField::Description)) =>
         {
-            KeyIntent::Action(AppAction::MemoryAddWizardInputChar(ch))
+            KeyIntent::Action(AppAction::MemoryAddWizard(
+                crate::tui::event::MemoryAddWizardAction::InputChar(ch),
+            ))
         }
         KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Backspace => KeyIntent::Action(AppAction::MemoryAddWizardBackspace),
-        KeyCode::Char(ch) => KeyIntent::Action(AppAction::MemoryAddWizardInputChar(ch)),
+        KeyCode::Backspace => KeyIntent::Action(AppAction::MemoryAddWizard(
+            crate::tui::event::MemoryAddWizardAction::Backspace,
+        )),
+        KeyCode::Char(ch) => KeyIntent::Action(AppAction::MemoryAddWizard(
+            crate::tui::event::MemoryAddWizardAction::InputChar(ch),
+        )),
         _ => KeyIntent::Noop,
     }
 }
@@ -505,12 +635,16 @@ pub(super) fn map_memory_add_wizard_key(key: KeyEvent, app: &AppState) -> KeyInt
 pub(super) fn map_agent_composer_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     use crate::tui::agent_composer::{AgentComposerField, AgentComposerStep, CursorMotion};
 
-    let Some(ModalKind::AgentComposer { state }) = &app.modal else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+        &app.modal
+    else {
         return KeyIntent::Noop;
     };
     // Ctrl+G drafts a prompt with the selected model (runtime guards the step).
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('g')) {
-        return KeyIntent::Action(AppAction::AgentComposerGenerate);
+        return KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Generate,
+        ));
     }
 
     // Which editing context the focused field is in.
@@ -526,54 +660,86 @@ pub(super) fn map_agent_composer_key(key: KeyEvent, app: &AppState) -> KeyIntent
             AgentComposerField::Model | AgentComposerField::BackupModel
         );
 
-    let cursor = |motion| KeyIntent::Action(AppAction::AgentComposerCursor(motion));
+    let cursor = |motion| {
+        KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Cursor(motion),
+        ))
+    };
 
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
         // The Prompt is a multi-line editor: Enter inserts a newline there.
         // Everywhere else Enter advances the stage, and on the Review preview it
         // saves the agent.
-        KeyCode::Enter if is_prompt => KeyIntent::Action(AppAction::AgentComposerInsertNewline),
-        KeyCode::Enter if on_model => KeyIntent::Action(AppAction::AgentComposerOpenModelPicker),
-        KeyCode::Enter => KeyIntent::Action(AppAction::AgentComposerSubmit),
+        KeyCode::Enter if is_prompt => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::InsertNewline,
+        )),
+        KeyCode::Enter if on_model => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::OpenModelPicker,
+        )),
+        KeyCode::Enter => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Submit,
+        )),
         // Tab / Shift+Tab move between stages; fields navigate with Up/Down. The
         // final stage (Review) has nowhere to advance — Enter saves it.
         KeyCode::Tab if matches!(state.step, AgentComposerStep::Review) => KeyIntent::Noop,
-        KeyCode::Tab => KeyIntent::Action(AppAction::AgentComposerNextPage),
-        KeyCode::BackTab => KeyIntent::Action(AppAction::AgentComposerBack),
+        KeyCode::Tab => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::NextPage,
+        )),
+        KeyCode::BackTab => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Back,
+        )),
         // Space mirrors Enter on a model row.
-        KeyCode::Char(' ') if on_model => {
-            KeyIntent::Action(AppAction::AgentComposerOpenModelPicker)
-        }
+        KeyCode::Char(' ') if on_model => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::OpenModelPicker,
+        )),
         // `d` clears the focused model-chain slot (primary -> inherit parent,
         // backup -> no backup / failover disabled).
-        KeyCode::Char('d') if on_model => KeyIntent::Action(AppAction::AgentComposerDeleteModel),
+        KeyCode::Char('d') if on_model => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::DeleteModel,
+        )),
         // In a text field the caret moves; on a value field Left/Right cycle.
         KeyCode::Left if is_text => cursor(CursorMotion::Left),
         KeyCode::Right if is_text => cursor(CursorMotion::Right),
-        KeyCode::Left if on_value => KeyIntent::Action(AppAction::AgentComposerToggle(-1)),
-        KeyCode::Right if on_value => KeyIntent::Action(AppAction::AgentComposerToggle(1)),
+        KeyCode::Left if on_value => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Toggle(-1),
+        )),
+        KeyCode::Right if on_value => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Toggle(1),
+        )),
         // Up/Down: caret rows in the Prompt; field / tool navigation elsewhere.
         KeyCode::Up if is_prompt => cursor(CursorMotion::Up),
         KeyCode::Down if is_prompt => cursor(CursorMotion::Down),
-        KeyCode::Up if is_details || is_tools => {
-            KeyIntent::Action(AppAction::AgentComposerMove(-1))
-        }
-        KeyCode::Down if is_details || is_tools => {
-            KeyIntent::Action(AppAction::AgentComposerMove(1))
-        }
-        KeyCode::PageUp if is_tools => KeyIntent::Action(AppAction::AgentComposerMove(-8)),
-        KeyCode::PageDown if is_tools => KeyIntent::Action(AppAction::AgentComposerMove(8)),
+        KeyCode::Up if is_details || is_tools => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Move(-1),
+        )),
+        KeyCode::Down if is_details || is_tools => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Move(1),
+        )),
+        KeyCode::PageUp if is_tools => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Move(-8),
+        )),
+        KeyCode::PageDown if is_tools => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Move(8),
+        )),
         KeyCode::Home if is_text => cursor(CursorMotion::Home),
         KeyCode::End if is_text => cursor(CursorMotion::End),
-        KeyCode::Backspace => KeyIntent::Action(AppAction::AgentComposerBackspace),
-        KeyCode::Delete if is_text => KeyIntent::Action(AppAction::AgentComposerDeleteForward),
+        KeyCode::Backspace => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Backspace,
+        )),
+        KeyCode::Delete if is_text => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::DeleteForward,
+        )),
         // Space toggles a tool row / cycles a value field, or types in text.
-        KeyCode::Char(' ') if is_text => KeyIntent::Action(AppAction::AgentComposerInputChar(' ')),
-        KeyCode::Char(' ') if on_value || is_tools => {
-            KeyIntent::Action(AppAction::AgentComposerToggle(1))
-        }
-        KeyCode::Char(ch) if is_text => KeyIntent::Action(AppAction::AgentComposerInputChar(ch)),
+        KeyCode::Char(' ') if is_text => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::InputChar(' '),
+        )),
+        KeyCode::Char(' ') if on_value || is_tools => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Toggle(1),
+        )),
+        KeyCode::Char(ch) if is_text => KeyIntent::Action(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::InputChar(ch),
+        )),
         _ => KeyIntent::Noop,
     }
 }
@@ -598,16 +764,36 @@ pub(super) fn map_agent_delete_confirm_key(key: KeyEvent) -> KeyIntent {
 pub(super) fn map_model_picker_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Enter => KeyIntent::Action(AppAction::ModelPickerSubmit),
-        KeyCode::Backspace => KeyIntent::Action(AppAction::ModelPickerInputBackspace),
-        KeyCode::Up => KeyIntent::Action(AppAction::ModelPickerMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::ModelPickerMove(1)),
-        KeyCode::Left => KeyIntent::Action(AppAction::ModelPickerMovePane(-1)),
-        KeyCode::Right | KeyCode::Tab => KeyIntent::Action(AppAction::ModelPickerMovePane(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::ModelPickerMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::ModelPickerMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::ModelPickerMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::ModelPickerMove(i16::MAX)),
+        KeyCode::Enter => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Submit,
+        )),
+        KeyCode::Backspace => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::InputBackspace,
+        )),
+        KeyCode::Up => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(-1),
+        )),
+        KeyCode::Down => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(1),
+        )),
+        KeyCode::Left => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::MovePane(-1),
+        )),
+        KeyCode::Right | KeyCode::Tab => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::MovePane(1),
+        )),
+        KeyCode::PageUp => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(-8),
+        )),
+        KeyCode::PageDown => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(8),
+        )),
+        KeyCode::Home => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(i16::MIN),
+        )),
+        KeyCode::End => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::Move(i16::MAX),
+        )),
         // With the Reasoning pane focused, bare letters assign model shortcuts
         // instead of typing into the filter. In every other pane they stay
         // filter input, so common letters keep working as search.
@@ -618,11 +804,17 @@ pub(super) fn map_model_picker_key(key: KeyEvent, app: &AppState) -> KeyIntent {
                 ) =>
         {
             match crate::model_role::ModelShortcutKey::new(ch) {
-                Some(key) => KeyIntent::Action(AppAction::ModelPickerAssignShortcut(key)),
-                None => KeyIntent::Action(AppAction::ModelPickerInputChar(ch)),
+                Some(key) => KeyIntent::Action(AppAction::ModelPicker(
+                    crate::tui::event::ModelPickerAction::AssignShortcut(key),
+                )),
+                None => KeyIntent::Action(AppAction::ModelPicker(
+                    crate::tui::event::ModelPickerAction::InputChar(ch),
+                )),
             }
         }
-        KeyCode::Char(ch) => KeyIntent::Action(AppAction::ModelPickerInputChar(ch)),
+        KeyCode::Char(ch) => KeyIntent::Action(AppAction::ModelPicker(
+            crate::tui::event::ModelPickerAction::InputChar(ch),
+        )),
         _ => KeyIntent::Noop,
     }
 }
@@ -647,16 +839,36 @@ pub(super) fn map_session_picker_key(key: KeyEvent) -> KeyIntent {
 pub(super) fn map_plan_picker_key(key: KeyEvent) -> KeyIntent {
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Enter => KeyIntent::Action(AppAction::PlanPickerSubmit),
-        KeyCode::Backspace => KeyIntent::Action(AppAction::PlanPickerInputBackspace),
-        KeyCode::Delete => KeyIntent::Action(AppAction::PlanPickerDeleteSelected),
-        KeyCode::Up => KeyIntent::Action(AppAction::PlanPickerMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::PlanPickerMove(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::PlanPickerMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::PlanPickerMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::PlanPickerMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::PlanPickerMove(i16::MAX)),
-        KeyCode::Char(ch) => KeyIntent::Action(AppAction::PlanPickerInputChar(ch)),
+        KeyCode::Enter => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::Submit,
+        )),
+        KeyCode::Backspace => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::InputBackspace,
+        )),
+        KeyCode::Delete => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::DeleteSelected,
+        )),
+        KeyCode::Up => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::Move(-1),
+        )),
+        KeyCode::Down => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::Move(1),
+        )),
+        KeyCode::PageUp => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::Move(-8),
+        )),
+        KeyCode::PageDown => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::Move(8),
+        )),
+        KeyCode::Home => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::Move(i16::MIN),
+        )),
+        KeyCode::End => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::Move(i16::MAX),
+        )),
+        KeyCode::Char(ch) => KeyIntent::Action(AppAction::PlanPicker(
+            crate::tui::event::PlanPickerAction::InputChar(ch),
+        )),
         _ => KeyIntent::Noop,
     }
 }
@@ -841,7 +1053,9 @@ pub(super) fn map_usage_dashboard_key(key: KeyEvent) -> KeyIntent {
 
 pub(super) fn map_subtask_list_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     let pane = match app.modal.as_ref() {
-        Some(ModalKind::SubtaskList { pane, .. }) => *pane,
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList { pane, .. })) => {
+            *pane
+        }
         _ => SubtaskListPane::List,
     };
 
@@ -1093,7 +1307,9 @@ pub(super) fn map_plan_finding_detail_key(key: KeyEvent, app: &AppState) -> KeyI
 }
 
 fn focused_finding_has_resolvable_evidence(app: &AppState) -> bool {
-    let Some(ModalKind::PlanFindingDetail { index }) = app.modal else {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::PlanFindingDetail { index })) =
+        app.modal
+    else {
         return false;
     };
     app.plan
@@ -1111,9 +1327,14 @@ fn focused_finding_has_resolvable_evidence(app: &AppState) -> bool {
 /// DiffPreview, Confirm). Modals that handle their own keys intercept them in
 /// `map_modal_key` before this is reached.
 pub(super) fn map_generic_modal_key(key: KeyEvent, app: &AppState) -> KeyIntent {
-    if matches!(app.modal, Some(ModalKind::ToolDetail { .. }))
-        && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
-        && let Some(ModalKind::ToolDetail { tool_id }) = app.modal.clone()
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::ToolDetail { .. }
+        ))
+    ) && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
+        && let Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { tool_id })) =
+            app.modal.clone()
     {
         return KeyIntent::Action(AppAction::OpenDiffPreview(tool_id));
     }
@@ -1142,13 +1363,15 @@ mod tests {
 
     fn wizard_app(step: MemoryWizardStep, field: MemoryWizardField) -> AppState {
         let mut app = AppState::new("codex", "model".to_string(), "workspace".to_string(), None);
-        app.modal = Some(ModalKind::MemoryAddWizard {
-            state: Box::new(MemoryAddWizardState {
-                step,
-                field,
-                ..MemoryAddWizardState::default()
-            }),
-        });
+        app.modal = Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::MemoryAddWizard {
+                state: Box::new(MemoryAddWizardState {
+                    step,
+                    field,
+                    ..MemoryAddWizardState::default()
+                }),
+            },
+        ));
         app
     }
 
@@ -1160,7 +1383,9 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
                 &body_app
             ),
-            KeyIntent::Action(AppAction::MemoryAddWizardInputChar('q'))
+            KeyIntent::Action(AppAction::MemoryAddWizard(
+                crate::tui::event::MemoryAddWizardAction::InputChar('q')
+            ))
         ));
 
         let details_app = wizard_app(MemoryWizardStep::Details, MemoryWizardField::Description);
@@ -1169,7 +1394,9 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
                 &details_app
             ),
-            KeyIntent::Action(AppAction::MemoryAddWizardInputChar('q'))
+            KeyIntent::Action(AppAction::MemoryAddWizard(
+                crate::tui::event::MemoryAddWizardAction::InputChar('q')
+            ))
         ));
     }
 
