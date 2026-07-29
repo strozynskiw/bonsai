@@ -1328,18 +1328,18 @@ fn emit_hook_warnings(sink: &SharedSink, warnings: &[String]) {
 
 fn planning_research_limit_message() -> String {
     format!(
-        "Error: planning research budget reached after {PLANNING_RESEARCH_TURN_LIMIT} tool-call turns without a canvas update. Stop calling read, grep, project_info, bash, or other inspection tools. Write the complete initial canvas with plan_replace_draft now; if information is still missing, include an open question or state an assumption in the plan."
+        "Error: planning research budget reached after {PLANNING_RESEARCH_TURN_LIMIT} tool-call turns without a canvas update. Stop calling read, grep, project_info, bash, or other inspection tools. If a consequential choice is unresolved, ask the user now with the question tool. Otherwise, write the complete initial canvas with plan_replace_draft and state any non-consequential assumption in the plan. Never put open questions on the canvas."
     )
 }
 
 fn planning_research_stop_message() -> String {
-    "Agent stopped after the planning research limit: the model repeated non-progress planning tools after Bonsai rejected the over-budget turn. Update the plan canvas, record an assumption/question, or start a new turn with narrower instructions."
+    "Agent stopped after the planning research limit: the model repeated non-progress planning tools after Bonsai rejected the over-budget turn. Ask the user with the question tool, update the plan canvas with no open questions, or start a new turn with narrower instructions."
         .to_string()
 }
 
 fn planning_research_advisory_message() -> String {
     format!(
-        "### Planning canvas required\n- Planning research has reached the {PLANNING_RESEARCH_TURN_LIMIT}-turn budget without a canvas update.\n- Next tool turn: call plan_replace_draft once with the title, sections, questions, and complete tasks or phases before more inspection.\n- If information is still missing, include an open question or state an explicit assumption in the plan."
+        "### Planning decision required\n- Planning research has reached the {PLANNING_RESEARCH_TURN_LIMIT}-turn budget without a canvas update.\n- Do not inspect further. If a consequential choice is unresolved, ask the user now with the question tool.\n- Otherwise, call plan_replace_draft once with the title, sections, and complete tasks or phases. State any non-consequential assumption in a section; never put open questions on the canvas."
     )
 }
 

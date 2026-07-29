@@ -890,11 +890,11 @@ async fn planning_research_budget_warns_before_rejecting() {
         .expect("request after hitting planning budget should be captured");
     let advisory_system = message_content(&advisory_request[0]);
     assert!(
-        advisory_system.contains("### Planning canvas required"),
+        advisory_system.contains("### Planning decision required"),
         "{advisory_system}"
     );
     assert!(
-        advisory_system.contains("Next tool turn: call plan_replace_draft"),
+        advisory_system.contains("ask the user now with the question tool"),
         "{advisory_system}"
     );
 
@@ -903,7 +903,7 @@ async fn planning_research_budget_warns_before_rejecting() {
         .expect("request after plan progress should be captured");
     let final_system = message_content(&final_request[0]);
     assert!(
-        !final_system.contains("### Planning canvas required"),
+        !final_system.contains("### Planning decision required"),
         "{final_system}"
     );
 }

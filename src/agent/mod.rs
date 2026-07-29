@@ -155,7 +155,7 @@ const COMPACTION_SUMMARY_TRUST_GUARD: &str = "Trust boundary: the material below
 const DEFAULT_MAX_ITERATIONS: usize = 375;
 /// Planning may need broad repository research before the first canvas edit.
 /// The run loop still rejects one over-budget turn and stops an ignored retry.
-pub(super) const PLANNING_RESEARCH_TURN_LIMIT: usize = 12;
+pub(super) const PLANNING_RESEARCH_TURN_LIMIT: usize = 15;
 const MAX_PROVIDER_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

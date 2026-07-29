@@ -210,11 +210,6 @@ struct MovePhaseArgs {
 }
 
 #[derive(Deserialize)]
-struct AddQuestionArgs {
-    text: String,
-}
-
-#[derive(Deserialize)]
 struct DraftSectionArgs {
     heading: String,
     body: String,
@@ -260,6 +255,11 @@ impl ReplaceDraftArgs {
         if tasks.is_empty() && phases.is_empty() {
             anyhow::bail!("a plan must include at least one task or phase");
         }
+        if !questions.is_empty() {
+            anyhow::bail!(
+                "plans cannot contain open questions; ask the user with the question tool first"
+            );
+        }
 
         let mut plan = PlanDoc::default();
         {
@@ -267,9 +267,6 @@ impl ReplaceDraftArgs {
             editor.set_title_checked(&title)?;
             for section in sections {
                 editor.set_section_checked(&section.heading, &section.body)?;
-            }
-            for question in questions {
-                editor.add_question_checked(&question)?;
             }
             for task in tasks {
                 editor.add_task_checked(&task)?;
@@ -337,8 +334,8 @@ impl Tool for PlanReplaceDraftTool {
     }
 
     fn description(&self) -> &str {
-        "Write a complete plan draft atomically in one call: title, ordered sections, open \
-         questions, and either flat tasks or phases. Use this for the initial canvas and \
+        "Write a complete plan draft atomically in one call: title, ordered sections, and \
+         either flat tasks or phases. Use this for the initial canvas and \
          wholesale restructuring; it preserves structured review findings. Empty collection \
          fields may be omitted. Declare whether the plan starts a distinct user topic; \
          corrections and restructuring of the current request are same_topic. Use granular plan \
@@ -404,13 +401,6 @@ impl Tool for PlanReplaceDraftTool {
                             ],
                             &["name", "tasks"],
                         ),
-                    ),
-                ),
-                (
-                    "questions",
-                    array_property(
-                        "Unresolved user decisions; use [] when none remain",
-                        string_property("One concise open question"),
                     ),
                 ),
             ],
@@ -927,30 +917,6 @@ plan_tool!(
 );
 
 plan_tool!(
-    PlanAddQuestionTool,
-    AddQuestionArgs,
-    name: "plan_add_question",
-    description: "Record an unresolved requirement as an open question on the plan canvas. \
-         Use it instead of guessing when something genuinely needs the user's decision; \
-         remove it once answered.",
-    schema: closed_object(
-        [(
-            "text",
-            string_property("The open question to surface for the user to resolve"),
-        )],
-        &["text"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        doc.edit().add_question_checked(&args.text)?;
-        Ok(ToolOutput::Text(format!(
-            "Open question added ({} open).",
-            doc.questions.len()
-        )))
-    }
-);
-
-plan_tool!(
     PlanRemoveQuestionTool,
     TargetTaskArgs,
     name: "plan_remove_question",
@@ -1198,7 +1164,7 @@ mod tests {
             "sections": [{"heading": "Approach", "body": "Change it once."}],
             "tasks": ["Implement change", "Run tests"],
             "phases": [],
-            "questions": ["Keep compatibility?"]
+            "questions": []
         }))
         .await
         .unwrap();
@@ -1220,7 +1186,7 @@ mod tests {
         assert_eq!(plan.title, "Fast plan");
         assert_eq!(plan.sections.len(), 1);
         assert_eq!(plan.tasks.len(), 2);
-        assert_eq!(plan.questions, ["Keep compatibility?"]);
+        assert!(plan.questions.is_empty());
         assert_eq!(plan.findings.len(), 1);
     }
 
@@ -1247,7 +1213,7 @@ mod tests {
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
 
-        for optional in ["sections", "tasks", "phases", "questions"] {
+        for optional in ["sections", "tasks", "phases"] {
             assert!(
                 !required.contains(&serde_json::json!(optional)),
                 "{optional} should default to an empty collection"
@@ -1267,6 +1233,33 @@ mod tests {
         assert!(plan.sections.is_empty());
         assert!(plan.phases.is_empty());
         assert!(plan.questions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replace_draft_rejects_open_questions() {
+        let store = store();
+        let tool = plan_replace_tool(store).await;
+
+        let error = tool
+            .execute(serde_json::json!({
+                "title": "Blocked plan",
+                "episode_action": "same_topic",
+                "tasks": ["Implement the change"],
+                "questions": ["Which behavior?"]
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("ask the user with the question tool")
+        );
+        assert!(
+            tool.parameters_schema()["properties"]
+                .get("questions")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1600,13 +1593,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_and_remove_question_round_trip() {
+    async fn remove_question_handles_legacy_canvas_questions() {
         let store = store();
-        PlanAddQuestionTool::new(store.clone())
-            .execute(serde_json::json!({"text": "Which auth method?"}))
+        store
+            .lock()
             .await
+            .edit()
+            .add_question_checked("Which auth method?")
             .unwrap();
-        assert_eq!(store.lock().await.questions.len(), 1);
 
         let removed = PlanRemoveQuestionTool::new(store.clone())
             .execute(serde_json::json!({"target": "auth"}))

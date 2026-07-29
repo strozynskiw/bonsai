@@ -408,6 +408,7 @@ impl PlanDoc {
     }
 
     /// Appends an open question unless an identical one already exists.
+    #[cfg(test)]
     fn add_question(&mut self, text: &str) {
         let text = text.trim();
         if text.is_empty() || self.questions.iter().any(|question| question == text) {
@@ -417,8 +418,8 @@ impl PlanDoc {
         self.revision += 1;
     }
 
-    /// Validates and appends an open question, rejecting blank input so the
-    /// `plan_add_question` tool gets an unambiguous signal from the model.
+    /// Validates and appends an open question, rejecting blank input.
+    #[cfg(test)]
     fn add_question_checked(&mut self, text: &str) -> anyhow::Result<()> {
         if text.trim().is_empty() {
             anyhow::bail!("question text must not be empty");

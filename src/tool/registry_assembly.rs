@@ -22,10 +22,10 @@ use crate::tool::lsp::{
 use crate::tool::memory_write::MemoryWriteTool;
 use crate::tool::peers::PeersTool;
 use crate::tool::plan::{
-    PlanAddFindingTool, PlanAddQuestionTool, PlanAssociateFindingTool, PlanCheckTaskTool,
-    PlanInsertTaskTool, PlanMovePhaseTool, PlanMoveSectionTool, PlanPatchSectionTool,
-    PlanRemovePhaseTool, PlanRemoveQuestionTool, PlanRemoveSectionTool, PlanRemoveTaskTool,
-    PlanReplaceDraftTool, PlanResolveFindingTool, PlanUncheckTaskTool, PlanUpdateTaskTool,
+    PlanAddFindingTool, PlanAssociateFindingTool, PlanCheckTaskTool, PlanInsertTaskTool,
+    PlanMovePhaseTool, PlanMoveSectionTool, PlanPatchSectionTool, PlanRemovePhaseTool,
+    PlanRemoveQuestionTool, PlanRemoveSectionTool, PlanRemoveTaskTool, PlanReplaceDraftTool,
+    PlanResolveFindingTool, PlanUncheckTaskTool, PlanUpdateTaskTool,
 };
 use crate::tool::profile::{RegistrationStage, ToolFactoryKey, ToolProfile, descriptors_for};
 use crate::tool::question::QuestionTool;
@@ -292,10 +292,6 @@ fn insert_plan_tools(
     instances.insert(
         ToolFactoryKey::PlanUncheckTask,
         Arc::new(PlanUncheckTaskTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanAddQuestion,
-        Arc::new(PlanAddQuestionTool::new(plan_store.clone())),
     );
     instances.insert(
         ToolFactoryKey::PlanRemoveQuestion,
@@ -1038,7 +1034,6 @@ mod tests {
             "plan_remove_task",
             "plan_check_task",
             "plan_uncheck_task",
-            "plan_add_question",
             "plan_remove_question",
             "plan_add_finding",
             "plan_associate_finding",
@@ -1170,7 +1165,6 @@ mod tests {
             "plan_remove_task",
             "plan_check_task",
             "plan_uncheck_task",
-            "plan_add_question",
             "plan_remove_question",
             "plan_add_finding",
             "plan_associate_finding",

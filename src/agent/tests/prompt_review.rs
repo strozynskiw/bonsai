@@ -316,7 +316,8 @@ fn planning_prompt_requires_evidence_based_precise_plans() {
     assert!(content.contains("Planning principles"));
     assert!(content.contains("Canvas mechanics"));
     assert!(content.contains("Prefer current code and command output over stale docs"));
-    assert!(content.contains("separate facts, assumptions, decisions, and open questions"));
+    assert!(content.contains("Plans never contain open questions"));
+    assert!(!content.contains("questions array"));
     assert!(content.contains("Make plans clean and precise"));
     assert!(content.contains("Concise, not sparse"));
     assert!(content.contains("nothing consequential is left to guess"));
@@ -335,6 +336,7 @@ fn planning_prompt_uses_a_lightweight_spec_interview() {
     assert!(content.contains("consequential product or implementation choices"));
     assert!(content.contains("prefer one focused decision at a time"));
     assert!(content.contains("include a recommended option"));
+    assert!(content.contains("ask the user with the question tool before drafting"));
 }
 
 #[test]
@@ -407,7 +409,8 @@ fn review_prompt_requires_read_only_evidence_and_severity_definitions() {
 fn planning_prompt_mentions_reorder_and_question_tools() {
     let content = system_content(AgentMode::Planning, "");
     assert!(content.contains("plan_move_section"));
-    assert!(content.contains("plan_add_question"));
+    assert!(!content.contains("plan_add_question"));
+    assert!(content.contains("plan_remove_question"));
     assert!(content.contains("repeats the section's own heading"));
 }
 

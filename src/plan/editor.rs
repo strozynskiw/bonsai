@@ -131,6 +131,7 @@ impl PlanEditor<'_> {
     }
 
     /// Adds a non-empty open question.
+    #[cfg(test)]
     pub fn add_question_checked(&mut self, text: &str) -> anyhow::Result<()> {
         self.try_apply(|doc| doc.add_question_checked(text))
     }
