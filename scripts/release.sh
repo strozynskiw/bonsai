@@ -25,9 +25,11 @@ references to already be at <version>, so the tag cannot land on a tree that
 disagrees with it. Use this when the bump was committed separately and only
 the tag is missing.
 
-Pushing the tag starts .github/workflows/release.yml, which publishes the
-GitHub release and release assets. After it succeeds, GitHub Actions opens or
-updates the Homebrew tap PR for release/<tag>.
+Pushing the tag starts .github/workflows/release.yml, which builds Linux
+(x86_64, aarch64) and macOS (x86_64, arm64) binaries, publishes a GitHub
+prerelease with signed manifests, and opens or updates the Homebrew tap PR
+for release/<tag>. Linux and macOS users install via:
+  curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh
 EOF
 }
 
@@ -206,8 +208,9 @@ if [ "$push" -eq 1 ]; then
   git push "$remote" "$current_branch"
   git push "$remote" "$tag"
   printf 'release: pushed %s and %s to %s\n' "$current_branch" "$tag" "$remote"
-  printf 'release: GitHub Actions will publish the release from %s\n' "$tag"
-  printf 'release: the published release will open or update the Homebrew tap PR\n'
+  printf 'release: GitHub Actions will build and publish the release from %s\n' "$tag"
+  printf 'release: after it succeeds, the Homebrew tap PR will be opened or updated\n'
+  printf 'release: Linux and macOS users can then install via the install.sh script\n'
 else
   printf 'release: prepared %s locally; push with:\n' "$tag"
   printf '  git push %s %s\n' "$remote" "$current_branch"
