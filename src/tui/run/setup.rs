@@ -71,6 +71,28 @@ impl TerminalSession {
                 false
             }
         };
+        match restore_raw_mode_if_needed() {
+            Ok(true) => {
+                tracing::warn!(
+                    "terminal capability probe reset raw mode; restored it before enabling mouse capture"
+                );
+                drain_pending_terminal_events();
+            }
+            Ok(false) => {}
+            Err(err) => {
+                if keyboard_enhanced {
+                    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+                }
+                let _ = execute!(stdout, DisableBracketedPaste);
+                if alternate_screen {
+                    let _ = execute!(stdout, LeaveAlternateScreen);
+                }
+                let _ = stdout.flush();
+                let _ = disable_raw_mode();
+                return Err(err)
+                    .context("failed to restore raw mode after terminal capability probe");
+            }
+        }
         if mouse_capture && let Err(err) = enable_mouse_capture(&mut stdout) {
             // A short write can enable only a prefix of the mouse modes. Undo
             // the whole group while raw mode still contains resulting bytes.
@@ -130,6 +152,32 @@ impl TerminalSession {
     /// Whether the terminal is currently capturing mouse events.
     pub(in crate::tui::run) fn mouse_capture(&self) -> bool {
         self.mouse_capture
+    }
+
+    /// Restore raw mode if another terminal participant reset the live tty.
+    ///
+    /// Crossterm tracks raw mode in process-local state. A terminal host can
+    /// reset the actual tty flags without updating that state, leaving
+    /// crossterm convinced raw mode is still active while the kernel echoes
+    /// mouse reports as `^[...`. Cycle crossterm's state only after checking
+    /// the real tty flags, then discard bytes that accumulated while canonical
+    /// input and echo were active.
+    pub(in crate::tui::run) fn ensure_raw_mode(&mut self) -> io::Result<bool> {
+        let recovered = match restore_raw_mode_if_needed() {
+            Ok(recovered) => recovered,
+            Err(err) => {
+                // Mouse reporting and cooked input must never coexist. If raw mode
+                // cannot be restored, stop the source of the visible escape bytes.
+                if execute!(self.terminal.backend_mut(), DisableMouseCapture).is_ok() {
+                    self.mouse_capture = false;
+                }
+                return Err(err);
+            }
+        };
+        if recovered {
+            drain_pending_terminal_events();
+        }
+        Ok(recovered)
     }
 
     /// Enable or disable mouse capture at runtime — the "copy mode" toggle.
@@ -242,6 +290,45 @@ fn terminal_viewport(screen_reader: bool) -> Viewport {
     } else {
         Viewport::Fullscreen
     }
+}
+
+#[cfg(unix)]
+fn terminal_raw_mode_is_effective() -> io::Result<bool> {
+    use std::io::IsTerminal;
+
+    use nix::sys::termios::tcgetattr;
+
+    let stdin = io::stdin();
+    let attributes = if stdin.is_terminal() {
+        tcgetattr(&stdin).map_err(io::Error::from)?
+    } else {
+        let tty = std::fs::File::open("/dev/tty")?;
+        tcgetattr(&tty).map_err(io::Error::from)?
+    };
+    Ok(terminal_local_flags_are_raw(attributes.local_flags))
+}
+
+#[cfg(unix)]
+fn terminal_local_flags_are_raw(local_flags: nix::sys::termios::LocalFlags) -> bool {
+    use nix::sys::termios::LocalFlags;
+
+    let cooked_flags =
+        LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::IEXTEN | LocalFlags::ISIG;
+    !local_flags.intersects(cooked_flags)
+}
+
+#[cfg(not(unix))]
+fn terminal_raw_mode_is_effective() -> io::Result<bool> {
+    crossterm::terminal::is_raw_mode_enabled()
+}
+
+fn restore_raw_mode_if_needed() -> io::Result<bool> {
+    if terminal_raw_mode_is_effective()? {
+        return Ok(false);
+    }
+    disable_raw_mode()?;
+    enable_raw_mode()?;
+    Ok(true)
 }
 
 impl Drop for TerminalSession {
@@ -522,6 +609,22 @@ mod tests {
         assert!(stale_motion_reset < button_capture);
         assert!(output.windows(8).any(|window| window == b"\x1b[?1000h"));
         assert!(!output.windows(8).any(|window| window == b"\x1b[?1003h"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cooked_terminal_local_flags_are_not_raw() {
+        use nix::sys::termios::LocalFlags;
+
+        assert!(terminal_local_flags_are_raw(LocalFlags::empty()));
+        for cooked_flag in [
+            LocalFlags::ECHO,
+            LocalFlags::ICANON,
+            LocalFlags::IEXTEN,
+            LocalFlags::ISIG,
+        ] {
+            assert!(!terminal_local_flags_are_raw(cooked_flag));
+        }
     }
 
     fn run_script(sink: &dyn OutputSink) {

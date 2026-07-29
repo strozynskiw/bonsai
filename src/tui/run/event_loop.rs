@@ -2647,6 +2647,25 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         let mut frame_persist = Duration::ZERO;
         let mut frame_needs_redraw = false;
 
+        match terminal.ensure_raw_mode() {
+            Ok(true) => {
+                tracing::warn!(
+                    "terminal raw mode was reset externally; restored it and discarded queued input"
+                );
+                frame_needs_redraw = true;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "terminal raw mode was reset and could not be restored; disabled mouse capture"
+                );
+                if app.mouse_capture {
+                    app.reduce(AppAction::ToggleMouseCapture);
+                }
+            }
+        }
+
         if pending_snapshot_flush
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished)
