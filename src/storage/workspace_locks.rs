@@ -605,13 +605,13 @@ mod tests {
 
     fn fast_timing() -> WorkspaceLeaseTiming {
         WorkspaceLeaseTiming {
-            lease: Duration::from_millis(400),
-            refresh: Duration::from_millis(60),
-            safety_margin: Duration::from_millis(100),
+            lease: Duration::from_millis(800),
+            refresh: Duration::from_millis(120),
+            safety_margin: Duration::from_millis(200),
             retry_min: Duration::from_millis(20),
             retry_max: Duration::from_millis(50),
-            live_wait: Duration::from_millis(80),
-            stale_wait: Duration::from_millis(500),
+            live_wait: Duration::from_millis(160),
+            stale_wait: Duration::from_millis(1000),
             poll: Duration::from_millis(10),
         }
     }
