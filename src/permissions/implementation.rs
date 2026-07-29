@@ -376,6 +376,86 @@ fn default_rules() -> Vec<CompiledRule> {
         ("git describe *", Permission::Allow),
         ("git blame *", Permission::Allow),
         ("git shortlog *", Permission::Allow),
+        // Browser-backed views cause an external user-visible effect, so they
+        // must remain confirmation-gated even when their base command is read-only.
+        ("gh * --web", Permission::Ask),
+        ("gh * --web *", Permission::Ask),
+        ("gh * --web=*", Permission::Ask),
+        ("glab * --web", Permission::Ask),
+        ("glab * --web *", Permission::Ask),
+        ("glab * --web=*", Permission::Ask),
+        // Explicit GitHub and GitLab CLI read commands. Do not allowlist entire
+        // command groups: their create, edit, merge, and delete subcommands mutate
+        // remote state and must stay confirmation-gated by the fallback policy.
+        ("gh auth status", Permission::Allow),
+        ("gh issue list", Permission::Allow),
+        ("gh issue list *", Permission::Allow),
+        ("gh issue view", Permission::Allow),
+        ("gh issue view *", Permission::Allow),
+        ("gh pr checks", Permission::Allow),
+        ("gh pr checks *", Permission::Allow),
+        ("gh pr diff", Permission::Allow),
+        ("gh pr diff *", Permission::Allow),
+        ("gh pr list", Permission::Allow),
+        ("gh pr list *", Permission::Allow),
+        ("gh pr status", Permission::Allow),
+        ("gh pr view", Permission::Allow),
+        ("gh pr view *", Permission::Allow),
+        ("gh repo list", Permission::Allow),
+        ("gh repo list *", Permission::Allow),
+        ("gh repo view", Permission::Allow),
+        ("gh repo view *", Permission::Allow),
+        ("gh release list", Permission::Allow),
+        ("gh release list *", Permission::Allow),
+        ("gh release view", Permission::Allow),
+        ("gh release view *", Permission::Allow),
+        ("gh workflow list", Permission::Allow),
+        ("gh workflow list *", Permission::Allow),
+        ("gh workflow view", Permission::Allow),
+        ("gh workflow view *", Permission::Allow),
+        ("gh run list", Permission::Allow),
+        ("gh run list *", Permission::Allow),
+        ("gh run view", Permission::Allow),
+        ("gh run view *", Permission::Allow),
+        ("gh label list", Permission::Allow),
+        ("gh label list *", Permission::Allow),
+        ("gh milestone list", Permission::Allow),
+        ("gh milestone list *", Permission::Allow),
+        ("glab auth status", Permission::Allow),
+        ("glab issue list", Permission::Allow),
+        ("glab issue list *", Permission::Allow),
+        ("glab issue view", Permission::Allow),
+        ("glab issue view *", Permission::Allow),
+        ("glab mr diff", Permission::Allow),
+        ("glab mr diff *", Permission::Allow),
+        ("glab mr list", Permission::Allow),
+        ("glab mr list *", Permission::Allow),
+        ("glab mr view", Permission::Allow),
+        ("glab mr view *", Permission::Allow),
+        ("glab repo list", Permission::Allow),
+        ("glab repo list *", Permission::Allow),
+        ("glab repo view", Permission::Allow),
+        ("glab repo view *", Permission::Allow),
+        ("glab release list", Permission::Allow),
+        ("glab release list *", Permission::Allow),
+        ("glab release view", Permission::Allow),
+        ("glab release view *", Permission::Allow),
+        ("glab ci status", Permission::Allow),
+        ("glab ci status *", Permission::Allow),
+        ("glab pipeline list", Permission::Allow),
+        ("glab pipeline list *", Permission::Allow),
+        ("glab pipeline view", Permission::Allow),
+        ("glab pipeline view *", Permission::Allow),
+        ("glab job list", Permission::Allow),
+        ("glab job list *", Permission::Allow),
+        ("glab job view", Permission::Allow),
+        ("glab job view *", Permission::Allow),
+        ("glab job trace", Permission::Allow),
+        ("glab job trace *", Permission::Allow),
+        ("glab label list", Permission::Allow),
+        ("glab label list *", Permission::Allow),
+        ("glab milestone list", Permission::Allow),
+        ("glab milestone list *", Permission::Allow),
         // Allow safe language commands
         ("go version", Permission::Allow),
         ("go help *", Permission::Allow),
@@ -777,6 +857,18 @@ mod tests {
         assert_eq!(service.check("pwd"), Permission::Allow);
         assert_eq!(service.check("git status"), Permission::Allow);
         assert_eq!(service.check("git log --oneline"), Permission::Allow);
+        assert_eq!(
+            service.check("gh issue view 111 --json number,title,body,state,labels,milestone,url"),
+            Permission::Allow
+        );
+        assert_eq!(
+            service.check("gh issue view 112 --json number,title,body,state,labels,milestone,url"),
+            Permission::Allow
+        );
+        assert_eq!(service.check("gh pr diff 42"), Permission::Allow);
+        assert_eq!(service.check("gh run view 123"), Permission::Allow);
+        assert_eq!(service.check("glab mr view 42"), Permission::Allow);
+        assert_eq!(service.check("glab job trace 123"), Permission::Allow);
         assert_eq!(service.check("cargo --version"), Permission::Allow);
         assert_eq!(service.check("npm --version"), Permission::Allow);
     }
@@ -801,6 +893,14 @@ mod tests {
         assert_eq!(service.check("cargo check"), Permission::Ask);
         assert_eq!(service.check("cargo build"), Permission::Ask);
         assert_eq!(service.check("docker run hello-world"), Permission::Ask);
+        assert_eq!(
+            service.check("gh issue create --title bug"),
+            Permission::Ask
+        );
+        assert_eq!(service.check("gh pr merge 42"), Permission::Ask);
+        assert_eq!(service.check("gh issue view 111 --web"), Permission::Ask);
+        assert_eq!(service.check("glab mr approve 42"), Permission::Ask);
+        assert_eq!(service.check("glab issue view 111 --web"), Permission::Ask);
     }
 
     #[test]
