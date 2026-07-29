@@ -1828,7 +1828,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 217);
+        assert_eq!(catalog.targets.len(), 218);
         assert!(
             catalog
                 .connections
@@ -2630,7 +2630,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 217);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 218);
 
         let cases = [
             EquivalenceCase {
@@ -2850,6 +2850,57 @@ default_base_url = "http://localhost:11434/v1"
             assert_eq!(pricing.input_micros_per_million, 0);
             assert_eq!(pricing.output_micros_per_million, 0);
         }
+    }
+
+    #[test]
+    fn builtin_catalog_resolves_current_minimax_contracts() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+
+        for connection in ["minimax", "minimax-coding-plan"] {
+            let m3 = catalog
+                .resolve(
+                    &connection_id(connection),
+                    &model_id(&format!("{connection}/MiniMax-M3")),
+                )
+                .unwrap();
+            assert_eq!(m3.reasoning_codec, ReasoningCodec::AnthropicAdaptive);
+            assert_eq!(m3.reasoning_options, vec![ReasoningOption::Toggle]);
+            assert!(m3.features.contains(&ModelFeature::ToolCall));
+            assert!(m3.features.contains(&ModelFeature::Attachment));
+
+            for model in [
+                "MiniMax-M2.5",
+                "MiniMax-M2.5-highspeed",
+                "MiniMax-M2.7",
+                "MiniMax-M2.7-highspeed",
+                "MiniMax-M2.1",
+                "MiniMax-M2.1-highspeed",
+                "MiniMax-M2",
+            ] {
+                let resolved = catalog
+                    .resolve(
+                        &connection_id(connection),
+                        &model_id(&format!("{connection}/{model}")),
+                    )
+                    .unwrap();
+                assert!(resolved.reasoning_options.is_empty(), "{model}");
+                if model == "MiniMax-M2.1-highspeed" {
+                    assert_eq!(resolved.remote_model_id.as_ref(), model);
+                }
+                if connection == "minimax-coding-plan" {
+                    let pricing = resolved.pricing.expect("subscription pricing");
+                    assert_eq!(pricing.input_micros_per_million, 0);
+                    assert_eq!(pricing.output_micros_per_million, 0);
+                }
+            }
+        }
+
+        let m21 = catalog
+            .resolve(&connection_id("minimax"), &model_id("minimax/MiniMax-M2.1"))
+            .unwrap();
+        let pricing = m21.pricing.unwrap();
+        assert_eq!(pricing.cache_read_micros_per_million, Some(30_000));
+        assert_eq!(pricing.cache_write_micros_per_million, Some(375_000));
     }
 
     #[test]

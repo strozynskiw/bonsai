@@ -7,9 +7,11 @@ recommended = true
 default = true
 endpoint_path = "v1/messages"
 token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
 max_tokens = 16000
 context_window = 1000000
 output_limit = 128000
+features = ["tool-call", "attachment"]
 pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
 
 [[targets.reasoning_options]]
@@ -28,9 +30,7 @@ context_window = 204800
 output_limit = 131072
 pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
 
-[[targets.reasoning_options]]
-type = "effort"
-values = ["low", "medium", "high"]
+reasoning_options = []
 
 [[targets]]
 connection = "minimax-coding-plan"
@@ -57,8 +57,7 @@ context_window = 204800
 output_limit = 131072
 pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
 
-[[targets.reasoning_options]]
-type = "toggle"
+reasoning_options = []
 
 [[targets]]
 connection = "minimax-coding-plan"
