@@ -101,10 +101,12 @@ pub(crate) async fn fetch_models_with_discovery(
         DiscoveryKind::Ollama => fetch_ollama_models(base_url).await,
         DiscoveryKind::OpenRouter => fetch_openrouter_models(base_url, api_key).await,
         DiscoveryKind::Tencent => fetch_tencent_models(base_url, api_key).await,
+        DiscoveryKind::QwenCloud => fetch_qwencloud_models(base_url, api_key, auth_header).await,
         DiscoveryKind::Zai => fetch_zai_models().await,
     };
     match native {
         Ok(availability) => Ok(availability),
+        Err(err) if discovery == DiscoveryKind::QwenCloud => Err(err),
         Err(err) => {
             tracing::warn!(
                 provider = %display_label,
@@ -115,6 +117,50 @@ pub(crate) async fn fetch_models_with_discovery(
             fetch_generic_models(protocol, display_label, base_url, api_key, auth_header).await
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Qwen Cloud filtered OpenAI-compatible catalog
+// ---------------------------------------------------------------------------
+
+async fn fetch_qwencloud_models(
+    base_url: &str,
+    api_key: &str,
+    auth_header: Option<&str>,
+) -> Result<LiveModelAvailability> {
+    let availability = fetch_generic_models(
+        Protocol::OpenAiChat,
+        "Qwen Cloud",
+        base_url,
+        api_key,
+        auth_header,
+    )
+    .await?;
+    Ok(LiveModelAvailability {
+        models: availability
+            .models
+            .into_iter()
+            .filter(|model| is_qwencloud_chat_model(&model.remote_model_id))
+            .collect(),
+        ..availability
+    })
+}
+
+fn is_qwencloud_chat_model(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    id.starts_with("qwen3")
+        && ![
+            "embedding",
+            "rerank",
+            "tts",
+            "asr",
+            "audio",
+            "omni",
+            "vl",
+            "image",
+        ]
+        .iter()
+        .any(|product| id.contains(product))
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,6 +1171,46 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn qwencloud_discovery_filters_non_chat_products() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer dashscope-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "qwen3.8-max-preview"},
+                    {"id": "qwen3.7-plus"},
+                    {"id": "qwen3-vl-plus"},
+                    {"id": "qwen3-embedding-8b"},
+                    {"id": "paraformer-v2"},
+                    {"id": "deepseek-v4"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::QwenCloud,
+            Protocol::OpenAiChat,
+            "Qwen Cloud",
+            &format!("{}/v1", server.uri()),
+            "dashscope-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            availability
+                .models
+                .iter()
+                .map(|model| model.remote_model_id.as_ref())
+                .collect::<Vec<_>>(),
+            ["qwen3.7-plus", "qwen3.8-max-preview"]
+        );
+    }
 
     #[test]
     fn zai_openapi_catalog_reads_only_tool_capable_chat_models() {

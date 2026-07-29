@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::model_catalog::LiveModelAvailability;
+use crate::model_catalog::{DiscoveryKind, LiveModelAvailability};
 use crate::provider::discovery::fetch_models_for_metadata;
 use crate::provider::openai_catalog::{normalize_openai_base_url, with_default_scheme};
 use crate::provider::{AuthorizeOutcome, Protocol, ProviderMetadata};
@@ -182,7 +182,11 @@ pub(crate) async fn list_available_models_for_metadata(
         // Anthropic-style providers fall back to their seed list on a hard
         // fetch error when one is configured (e.g. minimax-coding-plan); the
         // OpenAI path has no seed list and surfaces the error instead.
-        Err(err) if protocol == Protocol::AnthropicMessages && !metadata.seed_models.is_empty() => {
+        Err(err)
+            if (protocol == Protocol::AnthropicMessages
+                || metadata.discovery == DiscoveryKind::QwenCloud)
+                && !metadata.seed_models.is_empty() =>
+        {
             tracing::warn!(
                 provider = %metadata.id,
                 error = %err,
@@ -218,6 +222,9 @@ pub(crate) async fn probe_reachability_for_metadata(
 fn empty_success_fallback(metadata: &ProviderMetadata) -> LiveModelAvailability {
     match metadata.protocol {
         Protocol::AnthropicMessages => {
+            LiveModelAvailability::from_remote_ids(metadata.seed_model_list())
+        }
+        Protocol::OpenAiChat if metadata.discovery == DiscoveryKind::QwenCloud => {
             LiveModelAvailability::from_remote_ids(metadata.seed_model_list())
         }
         _ => LiveModelAvailability::default(),
@@ -316,6 +323,62 @@ mod tests {
             )
             .remote_model_ids()
             .is_empty()
+        );
+
+        let qwen = ProviderMetadata::new(
+            "qwen-test",
+            "Qwen Test",
+            "https://example.test/v1",
+            "qwen3.7-plus",
+            None,
+            None,
+            None,
+            &["qwen3.7-plus", "qwen3.7-max"],
+            Protocol::OpenAiChat,
+            crate::provider::ProviderCapabilities::new(
+                crate::provider::NO_REASONING,
+                crate::provider::NO_PARAMETERS,
+            ),
+            "chat/completions",
+        )
+        .with_discovery(DiscoveryKind::QwenCloud);
+        assert_eq!(
+            empty_success_fallback(&qwen).remote_model_ids(),
+            ["qwen3.7-plus", "qwen3.7-max"]
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen_discovery_error_falls_back_to_curated_seeds() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let metadata = ProviderMetadata::new(
+            "qwen-test",
+            "Qwen Test",
+            &format!("http://{address}/v1"),
+            "qwen3.7-plus",
+            None,
+            None,
+            None,
+            &["qwen3.7-plus", "qwen3.7-max"],
+            Protocol::OpenAiChat,
+            crate::provider::ProviderCapabilities::new(
+                crate::provider::NO_REASONING,
+                crate::provider::NO_PARAMETERS,
+            ),
+            "chat/completions",
+        )
+        .with_discovery(DiscoveryKind::QwenCloud);
+        let session = provider_session("test-key", &format!("http://{address}/v1"), "");
+
+        let available = list_available_models_for_metadata(&metadata, &session)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            available.remote_model_ids(),
+            ["qwen3.7-plus", "qwen3.7-max"]
         );
     }
 

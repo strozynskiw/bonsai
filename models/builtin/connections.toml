@@ -388,10 +388,10 @@ transport = "openai-chat"
 # Qwen Cloud (docs.qwencloud.com) pay-as-you-go serves through the DashScope
 # international OpenAI-compatible endpoint. DASHSCOPE_API_KEY is the env var
 # the official docs and the wider Qwen tooling ecosystem already use.
-# Discovery is static because the DashScope /models listing includes
-# embedding, speech, and subscription-tier models the user's API key cannot
-# call — polluting the picker with inaccessible entries.
-discovery = "static"
+# DashScope's /models listing includes embedding, speech, and vision products.
+# The Qwen Cloud discovery strategy keeps only Qwen 3 text-chat families while
+# preserving this catalog's curated metadata for known models.
+discovery = "qwen-cloud"
 default_base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 origins = [
   { id = "singapore", display_name = "Singapore", base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" },
@@ -439,10 +439,10 @@ default_model = "qwencloud-token-plan/qwen3.7-max"
 default_endpoint_path = "chat/completions"
 default_token_counter = "qwen3"
 # Same DashScope serving stack as `qwencloud` above; cache verified there.
-# Discovery is static — the Token Plan /models listing likely returns the
-# same embedding/speech/subscription-tier pollution as the pay-as-you-go
-# endpoint, polluting the picker with inaccessible entries.
-discovery = "static"
+# Use the same filtered live discovery as pay-as-you-go. The request is made
+# against this plan's regional host and key, so plan-exclusive models remain
+# discoverable without leaking unrelated DashScope products into the picker.
+discovery = "qwen-cloud"
 prompt_cache = true
 prompt_cache_policy = "rolling-history"
 

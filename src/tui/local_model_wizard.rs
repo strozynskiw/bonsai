@@ -90,6 +90,7 @@ impl ProviderPreset {
                 | DiscoveryKind::Mistral
                 | DiscoveryKind::OpenRouter
                 | DiscoveryKind::Tencent
+                | DiscoveryKind::QwenCloud
                 | DiscoveryKind::Zai
                 | DiscoveryKind::Static,
                 _,

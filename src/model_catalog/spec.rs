@@ -31,6 +31,9 @@ pub(crate) enum DiscoveryKind {
     OpenRouter,
     Ollama,
     Tencent,
+    /// DashScope's `/models` response mixes chat models with embedding, audio,
+    /// and other incompatible products, so retain only Qwen text-chat families.
+    QwenCloud,
     /// Z.AI publishes its current Chat Completions lineup in its official
     /// OpenAPI document; its API surface does not expose `/models`.
     Zai,

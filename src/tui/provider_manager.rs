@@ -67,6 +67,7 @@ impl ProviderManagerRow {
             DiscoveryKind::Mistral => parts.push("Mistral API".to_string()),
             DiscoveryKind::OpenRouter => parts.push("OpenRouter API".to_string()),
             DiscoveryKind::Tencent => parts.push("TokenHub API".to_string()),
+            DiscoveryKind::QwenCloud => parts.push("Qwen Cloud API".to_string()),
             DiscoveryKind::Zai => parts.push("Z.AI OpenAPI".to_string()),
             DiscoveryKind::Static => parts.push("curated models".to_string()),
             DiscoveryKind::Generic => {}
