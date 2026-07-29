@@ -1,8 +1,7 @@
 # Xiaomi MiMo pay-as-you-go API (sk-... keys). models.dev lists MiMo under its
 # `xiaomi` block — metadata_model maps each target there so pricing and window
-# metadata backfill automatically. Reasoning is left off for now — MiMo's
-# OpenAI-wire `thinking` param is unverified against bonsai's codec — so the
-# explicit empty reasoning_options is deliberate, not missing data.
+# metadata backfill automatically. MiMo documents a top-level
+# `thinking.type = enabled|disabled` toggle and `reasoning_content` replay.
 
 [[targets]]
 connection = "mimo"
@@ -13,10 +12,14 @@ recommended = true
 default = true
 endpoint_path = "chat/completions"
 token_counter = "heuristic"
+reasoning_codec = "mimo-thinking"
 max_tokens = 16000
 context_window = 1048576
 output_limit = 131072
-reasoning_options = []
+pricing = { input_micros_per_million = 435000, output_micros_per_million = 870000, cache_read_micros_per_million = 3600, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
 
 # The base mimo-v2.5 shares the pro model's specs (1M context, 128K output,
 # tool calling, Deep Thinking); offered as the cheaper general model.
@@ -28,7 +31,11 @@ metadata_model = "xiaomi/mimo-v2.5"
 roles = ["cheap"]
 endpoint_path = "chat/completions"
 token_counter = "heuristic"
+reasoning_codec = "mimo-thinking"
 max_tokens = 16000
 context_window = 1048576
 output_limit = 131072
-reasoning_options = []
+pricing = { input_micros_per_million = 140000, output_micros_per_million = 280000, cache_read_micros_per_million = 2800, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"

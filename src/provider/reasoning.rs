@@ -47,6 +47,9 @@ pub(crate) enum ReasoningCodec {
     /// Kimi K2.5/K2.6 use the vendor-specific top-level `thinking` toggle on
     /// their OpenAI-compatible Chat Completions endpoint.
     KimiThinking,
+    /// Xiaomi MiMo V2.5 uses the same top-level `thinking.type` toggle and
+    /// requires `reasoning_content` replay during multi-turn tool use.
+    MimoThinking,
     ZaiThinking,
     /// OpenCode's hosted GLM 5.2 route rejects a request that carries both
     /// `thinking` and `reasoning_effort`. Direct Z.AI uses [`ZaiThinking`],
@@ -74,7 +77,10 @@ impl ReasoningCodec {
                 anthropic_thinking(selection)
             }
             Self::AnthropicAdaptive => anthropic_adaptive(selection),
-            Self::KimiThinking | Self::ZaiThinking | Self::ZaiReasoningEffort => None,
+            Self::KimiThinking
+            | Self::MimoThinking
+            | Self::ZaiThinking
+            | Self::ZaiReasoningEffort => None,
         }
     }
 
@@ -89,7 +95,9 @@ impl ReasoningCodec {
                 apply_mistral_chat_completions_fields(body, selection);
             }
             Self::Hunyuan => apply_hunyuan_fields(body, selection),
-            Self::KimiThinking => apply_kimi_thinking_fields(body, selection),
+            Self::KimiThinking | Self::MimoThinking => {
+                apply_thinking_toggle_fields(body, selection);
+            }
             Self::ZaiThinking => apply_zai_thinking_fields(body, selection),
             Self::ZaiReasoningEffort => apply_zai_reasoning_effort_fields(body, selection),
             Self::OpenAiCompatible
@@ -188,7 +196,7 @@ fn openrouter_reasoning(selection: ReasoningSelection) -> Option<Value> {
     }
 }
 
-fn apply_kimi_thinking_fields(body: &mut Value, selection: ReasoningSelection) {
+fn apply_thinking_toggle_fields(body: &mut Value, selection: ReasoningSelection) {
     match selection {
         ReasoningSelection::Default | ReasoningSelection::BudgetTokens(_) => {}
         ReasoningSelection::Off => {
@@ -477,21 +485,20 @@ mod tests {
     }
 
     #[test]
-    fn kimi_thinking_uses_vendor_toggle_without_inventing_effort_fields() {
-        let mut enabled = json!({});
-        ReasoningCodec::KimiThinking
-            .apply_chat_completions_fields(&mut enabled, ReasoningSelection::High);
-        assert_eq!(enabled, json!({ "thinking": { "type": "enabled" } }));
+    fn thinking_toggle_codecs_use_vendor_field_without_inventing_effort() {
+        for codec in [ReasoningCodec::KimiThinking, ReasoningCodec::MimoThinking] {
+            let mut enabled = json!({});
+            codec.apply_chat_completions_fields(&mut enabled, ReasoningSelection::High);
+            assert_eq!(enabled, json!({ "thinking": { "type": "enabled" } }));
 
-        let mut disabled = json!({});
-        ReasoningCodec::KimiThinking
-            .apply_chat_completions_fields(&mut disabled, ReasoningSelection::Off);
-        assert_eq!(disabled, json!({ "thinking": { "type": "disabled" } }));
+            let mut disabled = json!({});
+            codec.apply_chat_completions_fields(&mut disabled, ReasoningSelection::Off);
+            assert_eq!(disabled, json!({ "thinking": { "type": "disabled" } }));
 
-        let mut default = json!({});
-        ReasoningCodec::KimiThinking
-            .apply_chat_completions_fields(&mut default, ReasoningSelection::Default);
-        assert_eq!(default, json!({}));
+            let mut default = json!({});
+            codec.apply_chat_completions_fields(&mut default, ReasoningSelection::Default);
+            assert_eq!(default, json!({}));
+        }
     }
 
     #[test]

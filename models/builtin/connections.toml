@@ -247,6 +247,7 @@ default_token_counter = "heuristic"
 # Coding Plan endpoint (98,304 cache_read_input_tokens/turn, partial hit ~84%→66%)
 # and implied on the pay-as-you-go endpoint.
 prompt_cache = true
+reasoning_content_echo = true
 
 [[connections]]
 id = "mimo-coding-plan"
@@ -269,6 +270,7 @@ default_token_counter = "heuristic"
 # honored (verified live on the Coding Plan endpoint: 98,304
 # cache_read_input_tokens/turn, partial hit ~84%→66% on a growing session).
 prompt_cache = true
+reasoning_content_echo = true
 
 [[connections]]
 id = "openrouter"

@@ -361,7 +361,11 @@ impl OpenAiCompatibleProvider {
                 .reasoning_by_call_id
                 .lock()
                 .map_err(|_| anyhow::anyhow!("reasoning replay state lock is poisoned"))?;
-            ensure_reasoning_content_on_tool_call_messages(&mut body, &reasoning_by_call_id);
+            if self.reasoning_codec == ReasoningCodec::MimoThinking {
+                ensure_mimo_reasoning_content(&mut body, &reasoning_by_call_id);
+            } else {
+                ensure_reasoning_content_on_tool_call_messages(&mut body, &reasoning_by_call_id);
+            }
         }
         {
             let extra_content_by_call_id = self
@@ -610,6 +614,36 @@ fn mistral_thinking_text(thinking: &[Value]) -> String {
 /// - It stays gated on [`ProviderCapabilities::echoes_reasoning_content`]
 ///   rather than being sent everywhere. The field is off-schema, and strict
 ///   servers reject unknown message fields.
+fn ensure_mimo_reasoning_content(body: &mut Value, reasoning_by_call_id: &HashMap<String, String>) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    messages.retain_mut(|message| {
+        let Some(message) = message.as_object_mut() else {
+            return true;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            return true;
+        }
+        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            return true;
+        };
+        let Some(reasoning) = tool_calls
+            .first()
+            .and_then(|tool_call| tool_call.get("id"))
+            .and_then(Value::as_str)
+            .and_then(|call_id| reasoning_by_call_id.get(call_id))
+        else {
+            return false;
+        };
+        message.insert(
+            "reasoning_content".to_string(),
+            Value::String(reasoning.clone()),
+        );
+        true
+    });
+}
+
 fn ensure_reasoning_content_on_tool_call_messages(
     body: &mut Value,
     reasoning_by_call_id: &HashMap<String, String>,
@@ -1585,6 +1619,30 @@ mod tests {
             coding.get("prompt_cache_key").and_then(Value::as_str),
             "plan-mode and coding-mode lanes must not share a cache route",
         );
+    }
+
+    #[test]
+    fn mimo_replay_preserves_exact_reasoning_and_drops_unrecoverable_tool_turns() {
+        let mut body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "known"}]},
+                {"role": "tool", "tool_call_id": "known", "content": "ok"},
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "lost"}]},
+                {"role": "tool", "tool_call_id": "lost", "content": "old"},
+                {"role": "user", "content": "continue"}
+            ]
+        });
+        let replay = HashMap::from([("known".to_string(), " exact trace ".to_string())]);
+
+        ensure_mimo_reasoning_content(&mut body, &replay);
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[1]["reasoning_content"], " exact trace ");
+        assert!(messages.iter().all(|message| {
+            message.pointer("/tool_calls/0/id").and_then(Value::as_str) != Some("lost")
+        }));
     }
 
     #[test]
