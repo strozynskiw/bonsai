@@ -1,5 +1,21 @@
 [[targets]]
 connection = "moonshotai"
+model = "moonshotai/kimi-k3"
+remote_model = "kimi-k3"
+recommended = true
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+context_window = 1048576
+output_limit = 131072
+features = ["tool-call", "attachment"]
+pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
+
+[[targets]]
+connection = "moonshotai"
 model = "moonshotai/kimi-k2.7-code"
 remote_model = "kimi-k2.7-code"
 recommended = true

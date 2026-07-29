@@ -1,6 +1,42 @@
 [[targets]]
 connection = "kimi-coding-plan"
+model = "kimi-coding-plan/k3"
+metadata_model = "kimi-for-coding/k3"
+remote_model = "k3"
+recommended = true
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+context_window = 1048576
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+pinned_fields = ["pricing"]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
+
+[[targets]]
+connection = "kimi-coding-plan"
+model = "kimi-coding-plan/k3-256k"
+metadata_model = "kimi-for-coding/k3-256k"
+remote_model = "k3-256k"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+context_window = 262144
+output_limit = 131072
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+pinned_fields = ["pricing"]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
+
+[[targets]]
+connection = "kimi-coding-plan"
 model = "kimi-coding-plan/kimi-for-coding"
+# The subscription alias is documented by Kimi Code but has no models.dev row;
+# keep its serving-proven K2.7 limits and zero subscription pricing explicit.
+pinned = true
 metadata_model = "kimi-for-coding/k2p7"
 remote_model = "kimi-for-coding"
 recommended = true

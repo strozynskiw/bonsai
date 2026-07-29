@@ -1828,7 +1828,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 214);
+        assert_eq!(catalog.targets.len(), 217);
         assert!(
             catalog
                 .connections
@@ -2630,7 +2630,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 214);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 217);
 
         let cases = [
             EquivalenceCase {
@@ -2811,6 +2811,45 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(resolved.token_counter, Some(TokenCounterKind::Tiktoken));
         assert!(resolved.reasoning_options.is_empty());
         assert_eq!(resolved.source, ModelSource::BuiltIn);
+    }
+
+    #[test]
+    fn builtin_catalog_resolves_current_kimi_k3_contracts() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let expected_efforts = vec![ReasoningOption::Effort(vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ])];
+
+        let moonshot = catalog
+            .resolve(
+                &connection_id("moonshotai"),
+                &model_id("moonshotai/kimi-k3"),
+            )
+            .unwrap();
+        assert_eq!(moonshot.remote_model_id.as_ref(), "kimi-k3");
+        assert_eq!(moonshot.context_window, Some(1_048_576));
+        assert_eq!(moonshot.output_limit, Some(131_072));
+        assert_eq!(moonshot.reasoning_options, expected_efforts);
+        assert!(moonshot.features.contains(&ModelFeature::ToolCall));
+        assert!(moonshot.features.contains(&ModelFeature::Attachment));
+
+        for (model, remote, context) in [
+            ("kimi-coding-plan/k3", "k3", 1_048_576),
+            ("kimi-coding-plan/k3-256k", "k3-256k", 262_144),
+        ] {
+            let resolved = catalog
+                .resolve(&connection_id("kimi-coding-plan"), &model_id(model))
+                .unwrap();
+            assert_eq!(resolved.remote_model_id.as_ref(), remote);
+            assert_eq!(resolved.context_window, Some(context));
+            assert_eq!(resolved.output_limit, Some(131_072));
+            assert_eq!(resolved.reasoning_options, expected_efforts);
+            let pricing = resolved.pricing.expect("subscription pricing");
+            assert_eq!(pricing.input_micros_per_million, 0);
+            assert_eq!(pricing.output_micros_per_million, 0);
+        }
     }
 
     #[test]
