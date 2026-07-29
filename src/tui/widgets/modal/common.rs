@@ -52,7 +52,9 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         ModalKind::UnauthorizeConfirm { .. } => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }
-        ModalKind::ModelPicker { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 76),
+        ModalKind::ModelPicker { .. } | ModalKind::ProviderManager { .. } => {
+            centered_rect(area, MODAL_WIDTH_WIDE, 76)
+        }
         ModalKind::McpServers { .. } => centered_rect(area, MODAL_WIDTH_WIDE, 76),
         ModalKind::SessionPicker { .. } => centered_rect(area, MODAL_WIDTH_FORM, 60),
         ModalKind::PlanPicker { .. } => centered_rect(area, MODAL_WIDTH_FORM, 60),
@@ -114,8 +116,8 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
             let rows = (peers.len().max(1) as u16).saturating_add(4);
             centered_rect_capped(area, MODAL_WIDTH_FORM, 66, rows)
         }
-        // Small dialogs with no dedicated arm: API-key prompt, provider manager
-        // and its remove confirm, help.
+        // Small dialogs with no dedicated arm: API-key prompt, provider remove
+        // confirm, and help.
         _ => centered_rect(area, MODAL_WIDTH_PROMPT, 48),
     }
 }
@@ -1018,6 +1020,19 @@ mod tests {
         };
 
         assert_eq!(modal_area(area, &kind), area);
+    }
+
+    #[test]
+    fn provider_manager_uses_wide_picker_footprint() {
+        let area = Rect::new(0, 0, 120, 50);
+        let kind = ModalKind::ProviderManager {
+            rows: Vec::new(),
+            filter: String::new(),
+            searching: false,
+            cursor: 0,
+        };
+
+        assert_eq!(modal_area(area, &kind), Rect::new(6, 6, 108, 38));
     }
 
     // ── Modal text selection tests ────────────────────────────────────────
