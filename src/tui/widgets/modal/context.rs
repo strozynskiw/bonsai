@@ -184,6 +184,7 @@ fn context_usage_summary_line(report: &ContextReport) -> Line<'static> {
         TokenCounterKind::Tiktoken => "tiktoken",
         TokenCounterKind::Qwen3 => "qwen3",
         TokenCounterKind::AnthropicCountTokens => "count_tokens",
+        TokenCounterKind::ZaiTokenizer => "Z.AI tokenizer",
         TokenCounterKind::Heuristic => "heuristic",
     };
     let confidence = match report.estimate_confidence {

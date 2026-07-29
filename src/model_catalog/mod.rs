@@ -1828,7 +1828,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 208);
+        assert_eq!(catalog.targets.len(), 214);
         assert!(
             catalog
                 .connections
@@ -2630,7 +2630,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 208);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 214);
 
         let cases = [
             EquivalenceCase {
@@ -4212,6 +4212,69 @@ default_base_url = "http://localhost:11434/v1"
             )),
             Some((100_000, 100_000, Some(10_000)))
         );
+    }
+
+    #[test]
+    fn zai_builtins_expose_documented_api_and_coding_plan_contracts() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let zai_id = connection_id("zai");
+        let zai = catalog.connection(&zai_id).unwrap();
+
+        assert_eq!(zai.discovery, DiscoveryKind::Zai);
+        assert!(zai.prompt_cache);
+        assert_eq!(zai.prompt_cache_policy, PromptCachePolicy::ImplicitPrefix);
+        assert_eq!(
+            zai.default_token_counter,
+            Some(TokenCounterKind::ZaiTokenizer)
+        );
+        let glm_52 = catalog.resolve(&zai_id, &model_id("zai/glm-5.2")).unwrap();
+        assert_eq!(glm_52.reasoning_codec, ReasoningCodec::ZaiThinking);
+        assert_eq!(glm_52.recommended_effort, Some(ReasoningSelection::Max));
+
+        let glm_45_x = catalog
+            .resolve(&zai_id, &model_id("zai/glm-4.5-x"))
+            .unwrap();
+        assert_eq!(glm_45_x.context_window, Some(131_072));
+        assert_eq!(
+            glm_45_x.pricing.map(|pricing| (
+                pricing.input_micros_per_million,
+                pricing.output_micros_per_million,
+                pricing.cache_read_micros_per_million,
+            )),
+            Some((2_200_000, 8_900_000, Some(450_000)))
+        );
+
+        let glm_46v = catalog.resolve(&zai_id, &model_id("zai/glm-4.6v")).unwrap();
+        assert!(glm_46v.features.contains(&ModelFeature::Attachment));
+        assert!(glm_46v.features.contains(&ModelFeature::ToolCall));
+        assert!(
+            catalog
+                .resolve(&zai_id, &model_id("zai/glm-5v-turbo"))
+                .is_err()
+        );
+
+        let plan_id = connection_id("zai-coding-plan");
+        let plan = catalog.connection(&plan_id).unwrap();
+        assert_eq!(plan.discovery, DiscoveryKind::Static);
+        assert!(plan.prompt_cache);
+        assert_eq!(plan.prompt_cache_policy, PromptCachePolicy::ImplicitPrefix);
+        assert_eq!(
+            plan.default_token_counter,
+            Some(TokenCounterKind::Heuristic)
+        );
+        let mut plan_models = catalog
+            .targets
+            .values()
+            .filter(|target| target.connection == plan_id)
+            .map(|target| {
+                target
+                    .remote_model
+                    .as_deref()
+                    .unwrap_or(target.model.model())
+            })
+            .collect::<Vec<_>>();
+        plan_models.sort_unstable();
+        assert_eq!(plan_models, ["glm-4.7", "glm-5-turbo", "glm-5.2"]);
     }
 
     #[test]

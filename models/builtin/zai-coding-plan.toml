@@ -1,3 +1,7 @@
+# not-shipped: glm-5.1 — Z.AI's Coding Plan supports only GLM-5.2, GLM-5-Turbo, and GLM-4.7
+# not-shipped: glm-4.5-air — Z.AI's Coding Plan supports only GLM-5.2, GLM-5-Turbo, and GLM-4.7
+# not-shipped: glm-5v-turbo — Vision Understanding is an MCP benefit, not a Coding Plan model
+
 [[targets]]
 connection = "zai-coding-plan"
 model = "zai-coding-plan/glm-5.2"
@@ -5,10 +9,10 @@ metadata_model = "zai-coding-plan/glm-5.2"
 remote_model = "glm-5.2"
 recommended = true
 default = true
-token_counter = "tiktoken"
-reasoning_codec = "zai-reasoning-effort"
-recommended_effort = "off"
-discouraged_efforts = ["default", "high", "xhigh", "max"]
+token_counter = "heuristic"
+reasoning_codec = "zai-thinking"
+recommended_effort = "max"
+discouraged_efforts = ["minimal", "low", "medium", "xhigh"]
 context_window = 1000000
 pinned = true
 output_limit = 12000
@@ -23,7 +27,7 @@ connection = "zai-coding-plan"
 model = "zai-coding-plan/glm-5-turbo"
 metadata_model = "zai-coding-plan/glm-5-turbo"
 remote_model = "glm-5-turbo"
-token_counter = "tiktoken"
+token_counter = "heuristic"
 reasoning_codec = "zai-thinking"
 context_window = 200000
 output_limit = 131072
@@ -37,7 +41,7 @@ connection = "zai-coding-plan"
 model = "zai-coding-plan/glm-4.7"
 metadata_model = "zai-coding-plan/glm-4.7"
 remote_model = "glm-4.7"
-token_counter = "tiktoken"
+token_counter = "heuristic"
 reasoning_codec = "zai-thinking"
 context_window = 204800
 output_limit = 131072

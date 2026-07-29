@@ -31,6 +31,9 @@ pub(crate) enum DiscoveryKind {
     OpenRouter,
     Ollama,
     Tencent,
+    /// Z.AI publishes its current Chat Completions lineup in its official
+    /// OpenAPI document; its API surface does not expose `/models`.
+    Zai,
     Static,
 }
 
@@ -59,6 +62,9 @@ pub(crate) enum PromptCachePolicy {
     /// mechanism: explicit breakpoint before a mutable tail (Anthropic) or
     /// immutable in-place snapshots (automatic Chat Completions caching).
     RollingHistory,
+    /// Preserve an exact growing prefix for a backend that detects cache hits
+    /// implicitly and rejects or does not document any cache-routing field.
+    ImplicitPrefix,
     /// OpenRouter's documented top-level automatic caching for Anthropic
     /// models, plus an explicit sticky session identity.
     OpenRouterAnthropic,
@@ -78,8 +84,16 @@ impl PromptCachePolicy {
     pub(crate) const fn uses_append_only_project_state(self) -> bool {
         matches!(
             self,
-            Self::RollingHistory | Self::OpenRouterAnthropic | Self::TokenHub
+            Self::RollingHistory
+                | Self::ImplicitPrefix
+                | Self::OpenRouterAnthropic
+                | Self::TokenHub
         )
+    }
+
+    /// Whether Chat Completions should carry a `prompt_cache_key`.
+    pub(crate) const fn emits_body_key(self) -> bool {
+        !matches!(self, Self::ImplicitPrefix)
     }
 
     /// Whether to emit OpenRouter's Anthropic-only automatic cache controls.

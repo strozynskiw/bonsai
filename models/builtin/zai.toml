@@ -4,10 +4,12 @@ model = "zai/glm-5.2"
 remote_model = "glm-5.2"
 recommended = true
 default = true
-token_counter = "tiktoken"
-reasoning_codec = "zai-reasoning-effort"
-recommended_effort = "off"
-discouraged_efforts = ["default", "high", "xhigh", "max"]
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+recommended_effort = "max"
+# Z.AI accepts the compatibility labels, but minimal/none disable thinking,
+# low/medium map to high, and xhigh maps to max.
+discouraged_efforts = ["minimal", "low", "medium", "xhigh"]
 context_window = 1000000
 # Match the bounded GLM 5.2 turns already proven on OpenCode: the full 131K
 # allowance can otherwise be consumed entirely by reasoning before any action.
@@ -23,7 +25,7 @@ values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 connection = "zai"
 model = "zai/glm-5.1"
 remote_model = "glm-5.1"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 200000
 output_limit = 131072
@@ -36,7 +38,7 @@ type = "toggle"
 connection = "zai"
 model = "zai/glm-5-turbo"
 remote_model = "glm-5-turbo"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 200000
 output_limit = 131072
@@ -49,7 +51,7 @@ type = "toggle"
 connection = "zai"
 model = "zai/glm-5"
 remote_model = "glm-5"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 204800
 output_limit = 131072
@@ -62,7 +64,7 @@ type = "toggle"
 connection = "zai"
 model = "zai/glm-4.7"
 remote_model = "glm-4.7"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 204800
 output_limit = 131072
@@ -75,7 +77,7 @@ type = "toggle"
 connection = "zai"
 model = "zai/glm-4.7-flashx"
 remote_model = "glm-4.7-flashx"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 200000
 output_limit = 131072
@@ -89,7 +91,7 @@ connection = "zai"
 model = "zai/glm-4.7-flash"
 remote_model = "glm-4.7-flash"
 roles = ["cheap"]
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 200000
 output_limit = 131072
@@ -102,7 +104,7 @@ type = "toggle"
 connection = "zai"
 model = "zai/glm-4.6"
 remote_model = "glm-4.6"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 204800
 output_limit = 131072
@@ -115,7 +117,7 @@ type = "toggle"
 connection = "zai"
 model = "zai/glm-4.5"
 remote_model = "glm-4.5"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 131072
 output_limit = 98304
@@ -128,7 +130,7 @@ type = "toggle"
 connection = "zai"
 model = "zai/glm-4.5-air"
 remote_model = "glm-4.5-air"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 131072
 output_limit = 98304
@@ -137,15 +139,118 @@ pricing = { input_micros_per_million = 200000, output_micros_per_million = 11000
 [[targets.reasoning_options]]
 type = "toggle"
 
+# Pinned to Z.AI's official OpenAPI and pricing table; models.dev does not
+# currently publish this documented model.
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.5-x"
+remote_model = "glm-4.5-x"
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+context_window = 131072
+output_limit = 98304
+features = ["tool-call", "reasoning", "structured-output", "temperature"]
+pricing = { input_micros_per_million = 2200000, output_micros_per_million = 8900000, cache_read_micros_per_million = 450000, cache_write_micros_per_million = 0 }
+pinned = true
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+# Pinned to Z.AI's official OpenAPI and pricing table; models.dev does not
+# currently publish this documented model.
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.5-airx"
+remote_model = "glm-4.5-airx"
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+context_window = 131072
+output_limit = 98304
+features = ["tool-call", "reasoning", "structured-output", "temperature"]
+pricing = { input_micros_per_million = 1100000, output_micros_per_million = 4500000, cache_read_micros_per_million = 220000, cache_write_micros_per_million = 0 }
+pinned = true
+
+[[targets.reasoning_options]]
+type = "toggle"
+
 [[targets]]
 connection = "zai"
 model = "zai/glm-4.5-flash"
 remote_model = "glm-4.5-flash"
-token_counter = "tiktoken"
+token_counter = "zai-tokenizer"
 reasoning_codec = "zai-thinking"
 context_window = 131072
 output_limit = 98304
 pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+# Pinned to Z.AI's official OpenAPI and pricing table; models.dev does not
+# currently publish this documented legacy text model.
+[[targets]]
+connection = "zai"
+model = "zai/glm-4-32b-0414-128k"
+remote_model = "glm-4-32b-0414-128k"
+token_counter = "zai-tokenizer"
+context_window = 128000
+output_limit = 16384
+features = ["tool-call", "structured-output", "temperature"]
+pricing = { input_micros_per_million = 100000, output_micros_per_million = 100000 }
+pinned = true
+
+# Z.AI's OpenAPI restricts function tools on vision models to the GLM-4.6V
+# series, so GLM-5V-Turbo and GLM-4.5V are deliberately omitted.
+# not-shipped: glm-5v-turbo — official OpenAPI does not support function tools
+# not-shipped: glm-4.5v — official OpenAPI does not support function tools
+
+# Z.AI documents a $0.05 cached-input rate that models.dev currently omits.
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.6v"
+remote_model = "glm-4.6v"
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+context_window = 128000
+output_limit = 32768
+features = ["tool-call", "reasoning", "structured-output", "temperature", "attachment"]
+pricing = { input_micros_per_million = 300000, output_micros_per_million = 900000, cache_read_micros_per_million = 50000, cache_write_micros_per_million = 0 }
+pinned = true
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+# Pinned to Z.AI's official OpenAPI and pricing table; models.dev does not
+# currently publish this documented tool-capable vision model.
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.6v-flashx"
+remote_model = "glm-4.6v-flashx"
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+context_window = 128000
+output_limit = 32768
+features = ["tool-call", "reasoning", "structured-output", "temperature", "attachment"]
+pricing = { input_micros_per_million = 40000, output_micros_per_million = 400000, cache_read_micros_per_million = 4000, cache_write_micros_per_million = 0 }
+pinned = true
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+# Pinned to Z.AI's official OpenAPI and pricing table; models.dev does not
+# currently publish this documented tool-capable vision model.
+[[targets]]
+connection = "zai"
+model = "zai/glm-4.6v-flash"
+remote_model = "glm-4.6v-flash"
+roles = ["cheap"]
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+context_window = 128000
+output_limit = 32768
+features = ["tool-call", "reasoning", "structured-output", "temperature", "attachment"]
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+pinned = true
 
 [[targets.reasoning_options]]
 type = "toggle"

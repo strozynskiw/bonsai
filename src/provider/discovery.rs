@@ -32,6 +32,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// OpenRouter returns the complete public tool-capable catalog in one response,
 /// which is substantially larger than a local native probe.
 const REMOTE_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
+const ZAI_OPENAPI_URL: &str = "https://docs.z.ai/openapi.json";
 
 /// Bound on per-model `/api/show` calls for one Ollama listing; beyond this
 /// the remaining models are listed without metadata rather than hammering the
@@ -100,6 +101,7 @@ pub(crate) async fn fetch_models_with_discovery(
         DiscoveryKind::Ollama => fetch_ollama_models(base_url).await,
         DiscoveryKind::OpenRouter => fetch_openrouter_models(base_url, api_key).await,
         DiscoveryKind::Tencent => fetch_tencent_models(base_url, api_key).await,
+        DiscoveryKind::Zai => fetch_zai_models().await,
     };
     match native {
         Ok(availability) => Ok(availability),
@@ -113,6 +115,112 @@ pub(crate) async fn fetch_models_with_discovery(
             fetch_generic_models(protocol, display_label, base_url, api_key, auth_header).await
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Z.AI official OpenAPI catalog
+// ---------------------------------------------------------------------------
+
+/// Fetch Z.AI's documented tool-capable chat lineup. Z.AI does not expose a
+/// `/models` endpoint; model enums in its official OpenAPI document are the
+/// machine-readable source of truth used by its own API reference.
+async fn fetch_zai_models() -> Result<LiveModelAvailability> {
+    let response = crate::provider::http_client()
+        .get(ZAI_OPENAPI_URL)
+        .timeout(REMOTE_CATALOG_TIMEOUT)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .context("Failed to fetch Z.AI OpenAPI model catalog")?;
+    if !response.status().is_success() {
+        return Err(sse::error_from_response(response).await.into());
+    }
+    let value: Value = response
+        .json()
+        .await
+        .context("Failed to parse Z.AI OpenAPI model catalog")?;
+    Ok(LiveModelAvailability {
+        models: zai_models_from_openapi(&value)?,
+        ..LiveModelAvailability::default()
+    })
+}
+
+fn zai_models_from_openapi(value: &Value) -> Result<Vec<AvailableModel>> {
+    let Some(text_models) = value
+        .pointer("/components/schemas/ChatCompletionTextRequest/properties/model/enum")
+        .and_then(Value::as_array)
+    else {
+        anyhow::bail!("Z.AI OpenAPI catalog has no text-model enum");
+    };
+    let vision_models = value
+        .pointer("/components/schemas/ChatCompletionVisionRequest/properties/model/enum")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|model| model.as_str().is_some_and(|id| id.starts_with("glm-4.6v")));
+    let mut seen = std::collections::HashSet::new();
+    let models = text_models
+        .iter()
+        .chain(vision_models)
+        .filter_map(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .filter(|id| seen.insert(*id))
+        .map(zai_model_from_id)
+        .collect();
+    Ok(models)
+}
+
+fn zai_model_from_id(id: &str) -> AvailableModel {
+    let mut features = vec![
+        ModelFeature::ToolCall,
+        ModelFeature::StructuredOutput,
+        ModelFeature::Temperature,
+    ];
+    if id.starts_with("glm-4.6v") {
+        features.push(ModelFeature::Attachment);
+    }
+    let supports_thinking = id != "glm-4-32b-0414-128k";
+    if supports_thinking {
+        features.push(ModelFeature::Reasoning);
+    }
+    let mut model = AvailableModel::with_metadata(id, None, None, features)
+        .with_token_counter(Some(TokenCounterKind::ZaiTokenizer));
+    if zai_supports_reasoning_effort(id) {
+        model = model
+            .with_reasoning_codec(ReasoningCodec::ZaiThinking)
+            .with_reasoning(
+                vec![
+                    ReasoningSelection::Off,
+                    ReasoningSelection::Minimal,
+                    ReasoningSelection::Low,
+                    ReasoningSelection::Medium,
+                    ReasoningSelection::High,
+                    ReasoningSelection::XHigh,
+                    ReasoningSelection::Max,
+                ],
+                Some(ReasoningSelection::Max),
+            );
+    } else if supports_thinking {
+        model = model
+            .with_reasoning_codec(ReasoningCodec::ZaiThinking)
+            .with_reasoning(vec![ReasoningSelection::Off, ReasoningSelection::On], None);
+    }
+    model
+}
+
+fn zai_supports_reasoning_effort(id: &str) -> bool {
+    let Some(version) = id.strip_prefix("glm-") else {
+        return false;
+    };
+    let mut components = version.split(['.', '-']);
+    let major = components
+        .next()
+        .and_then(|component| component.parse::<u32>().ok());
+    let minor = components
+        .next()
+        .and_then(|component| component.parse::<u32>().ok());
+    major.is_some_and(|major| major > 5)
+        || (major == Some(5) && minor.is_some_and(|minor| minor >= 2))
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1125,91 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn zai_openapi_catalog_reads_only_tool_capable_chat_models() {
+        let value = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "ChatCompletionTextRequest": {
+                        "properties": {
+                            "model": {
+                                "enum": [
+                                    "glm-5.2",
+                                    "glm-4.7",
+                                    "glm-4-32b-0414-128k",
+                                    "glm-5.2"
+                                ]
+                            }
+                        }
+                    },
+                    "ChatCompletionVisionRequest": {
+                        "properties": {
+                            "model": {
+                                "enum": [
+                                    "glm-5v-turbo",
+                                    "glm-4.6v",
+                                    "glm-4.6v-flashx",
+                                    "glm-4.5v"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let models = zai_models_from_openapi(&value).unwrap();
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.remote_model_id.as_ref())
+                .collect::<Vec<_>>(),
+            [
+                "glm-5.2",
+                "glm-4.7",
+                "glm-4-32b-0414-128k",
+                "glm-4.6v",
+                "glm-4.6v-flashx",
+            ]
+        );
+        assert!(
+            models
+                .iter()
+                .all(|model| model.features.contains(&ModelFeature::ToolCall))
+        );
+        assert_eq!(
+            models[0].supported_reasoning,
+            [
+                ReasoningSelection::Off,
+                ReasoningSelection::Minimal,
+                ReasoningSelection::Low,
+                ReasoningSelection::Medium,
+                ReasoningSelection::High,
+                ReasoningSelection::XHigh,
+                ReasoningSelection::Max,
+            ]
+        );
+        assert_eq!(
+            models[0].recommended_reasoning,
+            Some(ReasoningSelection::Max)
+        );
+        assert!(
+            !models[2].features.contains(&ModelFeature::Reasoning),
+            "the legacy GLM-4 model predates Z.AI's thinking control"
+        );
+        assert!(models[3].features.contains(&ModelFeature::Attachment));
+        assert!(zai_supports_reasoning_effort("glm-5.3"));
+        assert!(zai_supports_reasoning_effort("glm-6"));
+        assert!(!zai_supports_reasoning_effort("glm-5-turbo"));
+    }
+
+    #[test]
+    fn zai_openapi_catalog_rejects_an_unrecognized_document() {
+        let error = zai_models_from_openapi(&serde_json::json!({})).unwrap_err();
+        assert!(error.to_string().contains("text-model enum"));
+    }
 
     #[test]
     fn tencent_response_keeps_online_hunyuan_language_models_with_known_metadata() {

@@ -90,6 +90,7 @@ impl ProviderPreset {
                 | DiscoveryKind::Mistral
                 | DiscoveryKind::OpenRouter
                 | DiscoveryKind::Tencent
+                | DiscoveryKind::Zai
                 | DiscoveryKind::Static,
                 _,
             ) => None,

@@ -395,6 +395,7 @@ impl OpenAiCompatibleProvider {
         // routes. Only verified backends receive the field, so strict servers
         // never see it.
         if self.supports_prompt_cache
+            && self.prompt_cache_policy.emits_body_key()
             && (self.prompt_cache_header.is_none()
                 || self.prompt_cache_policy.emits_body_key_with_header())
         {
@@ -1583,6 +1584,34 @@ mod tests {
             planning.get("prompt_cache_key").and_then(Value::as_str),
             coding.get("prompt_cache_key").and_then(Value::as_str),
             "plan-mode and coding-mode lanes must not share a cache route",
+        );
+    }
+
+    #[test]
+    fn zai_implicit_cache_keeps_a_stable_prefix_without_a_cache_key() {
+        let catalog =
+            crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
+        let resolved = catalog
+            .resolve_connection_model(&"zai".parse().expect("connection id"), "zai/glm-5.2")
+            .expect("Z.AI target resolves");
+        let session = provider_session("zai-key", "https://api.z.ai/api/paas/v4", "zai/glm-5.2");
+        let target = resolved.run_target(session.base_url.as_str().into(), session.reasoning);
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            "zai",
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            CACHING,
+        );
+
+        let body = provider
+            .request_body(&[system_message("stable"), user_message("hello")], &[])
+            .unwrap();
+
+        assert!(body.get("prompt_cache_key").is_none());
+        assert_eq!(
+            provider.project_state_cache_strategy(),
+            crate::provider::ProjectStateCacheStrategy::AppendOnlyHistory
         );
     }
 

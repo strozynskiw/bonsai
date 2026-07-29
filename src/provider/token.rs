@@ -18,6 +18,7 @@ pub enum TokenCounterKind {
     Tiktoken,
     Qwen3,
     AnthropicCountTokens,
+    ZaiTokenizer,
     #[default]
     Heuristic,
 }
@@ -28,6 +29,7 @@ impl TokenCounterKind {
             Self::Tiktoken => "tiktoken",
             Self::Qwen3 => "qwen3",
             Self::AnthropicCountTokens => "anthropic-count-tokens",
+            Self::ZaiTokenizer => "zai-tokenizer",
             Self::Heuristic => "heuristic",
         }
     }
@@ -37,6 +39,7 @@ impl TokenCounterKind {
             "tiktoken" => Self::Tiktoken,
             "qwen3" | "qwen-3" => Self::Qwen3,
             "anthropic-count-tokens" | "anthropic count_tokens" => Self::AnthropicCountTokens,
+            "zai-tokenizer" | "zai tokenizer" => Self::ZaiTokenizer,
             _ => Self::Heuristic,
         }
     }
@@ -46,6 +49,7 @@ impl TokenCounterKind {
             Self::Tiktoken => "tiktoken",
             Self::Qwen3 => "qwen3",
             Self::AnthropicCountTokens => "anthropic count_tokens",
+            Self::ZaiTokenizer => "Z.AI tokenizer",
             Self::Heuristic => "heuristic",
         }
     }
@@ -270,6 +274,7 @@ pub struct PromptEstimator {
     kind: TokenCounterKind,
     pricing: Option<ModelPricingSchedule>,
     anthropic: Option<AnthropicCountTokensClient>,
+    zai: Option<ZaiTokenizerClient>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -286,11 +291,14 @@ impl PromptEstimator {
             .unwrap_or(TokenCounterKind::Heuristic);
         let anthropic = matches!(kind, TokenCounterKind::AnthropicCountTokens)
             .then(|| AnthropicCountTokensClient::new(session, metadata));
+        let zai = matches!(kind, TokenCounterKind::ZaiTokenizer)
+            .then(|| ZaiTokenizerClient::new(session, metadata, &model));
         Self {
             model,
             kind,
             pricing: metadata.pricing.map(ModelPricingSchedule::flat),
             anthropic,
+            zai,
         }
     }
 
@@ -304,11 +312,14 @@ impl PromptEstimator {
             .unwrap_or(TokenCounterKind::Heuristic);
         let anthropic = matches!(kind, TokenCounterKind::AnthropicCountTokens)
             .then(|| AnthropicCountTokensClient::new_for_resolved(session, resolved, metadata));
+        let zai = matches!(kind, TokenCounterKind::ZaiTokenizer)
+            .then(|| ZaiTokenizerClient::new(session, metadata, resolved.remote_model_id.as_ref()));
         Self {
             model: resolved.remote_model_id.to_string(),
             kind,
             pricing: resolved.pricing_schedule.clone(),
             anthropic,
+            zai,
         }
     }
 
@@ -318,6 +329,7 @@ impl PromptEstimator {
             kind: TokenCounterKind::Heuristic,
             pricing: None,
             anthropic: None,
+            zai: None,
         }
     }
 
@@ -332,6 +344,7 @@ impl PromptEstimator {
             kind,
             pricing: pricing.map(ModelPricingSchedule::flat),
             anthropic: None,
+            zai: None,
         }
     }
 
@@ -437,6 +450,35 @@ impl PromptEstimator {
                     )
                 }
             }
+            TokenCounterKind::ZaiTokenizer => {
+                if let Some(client) = &self.zai {
+                    match client.count_tokens(messages, tools).await {
+                        Ok(tokens) => PromptEstimate {
+                            input_tokens: tokens,
+                            source: TokenCounterKind::ZaiTokenizer,
+                            confidence: EstimateConfidence::High,
+                            tool_schema_tokens,
+                        },
+                        Err(err) => {
+                            tracing::debug!(
+                                error = %format!("{err:#}"),
+                                "Z.AI tokenizer failed; falling back to heuristic token count"
+                            );
+                            heuristic_estimate_with_tool_schema_tokens(
+                                messages,
+                                tool_schema_tokens,
+                                TokenCounterKind::Heuristic,
+                            )
+                        }
+                    }
+                } else {
+                    heuristic_estimate_with_tool_schema_tokens(
+                        messages,
+                        tool_schema_tokens,
+                        TokenCounterKind::Heuristic,
+                    )
+                }
+            }
             TokenCounterKind::Heuristic => heuristic_estimate_with_tool_schema_tokens(
                 messages,
                 tool_schema_tokens,
@@ -476,6 +518,65 @@ impl PromptEstimator {
 impl Default for PromptEstimator {
     fn default() -> Self {
         Self::heuristic()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ZaiTokenizerClient {
+    http: reqwest::Client,
+    endpoint: String,
+    api_key: String,
+    model: String,
+}
+
+impl ZaiTokenizerClient {
+    fn new(session: &ProviderSession, metadata: &ProviderMetadata, model: &str) -> Self {
+        let base_url = if session.base_url.trim().is_empty() {
+            metadata.default_base_url.as_ref()
+        } else {
+            session.base_url.trim()
+        };
+        Self {
+            http: crate::provider::http_client(),
+            endpoint: format!("{}/tokenizer", base_url.trim_end_matches('/')),
+            api_key: session.api_key.clone(),
+            model: model.to_string(),
+        }
+    }
+
+    async fn count_tokens(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+    ) -> Result<usize> {
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+        });
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+        }
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to call Z.AI tokenizer")?;
+        if !response.status().is_success() {
+            anyhow::bail!("Z.AI tokenizer returned HTTP {}", response.status());
+        }
+        let payload: Value = response
+            .json()
+            .await
+            .context("Failed to parse Z.AI tokenizer response")?;
+        payload
+            .pointer("/usage/prompt_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .context("Z.AI tokenizer response missing usage.prompt_tokens")
     }
 }
 
@@ -682,7 +783,10 @@ fn estimate_messages_for_report(
         }
         Ok(None) => (
             heuristic_message_tokens_for_report(messages),
-            if matches!(kind, TokenCounterKind::AnthropicCountTokens) {
+            if matches!(
+                kind,
+                TokenCounterKind::AnthropicCountTokens | TokenCounterKind::ZaiTokenizer
+            ) {
                 TokenCounterKind::Heuristic
             } else {
                 kind
@@ -722,7 +826,9 @@ fn local_tokenizer_confidence(kind: TokenCounterKind, model: &str) -> EstimateCo
                 || model.starts_with("text-embedding-")
         }
         TokenCounterKind::Qwen3 => model.contains("qwen3"),
-        TokenCounterKind::AnthropicCountTokens | TokenCounterKind::Heuristic => false,
+        TokenCounterKind::AnthropicCountTokens
+        | TokenCounterKind::ZaiTokenizer
+        | TokenCounterKind::Heuristic => false,
     };
     if native_family {
         EstimateConfidence::High
@@ -837,7 +943,9 @@ fn local_tokenizer_for_counter(
         TokenCounterKind::Qwen3 => Ok(Some(LocalTokenizerRef::HuggingFace(
             cached_huggingface_tokenizer(&QWEN3_TOKENIZER, QWEN3_TOKENIZER_JSON, "qwen3")?,
         ))),
-        TokenCounterKind::AnthropicCountTokens | TokenCounterKind::Heuristic => Ok(None),
+        TokenCounterKind::AnthropicCountTokens
+        | TokenCounterKind::ZaiTokenizer
+        | TokenCounterKind::Heuristic => Ok(None),
     }
 }
 
@@ -966,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn token_counter_kind_round_trips_qwen3_labels() {
+    fn token_counter_kind_round_trips_provider_labels() {
         assert_eq!(TokenCounterKind::Qwen3.as_db_str(), "qwen3");
         assert_eq!(
             TokenCounterKind::from_db_str("qwen3"),
@@ -983,6 +1091,15 @@ mod tests {
         let decoded: TokenCounterKind =
             serde_json::from_str("\"qwen3\"").expect("qwen3 should deserialize");
         assert_eq!(decoded, TokenCounterKind::Qwen3);
+
+        assert_eq!(
+            TokenCounterKind::from_db_str("zai-tokenizer"),
+            TokenCounterKind::ZaiTokenizer
+        );
+        assert_eq!(
+            serde_json::to_string(&TokenCounterKind::ZaiTokenizer).unwrap(),
+            "\"zai-tokenizer\""
+        );
     }
 
     #[test]
@@ -1233,6 +1350,42 @@ mod tests {
 
         assert_eq!(estimate.input_tokens, 42);
         assert_eq!(estimate.source, TokenCounterKind::AnthropicCountTokens);
+        assert_eq!(estimate.confidence, EstimateConfidence::High);
+    }
+
+    #[tokio::test]
+    async fn zai_tokenizer_success_is_high_confidence() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tokenizer"))
+            .and(header("authorization", "Bearer zai-key"))
+            .and(body_partial_json(json!({
+                "model": "glm-5.2",
+                "messages": [{"role": "user", "content": "hello"}],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "usage": {"prompt_tokens": 37, "total_tokens": 37}
+            })))
+            .mount(&server)
+            .await;
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin()
+            .expect("built-in catalog should load");
+        let registry = crate::provider::ProviderRegistry::from_catalog(&catalog);
+        let factory = registry.get("zai").expect("Z.AI provider should exist");
+        let metadata = factory.metadata();
+        let session = provider_session("zai-key", &server.uri(), "glm-5.2");
+        let estimator = PromptEstimator::from_metadata(metadata, &session);
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("hello")
+                .build()
+                .expect("user message should build"),
+        )];
+
+        let estimate = estimator.estimate_prompt(&messages, &[]).await;
+
+        assert_eq!(estimate.input_tokens, 37);
+        assert_eq!(estimate.source, TokenCounterKind::ZaiTokenizer);
         assert_eq!(estimate.confidence, EstimateConfidence::High);
     }
 

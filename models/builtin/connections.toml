@@ -152,7 +152,14 @@ model_env = "ZAI_MODEL"
 base_url_env = "ZAI_BASE_URL"
 default_model = "zai/glm-5.2"
 default_endpoint_path = "chat/completions"
-default_token_counter = "tiktoken"
+default_token_counter = "zai-tokenizer"
+# Z.AI has no `/models` endpoint. `/refresh` reads its tool-capable chat model
+# enums from the official OpenAPI document, then enriches them from models.dev.
+discovery = "zai"
+# Z.AI detects repeated prefixes automatically and documents no request-side
+# cache key. Keep history byte-stable without adding an off-schema field.
+prompt_cache = true
+prompt_cache_policy = "implicit-prefix"
 # GLM tool rounds require their streamed reasoning_content to be replayed.
 reasoning_content_echo = true
 
@@ -171,7 +178,12 @@ model_env = "ZAI_CODING_PLAN_MODEL"
 base_url_env = "ZAI_CODING_PLAN_BASE_URL"
 default_model = "zai-coding-plan/glm-5.2"
 default_endpoint_path = "chat/completions"
-default_token_counter = "tiktoken"
+default_token_counter = "heuristic"
+# The Coding Plan documentation is authoritative: it currently supports only
+# GLM-5.2, GLM-5-Turbo, and GLM-4.7. Avoid models.dev's false plan candidates.
+discovery = "static"
+prompt_cache = true
+prompt_cache_policy = "implicit-prefix"
 reasoning_content_echo = true
 
 [[connections]]

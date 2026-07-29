@@ -48,10 +48,10 @@ pub(crate) enum ReasoningCodec {
     /// their OpenAI-compatible Chat Completions endpoint.
     KimiThinking,
     ZaiThinking,
-    /// GLM 5.2+ (Z.ai via OpenAI-compatible endpoints) rejects a request that
-    /// carries BOTH `thinking` and `reasoning_effort` ("cannot specify both
-    /// 'thinking' and 'reasoning_effort'"), which [`ZaiThinking`] sends together
-    /// for older GLM. This variant sends only one field.
+    /// OpenCode's hosted GLM 5.2 route rejects a request that carries both
+    /// `thinking` and `reasoning_effort`. Direct Z.AI uses [`ZaiThinking`],
+    /// matching its current documented requirement that effort only takes
+    /// effect while `thinking.type` is enabled.
     ZaiReasoningEffort,
 }
 
@@ -229,12 +229,9 @@ fn apply_zai_thinking_fields(body: &mut Value, selection: ReasoningSelection) {
     }
 }
 
-/// GLM 5.2+ rejects a request carrying BOTH `thinking` and `reasoning_effort`,
-/// so send only one field: `reasoning_effort` for an effort level, and the
-/// `thinking` toggle only for the plain on/off cases (which carry no
-/// `reasoning_effort` to conflict with). An effort level implies reasoning is
-/// on, so no separate enable flag is needed. Contrast [`apply_zai_thinking_fields`],
-/// which sends both for older GLM that required the explicit `thinking` enable.
+/// OpenCode's GLM 5.2 route rejects a request carrying both `thinking` and
+/// `reasoning_effort`, so send only one field. Direct Z.AI uses
+/// [`apply_zai_thinking_fields`] because its current API requires both fields.
 fn apply_zai_reasoning_effort_fields(body: &mut Value, selection: ReasoningSelection) {
     match selection {
         ReasoningSelection::Default | ReasoningSelection::BudgetTokens(_) => {}
@@ -523,8 +520,8 @@ mod tests {
 
     #[test]
     fn zai_reasoning_effort_never_sends_thinking_and_effort_together() {
-        // GLM 5.2 rejects both fields at once; an effort level sends only
-        // `reasoning_effort`.
+        // OpenCode's GLM 5.2 route rejects both fields at once; an effort level
+        // sends only `reasoning_effort`.
         let mut body = json!({});
         ReasoningCodec::ZaiReasoningEffort
             .apply_chat_completions_fields(&mut body, ReasoningSelection::High);
