@@ -1,18 +1,16 @@
-//! The `enter_plan_mode` tool: the coding agent's one lever to move planning
-//! work onto the live plan canvas. A coding turn holds the agent lock and
-//! therefore cannot swap its own registry to the plan tools in place, so this
-//! tool instead asks the user to confirm the switch and, on yes, ends the turn
-//! with [`WaitReason::PersonaSwitch`]. The TUI event loop performs the actual
-//! persona swap and re-dispatches a continuation under the planning persona,
-//! carrying the conversation so the model builds the plan on the canvas rather
-//! than inventing an ad-hoc `*.plan.md` file.
+//! The `start_new_plan` tool starts a fresh canvas planning continuation. A
+//! coding turn holds the agent lock and therefore cannot prepare the canvas or
+//! swap its own registry in place, so this tool asks for confirmation and ends
+//! the turn with [`WaitReason::StartNewPlan`]. The TUI event loop protects any
+//! non-empty canvas in the saved-plan library, clears it, then re-dispatches the
+//! conversation under the planning persona.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agent::{AgentMode, WaitReason};
+use crate::agent::WaitReason;
 use crate::interaction::{
     InteractionAnswer, InteractionOutcome, InteractionRequest, InteractionService, QuestionOption,
 };
@@ -20,18 +18,18 @@ use crate::tool::schema::{object, parse_args, string_property};
 use crate::tool::{Tool, ToolExecutionContext, ToolOutput};
 
 #[derive(Deserialize)]
-struct EnterPlanModeArgs {
+struct StartNewPlanArgs {
     /// A one-line description of what the model intends to plan, shown to the
     /// user in the confirmation prompt so the choice is informed. Optional.
     #[serde(default)]
     summary: Option<String>,
 }
 
-pub struct EnterPlanModeTool {
+pub struct StartNewPlanTool {
     interaction: Arc<InteractionService>,
 }
 
-impl EnterPlanModeTool {
+impl StartNewPlanTool {
     pub fn new(interaction: Arc<InteractionService>) -> Self {
         Self { interaction }
     }
@@ -41,7 +39,7 @@ impl EnterPlanModeTool {
         args: serde_json::Value,
         origin: Option<&str>,
     ) -> anyhow::Result<ToolOutput> {
-        let args: EnterPlanModeArgs = parse_args("enter_plan_mode tool", args)?;
+        let args: StartNewPlanArgs = parse_args("start_new_plan tool", args)?;
         let summary = args
             .summary
             .as_deref()
@@ -49,17 +47,17 @@ impl EnterPlanModeTool {
             .filter(|s| !s.is_empty());
         let prompt = match summary {
             Some(what) => format!(
-                "This looks like planning work ({what}). Switch to plan mode and build it on the live canvas?"
+                "This looks like planning work ({what}). Start a fresh plan on the live canvas? Any existing non-empty canvas will be saved automatically first."
             ),
             None => {
-                "This looks like planning work. Switch to plan mode and build it on the live canvas?"
+                "This looks like planning work. Start a fresh plan on the live canvas? Any existing non-empty canvas will be saved automatically first."
                     .to_string()
             }
         };
         let options = vec![
             QuestionOption {
-                label: "Switch to plan mode".to_string(),
-                description: "Move to the plan canvas and design there".to_string(),
+                label: "Start new plan".to_string(),
+                description: "Save any existing canvas, then plan on a fresh canvas".to_string(),
                 preselected: false,
             },
             QuestionOption {
@@ -74,25 +72,26 @@ impl EnterPlanModeTool {
             .request(|id| InteractionRequest::Question {
                 request_id: id,
                 prompt,
-                header: Some("Plan mode".to_string()),
+                header: Some("Start new plan".to_string()),
                 options,
                 multiple: false,
                 origin,
             })
             .await;
         match outcome {
-            // Index 0 is "Switch to plan mode"; anything else keeps coding.
+            // Index 0 is "Start new plan"; anything else keeps coding.
             Ok(InteractionOutcome::Question(Some(InteractionAnswer::Choices(indices))))
                 if indices.first() == Some(&0) =>
             {
                 Ok(ToolOutput::WaitStarted {
-                    reason: WaitReason::PersonaSwitch(AgentMode::Planning),
-                    message: "Switching to plan mode — continuing on the live canvas.".to_string(),
+                    reason: WaitReason::StartNewPlan,
+                    message: "Starting a new plan — protecting the current canvas first."
+                        .to_string(),
                 })
             }
             // Any other answer (the second option, a custom reply, or a
             // cancel) means stay in the coding agent. A non-interactive
-            // surface cannot switch persona, so it also stays. None of these
+            // surface cannot start a new plan, so it also stays. None of these
             // are errors: the coding turn simply continues.
             _ => Ok(ToolOutput::Text(
                 "Staying in the coding agent. Continue the work here, or produce a brief plan inline in chat — do not write an ad-hoc plan file.".to_string(),
@@ -102,23 +101,24 @@ impl EnterPlanModeTool {
 }
 
 #[async_trait]
-impl Tool for EnterPlanModeTool {
+impl Tool for StartNewPlanTool {
     fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {
         crate::tool::ToolEffectPolicy::LocalState
     }
 
     fn name(&self) -> &str {
-        "enter_plan_mode"
+        "start_new_plan"
     }
 
     fn description(&self) -> &str {
-        "Ask the user to switch into plan mode so the plan is built on the live plan canvas. \
+        "Ask the user to start a fresh plan on the live plan canvas. \
          Call this when the user asks you to plan, design, or scope a feature rather than \
          implement it now — or proactively, when you judge the task is large or risky enough \
          that a reviewed plan should precede implementation (multi-file feature work, \
          architectural changes, ambiguous scope). The user confirms or declines the switch, so \
-         offering it is cheap. On confirmation the conversation continues under the planning \
-         persona with the canvas tools; if the user declines, keep working in the coding agent. \
+         offering it is cheap. On confirmation any existing non-empty canvas is saved to the \
+         plan library, then the conversation continues under the planning persona with a fresh \
+         canvas; if the user declines, keep working in the coding agent. \
          Never write an ad-hoc plan file (e.g. *.plan.md) — the canvas is the plan surface."
     }
 
@@ -156,10 +156,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn confirming_switch_ends_turn_with_persona_switch() {
+    async fn confirming_starts_a_new_plan_transition() {
         let (service, mut rx) = InteractionService::new();
         let service = Arc::new(service);
-        let tool = EnterPlanModeTool::new(service.clone());
+        let tool = StartNewPlanTool::new(service.clone());
         let answerer = tokio::spawn(async move {
             let InteractionRequest::Question { request_id, .. } = rx.recv().await.unwrap() else {
                 panic!("expected a question request");
@@ -180,7 +180,7 @@ mod tests {
         assert!(matches!(
             out,
             ToolOutput::WaitStarted {
-                reason: WaitReason::PersonaSwitch(AgentMode::Planning),
+                reason: WaitReason::StartNewPlan,
                 ..
             }
         ));
@@ -190,7 +190,7 @@ mod tests {
     async fn declining_keeps_coding() {
         let (service, mut rx) = InteractionService::new();
         let service = Arc::new(service);
-        let tool = EnterPlanModeTool::new(service.clone());
+        let tool = StartNewPlanTool::new(service.clone());
         let answerer = tokio::spawn(async move {
             let InteractionRequest::Question { request_id, .. } = rx.recv().await.unwrap() else {
                 panic!("expected a question request");
@@ -210,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn noninteractive_keeps_coding() {
-        let tool = EnterPlanModeTool::new(Arc::new(InteractionService::noninteractive()));
+        let tool = StartNewPlanTool::new(Arc::new(InteractionService::noninteractive()));
         let out = tool.execute(serde_json::json!({})).await.unwrap();
         assert!(matches!(out, ToolOutput::Text(_)));
     }

@@ -4,7 +4,6 @@
 use async_openai::types::chat::ChatCompletionRequestMessage;
 use tokio_util::sync::CancellationToken;
 
-use super::AgentMode;
 use crate::model_catalog::ConnectionId;
 use crate::provider::{EstimateConfidence, InputCacheUsage, TokenCounterKind};
 use crate::storage::SessionId;
@@ -79,14 +78,11 @@ pub enum WaitReason {
     Subagents(Vec<String>),
     /// Waiting for another live session to finish its current run.
     Peer(PeerWait),
-    /// The model asked to change persona mid-conversation (e.g. the coding
-    /// agent entering plan mode after the user confirmed). A turn cannot swap
-    /// its own registry while it holds the agent lock, so the tool ends the
-    /// turn with this reason; the TUI event loop then switches the active
-    /// persona and re-dispatches a continuation under the new mode. Unlike the
-    /// other variants this does not park the session — it hands control back so
-    /// the next run starts with the requested persona.
-    PersonaSwitch(AgentMode),
+    /// The coding agent confirmed a fresh planning continuation. Before
+    /// switching persona, the TUI protects any non-empty canvas in the saved
+    /// plan library and clears the working canvas. Failure leaves the coding
+    /// persona and canvas untouched.
+    StartNewPlan,
 }
 
 /// Exact one-shot peer wait whose done notice may resume a parked turn.

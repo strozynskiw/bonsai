@@ -641,19 +641,29 @@ async fn save_current_plan(
     deps: PersistenceCommandDeps<'_>,
     state: &mut PersistenceCommandState<'_>,
 ) -> Result<()> {
+    let saved = save_current_plan_to_library(app, deps.storage, *state.current_session_id).await?;
+    app.reduce(AppAction::SetActiveSavedPlan(Some(saved.id)));
+    push_transient_notice(app, &format!("Saved plan #{}: {}.", saved.id, saved.title));
+    Ok(())
+}
+
+/// Validate and freeze the active canvas in the saved-plan library. Both a
+/// manual `/save` and a fresh-plan transition use this path so malformed
+/// canvases are never discarded by automation.
+async fn save_current_plan_to_library(
+    app: &AppState,
+    storage: &Storage,
+    current_session_id: SessionId,
+) -> Result<crate::storage::SavedPlanSummary> {
     validate_plan_for_save(&app.plan)?;
-    let saved = deps
-        .storage
+    storage
         .save_plan_to_library(
-            *state.current_session_id,
+            current_session_id,
             app.active_saved_plan_session_id,
             &app.plan,
             app.branch.as_deref(),
         )
-        .await?;
-    app.reduce(AppAction::SetActiveSavedPlan(Some(saved.id)));
-    push_transient_notice(app, &format!("Saved plan #{}: {}.", saved.id, saved.title));
-    Ok(())
+        .await
 }
 
 fn validate_plan_for_save(plan: &crate::plan::PlanDoc) -> Result<()> {
@@ -732,6 +742,29 @@ pub(in crate::tui) async fn clear_canvas_plan(app: &mut AppState, plan_store: &S
         app.plan = plan.clone();
     }
     app.reduce(AppAction::SetActiveSavedPlan(None));
+}
+
+/// Protect the current canvas before replacing it for a planning continuation.
+/// A non-empty canvas is saved with the same validation and upsert policy as
+/// `/save`; only a successful save may clear the shared canvas and its binding.
+pub(in crate::tui) async fn protect_canvas_before_new_plan(
+    app: &mut AppState,
+    storage: &Storage,
+    current_session_id: SessionId,
+    plan_store: &SharedPlanStore,
+) -> Result<()> {
+    let plan = plan_store.lock().await.clone();
+    app.plan = plan;
+    if !app.plan.is_empty() {
+        let saved = save_current_plan_to_library(app, storage, current_session_id).await?;
+        app.reduce(AppAction::SetActiveSavedPlan(Some(saved.id)));
+        push_transient_notice(
+            app,
+            &format!("Saved plan #{} before starting a new plan.", saved.id),
+        );
+    }
+    clear_canvas_plan(app, plan_store).await;
+    Ok(())
 }
 
 pub(in crate::tui) async fn open_saved_plan(

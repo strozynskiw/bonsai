@@ -556,8 +556,8 @@ impl TaskController {
     }
 
     /// Continue the current conversation under a newly selected persona after
-    /// the coding agent confirmed a plan-mode switch (`enter_plan_mode`). No new
-    /// user turn is appended: `set_persona` swaps the registry and injects the
+    /// a completed planning transition. No new user turn is appended:
+    /// `set_persona` swaps the registry and injects the
     /// transition system message, then the model generates from the existing
     /// context so it builds the plan on the canvas instead of re-grounding.
     pub fn start_persona_switch_continuation(

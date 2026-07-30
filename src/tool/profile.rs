@@ -64,7 +64,7 @@ pub(crate) enum ToolFactoryKey {
     Tasks,
     Peers,
     Question,
-    EnterPlanMode,
+    StartNewPlan,
     MemoryWrite,
     WebFetch,
     WebSearch,
@@ -414,13 +414,12 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         [false; 5],
         Standard,
     ),
-    // Coding-only: the lever a coding turn uses to move planning work onto the
-    // plan canvas. Absent from the planning profile (already there) and from
-    // subagents/smol.
+    // Coding-only: the lever a coding turn uses to start fresh planning work on
+    // the plan canvas. Absent from the planning profile and from subagents/smol.
     descriptor(
         46,
-        EnterPlanMode,
-        "enter_plan_mode",
+        StartNewPlan,
+        "start_new_plan",
         LocalState,
         Serialized,
         [30, ABSENT, ABSENT, ABSENT, ABSENT],

@@ -2910,37 +2910,39 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         // poll_finished-only driver would miss the signal and the phased plan
         // would stall after the first phase. maybe_advance self-gates on
         // idle + !is_busy + phase_advance.take(), so it is a cheap no-op
-        // otherwise. Phase advance takes priority over a queued run, mirroring
-        // the poll_finished site (and how start_pending runs at both sites).
-        let started_deferred = start_next_deferred_command_if_idle(
+        // otherwise. Deferred commands run before phase advancement at both
+        // dispatch sites; queued user input remains last in the idle slot.
+        // Starting a new plan protects and clears the previous canvas before
+        // any deferred command can act on it. It takes priority over phase
+        // advancement and queued work.
+        let started_new_plan = maybe_start_new_plan(
             &mut app,
             &mut tasks,
             agent.clone(),
-            session_store.clone(),
-            &project_root,
-            DeferredCommandDeps {
-                registry: registry.clone(),
-                model_catalog: model_catalog.clone(),
-                storage: Some(&storage),
-            },
+            sink.clone(),
+            &mut repo_map,
+            &storage,
+            current_session_id,
+            plan_store.clone(),
         )
         .await;
-        frame_needs_redraw |= started_deferred;
-        if !started_deferred {
-            // A confirmed plan-mode switch continues the just-finished turn under
-            // the new persona; it takes priority over phase-advance and queued
-            // runs for the idle slot (the two are mutually exclusive in practice
-            // — a switch only follows a flat coding run, never a phased plan).
-            let switched = maybe_apply_persona_switch(
+        frame_needs_redraw |= started_new_plan;
+        if !started_new_plan {
+            let started_deferred = start_next_deferred_command_if_idle(
                 &mut app,
                 &mut tasks,
                 agent.clone(),
-                sink.clone(),
-                &mut repo_map,
+                session_store.clone(),
+                &project_root,
+                DeferredCommandDeps {
+                    registry: registry.clone(),
+                    model_catalog: model_catalog.clone(),
+                    storage: Some(&storage),
+                },
             )
             .await;
-            frame_needs_redraw |= switched;
-            let advanced = !switched
+            frame_needs_redraw |= started_deferred;
+            let advanced = !started_deferred
                 && maybe_advance_plan_phase(
                     &mut app,
                     &mut tasks,
@@ -2952,7 +2954,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 )
                 .await;
             frame_needs_redraw |= advanced;
-            if !switched && !advanced {
+            if !started_deferred && !advanced {
                 frame_needs_redraw |= start_pending_queued_run_if_idle(
                     &mut app,
                     &mut tasks,
@@ -3330,37 +3332,39 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 app.reduce(AppAction::Agent(UiEvent::Interrupted));
             }
             app.mark_run_finished(Instant::now());
-            let started_deferred = start_next_deferred_command_if_idle(
+            // Starting a new plan protects and clears the previous canvas before
+            // any deferred command can act on it.
+            let started_new_plan = maybe_start_new_plan(
                 &mut app,
                 &mut tasks,
                 agent.clone(),
-                session_store.clone(),
-                &project_root,
-                DeferredCommandDeps {
-                    registry: registry.clone(),
-                    model_catalog: model_catalog.clone(),
-                    storage: Some(&storage),
-                },
+                sink.clone(),
+                &mut repo_map,
+                &storage,
+                current_session_id,
+                plan_store.clone(),
             )
             .await;
-            redraw_requested |= started_deferred;
-            if !started_deferred {
-                // A confirmed plan-mode switch continues the just-finished turn
-                // under the new persona; it takes priority over phase-advance
-                // and queued runs for the idle slot.
-                let switched = maybe_apply_persona_switch(
+            redraw_requested |= started_new_plan;
+            if !started_new_plan {
+                let started_deferred = start_next_deferred_command_if_idle(
                     &mut app,
                     &mut tasks,
                     agent.clone(),
-                    sink.clone(),
-                    &mut repo_map,
+                    session_store.clone(),
+                    &project_root,
+                    DeferredCommandDeps {
+                        registry: registry.clone(),
+                        model_catalog: model_catalog.clone(),
+                        storage: Some(&storage),
+                    },
                 )
                 .await;
-                redraw_requested |= switched;
+                redraw_requested |= started_deferred;
                 // A finished phased-plan run auto-advances to the next phase. When it
                 // starts the next phase, skip the queued-run start so the two don't
                 // race for the idle slot.
-                let advanced = !switched
+                let advanced = !started_deferred
                     && maybe_advance_plan_phase(
                         &mut app,
                         &mut tasks,
@@ -3372,7 +3376,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                     )
                     .await;
                 redraw_requested |= advanced;
-                if !switched && !advanced {
+                if !started_deferred && !advanced {
                     redraw_requested |= start_pending_queued_run_if_idle(
                         &mut app,
                         &mut tasks,
@@ -4160,7 +4164,9 @@ async fn start_next_deferred_command_if_idle(
     project_root: &Path,
     deps: DeferredCommandDeps<'_>,
 ) -> bool {
-    if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() {
+    // A confirmed fresh plan must save the current canvas before a deferred
+    // command such as `/new-plan` can clear it.
+    if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() || app.pending_start_new_plan {
         return false;
     }
     let Some(command) = app.deferred_commands.first().cloned() else {
@@ -4343,50 +4349,57 @@ async fn maybe_advance_plan_phase(
     true
 }
 
-/// After the coding agent confirmed an `enter_plan_mode` switch, swap the
-/// active persona to the requested mode and continue the current conversation
-/// under it, so the model builds the plan on the canvas from the context it
-/// already gathered rather than re-grounding. Mirrors `maybe_advance_plan_phase`:
-/// acts only when idle and self-gates on `pending_persona_switch.take()`, so it
-/// is a cheap no-op on every other frame. Returns `true` when it dispatched the
-/// continuation run.
-async fn maybe_apply_persona_switch(
+/// Consume a confirmed fresh-plan transition while idle. Saving happens before
+/// clearing, so validation or storage failures leave the previous canvas and
+/// coding persona intact; the deferred continuation is then discarded.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the event-loop transition needs its owned runtime dependencies"
+)]
+async fn maybe_start_new_plan(
     app: &mut AppState,
     tasks: &mut TaskController,
     agent: Arc<Mutex<Agent>>,
     sink: SharedSink,
     repo_map: &mut RepoMapInjector,
+    storage: &Storage,
+    current_session_id: SessionId,
+    plan_store: SharedPlanStore,
 ) -> bool {
-    if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() {
+    if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() || !app.pending_start_new_plan
+    {
         return false;
     }
-    let Some(mode) = app.pending_persona_switch.take() else {
-        return false;
-    };
-    let view = match mode {
-        crate::agent::AgentMode::Planning => crate::tui::event::View::Plan,
-        _ => crate::tui::event::View::Agent,
-    };
-    // SetView also sets `active_persona` to the view's default mode; the
-    // continuation dispatch then applies that persona to the agent (swapping
-    // the registry and injecting the transition system message).
-    app.reduce(AppAction::SetView(view));
-    let persona = app.active_persona.clone();
-    app.reduce(AppAction::ScrollBottom);
-    app.reduce(AppAction::SetTaskState(TaskState::Running));
-    app.mark_run_started(std::time::Instant::now());
-    app.reduce(AppAction::Agent(UiEvent::Thinking(
-        "Switched to plan mode — building the plan on the canvas".to_string(),
-    )));
-    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
-    if let Some(report) = repo_map.apply_before_turn(&agent).await {
-        app.latest_context_report = Some(report);
+
+    app.pending_start_new_plan = false;
+    match protect_canvas_before_new_plan(app, storage, current_session_id, &plan_store).await {
+        Ok(()) => {
+            app.reduce(AppAction::SetView(crate::tui::event::View::Plan));
+            let persona = app.active_persona.clone();
+            app.reduce(AppAction::ScrollBottom);
+            app.reduce(AppAction::SetTaskState(TaskState::Running));
+            app.mark_run_started(std::time::Instant::now());
+            app.reduce(AppAction::Agent(UiEvent::Thinking(
+                "Starting a new plan on the canvas".to_string(),
+            )));
+            sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+            if let Some(report) = repo_map.apply_before_turn(&agent).await {
+                app.latest_context_report = Some(report);
+            }
+            if let Err(err) = tasks.start_persona_switch_continuation(agent, sink, persona) {
+                app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
+                return false;
+            }
+            true
+        }
+        Err(err) => {
+            app.reduce(AppAction::CommandOutput {
+                kind: CommandOutputKind::Error,
+                text: format!("Could not save the current plan before starting a new one: {err:#}"),
+            });
+            false
+        }
     }
-    if let Err(err) = tasks.start_persona_switch_continuation(agent, sink, persona) {
-        app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
-        return false;
-    }
-    true
 }
 
 async fn start_pending_queued_run_if_idle(

@@ -925,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn meta_line_shows_pending_persona_switch_mid_run() {
+    fn meta_line_shows_pending_persona_selection_mid_run() {
         // A mid-run persona selection never cancels the run; the meta line
         // shows `Running → Selected` so the user sees the switch is pending
         // for the next run, not applied to (or killing) the current one.
