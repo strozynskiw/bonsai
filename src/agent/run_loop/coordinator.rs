@@ -201,7 +201,11 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             ModelCallOutcome::Response(response) => response,
         };
 
-        if response.is_interrupted() {
+        // Providers use `Completed(Stop)` for an ordinary terminal response;
+        // only an explicit interrupted terminal or a stop arriving while the
+        // provider call completed ends this turn as cancelled. In particular,
+        // an empty completed `Stop` remains eligible for the bounded nudge.
+        if response.is_interrupted() || self.cancellation_token.is_cancelled() {
             self.agent.log_response(&response, true);
             if !response.content.is_empty() {
                 deferred_sink.flush();

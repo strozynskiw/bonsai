@@ -12,6 +12,8 @@ struct StreamingMockProvider {
     requests: Arc<Mutex<Vec<Vec<ChatCompletionRequestMessage>>>>,
 }
 
+struct CancellationRaceProvider(CancellationToken);
+
 struct EffortRetryProvider {
     responses: Arc<Mutex<Vec<crate::provider::ProviderResult<StreamedResponse>>>>,
     requests: Arc<Mutex<Vec<Vec<ChatCompletionRequestMessage>>>>,
@@ -148,6 +150,24 @@ impl Provider for StreamingMockProvider {
 
     async fn list_models(&self) -> anyhow::Result<Vec<String>> {
         Ok(vec![])
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for CancellationRaceProvider {
+    async fn chat_stream(
+        &self,
+        _messages: &[ChatCompletionRequestMessage],
+        _tools: &[ChatCompletionTool],
+        _cancellation_token: CancellationToken,
+        _sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        self.0.cancel();
+        finished_response("")
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
     }
 }
 
@@ -569,7 +589,7 @@ async fn interrupted_response_is_preserved() {
 /// the run as a silent success — the model gets a bounded act-now nudge, and
 /// the run completes normally once it produces a real answer.
 #[tokio::test]
-async fn blank_response_is_nudged_not_treated_as_completion() {
+async fn completed_stop_blank_response_is_nudged_not_treated_as_completion() {
     let fixture = TestFixture::new();
     let provider = MockProvider::new(vec![
         finished_response(""),
@@ -602,6 +622,33 @@ async fn blank_response_is_nudged_not_treated_as_completion() {
     assert!(
         second_request.contains("no tool calls and no answer text"),
         "the retry request must carry the act-now nudge: {second_request}"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_racing_a_completed_empty_stop_is_not_nudged() {
+    let fixture = TestFixture::new();
+    let token = CancellationToken::new();
+    let mut agent = Agent::new(
+        Box::new(CancellationRaceProvider(token.clone())),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run("do the task", token, Arc::new(StdoutSink))
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Interrupted(String::new()));
+    assert!(
+        !agent.messages.iter().any(|message| format!("{message:?}")
+            .contains("Your previous turn produced no tool calls and no answer text.")),
+        "a cancellation race must not append an empty-response nudge"
     );
 }
 
