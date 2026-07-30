@@ -7,8 +7,8 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::catalog::{
-    BUILTIN_AGENTS, SubagentRunLimits, builtin_agent, builtin_settings_model_chain,
-    canonical_agent_tool, custom_subagent_limits, frontmatter_model_chain, merged_agent_entries,
+    SubagentRunLimits, builtin_agent, builtin_settings_model_chain, canonical_agent_tool,
+    custom_subagent_limits, frontmatter_model_chain, merged_agent_entries,
     registry_grants_mutation,
 };
 use super::runner::{SubagentRunSpec, SubagentRunner};
@@ -25,20 +25,11 @@ pub struct AgentTool {
     /// add or remove definitions mid-session.
     custom_agents: crate::resource::agent::SharedAgentRegistry,
     builtin_settings: crate::subagent::SharedBuiltinSubagentSettings,
-    resolution: AgentResolution,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentResolution {
-    CustomAndBuiltin,
-    BuiltinOnly,
 }
 
 impl std::fmt::Debug for AgentTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentTool")
-            .field("resolution", &self.resolution)
-            .finish_non_exhaustive()
+        f.debug_struct("AgentTool").finish_non_exhaustive()
     }
 }
 
@@ -74,36 +65,6 @@ impl AgentTool {
             runner,
             custom_agents,
             builtin_settings,
-            resolution: AgentResolution::CustomAndBuiltin,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_builtin_only(
-        name: &'static str,
-        runner: SubagentRunner,
-        custom_agents: crate::resource::agent::SharedAgentRegistry,
-    ) -> Self {
-        Self::new_builtin_only_with_settings(
-            name,
-            runner,
-            custom_agents,
-            crate::subagent::SharedBuiltinSubagentSettings::default(),
-        )
-    }
-
-    pub(crate) fn new_builtin_only_with_settings(
-        name: &'static str,
-        runner: SubagentRunner,
-        custom_agents: crate::resource::agent::SharedAgentRegistry,
-        builtin_settings: crate::subagent::SharedBuiltinSubagentSettings,
-    ) -> Self {
-        Self {
-            name,
-            runner,
-            custom_agents,
-            builtin_settings,
-            resolution: AgentResolution::BuiltinOnly,
         }
     }
 
@@ -215,40 +176,31 @@ impl AgentTool {
                 limits: spec.budget.limits(),
             });
         }
-        if self.resolution == AgentResolution::CustomAndBuiltin {
-            match custom_agents.get(name) {
-                Some(def) if def.enabled && def.allows_subagent() => {
-                    return Ok(ResolvedAgent {
-                        name: def.name.clone(),
-                        instructions: def.instructions.clone(),
-                        registry: self.scoped_registry(def.tools.as_deref())?,
-                        model_chain: frontmatter_model_chain(def),
-                        limits: custom_subagent_limits(def.max_turns),
-                    });
-                }
-                Some(def) if !def.enabled => {
-                    return Err(anyhow!("Agent '{name}' is disabled."));
-                }
-                Some(_) => {
-                    return Err(anyhow!(
-                        "Agent '{name}' is not available as a delegated subagent."
-                    ));
-                }
-                None => {}
+        match custom_agents.get(name) {
+            Some(def) if def.enabled && def.allows_subagent() => {
+                return Ok(ResolvedAgent {
+                    name: def.name.clone(),
+                    instructions: def.instructions.clone(),
+                    registry: self.scoped_registry(def.tools.as_deref())?,
+                    model_chain: frontmatter_model_chain(def),
+                    limits: custom_subagent_limits(def.max_turns),
+                });
             }
+            Some(def) if !def.enabled => {
+                return Err(anyhow!("Agent '{name}' is disabled."));
+            }
+            Some(_) => {
+                return Err(anyhow!(
+                    "Agent '{name}' is not available as a delegated subagent."
+                ));
+            }
+            None => {}
         }
-        let available: Vec<String> = match self.resolution {
-            AgentResolution::CustomAndBuiltin => {
-                merged_agent_entries(&custom_agents, &self.builtin_settings.snapshot())
-                    .into_iter()
-                    .map(|(name, _)| name)
-                    .collect()
-            }
-            AgentResolution::BuiltinOnly => BUILTIN_AGENTS
-                .iter()
-                .map(|spec| spec.name.to_string())
-                .collect(),
-        };
+        let available: Vec<String> =
+            merged_agent_entries(&custom_agents, &self.builtin_settings.snapshot())
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
         Err(anyhow!(
             "Unknown agent '{name}'. Available: {}.",
             available.join(", ")
@@ -421,17 +373,9 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        match self.resolution {
-            AgentResolution::CustomAndBuiltin => {
-                "Delegate one scoped project task and return its conclusion. Names are in the \
+        "Delegate one scoped project task and return its conclusion. Names are in the \
 Subagents index. Batch independent read-only calls in one turn; use background mode for broad \
 read-only scans. Custom agents receive only their declared tools. All paths must stay in-project."
-            }
-            AgentResolution::BuiltinOnly => {
-                "Delegate one scoped project task to a built-in read-only subagent. Batch independent \
-calls in one turn; use background mode for broad scans. All paths must stay in-project."
-            }
-        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -412,6 +412,13 @@ fn review_prompt_requires_read_only_evidence_and_severity_definitions() {
         "review prompt should instruct structured finding capture"
     );
     assert!(content.contains("Base findings on evidence"));
+    assert!(content.contains("You own the full review"));
+    assert!(content.contains("Systematically inspect every changed file"));
+    assert!(content.contains("callers or consumers, contracts, and tests"));
+    assert!(
+        content.contains("do not spawn or rely on explore, review, or security-review subagents")
+    );
+    assert!(!content.contains("Fan out instead of reading serially"));
     assert!(content.contains("Blocker (must fix before merge)"));
     assert!(content.contains("Major (likely bug/regression)"));
     assert!(content.contains("Minor (edge case/maintainability)"));
@@ -620,6 +627,165 @@ async fn implement_plan_from_phase_seeds_only_that_phase() {
     assert_eq!(snapshot[0].status, TodoStatus::InProgress);
     assert_eq!(snapshot[1].content, "render it");
     assert_eq!(snapshot[1].status, TodoStatus::Pending);
+}
+
+#[tokio::test]
+async fn plan_self_review_retains_goal_contract_and_active_phase_when_capped() {
+    use crate::plan::{Finding, PlanDoc, Severity};
+
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "lib.rs",
+        "fn baseline() {}\n",
+        "baseline",
+    );
+    let baseline = crate::review::capture_review_baseline(&fixture.project_root)
+        .await
+        .expect("capture baseline");
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+    let mut plan = PlanDoc::default();
+    plan.edit().set_title("Authoritative plan");
+    plan.edit().set_section(
+        "Requirements",
+        &format!(
+            "{}\nPreserve this trailing semantic requirement.",
+            "x".repeat(6_000)
+        ),
+    );
+    plan.edit()
+        .set_section("Non-goals", "Do not widen the workspace scope.");
+    plan.edit()
+        .set_section("Assumptions", "Keep the wire format compatible.");
+    plan.edit().set_section(
+        "Implementation details",
+        "Preserve the repository-specific change map and verification anchors.",
+    );
+    plan.edit()
+        .add_finding_checked(Finding {
+            severity: Severity::Major,
+            file: Some("src/lib.rs".to_string()),
+            line: Some(7),
+            issue: "Unresolved handoff regression".to_string(),
+            required_fix: "Preserve the review finding in self-review context".to_string(),
+            acceptance_tests: vec!["Run the focused self-review test".to_string()],
+            source_ids: Vec::new(),
+            task: Some("Implement the active phase".to_string()),
+            resolved: false,
+        })
+        .unwrap();
+    plan.edit()
+        .add_finding_checked(Finding {
+            severity: Severity::Blocker,
+            file: Some("src/blocker.rs".to_string()),
+            line: Some(11),
+            issue: format!("Early blocker finding {}", "b".repeat(1_000)),
+            required_fix: "Preserve this blocker before later findings".to_string(),
+            acceptance_tests: Vec::new(),
+            source_ids: Vec::new(),
+            task: None,
+            resolved: false,
+        })
+        .unwrap();
+    for index in 0..4 {
+        plan.edit()
+            .add_finding_checked(Finding {
+                severity: Severity::Major,
+                file: Some(format!("src/major_{index}.rs")),
+                line: Some(20 + index),
+                issue: format!("Major finding {index} {}", "m".repeat(600)),
+                required_fix: format!("Preserve major fix {index}"),
+                acceptance_tests: Vec::new(),
+                source_ids: Vec::new(),
+                task: None,
+                resolved: false,
+            })
+            .unwrap();
+    }
+    plan.edit().add_phase("Phase one");
+    plan.edit().add_phase("Phase two");
+    plan.edit()
+        .add_task_to_phase("Phase two", "Implement the active phase")
+        .unwrap();
+
+    assert!(agent.implement_plan_from(&plan, Some(1)).await);
+    let request = agent.self_review.request().expect("plan review target");
+    std::fs::write(fixture.project_root.join("lib.rs"), "fn changed() {}\n").unwrap();
+    let scoped_path = ["lib.rs".to_string()];
+    let diff = crate::review::capture_diff_since_baseline_scoped(
+        &fixture.project_root,
+        &baseline,
+        Some(&scoped_path),
+    )
+    .await
+    .expect("capture scoped diff");
+    let prompt = crate::review::review_subagent_prompt(&diff, Some(request), &[], &[], &[], false);
+
+    assert!(request.contains("Authoritative implementation plan goal contract"));
+    assert!(request.contains("Implement only active phase: Phase two."));
+    assert!(prompt.contains("Priority plan intent anchors:"), "{prompt}");
+    assert!(
+        prompt.contains("Preserve this trailing semantic requirement."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Non-goals"), "{prompt}");
+    assert!(
+        prompt.contains("Do not widen the workspace scope."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Assumptions"), "{prompt}");
+    assert!(
+        prompt.contains("Keep the wire format compatible."),
+        "{prompt}"
+    );
+    assert!(
+        request.contains("Priority unresolved finding anchors"),
+        "{request}"
+    );
+    assert!(request.contains("Early blocker finding"), "{request}");
+    assert!(
+        request.contains("Preserve this blocker before later findings"),
+        "{request}"
+    );
+    for index in 0..4 {
+        assert!(
+            request.contains(&format!("Major finding {index}")),
+            "{request}"
+        );
+        assert!(
+            request.contains(&format!("Preserve major fix {index}")),
+            "{request}"
+        );
+    }
+    assert!(request.contains("Unresolved review findings"), "{request}");
+    assert!(
+        request.contains("Unresolved handoff regression"),
+        "{request}"
+    );
+    assert!(
+        request.contains("Preserve the review finding in self-review context"),
+        "{request}"
+    );
+    assert!(prompt.contains("Implementation details"), "{prompt}");
+    assert!(
+        prompt.contains("Preserve the repository-specific change map and verification anchors."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Implement only active phase: Phase two."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("middle truncated"), "{prompt}");
 }
 
 #[tokio::test]
@@ -845,11 +1011,11 @@ async fn review_pending_changes_seeds_diff_context() {
         "user message should embed the git diff, got: {user_text:?}"
     );
     assert!(
-        user_text.contains("For each changed file, read the file"),
+        user_text.contains("systematically inspect every changed file"),
         "user message should instruct per-file reads, got: {user_text:?}"
     );
     assert!(
-        user_text.contains("do not run commands"),
+        user_text.contains("do not run commands or widen to unrelated working-tree changes"),
         "user message should keep review truncation handling read-only, got: {user_text:?}"
     );
     assert!(
@@ -914,6 +1080,7 @@ async fn review_pending_changes_uses_read_only_review_registry() {
             "skill",
             "question",
             "plan_set_title",
+            "agent",
         ]),
         fixture.read_tracker.clone(),
         String::new(),
@@ -952,6 +1119,56 @@ async fn review_pending_changes_uses_read_only_review_registry() {
             "review registry must not expose {tool}"
         );
     }
+}
+
+#[tokio::test]
+async fn review_registry_omits_agent_even_with_a_configured_subagent_runner() {
+    let fixture = TestFixture::new();
+    let root = &fixture.project_root;
+    init_repo(root);
+    commit_file(root, "lib.rs", "fn old() {}\n", "baseline");
+    std::fs::write(root.join("lib.rs"), "fn new() {}\n").unwrap();
+    let runner = crate::tool::SubagentRunner::new(
+        Arc::new(|_agent, _chain| {
+            Box::pin(async {
+                crate::tool::SubagentProviderConfig::new(
+                    MockProvider::empty(),
+                    8_000,
+                    PromptEstimator::default(),
+                    "test-model".to_string(),
+                )
+            })
+        }),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        Arc::new(crate::tool::ProjectInfoRuntime::new(None)),
+        Arc::new(crate::subagent::SubagentRegistry::new()),
+        fixture.project_root.clone(),
+    );
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        mock_registry(&["read", "write", "agent"]),
+        mock_registry(&[
+            "read",
+            "glob",
+            "grep",
+            "symbol_search",
+            "plan_add_finding",
+            "plan_associate_finding",
+        ]),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .subagent_runner(Some(runner))
+    .build()
+    .unwrap();
+
+    assert!(agent.review_pending_changes(ReviewScope::Uncommitted).await);
+    assert!(agent.tool_registry.get("read").is_some());
+    assert!(agent.tool_registry.get("plan_add_finding").is_some());
+    assert!(agent.tool_registry.get("plan_associate_finding").is_some());
+    assert!(agent.tool_registry.get("agent").is_none());
 }
 
 #[tokio::test]

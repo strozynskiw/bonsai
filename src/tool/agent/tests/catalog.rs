@@ -34,6 +34,18 @@ fn builtins_and_custom_agents_have_distinct_budgets() {
 }
 
 #[test]
+fn review_subagent_keeps_the_caller_scope_authoritative() {
+    let review = builtin_agent("review").expect("review builtin exists");
+    let instructions = review.instructions();
+
+    assert!(instructions.contains("caller's requested scope is authoritative"));
+    assert!(instructions.contains("review only the supplied files, subsystem, or diff"));
+    assert!(instructions.contains("inspect that scope directly"));
+    assert!(instructions.contains("only when the caller explicitly requests"));
+    assert!(instructions.contains("never silently broaden"));
+}
+
+#[test]
 fn frontmatter_model_effort_becomes_an_override() {
     let custom = custom_registry(&[(
         "fast",

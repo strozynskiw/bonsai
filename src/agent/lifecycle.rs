@@ -361,7 +361,12 @@ impl Agent {
                 "{intro}\n\n{todo_block}\n\nUse todowrite explicitly: before editing files, call todowrite with the implementation todo list above, preserving the statuses and keeping at most one item in_progress. Keep todowrite updated as you complete work. If a Review findings section is present, include those fixes in todowrite progress and the final summary; do not mutate the plan canvas to mark them done.{findings_section}\n\nPlan markdown:\n\n{}",
                 plan.to_markdown_for_handoff()
             );
-            self.arm_self_review_for_coding_task(&body).await;
+            let review_goal_context = plan_self_review_goal_context(plan, phase_name.as_deref());
+            self.arm_self_review_for_coding_task_with_goal_context(
+                &body,
+                Some(&review_goal_context),
+            )
+            .await;
             self.push_message(user_text_message(&body));
             // The implementation episode opens on the seeded handoff message.
             self.open_episode_for_seeded_message(&intro);
@@ -503,4 +508,144 @@ impl Agent {
         self.budget.context_budget_tokens = context_budget_tokens.max(1);
         self.refresh_effective_smol_profile();
     }
+}
+
+const MAX_SELF_REVIEW_PLAN_ANCHOR_BYTES: usize = 384;
+const MAX_SELF_REVIEW_PLAN_ANCHORS_BYTES: usize = 600;
+const MAX_SELF_REVIEW_FINDING_ANCHOR_BYTES: usize = 200;
+const MAX_SELF_REVIEW_FINDING_ANCHORS_BYTES: usize = 1_400;
+
+/// Render the plan information a self-reviewer must retain independently of
+/// the display-oriented `/start` handoff. The selected phase scopes current
+/// implementation, while compact no-drop anchors ensure important plan intent
+/// survives the review prompt's request cap.
+fn plan_self_review_goal_context(plan: &crate::plan::PlanDoc, phase_name: Option<&str>) -> String {
+    let active_scope = phase_name
+        .map(|name| format!("Implement only active phase: {name}."))
+        .unwrap_or_else(|| "Implement the plan's flat task list.".to_string());
+    let anchors = plan_self_review_goal_anchors(plan);
+    let finding_anchors = plan_self_review_finding_anchors(plan);
+    let findings = plan.findings_handoff_block();
+    let findings_reference = if findings.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nUnresolved review findings:\n{findings}")
+    };
+    format!(
+        "Authoritative implementation plan goal contract:\n\
+         Review semantic completion against this full plan — including its requirements, scope, non-goals, assumptions, decisions, and unresolved review findings — not merely the current todo labels.\n\n\
+         Active implementation scope:\n{active_scope}\n\n\
+         Priority unresolved finding anchors:\n{finding_anchors}\n\n\
+         Priority plan intent anchors:\n{anchors}\n\n\
+         Full plan reference:\n{}{findings_reference}",
+        plan.to_markdown_for_handoff()
+    )
+}
+
+fn plan_self_review_goal_anchors(plan: &crate::plan::PlanDoc) -> String {
+    let mut anchors = String::new();
+    for section in plan
+        .sections
+        .iter()
+        .filter(|section| is_plan_goal_anchor_heading(&section.heading))
+    {
+        let body = truncate_plan_goal_anchor(&section.body, MAX_SELF_REVIEW_PLAN_ANCHOR_BYTES);
+        let anchor = format!("### {}\n{body}\n\n", section.heading);
+        if anchors.len().saturating_add(anchor.len()) > MAX_SELF_REVIEW_PLAN_ANCHORS_BYTES {
+            anchors.push_str("…(remaining plan-intent anchors are in the full plan reference)…\n");
+            break;
+        }
+        anchors.push_str(&anchor);
+    }
+    if anchors.is_empty() {
+        "(No explicitly named requirements, scope, non-goals, assumptions, goals, overview, or decisions section; use the full plan reference.)"
+            .to_string()
+    } else {
+        anchors.trim_end().to_string()
+    }
+}
+
+fn plan_self_review_finding_anchors(plan: &crate::plan::PlanDoc) -> String {
+    let mut anchors = String::new();
+    for finding in plan
+        .findings_in_severity_order()
+        .into_iter()
+        .filter(|finding| !finding.resolved)
+    {
+        let location = finding
+            .location_label()
+            .unwrap_or_else(|| "(no file)".to_string());
+        let detail = format!(
+            "[{}] {location} — {}\nRequired fix: {}",
+            finding.severity.label(),
+            finding
+                .issue
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+            finding
+                .required_fix
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let detail = truncate_plan_goal_anchor(&detail, MAX_SELF_REVIEW_FINDING_ANCHOR_BYTES);
+        let anchor = format!("{detail}\n\n");
+        if anchors.len().saturating_add(anchor.len()) > MAX_SELF_REVIEW_FINDING_ANCHORS_BYTES {
+            anchors
+                .push_str("…(remaining unresolved findings are in the full findings reference)…\n");
+            break;
+        }
+        anchors.push_str(&anchor);
+    }
+    if anchors.is_empty() {
+        "(No unresolved review findings.)".to_string()
+    } else {
+        anchors.trim_end().to_string()
+    }
+}
+
+fn is_plan_goal_anchor_heading(heading: &str) -> bool {
+    let heading = heading.to_ascii_lowercase();
+    [
+        "requirement",
+        "scope",
+        "non-goal",
+        "assumption",
+        "goal",
+        "overview",
+        "decision",
+        "implementation detail",
+    ]
+    .iter()
+    .any(|needle| heading.contains(needle))
+}
+
+fn truncate_plan_goal_anchor(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+
+    const OMITTED: &str = "\n…(middle omitted; full section remains below)…\n";
+    let content_budget = budget.saturating_sub(OMITTED.len());
+    let head_budget = content_budget / 2;
+    let tail_budget = content_budget.saturating_sub(head_budget);
+
+    let mut head_end = head_budget.min(text.len());
+    while head_end > 0 && !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    if let Some(line_end) = text[..head_end].rfind('\n') {
+        head_end = line_end;
+    }
+
+    let mut tail_start = text.len().saturating_sub(tail_budget);
+    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    if let Some(line_start) = text[tail_start..].find('\n') {
+        tail_start += line_start + 1;
+    }
+
+    format!("{}{OMITTED}{}", &text[..head_end], &text[tail_start..])
 }

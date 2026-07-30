@@ -98,32 +98,10 @@ impl Agent {
         Arc::new(registry)
     }
 
-    fn review_registry_from(
-        planning_registry: &Arc<ToolRegistry>,
-        subagent_runner: Option<&SubagentRunner>,
-        custom_agents: &crate::resource::agent::SharedAgentRegistry,
-        builtin_subagent_settings: &crate::subagent::SharedBuiltinSubagentSettings,
-    ) -> Arc<ToolRegistry> {
-        let mut registry = ToolRegistry::new();
-        for name in REVIEW_TOOL_NAMES {
-            if let Some(tool) = planning_registry.get(name) {
-                registry.register(tool);
-            }
-        }
-        if let Some(runner) = subagent_runner {
-            // Review delegation is intentionally built-in-only. The general
-            // agent tool can resolve custom agents with mutating frontmatter,
-            // which would violate the review persona's read-only boundary.
-            registry.register(Arc::new(
-                crate::tool::AgentTool::new_builtin_only_with_settings(
-                    "agent",
-                    runner.clone(),
-                    custom_agents.clone(),
-                    builtin_subagent_settings.clone(),
-                ),
-            ));
-        }
-        Arc::new(registry)
+    fn review_registry_from(planning_registry: &Arc<ToolRegistry>) -> Arc<ToolRegistry> {
+        // Review owns exhaustive inspection of its captured diff. It remains
+        // read-only and cannot delegate that responsibility through `agent`.
+        Self::registry_subset(planning_registry, &REVIEW_TOOL_NAMES)
     }
 
     fn read_only_registry_from(coding_registry: &Arc<ToolRegistry>) -> Arc<ToolRegistry> {
@@ -170,12 +148,7 @@ impl Agent {
             &builder.system_context,
             builder.system_prompt_suffix.as_deref(),
         );
-        let review_registry = Self::review_registry_from(
-            &builder.planning_registry,
-            builder.subagent_runner.as_ref(),
-            &builder.custom_agents,
-            &builder.builtin_subagent_settings,
-        );
+        let review_registry = Self::review_registry_from(&builder.planning_registry);
         let read_only_registry = Self::read_only_registry_from(&builder.coding_registry);
         let smol_registry = builder.smol_registry.unwrap_or_else(|| {
             Self::smol_registry_from(

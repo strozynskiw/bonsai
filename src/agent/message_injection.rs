@@ -42,6 +42,19 @@ impl Agent {
     }
 
     pub(super) async fn arm_self_review_for_coding_task(&mut self, request: &str) {
+        self.arm_self_review_for_coding_task_with_goal_context(request, None)
+            .await;
+    }
+
+    /// Arms self-review with a task request, optionally replacing its review
+    /// target with an authoritative goal contract. Plan execution uses this to
+    /// keep the plan's requirements visible even when its user-facing handoff
+    /// contains long todo and finding scaffolding.
+    pub(super) async fn arm_self_review_for_coding_task_with_goal_context(
+        &mut self,
+        request: &str,
+        goal_context: Option<&str>,
+    ) {
         self.reset_after_edit_verification();
         if !self.persona_self_review()
             || self.self_review.mode().decision(self.approval_level()) == SelfReviewDecision::Skip
@@ -52,10 +65,10 @@ impl Agent {
 
         let baseline = capture_review_baseline(&self.project_root).await;
         // Captured so the reviewer subagent can judge the diff against what was
-        // asked. An empty request (e.g. a focused run started without a prompt)
-        // falls back to a generic review; the text is length-capped where it is
-        // embedded into the reviewer prompt.
-        let trimmed = request.trim();
+        // asked. Plan execution supplies the plan's goal contract rather than
+        // its full display handoff; ordinary tasks retain the user request.
+        let review_target = goal_context.unwrap_or(request);
+        let trimmed = review_target.trim();
         let request = (!trimmed.is_empty()).then(|| trimmed.to_string());
         self.self_review.arm(baseline, request);
         let profile = crate::verification::VerificationProfile::resolve(
