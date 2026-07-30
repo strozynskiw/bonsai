@@ -1365,7 +1365,7 @@ impl AppState {
                     }
                 }
             }
-            RuntimeEvent::AgentComposerPromptGenerated { request_id, result } => {
+            RuntimeEvent::AgentComposerDescriptionExtended { request_id, result } => {
                 if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer {
                     state,
                 })) = &mut self.modal
@@ -1374,8 +1374,8 @@ impl AppState {
                         return;
                     }
                     match result {
-                        Ok(prompt) => state.apply_generated(prompt),
-                        Err(err) => state.apply_generate_error(err.detail),
+                        Ok(prompt) => state.apply_description_extension(prompt),
+                        Err(err) => state.apply_description_extension_error(err.detail),
                     }
                 }
             }

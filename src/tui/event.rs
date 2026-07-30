@@ -805,9 +805,9 @@ pub enum RuntimeEvent {
         request_id: u64,
         result: Result<crate::tui::local_model_wizard::WizardFetchOutcome, UiError>,
     },
-    /// A background agent-composer prompt-generation call finished. Guarded by
+    /// A background agent-composer description-extension call finished. Guarded by
     /// `request_id` against a stale reply landing in a reused modal.
-    AgentComposerPromptGenerated {
+    AgentComposerDescriptionExtended {
         request_id: u64,
         result: Result<String, UiError>,
     },
@@ -940,7 +940,7 @@ pub enum AgentComposerAction {
     Back,
     NextPage,
     Submit,
-    Generate,
+    ExtendDescription,
     OpenModelPicker,
     DeleteModel,
     Cursor(crate::tui::agent_composer::CursorMotion),

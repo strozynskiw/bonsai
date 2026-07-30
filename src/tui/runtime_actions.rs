@@ -321,8 +321,8 @@ pub(super) async fn handle_runtime_action(
         AppAction::PasteFromClipboard => {
             paste_from_clipboard(app, &deps.registry, Some(deps.model_catalog.as_ref()));
         }
-        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Generate) => {
-            start_agent_composer_generate(app, deps);
+        AppAction::AgentComposer(crate::tui::event::AgentComposerAction::ExtendDescription) => {
+            start_agent_composer_extend_description(app, deps);
         }
         AppAction::AgentComposer(crate::tui::event::AgentComposerAction::OpenModelPicker) => {
             open_model_picker_for_composer(app, deps).await;
@@ -2338,7 +2338,7 @@ async fn commit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
     reopen_agent_browser(app, &deps, 0).await;
 }
 
-fn start_agent_composer_generate(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
+fn start_agent_composer_extend_description(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
         app.modal.as_ref()
     else {
@@ -2351,11 +2351,11 @@ fn start_agent_composer_generate(app: &mut AppState, deps: RuntimeActionDeps<'_>
         if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
             &mut app.modal
         {
-            state.error = Some("Add a description first, then generate.".to_string());
+            state.error = Some("Add a description first, then extend it.".to_string());
         }
         return;
     }
-    let (system, user) = state.generation_messages();
+    let (system, user) = state.description_extension_messages();
     let model = state.selected_model().map(str::to_string);
     let request_id = app.next_local_model_wizard_request_id();
     if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
@@ -2370,16 +2370,19 @@ fn start_agent_composer_generate(app: &mut AppState, deps: RuntimeActionDeps<'_>
     let sender = deps.runtime_sender.clone();
     spawn_panicked(async move {
         let result =
-            generate_agent_prompt(&registry, &session_store, &catalog, model, system, user)
+            extend_agent_description(&registry, &session_store, &catalog, model, system, user)
                 .await
                 .map_err(|err| {
-                    crate::tui::event::UiError::new("Prompt generation failed", format!("{err:#}"))
+                    crate::tui::event::UiError::new(
+                        "Description extension failed",
+                        format!("{err:#}"),
+                    )
                 });
-        let _ = sender.send(RuntimeEvent::AgentComposerPromptGenerated { request_id, result });
+        let _ = sender.send(RuntimeEvent::AgentComposerDescriptionExtended { request_id, result });
     });
 }
 
-async fn generate_agent_prompt(
+async fn extend_agent_description(
     registry: &ProviderRegistry,
     session_store: &Mutex<SessionStore>,
     catalog: &ModelCatalog,

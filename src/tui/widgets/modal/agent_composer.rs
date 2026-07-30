@@ -292,7 +292,7 @@ fn render_prompt(f: &mut Frame, area: Rect, state: &AgentComposerState) {
     let text = &state.prompt.text;
     if text.is_empty() {
         let hint = Line::from(Span::styled(
-            "Type or paste the prompt, or press Ctrl+G to generate one.",
+            "Type or paste a persona prompt, or press Ctrl+G to extend the description.",
             theme::dim(),
         ));
         f.render_widget(Paragraph::new(vec![hint]).style(theme::panel()), area);
@@ -466,7 +466,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &AgentComposerState) {
             }
             AgentComposerStep::Prompt => footer_hint_line(&[
                 ("Enter", "newline"),
-                ("Ctrl+G", "generate"),
+                ("Ctrl+G", "extend description"),
                 ("Tab", "review"),
             ]),
             AgentComposerStep::Review => {

@@ -645,10 +645,10 @@ pub(super) fn map_agent_composer_key(key: KeyEvent, app: &AppState) -> KeyIntent
     else {
         return KeyIntent::Noop;
     };
-    // Ctrl+G drafts a prompt with the selected model (runtime guards the step).
+    // Ctrl+G extends the description with the selected model (runtime guards the step).
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('g')) {
         return KeyIntent::Action(AppAction::AgentComposer(
-            crate::tui::event::AgentComposerAction::Generate,
+            crate::tui::event::AgentComposerAction::ExtendDescription,
         ));
     }
 
