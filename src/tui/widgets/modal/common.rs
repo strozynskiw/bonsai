@@ -1089,12 +1089,12 @@ mod tests {
     #[test]
     fn provider_manager_uses_wide_picker_footprint() {
         let area = Rect::new(0, 0, 120, 50);
-        let kind = ModalKind::ProviderManager {
+        let kind = ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
             rows: Vec::new(),
             filter: String::new(),
             searching: false,
             cursor: 0,
-        };
+        });
 
         assert_eq!(modal_area(area, &kind), Rect::new(6, 6, 108, 38));
     }
