@@ -772,9 +772,9 @@ impl Agent {
                 }
             }
             for (tool_call, result, status) in results {
-                outcome
-                    .tool_observations
-                    .push(ToolCallObservation::new(&tool_call, status));
+                let mut observation = ToolCallObservation::new(&tool_call, status);
+                observation.observe_result(&result);
+                outcome.tool_observations.push(observation);
                 if let ToolOutput::SubagentStarted { subtask_id, .. } = &result {
                     outcome.detached_subagent_ids.push(subtask_id.clone());
                 }
@@ -1796,6 +1796,12 @@ impl ToolCallObservation {
             tool_name: tool_call.name.clone(),
             status,
             makes_progress: status.is_success() && failed_call_progress_candidate(tool_call),
+        }
+    }
+
+    fn observe_result(&mut self, result: &ToolOutput) {
+        if matches!(result, ToolOutput::BackgroundTaskStarted { .. }) {
+            self.makes_progress = true;
         }
     }
 }
@@ -2947,6 +2953,25 @@ mod tests {
                 assert!(action.is_none());
             }
         }
+    }
+
+    #[test]
+    fn implementation_stall_guard_resets_when_background_work_starts() {
+        let mut guard = ImplementationStallGuard {
+            turns_without_progress: IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS - 1,
+        };
+        let mut observation = stall_observation(
+            "bash",
+            r#"{"command":"cargo test --locked","run_in_background":true}"#,
+            crate::output::ToolExecutionStatus::Started,
+        );
+        observation.observe_result(&ToolOutput::BackgroundTaskStarted {
+            task_id: "bg-1".to_string(),
+            message: "Started background task bg-1".to_string(),
+        });
+
+        assert!(guard.observe_turn(&[observation]).is_none());
+        assert_eq!(guard.turns_without_progress, 0);
     }
 
     #[test]
