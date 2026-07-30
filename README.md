@@ -20,7 +20,16 @@ OpenRouter, tool-based execution, and a terminal UI.
 
 ### From binaries (recommended)
 
-One line, no Rust toolchain required:
+With Homebrew on macOS or Linux:
+
+```sh
+brew install strozynskiw/bonsai/bonsai
+```
+
+Homebrew manages upgrades for this installation with `brew upgrade bonsai`, so
+Bonsai defers its built-in self-updater to the package manager.
+
+Alternatively, use the verified installer with no Rust toolchain required:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh
@@ -96,13 +105,14 @@ cargo install --path . --locked
 
 ### Updating
 
-Binary installs keep themselves updated: on startup, bonsai checks GitHub for a
-newer signed release in the background, verifies it against the same
-Ed25519-signed manifest as the installer, and stages it — the update applies on
-the next launch. `/update` in the TUI or `bonsai update` from the CLI runs the
-same verified install on demand (`bonsai update --check` only reports), and
-`[update]` in `~/.bonsai/config.toml` tunes the behavior
+Installer-managed binary installs keep themselves updated: on startup, bonsai
+checks GitHub for a newer signed release in the background, verifies it against
+the same Ed25519-signed manifest as the installer, and stages it — the update
+applies on the next launch. `/update` in the TUI or `bonsai update` from the CLI
+runs the same verified install on demand (`bonsai update --check` only reports),
+and `[update]` in `~/.bonsai/config.toml` tunes the behavior
 (`mode = "auto" | "notify" | "off"`, `pin = "X.Y.Z"` to hold a version).
+Homebrew installations instead update through `brew upgrade bonsai`.
 
 A source install updates by rerunning the install command with the new tag —
 Cargo replaces the installed binary when the version differs. To refresh a
