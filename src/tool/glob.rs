@@ -83,7 +83,7 @@ impl Tool for GlobTool {
             .action("search")
             .resolve_existing_or_project_root(args.path.as_deref())?;
 
-        let respect_gitignore = search::env_flag_enabled("BONSAI_GLOB_RESPECT_GITIGNORE", true);
+        let respect_gitignore = search::respect_gitignore("BONSAI_GLOB_RESPECT_GITIGNORE");
 
         let pattern = search::compile_glob(Some(&args.pattern), None)?
             .expect("compile_glob returns Some when the pattern is Some");

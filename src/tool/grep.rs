@@ -277,7 +277,7 @@ impl Tool for GrepTool {
         let resolved_roots = resolve_search_roots(&self.project_root, args.path.as_deref())?;
         let skipped_missing_paths = resolved_roots.skipped_missing_paths;
 
-        let respect_gitignore = search::env_flag_enabled("BONSAI_GREP_RESPECT_GITIGNORE", true);
+        let respect_gitignore = search::respect_gitignore("BONSAI_GREP_RESPECT_GITIGNORE");
         let glob_pattern = search::compile_glob(args.glob.as_deref(), None)?;
         let matcher = RegexMatcherBuilder::new()
             .multi_line(args.multiline)

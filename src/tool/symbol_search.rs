@@ -152,7 +152,7 @@ impl Tool for SymbolSearchTool {
 
         let glob_pattern = search::compile_glob(args.glob.as_deref(), None)?;
 
-        let respect_gitignore = search::env_flag_enabled("BONSAI_SYMBOL_RESPECT_GITIGNORE", true);
+        let respect_gitignore = search::respect_gitignore("BONSAI_SYMBOL_RESPECT_GITIGNORE");
 
         // Owned copies moved into the blocking closure so the walkdir + file
         // read + tree-sitter extraction (the dominant CPU cost) runs off the

@@ -48,7 +48,7 @@ struct FileOutline {
 }
 
 fn build_with_budget(root: &Path, char_budget: usize) -> String {
-    let respect_gitignore = search::env_flag_enabled("BONSAI_REPO_MAP_RESPECT_GITIGNORE", true);
+    let respect_gitignore = search::respect_gitignore("BONSAI_REPO_MAP_RESPECT_GITIGNORE");
     let gitignore = if respect_gitignore {
         search::build_gitignore(root, root)
     } else {

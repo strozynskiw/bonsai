@@ -3,10 +3,21 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-pub(crate) fn env_flag_enabled(var: &str, default: bool) -> bool {
+const RESPECT_GITIGNORE_ENV: &str = "BONSAI_RESPECT_GITIGNORE";
+
+fn env_flag_enabled(var: &str, default: bool) -> bool {
     std::env::var(var)
         .map(|value| value != "false" && value != "0")
         .unwrap_or(default)
+}
+
+/// Whether a search tool should honor `.gitignore` files.
+///
+/// The tool-specific variable wins over the shared
+/// `BONSAI_RESPECT_GITIGNORE` setting. Both default to enabled.
+pub(crate) fn respect_gitignore(tool_override_env: &str) -> bool {
+    let shared = env_flag_enabled(RESPECT_GITIGNORE_ENV, true);
+    env_flag_enabled(tool_override_env, shared)
 }
 
 pub(crate) fn build_gitignore(project_root: &Path, search_path: &Path) -> Option<Gitignore> {
@@ -247,6 +258,8 @@ pub(crate) fn format_truncation(limit: usize, total: Option<usize>) -> String {
 mod tests {
     use super::*;
 
+    const TOOL_OVERRIDE_ENV: &str = "BONSAI_TEST_RESPECT_GITIGNORE";
+
     fn touch(path: &Path) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -318,6 +331,30 @@ mod tests {
         assert!(gitignore.matched("src/generated.rs", false).is_ignore());
         assert!(gitignore.matched("src/local.rs", false).is_ignore());
         assert!(!gitignore.matched("src/kept.rs", false).is_ignore());
+    }
+
+    #[test]
+    fn gitignore_setting_uses_shared_default_and_tool_override() {
+        crate::util::test_env::with_var(RESPECT_GITIGNORE_ENV, None::<&str>, || {
+            crate::util::test_env::with_var(TOOL_OVERRIDE_ENV, None::<&str>, || {
+                assert!(respect_gitignore(TOOL_OVERRIDE_ENV));
+            });
+        });
+
+        crate::util::test_env::with_var(RESPECT_GITIGNORE_ENV, Some("false"), || {
+            crate::util::test_env::with_var(TOOL_OVERRIDE_ENV, None::<&str>, || {
+                assert!(!respect_gitignore(TOOL_OVERRIDE_ENV));
+            });
+            crate::util::test_env::with_var(TOOL_OVERRIDE_ENV, Some("true"), || {
+                assert!(respect_gitignore(TOOL_OVERRIDE_ENV));
+            });
+        });
+
+        crate::util::test_env::with_var(RESPECT_GITIGNORE_ENV, Some("true"), || {
+            crate::util::test_env::with_var(TOOL_OVERRIDE_ENV, Some("0"), || {
+                assert!(!respect_gitignore(TOOL_OVERRIDE_ENV));
+            });
+        });
     }
 
     #[test]

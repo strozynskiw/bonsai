@@ -479,7 +479,7 @@ impl ReadTool {
         path: &std::path::Path,
         project_root: &std::path::Path,
     ) -> Result<ToolOutput> {
-        let respect_gitignore = search::env_flag_enabled("BONSAI_READ_RESPECT_GITIGNORE", true);
+        let respect_gitignore = search::respect_gitignore("BONSAI_READ_RESPECT_GITIGNORE");
         let gitignore = if respect_gitignore {
             search::build_gitignore(project_root, path)
         } else {
@@ -582,7 +582,7 @@ impl ReadTool {
         project_root: &std::path::Path,
         depth: usize,
     ) -> Result<ToolOutput> {
-        let respect_gitignore = search::env_flag_enabled("BONSAI_READ_RESPECT_GITIGNORE", true);
+        let respect_gitignore = search::respect_gitignore("BONSAI_READ_RESPECT_GITIGNORE");
         let gitignore = if respect_gitignore {
             search::build_gitignore(project_root, path)
         } else {
