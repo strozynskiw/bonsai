@@ -77,6 +77,6 @@ Drop the file in `cases/` (named `NN_*.sh`, `chmod +x`) and `run.sh` picks it up
 
 ## Related
 
-`.claude/skills/verifier-tui/` is the ad-hoc, single-shot verification handle
-used by `/verify`. This `e2e/` suite is the committed, batch-runnable evolution
-of it, with the environment isolation baked in.
+`.agents/skills/verifier-tui/SKILL.md` is the ad-hoc, single-shot verification
+handle used by `/verify`. This `e2e/` suite is the committed, batch-runnable
+evolution of it, with the environment isolation baked in.

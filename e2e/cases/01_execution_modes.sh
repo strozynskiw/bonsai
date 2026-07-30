@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Execution-mode prompt policy, driven through the live TUI. Ported from
-# .claude/skills/verifier-tui/smoke-execution-modes.sh, now self-contained
-# (isolated env, no real provider needed). Regression guard for the idle-`/yolo`
+# Execution-mode prompt policy, driven through the live TUI. Originally from
+# the verifier-tui skill; now self-contained (isolated env, no real provider
+# needed). Regression guard for the idle-`/yolo`
 # bug: yolo must render as `yolo`, never collapse to `auto-accept`.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
