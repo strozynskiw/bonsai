@@ -165,6 +165,13 @@ fn modal_identity(kind: &ModalKind) -> (std::mem::Discriminant<ModalKind>, u64) 
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
     match kind {
+        ModalKind::Picker(modal) => std::mem::discriminant(modal).hash(&mut hasher),
+        ModalKind::Manager(modal) => std::mem::discriminant(modal).hash(&mut hasher),
+        ModalKind::Wizard(modal) => std::mem::discriminant(modal).hash(&mut hasher),
+        ModalKind::Confirm(modal) => std::mem::discriminant(modal).hash(&mut hasher),
+        ModalKind::Detail(modal) => std::mem::discriminant(modal).hash(&mut hasher),
+    }
+    match kind {
         ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { tool_id })
         | ModalKind::Detail(crate::tui::event::DetailModal::DiffPreview { tool_id }) => {
             tool_id.hash(&mut hasher)
