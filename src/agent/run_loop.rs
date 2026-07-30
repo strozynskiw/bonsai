@@ -1274,10 +1274,6 @@ struct ToolRejections {
     /// Known slow ad-hoc verification calls promoted off the foreground lane.
     auto_background: HashSet<String>,
     planning_research: Option<String>,
-    /// One-time guidance for broad parent reads that duplicate full-file work
-    /// just completed by a child. A retry executes normally so the parent can
-    /// still obtain edit authorization when it genuinely needs the full body.
-    delegated_read: HashMap<String, String>,
     repeated_inspection: Option<String>,
     /// Read targets that stormed this turn. A call is rejected only when its own
     /// target is in the set, so sibling reads of other files pass through.
@@ -1293,10 +1289,6 @@ impl ToolRejections {
             && !planning_tool_makes_progress(&tool_call.name)
         {
             return Some(message.to_string());
-        }
-
-        if let Some(message) = self.delegated_read.get(&tool_call.id) {
-            return Some(message.clone());
         }
 
         if let Some(stormed) = self.read_storm.as_ref()
@@ -1330,11 +1322,7 @@ impl Agent {
             .collect()
     }
 
-    pub(in crate::agent) fn delegated_read_rejections(
-        &mut self,
-        tool_calls: &[ToolCall],
-    ) -> HashMap<String, String> {
-        let mut rejections = HashMap::new();
+    pub(in crate::agent) fn observe_delegated_read_overlap(&mut self, tool_calls: &[ToolCall]) {
         for tool_call in tool_calls {
             let Some((canonical_path, display_path)) =
                 broad_read_target(tool_call, &self.project_root)
@@ -1372,17 +1360,9 @@ impl Agent {
                 target: "bonsai::delegation",
                 path = %display_path,
                 subtasks = ?subtasks,
-                "deferred broad parent reread already covered by delegation",
-            );
-            rejections.insert(
-                tool_call.id.clone(),
-                format!(
-                    "Error: broad parent reread deferred for {display_path}: completed delegation {} already observed the full file. Use its report, or read a narrow cited/risky range with read_region/read_symbol. Retry this broad read only when you need the complete source in parent context or must authorize an edit.",
-                    subtasks.join(", ")
-                ),
+                "broad parent reread overlaps delegated full-file coverage",
             );
         }
-        rejections
     }
 
     pub(in crate::agent) fn read_follows_compact_reuse(&self, tool_call: &ToolCall) -> bool {

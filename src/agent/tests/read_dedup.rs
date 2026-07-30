@@ -338,7 +338,7 @@ fn reused_pointer(agent: &Agent, call_id: &str, rendered: &str) -> Option<String
 }
 
 #[tokio::test]
-async fn delegated_full_read_defers_one_broad_parent_read_but_never_authorizes_edits() {
+async fn delegated_full_read_observes_broad_parent_overlap_without_blocking_execution() {
     let fixture = TestFixture::new();
     let path = fixture.project_root.join("delegated.rs");
     let body = b"fn delegated() {}\n";
@@ -362,8 +362,11 @@ async fn delegated_full_read_defers_one_broad_parent_read_but_never_authorizes_e
         Some(crate::tool::digest_content(body)),
     );
     let mut agent = Agent::builder(
-        MockProvider::empty(),
-        empty_registry(),
+        Box::new(MockProvider::new(vec![
+            read_call_response("call-broad", "delegated.rs"),
+            finish_response("done"),
+        ])),
+        read_registry(&fixture),
         empty_registry(),
         fixture.read_tracker.clone(),
         fixture.project_root.clone(),
@@ -373,22 +376,23 @@ async fn delegated_full_read_defers_one_broad_parent_read_but_never_authorizes_e
     ))
     .build()
     .unwrap();
-    agent.usage.record(
-        Some(crate::provider::TokenUsage {
-            prompt_tokens: 100,
-            completion_tokens: 1,
-            input_cache: None,
-        }),
-        None,
-        crate::agent::UsageTurnDiagnostics::default(),
-    );
-    agent.import_delegated_read_evidence(&[DelegatedReadEvidence {
-        subtask_id: "sub-7".to_string(),
-        launch_group_id: Some("group-4".to_string()),
-        source_id: "tool:child-read".to_string(),
-        cited_in_result: true,
-        evidence,
-    }]);
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    agent.import_delegated_read_evidence(&[
+        DelegatedReadEvidence {
+            subtask_id: "sub-7".to_string(),
+            launch_group_id: Some("group-4".to_string()),
+            source_id: "tool:child-read".to_string(),
+            cited_in_result: true,
+            evidence: evidence.clone(),
+        },
+        DelegatedReadEvidence {
+            subtask_id: "sub-7".to_string(),
+            launch_group_id: Some("group-4".to_string()),
+            source_id: "tool:child-read-duplicate".to_string(),
+            cited_in_result: true,
+            evidence,
+        },
+    ]);
     agent.refresh_stale_read_advisory();
 
     assert!(!fixture.read_tracker.is_read(&canonical).await);
@@ -406,17 +410,146 @@ async fn delegated_full_read_defers_one_broad_parent_read_but_never_authorizes_e
         "read",
         r#"{"path":"delegated.rs","offset":1,"limit":40}"#,
     );
-    assert!(agent.delegated_read_rejections(&[narrow]).is_empty());
+    agent.observe_delegated_read_overlap(&[narrow]);
+    assert_eq!(
+        agent
+            .usage_turns()
+            .iter()
+            .map(|turn| turn.delegated_parent_overlap)
+            .sum::<usize>(),
+        0
+    );
+
+    let result = agent
+        .run(
+            "read delegated.rs",
+            CancellationToken::new(),
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+    assert!(fixture.read_tracker.is_read(&canonical).await);
+    assert_eq!(
+        tool_messages(&agent.messages)
+            .iter()
+            .find(|(id, _)| id == "call-broad"),
+        Some(&(
+            "call-broad".to_string(),
+            "1: fn delegated() {}\n".to_string()
+        ))
+    );
+    assert_eq!(agent.usage_turns()[0].delegated_parent_overlap, 1);
 
     let broad = test_tool_call("call-broad", "read", r#"{"path":"delegated.rs"}"#);
-    let first = agent.delegated_read_rejections(std::slice::from_ref(&broad));
-    assert!(first["call-broad"].contains("completed delegation sub-7"));
+    agent.observe_delegated_read_overlap(&[broad]);
     assert_eq!(agent.usage_turns()[0].delegated_parent_overlap, 1);
-    assert!(
-        agent.delegated_read_rejections(&[broad]).is_empty(),
-        "a retry must execute so the parent can obtain full content and write authorization"
+}
+
+#[tokio::test]
+async fn stale_partial_and_unrelated_delegated_evidence_do_not_observe_overlap() {
+    let fixture = TestFixture::new();
+    let target = fixture.project_root.join("target.rs");
+    let unrelated = fixture.project_root.join("unrelated.rs");
+    tokio::fs::write(&target, "fn old() {}\n").await.unwrap();
+    tokio::fs::write(&unrelated, "fn unrelated() {}\n")
+        .await
+        .unwrap();
+    let target_canonical = tokio::fs::canonicalize(&target).await.unwrap();
+    let unrelated_canonical = tokio::fs::canonicalize(&unrelated).await.unwrap();
+    let stale_metadata = tokio::fs::metadata(&target_canonical).await.unwrap();
+    let stale = ReadEvidence::new(
+        "target.rs",
+        target_canonical.clone(),
+        ReadWindow {
+            requested_offset: 1,
+            requested_limit: 2000,
+            start_line: 1,
+            end_line: Some(1),
+            total_lines: Some(1),
+        },
+        ReadCoverage::Full,
+        "1: fn old() {}\n",
+        stale_metadata.modified().ok(),
+        stale_metadata.len(),
+        Some(crate::tool::digest_content(b"fn old() {}\n")),
     );
-    assert!(!fixture.read_tracker.is_read(&canonical).await);
+    tokio::fs::write(&target, "fn new() {}\n").await.unwrap();
+    let target_metadata = tokio::fs::metadata(&target_canonical).await.unwrap();
+    let partial = ReadEvidence::new(
+        "target.rs",
+        target_canonical.clone(),
+        ReadWindow {
+            requested_offset: 1,
+            requested_limit: 1,
+            start_line: 1,
+            end_line: Some(1),
+            total_lines: Some(1),
+        },
+        ReadCoverage::Partial,
+        "1: fn new() {}\n",
+        target_metadata.modified().ok(),
+        target_metadata.len(),
+        Some(crate::tool::digest_content(b"fn new() {}\n")),
+    );
+    let unrelated_metadata = tokio::fs::metadata(&unrelated_canonical).await.unwrap();
+    let unrelated = ReadEvidence::new(
+        "unrelated.rs",
+        unrelated_canonical,
+        ReadWindow {
+            requested_offset: 1,
+            requested_limit: 2000,
+            start_line: 1,
+            end_line: Some(1),
+            total_lines: Some(1),
+        },
+        ReadCoverage::Full,
+        "1: fn unrelated() {}\n",
+        unrelated_metadata.modified().ok(),
+        unrelated_metadata.len(),
+        Some(crate::tool::digest_content(b"fn unrelated() {}\n")),
+    );
+    let mut agent = review_agent(&fixture, String::new());
+    agent.import_delegated_read_evidence(&[
+        DelegatedReadEvidence {
+            subtask_id: "stale".to_string(),
+            launch_group_id: None,
+            source_id: "tool:stale".to_string(),
+            cited_in_result: true,
+            evidence: stale,
+        },
+        DelegatedReadEvidence {
+            subtask_id: "partial".to_string(),
+            launch_group_id: None,
+            source_id: "tool:partial".to_string(),
+            cited_in_result: true,
+            evidence: partial,
+        },
+        DelegatedReadEvidence {
+            subtask_id: "unrelated".to_string(),
+            launch_group_id: None,
+            source_id: "tool:unrelated".to_string(),
+            cited_in_result: true,
+            evidence: unrelated,
+        },
+    ]);
+    agent.refresh_read_evidence_freshness().await;
+
+    agent.observe_delegated_read_overlap(&[test_tool_call(
+        "call-broad",
+        "read",
+        r#"{"path":"target.rs"}"#,
+    )]);
+
+    assert_eq!(
+        agent
+            .usage_turns()
+            .iter()
+            .map(|turn| turn.delegated_parent_overlap)
+            .sum::<usize>(),
+        0
+    );
+    assert!(!fixture.read_tracker.is_read(&target_canonical).await);
 }
 
 /// A successful `bash` tool detail for `command` whose stdout is `output`, the

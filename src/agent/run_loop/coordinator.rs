@@ -326,7 +326,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             planning_research_action,
             &response,
         )?;
-        let delegated_read_rejections = self.agent.delegated_read_rejections(&response.tool_calls);
         let read_target_versions = self.agent.read_target_versions(&response.tool_calls).await;
         let repeated_inspection_action = if self.agent.persona_planning_budget() {
             None
@@ -370,6 +369,8 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         // A hook, peer, or editor can change a file after request preflight
         // while the model is responding. Probe again at the reuse decision.
         self.agent.refresh_read_evidence_freshness().await;
+        self.agent
+            .observe_delegated_read_overlap(&response.tool_calls);
         let precomputed_read = self.agent.preexecution_read_reuses(&response.tool_calls);
         let precomputed_read_delta = self.agent.preexecution_read_deltas(&response.tool_calls);
         let auto_background = self
@@ -390,7 +391,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     precomputed_read_delta,
                     auto_background,
                     planning_research: planning_research_rejection,
-                    delegated_read: delegated_read_rejections,
                     repeated_inspection: repeated_inspection_rejection,
                     read_storm: read_storm_rejection,
                     repeated_failure: repeated_failure_rejection.unwrap_or_default(),
