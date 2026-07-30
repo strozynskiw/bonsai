@@ -67,6 +67,13 @@ impl TurnPolicies {
     fn observe_tool_execution(&mut self, execution: &ToolExecutionOutcome) {
         self.repeated_failure
             .observe(&execution.tool_observations, execution.reset_loop_guards);
+        if execution
+            .tool_observations
+            .iter()
+            .any(|observation| observation.makes_progress)
+        {
+            self.empty_response_nudges = 0;
+        }
         if execution.reset_loop_guards {
             self.planning_research.reset();
             self.repeated_inspection.reset();
@@ -74,7 +81,6 @@ impl TurnPolicies {
             self.single_call_streak = SingleCallStreakGuard::default();
             self.serial_delegation = SerialDelegationGuard::default();
             self.implementation_stall.reset();
-            self.empty_response_nudges = 0;
         }
     }
 }
@@ -214,8 +220,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         }
 
         deferred_sink.flush();
-        // A model action starts a fresh empty-response nudge budget.
-        self.state.policies.empty_response_nudges = 0;
         self.execute_tool_turn(response).await
     }
 
@@ -514,5 +518,29 @@ mod tests {
         assert_eq!(policies.empty_response_nudges, 0);
         assert_eq!(policies.implementation_stall.turns_without_progress, 0);
         assert_eq!(policies.single_call_streak.streak, 0);
+    }
+
+    #[test]
+    fn only_progress_resets_empty_response_nudges() {
+        let mut policies = TurnPolicies {
+            empty_response_nudges: 2,
+            ..TurnPolicies::default()
+        };
+        let mut execution = ToolExecutionOutcome {
+            tool_observations: vec![ToolCallObservation {
+                signature: "read:{}".to_string(),
+                tool_name: "read".to_string(),
+                status: crate::output::ToolExecutionStatus::Succeeded,
+                makes_progress: false,
+            }],
+            ..ToolExecutionOutcome::default()
+        };
+
+        policies.observe_tool_execution(&execution);
+        assert_eq!(policies.empty_response_nudges, 2);
+
+        execution.tool_observations[0].makes_progress = true;
+        policies.observe_tool_execution(&execution);
+        assert_eq!(policies.empty_response_nudges, 0);
     }
 }
