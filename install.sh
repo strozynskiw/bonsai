@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/strozynskiw/bonsai/master/install.sh | sh
 #
 # Environment:
-#   BONSAI_VERSION      Tag to install (e.g. v0.2.7). Default: newest release.
+#   BONSAI_VERSION      Tag to install (e.g. v0.2.8). Default: newest release.
 #   BONSAI_INSTALL_DIR  Install directory. Default: $HOME/.local/bin
 #   BONSAI_NO_MODIFY_PATH=1
 #                       Never touch shell profiles. When the install directory
