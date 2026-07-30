@@ -1111,6 +1111,7 @@ impl AppState {
             UiEvent::ContextUpdated(report) => {
                 self.latest_context_report = Some(*report);
             }
+            UiEvent::TransientStatus(text) => self.set_session_toast(text),
             UiEvent::Status(text) => {
                 self.close_active_execution_group();
                 self.push_transcript_item(TranscriptItem::CommandOutput {
@@ -1434,11 +1435,15 @@ impl AppState {
                 if let Some(notice) = staged_notice {
                     self.update_notice = Some(notice);
                 }
-                self.push_transcript_item(TranscriptItem::CommandOutput {
-                    kind,
-                    text: message,
-                });
-                self.maybe_scroll_to_bottom_current();
+                if matches!(kind, CommandOutputKind::Error) {
+                    self.push_transcript_item(TranscriptItem::CommandOutput {
+                        kind,
+                        text: message,
+                    });
+                    self.maybe_scroll_to_bottom_current();
+                } else {
+                    self.set_session_toast(message);
+                }
             }
             RuntimeEvent::TaskPanicked(text) => {
                 self.mark_run_finished(Instant::now());
@@ -4850,6 +4855,70 @@ mod tests {
         assert_eq!(app.provider, "codex");
         assert_eq!(app.model, "o3");
         assert_eq!(app.reasoning, ReasoningSelection::High);
+    }
+
+    #[test]
+    fn transient_status_sets_toast_without_transcript_item() {
+        let mut app = app();
+
+        app.reduce(AppAction::Agent(UiEvent::TransientStatus(
+            "Settings saved.".to_string(),
+        )));
+
+        assert!(app.transcript.is_empty());
+        assert_eq!(
+            app.session_toast.as_ref().map(|toast| toast.text.as_str()),
+            Some("Settings saved.")
+        );
+    }
+
+    #[test]
+    fn durable_status_remains_in_transcript() {
+        let mut app = app();
+
+        app.reduce(AppAction::Agent(UiEvent::Status(
+            "Action required.".to_string(),
+        )));
+
+        assert_eq!(app.session_toast, None);
+        assert!(matches!(
+            app.transcript.as_slice(),
+            [TranscriptItem::CommandOutput {
+                kind: CommandOutputKind::Status,
+                text,
+            }] if text == "Action required."
+        ));
+    }
+
+    #[test]
+    fn successful_update_command_is_transient_but_errors_remain_durable() {
+        let mut app = app();
+
+        app.reduce(AppAction::Runtime(RuntimeEvent::UpdateCommandFinished {
+            message: "Bonsai is up to date.".to_string(),
+            kind: CommandOutputKind::Status,
+            staged_notice: None,
+        }));
+
+        assert!(app.transcript.is_empty());
+        assert_eq!(
+            app.session_toast.as_ref().map(|toast| toast.text.as_str()),
+            Some("Bonsai is up to date.")
+        );
+
+        app.reduce(AppAction::Runtime(RuntimeEvent::UpdateCommandFinished {
+            message: "Update failed.".to_string(),
+            kind: CommandOutputKind::Error,
+            staged_notice: None,
+        }));
+
+        assert!(matches!(
+            app.transcript.as_slice(),
+            [TranscriptItem::CommandOutput {
+                kind: CommandOutputKind::Error,
+                text,
+            }] if text == "Update failed."
+        ));
     }
 
     #[test]

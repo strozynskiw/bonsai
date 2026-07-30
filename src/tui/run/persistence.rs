@@ -514,11 +514,7 @@ pub(in crate::tui::run) async fn apply_persistence_command(
                 .await?
             {
                 ForgetSessionOutcome::Forgotten => {
-                    push_command_message(
-                        app,
-                        CommandOutputKind::Status,
-                        &format!("Forgot session #{session_id}."),
-                    );
+                    push_transient_notice(app, &format!("Forgot session #{session_id}."));
                     refresh_session_completion_choices(
                         app,
                         deps.storage,
@@ -607,11 +603,7 @@ async fn export_current_plan(
     tokio::fs::write(&path, markdown)
         .await
         .with_context(|| format!("Failed to export plan to {display_path}"))?;
-    push_command_message(
-        app,
-        CommandOutputKind::Status,
-        &format!("Exported plan to {display_path}."),
-    );
+    push_transient_notice(app, &format!("Exported plan to {display_path}."));
     Ok(())
 }
 
@@ -660,11 +652,7 @@ async fn save_current_plan(
         )
         .await?;
     app.reduce(AppAction::SetActiveSavedPlan(Some(saved.id)));
-    push_command_message(
-        app,
-        CommandOutputKind::Status,
-        &format!("Saved plan #{}: {}.", saved.id, saved.title),
-    );
+    push_transient_notice(app, &format!("Saved plan #{}: {}.", saved.id, saved.title));
     Ok(())
 }
 
@@ -710,7 +698,7 @@ async fn discard_current_plan(app: &mut AppState, deps: PersistenceCommandDeps<'
         return Ok(());
     }
     clear_canvas_plan(app, &deps.plan_store).await;
-    push_command_message(app, CommandOutputKind::Status, "Plan discarded.");
+    push_transient_notice(app, "Plan discarded.");
     Ok(())
 }
 
@@ -730,11 +718,7 @@ async fn new_plan(app: &mut AppState, plan_store: &SharedPlanStore) {
         return;
     }
     clear_canvas_plan(app, plan_store).await;
-    push_command_message(
-        app,
-        CommandOutputKind::Status,
-        "Plan canvas cleared. Chat kept.",
-    );
+    push_transient_notice(app, "Plan canvas cleared. Chat kept.");
 }
 
 /// Clear the working plan from the canvas: empty the shared plan store, mirror it

@@ -1003,4 +1003,48 @@ mod tests {
         assert_eq!(stored.plan.title, "atomic plan");
         assert_eq!(stored.todos, todos);
     }
+
+    #[tokio::test]
+    async fn only_durable_transcript_rows_are_persisted() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let transcript = vec![TranscriptItem::CommandOutput {
+            kind: crate::tui::event::CommandOutputKind::Status,
+            text: "Durable action required.".to_string(),
+        }];
+        let plan = crate::plan::PlanDoc::default();
+        let todos = Vec::new();
+        let writer = SessionSnapshotWriter::new(&fixture.storage, session_id);
+
+        let outcome = writer
+            .persist(
+                SessionSnapshotData {
+                    transcript: &transcript,
+                    plan: &plan,
+                    todos: &todos,
+                    agent: None,
+                    fallback_usage: None,
+                    ui_peer_delivery_receipts: &[],
+                    agent_peer_delivery_receipts: &[],
+                },
+                SessionSnapshotSignatures::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.changed);
+        let stored = fixture
+            .storage
+            .load_session_snapshot(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stored.transcript.as_slice(),
+            [TranscriptItem::CommandOutput {
+                kind: crate::tui::event::CommandOutputKind::Status,
+                text,
+            }] if text == "Durable action required."
+        ));
+    }
 }

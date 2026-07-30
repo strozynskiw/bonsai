@@ -54,7 +54,6 @@ pub(in crate::agent) const IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS: usize = 10;
 pub(in crate::agent) const IMPLEMENTATION_STALL_SECOND_NUDGE_TURNS: usize = 14;
 pub(in crate::agent) const IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS: usize = 18;
 pub(in crate::agent) const IMPLEMENTATION_STALL_REPEATED_NUDGE_INTERVAL_TURNS: usize = 16;
-pub(in crate::agent) const IMPLEMENTATION_STALL_STATUS_MESSAGE: &str = "No implementation progress for several turns — nudging the model to edit or report its blocker.";
 
 /// Result of [`Agent::call_model`]: either the provider responded, or
 /// compaction was cancelled mid-preflight and the turn should end as
@@ -212,6 +211,10 @@ impl crate::output::OutputSink for DeferredAssistantSink {
 
     fn context_updated(&self, report: ContextReport) {
         self.inner.context_updated(report);
+    }
+
+    fn transient_status(&self, text: &str) {
+        self.inner.transient_status(text);
     }
 
     fn status(&self, text: &str) {
@@ -2276,16 +2279,9 @@ struct ImplementationStallGuard {
     turns_without_progress: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImplementationStallStatus {
-    Show,
-    Quiet,
-}
-
 #[derive(Debug)]
 struct ImplementationStallNudge {
     note: String,
-    status: ImplementationStallStatus,
 }
 
 impl ImplementationStallGuard {
@@ -2304,13 +2300,11 @@ impl ImplementationStallGuard {
         if self.turns_without_progress == IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS {
             return Some(ImplementationStallNudge {
                 note: implementation_stall_first_nudge_message(self.turns_without_progress),
-                status: ImplementationStallStatus::Show,
             });
         }
         if self.turns_without_progress == IMPLEMENTATION_STALL_SECOND_NUDGE_TURNS {
             return Some(ImplementationStallNudge {
                 note: implementation_stall_second_nudge_message(self.turns_without_progress),
-                status: ImplementationStallStatus::Quiet,
             });
         }
         if self.turns_without_progress >= IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS
@@ -2319,7 +2313,6 @@ impl ImplementationStallGuard {
         {
             return Some(ImplementationStallNudge {
                 note: implementation_stall_repeated_nudge_message(self.turns_without_progress),
-                status: ImplementationStallStatus::Quiet,
             });
         }
         None

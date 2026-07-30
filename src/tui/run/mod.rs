@@ -76,7 +76,8 @@ pub(super) use commands::{
     create_pull_request, implement_plan, implement_plan_with_context, mark_started_saved_plan,
     non_empty_trimmed, open_cached_model_picker, open_context_modal_with_preview,
     open_start_plan_choice, open_theme_picker, persist_current_theme, push_command_message,
-    review_changes, run_build_profile, run_test_profile, switch_model_selection,
+    push_transient_notice, review_changes, run_build_profile, run_test_profile,
+    switch_model_selection,
 };
 pub(super) use event_loop::{open_background_task_list, start_delete_selected_background_task};
 pub(super) use persistence::{

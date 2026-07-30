@@ -1,6 +1,6 @@
 //! Integration coverage for the implementation-stall guard (session 84): a
 //! coding-persona run that only explores — distinct reads every turn, so the
-//! signature-based inspection guards never trip — must receive persistent
+//! signature-based inspection guards never trip — must receive model-only
 //! nudges without being stopped, while progress, planning runs, and subagent
 //! lanes stay unguarded.
 
@@ -9,7 +9,7 @@ use super::*;
 use super::super::ExecutionLane;
 use super::super::run_loop::{
     IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS, IMPLEMENTATION_STALL_REPEATED_NUDGE_INTERVAL_TURNS,
-    IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS, IMPLEMENTATION_STALL_STATUS_MESSAGE,
+    IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS,
 };
 
 /// One exploration-only model turn: a single `read` call whose arguments are
@@ -139,13 +139,9 @@ async fn stall_guard_keeps_long_exploration_run_alive_with_persistent_nudges() {
             .all(|note| note.contains("Persistent implementation nudge")),
         "later nudges must keep steering without terminating: {notes:#?}"
     );
-    assert_eq!(
-        sink.statuses()
-            .iter()
-            .filter(|status| status.as_str() == IMPLEMENTATION_STALL_STATUS_MESSAGE)
-            .count(),
-        1,
-        "only the first nudge in a continuous stall should be user-visible"
+    assert!(
+        sink.statuses().is_empty(),
+        "implementation guard nudges must stay model-only"
     );
 }
 

@@ -331,12 +331,12 @@ async fn self_review_set_updates_state_and_confirms_in_transcript() {
         crate::self_review::SelfReviewMode::Off,
         "sync_agent must mirror the mode into the live agent"
     );
+    assert!(app.transcript.is_empty());
     assert!(
-        matches!(
-            app.transcript.last(),
-            Some(TranscriptItem::CommandOutput { text, .. }) if text.starts_with("Self-review set to")
-        ),
-        "the set must confirm in the transcript"
+        app.session_toast
+            .as_ref()
+            .is_some_and(|toast| toast.text.starts_with("Self-review set to")),
+        "the set must confirm through a transient toast"
     );
 }
 
@@ -2477,13 +2477,12 @@ async fn running_smol_on_applies_preference_mid_run() {
         ),
         "setting toggles must not open the busy-command modal"
     );
-    assert!(app.transcript.iter().any(|item| matches!(
-        item,
-        TranscriptItem::CommandOutput {
-            kind: CommandOutputKind::Status,
-            text,
-        } if text.starts_with("SMOL preference set to on")
-    )));
+    assert!(app.transcript.is_empty());
+    assert!(
+        app.session_toast
+            .as_ref()
+            .is_some_and(|toast| toast.text.starts_with("SMOL preference set to on"))
+    );
 }
 
 /// Audit H1: `/self-review off` typed mid-run applies to the app mirror (the
@@ -4309,6 +4308,10 @@ async fn maybe_advance_plan_phase_continues_to_next_phase() {
         todos[0].content, "do b",
         "only the next phase's todos are seeded"
     );
+    assert!(
+        app.transcript.is_empty(),
+        "phase progress is represented by the plan surface, not transcript rows"
+    );
 
     drain_tasks(&mut tasks).await;
 }
@@ -4392,6 +4395,10 @@ async fn maybe_advance_plan_phase_completes_after_final_phase() {
             .tasks
             .iter()
             .all(|t| t.done)
+    );
+    assert!(
+        app.transcript.is_empty(),
+        "plan completion is represented by the canvas, not a transcript row"
     );
 }
 
@@ -5721,15 +5728,11 @@ async fn export_command_writes_plan_markdown_to_relative_path() {
         .await
         .unwrap();
     assert_eq!(exported, format!("{}\n", app.plan.to_markdown()));
-    assert!(app.transcript.iter().any(|item| {
-        matches!(
-            item,
-            TranscriptItem::CommandOutput {
-                kind: CommandOutputKind::Status,
-                text,
-            } if text == "Exported plan to plans/current.md."
-        )
-    }));
+    assert!(app.transcript.is_empty());
+    assert_eq!(
+        app.session_toast.as_ref().map(|toast| toast.text.as_str()),
+        Some("Exported plan to plans/current.md.")
+    );
     assert_eq!(app.active_saved_plan_session_id, None);
 }
 

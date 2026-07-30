@@ -300,7 +300,7 @@ async fn completed_background_task_output_is_added_to_context() {
 }
 
 #[tokio::test]
-async fn completed_background_tasks_are_reported_as_one_status_and_context_message() {
+async fn completed_background_tasks_are_added_to_context_without_status() {
     let fixture = TestFixture::new();
     let registry = Arc::new(BackgroundTaskRegistry::new());
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -346,11 +346,10 @@ async fn completed_background_tasks_are_reported_as_one_status_and_context_messa
         .unwrap();
 
     assert_eq!(result, AgentRunResult::Completed("done".to_string()));
-    let statuses = sink.statuses();
-    assert_eq!(statuses.len(), 1);
-    assert!(statuses[0].contains("2 tasks succeeded"));
-    assert!(statuses[0].contains(&first.id), "status: {}", statuses[0]);
-    assert!(statuses[0].contains(&second.id), "status: {}", statuses[0]);
+    assert!(
+        sink.statuses().is_empty(),
+        "background completion remains available through the activity card and model context"
+    );
 
     let requests = requests.lock().await;
     let completions = user_messages_in(&requests[0])

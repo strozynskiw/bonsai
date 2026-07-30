@@ -108,6 +108,12 @@ pub trait OutputSink: Send + Sync {
     fn workspace_changed(&self, _paths: &[String], _intent: &str) {}
     fn queued_user_message_sent(&self, _id: u64, _text: &str) {}
     fn context_updated(&self, _report: ContextReport) {}
+    /// An immediate confirmation that display surfaces may show without
+    /// retaining in their transcript. Sinks without a transient surface retain
+    /// the readable output by forwarding it to [`Self::status`].
+    fn transient_status(&self, text: &str) {
+        self.status(text);
+    }
     fn status(&self, _text: &str) {}
     /// A status specifically about context compaction. Routes to `status` by
     /// default; the TUI overrides it so consecutive compaction rows collapse.

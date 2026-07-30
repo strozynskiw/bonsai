@@ -201,6 +201,10 @@ impl OutputSink for PerfSink {
         self.inner.context_updated(report);
     }
 
+    fn transient_status(&self, text: &str) {
+        self.inner.transient_status(text);
+    }
+
     fn status(&self, text: &str) {
         self.inner.status(text);
     }

@@ -256,8 +256,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 nudges = self.state.policies.empty_response_nudges,
                 "guard nudged model"
             );
-            self.sink
-                .status("Empty model turn (no output, no tool calls) — nudging it to act.");
             self.agent
                 .push_harness_note(&empty_response_nudge_message());
             self.agent.emit_context_updated(&self.sink);
@@ -461,9 +459,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     .turns_without_progress,
                 "guard nudged model"
             );
-            if nudge.status == ImplementationStallStatus::Show {
-                self.sink.status(IMPLEMENTATION_STALL_STATUS_MESSAGE);
-            }
             self.agent.push_harness_note(&nudge.note);
             self.agent.emit_context_updated(&self.sink);
         } else if let Some(hint) = serial_delegation_hint {

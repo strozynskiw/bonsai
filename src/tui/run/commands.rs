@@ -118,11 +118,7 @@ pub(in crate::tui::run) fn spawn_update_command(
     bonsai_home: std::path::PathBuf,
     config: crate::config::UpdateConfig,
 ) {
-    push_command_message(
-        app,
-        CommandOutputKind::Status,
-        "Checking for the newest release…",
-    );
+    push_transient_notice(app, "Checking for the newest release…");
     tokio::spawn(async move {
         let outcome = crate::update::run_forced_update(&bonsai_home, &config, false).await;
         tracing::debug!(?outcome, "/update finished");
@@ -274,9 +270,8 @@ async fn export_theme(name: &str, app: &mut AppState, project_root: &std::path::
         );
         return;
     }
-    push_command_message(
+    push_transient_notice(
         app,
-        CommandOutputKind::Status,
         &format!(
             "Exported current theme to {}. Edit it, then run /theme {name}.",
             path.display()
@@ -316,9 +311,8 @@ pub(in crate::tui::run) async fn apply_autonomy_command(
     use crate::tool::ApprovalLevel;
 
     let status_now = |app: &mut AppState| {
-        push_command_message(
+        push_transient_notice(
             app,
-            CommandOutputKind::Status,
             &crate::commands::autonomy_status_message(app.approval_level),
         );
     };
@@ -430,19 +424,15 @@ pub(in crate::tui::run) async fn apply_self_review_command(
                 agent.lock().await.set_self_review_mode(mode);
             }
             app.self_review_mode = mode;
-            // Confirm the change — a silent set is indistinguishable from a
-            // no-op (and matches the headless handler's feedback).
-            push_command_message(
+            push_transient_notice(
                 app,
-                CommandOutputKind::Status,
                 &crate::commands::self_review_set_message(mode, app.approval_level),
             );
         }
         Ok(SelfReviewCommandRequest::Status) => {
             let mode = app.self_review_mode;
-            push_command_message(
+            push_transient_notice(
                 app,
-                CommandOutputKind::Status,
                 &crate::commands::self_review_status_message(mode, app.approval_level),
             );
         }
@@ -483,9 +473,8 @@ pub(in crate::tui::run) async fn apply_self_review_command(
             }
             app.builtin_subagents
                 .upsert(crate::subagent::BuiltinSubagentId::SelfReview, settings);
-            push_command_message(
+            push_transient_notice(
                 app,
-                CommandOutputKind::Status,
                 "Self-review model cleared — the reviewer uses the parent model.",
             );
         }
@@ -547,18 +536,16 @@ pub(in crate::tui::run) async fn apply_smol_command(
                 tokio::spawn(async move {
                     agent.lock().await.set_smol_preference(preference);
                 });
-                push_command_message(
+                push_transient_notice(
                     app,
-                    CommandOutputKind::Status,
                     &format!(
                         "SMOL preference set to {}; the running agent picks it up when the current run finishes.",
                         preference.as_str()
                     ),
                 );
             }
-            None => push_command_message(
+            None => push_transient_notice(
                 app,
-                CommandOutputKind::Status,
                 if app.smol_mode {
                     "SMOL effective profile: on. Preference details are available while idle."
                 } else {
@@ -589,19 +576,11 @@ pub(in crate::tui::run) async fn apply_smol_command(
             if profile.enabled {
                 app.reduce(AppAction::SetPureMode(false));
             }
-            push_command_message(
-                app,
-                CommandOutputKind::Status,
-                &crate::commands::smol_set_message(profile),
-            );
+            push_transient_notice(app, &crate::commands::smol_set_message(profile));
         }
         None => {
             let profile = agent.lock().await.smol_profile();
-            push_command_message(
-                app,
-                CommandOutputKind::Status,
-                &crate::commands::smol_status_message(profile),
-            );
+            push_transient_notice(app, &crate::commands::smol_status_message(profile));
         }
     }
 }
@@ -630,11 +609,7 @@ pub(in crate::tui::run) async fn apply_pure_command(
         }
         crate::commands::PureCommandRequest::Set(target) => target,
         crate::commands::PureCommandRequest::Status => {
-            push_command_message(
-                app,
-                CommandOutputKind::Status,
-                &crate::commands::pure_status_message(is_pure),
-            );
+            push_transient_notice(app, &crate::commands::pure_status_message(is_pure));
             return;
         }
     };
@@ -658,11 +633,7 @@ pub(in crate::tui::run) async fn apply_pure_command(
         };
         app.latest_context_report = Some(context_report);
     }
-    push_command_message(
-        app,
-        CommandOutputKind::Status,
-        &crate::commands::pure_set_message(target),
-    );
+    push_transient_notice(app, &crate::commands::pure_set_message(target));
 }
 
 pub(in crate::tui::run) async fn apply_serenity_command(
@@ -683,16 +654,11 @@ pub(in crate::tui::run) async fn apply_serenity_command(
                         &format!("Failed to save serenity preference: {error:#}"),
                     );
                 }
-                push_command_message(
-                    app,
-                    CommandOutputKind::Status,
-                    crate::commands::serenity::serenity_set_message(on),
-                );
+                push_transient_notice(app, crate::commands::serenity::serenity_set_message(on));
             }
             None => {
-                push_command_message(
+                push_transient_notice(
                     app,
-                    CommandOutputKind::Status,
                     crate::commands::serenity::serenity_status_message(app.serenity_mode),
                 );
             }
@@ -1427,6 +1393,10 @@ pub(in crate::tui) fn push_command_message(
     });
 }
 
+pub(in crate::tui) fn push_transient_notice(app: &mut AppState, text: &str) {
+    app.set_session_toast(text);
+}
+
 pub(in crate::tui) fn non_empty_trimmed(value: String) -> Option<String> {
     let value = value.trim().to_string();
     (!value.is_empty()).then_some(value)
@@ -1700,9 +1670,8 @@ pub(in crate::tui::run) async fn retry_last_turn(
         app.model = selection.model.clone();
         app.reasoning = selection.reasoning;
         app.refresh_agent_mirrors(&*deps.agent.lock().await);
-        push_command_message(
+        push_transient_notice(
             app,
-            CommandOutputKind::Status,
             &format!(
                 "Retry model set to {} ({}, reasoning: {}).",
                 selection.model,
@@ -2324,6 +2293,19 @@ mod tests {
             "workspace".to_string(),
             None,
         )
+    }
+
+    #[test]
+    fn transient_notice_does_not_create_a_transcript_row() {
+        let mut app = app();
+
+        push_transient_notice(&mut app, "SMOL preference set to on.");
+
+        assert!(app.transcript.is_empty());
+        assert_eq!(
+            app.session_toast.as_ref().map(|toast| toast.text.as_str()),
+            Some("SMOL preference set to on.")
+        );
     }
 
     #[test]

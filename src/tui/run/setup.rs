@@ -538,6 +538,10 @@ impl OutputSink for TuiSink {
         let _ = self.sender.send(UiEvent::ContextUpdated(Box::new(report)));
     }
 
+    fn transient_status(&self, text: &str) {
+        let _ = self.sender.send(UiEvent::TransientStatus(text.to_string()));
+    }
+
     fn status(&self, text: &str) {
         let _ = self.sender.send(UiEvent::Status(text.to_string()));
     }

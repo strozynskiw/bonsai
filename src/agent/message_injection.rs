@@ -195,7 +195,7 @@ impl Agent {
     }
 
     pub(super) async fn refresh_background_context(&mut self, sink: &SharedSink) -> bool {
-        let drained = self.drain_background_completions(sink).await;
+        let drained = self.drain_background_completions().await;
         let drained_terminals = self.drain_terminal_updates(sink).await;
         let drained_subagents = self.drain_subagent_completions().await;
         let synced = self.sync_running_background_status().await;
@@ -281,13 +281,12 @@ impl Agent {
         }
     }
 
-    pub(super) async fn drain_background_completions(&mut self, sink: &SharedSink) -> bool {
+    pub(super) async fn drain_background_completions(&mut self) -> bool {
         let completed = self.background_tasks.drain_completed_for_agent().await;
         if completed.is_empty() {
             return false;
         }
 
-        sink.status(&background_completion_status(&completed));
         self.push_untrusted_runtime_note(
             MessageProvenance::Background,
             "background command completion",
@@ -302,7 +301,7 @@ impl Agent {
         if updates.is_empty() {
             return false;
         }
-        sink.status(&format!(
+        sink.transient_status(&format!(
             "{} interactive terminal update{} ready",
             updates.len(),
             if updates.len() == 1 { "" } else { "s" }

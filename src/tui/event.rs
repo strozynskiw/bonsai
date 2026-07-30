@@ -772,6 +772,8 @@ pub enum UiEvent {
         text: String,
     },
     ContextUpdated(Box<crate::agent::ContextReport>),
+    /// An immediate confirmation that should not be retained in the transcript.
+    TransientStatus(String),
     Status(String),
     /// A context-compaction status; the app collapses consecutive ones.
     CompactionStatus(String),

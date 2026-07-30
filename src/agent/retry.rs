@@ -251,6 +251,10 @@ impl crate::output::OutputSink for AttemptSink {
         self.inner.thinking(text);
     }
 
+    fn transient_status(&self, text: &str) {
+        self.inner.transient_status(text);
+    }
+
     fn status(&self, text: &str) {
         self.inner.status(text);
     }

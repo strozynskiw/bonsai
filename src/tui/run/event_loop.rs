@@ -4260,10 +4260,6 @@ async fn maybe_advance_plan_phase(
 
     let Some(next) = plan.next_phase_with_pending(Some(current)) else {
         app.clear_plan_execution();
-        app.reduce(AppAction::CommandOutput {
-            kind: CommandOutputKind::Status,
-            text: "All phases complete.".to_string(),
-        });
         return false;
     };
 
@@ -4291,10 +4287,6 @@ async fn maybe_advance_plan_phase(
         .get(next)
         .map(|phase| phase.name.clone())
         .unwrap_or_default();
-    app.reduce(AppAction::CommandOutput {
-        kind: CommandOutputKind::Status,
-        text: format!("Phase {} complete — starting {next_name}", current + 1),
-    });
     app.reduce(AppAction::ScrollBottom);
     app.reduce(AppAction::SetTaskState(TaskState::Running));
     app.mark_run_started(std::time::Instant::now());

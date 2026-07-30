@@ -179,32 +179,6 @@ fn single_diff_context_preview(diff: &crate::diff::FileDiff) -> String {
     text
 }
 
-pub(super) fn background_completion_status(
-    tasks: &[crate::background::BackgroundTaskSnapshot],
-) -> String {
-    match tasks {
-        [] => "[background] no completed tasks".to_string(),
-        [task] => format!("[background] {} {}", task.id, task.status.label()),
-        tasks => {
-            let task_ids = tasks
-                .iter()
-                .map(|task| task.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            if tasks.iter().all(|task| task.status.is_success()) {
-                format!("[background] {} tasks succeeded: {task_ids}", tasks.len())
-            } else {
-                let summary = tasks
-                    .iter()
-                    .map(|task| format!("{} {}", task.id, task.status.label()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("[background] {} tasks finished: {summary}", tasks.len())
-            }
-        }
-    }
-}
-
 pub(super) fn background_completion_message(
     tasks: &[crate::background::BackgroundTaskSnapshot],
 ) -> String {
