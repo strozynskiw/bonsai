@@ -713,6 +713,14 @@ async fn submit_and_start_run(
     deps: RuntimeActionDeps<'_>,
     repo_map: &mut RepoMapInjector,
 ) -> bool {
+    if app.waiting_for_peer.is_some() {
+        if let Some(peer_bus) = deps.peer_bus
+            && let Err(err) = peer_bus.cancel_own_wake_subscriptions().await
+        {
+            tracing::warn!(%err, "failed to cancel peer wait before a new turn");
+        }
+        app.waiting_for_peer = None;
+    }
     if input.starts_with('/') {
         app.reduce(AppAction::ScrollBottom);
         app.reduce(AppAction::SubmitCommandInput(input.to_string()));
@@ -1729,6 +1737,15 @@ fn peer_wake_authority(
                 && message.wake_subscription_id == Some(wait.subscription_id)
         })
     });
+    // A done notice is automatic-wake authority only for the exact current
+    // subscription. Never downgrade a stale completion into an unsolicited wake.
+    if messages
+        .iter()
+        .any(|message| message.kind == crate::storage::PeerMessageKind::DoneNotice)
+        && !solicited
+    {
+        return None;
+    }
     Some((hop, solicited))
 }
 
@@ -1842,6 +1859,12 @@ async fn maybe_start_peer_wake(
     }
 
     *pending_peer_wake = None;
+    if !solicited
+        && app.waiting_for_peer.is_some()
+        && let Err(err) = peer_bus.cancel_own_wake_subscriptions().await
+    {
+        tracing::warn!(%err, "failed to cancel peer wait before an unrelated peer wake");
+    }
     app.waiting_for_peer = None;
     peer_bus.begin_turn(crate::peer::TurnOrigin::PeerWake { hop: pending_hop });
     app.reduce(AppAction::SetTaskState(TaskState::Running));
@@ -2577,6 +2600,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 sink: sink.clone(),
                 background_tasks: background_tasks.clone(),
                 terminals: terminals.clone(),
+                peer_bus: Some(peer_bus.clone()),
             }
         };
     }

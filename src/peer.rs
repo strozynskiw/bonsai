@@ -431,6 +431,13 @@ impl PeerBus {
         self.storage.wake_relationships(self_id).await
     }
 
+    /// Cancel this session's outstanding waits without producing done notices.
+    /// A newly started unrelated turn calls this before clearing its local park.
+    pub async fn cancel_own_wake_subscriptions(&self) -> Result<u64> {
+        let self_id = self.self_id().await?;
+        self.storage.cancel_wake_subscriptions(self_id).await
+    }
+
     /// Fire the wake subscriptions targeting this session (called when its
     /// agent run finishes). Returns the requesters that were notified.
     pub async fn fire_own_wake_subscriptions(&self) -> Result<Vec<SessionId>> {

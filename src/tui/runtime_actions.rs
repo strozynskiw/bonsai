@@ -88,6 +88,7 @@ pub(super) struct RuntimeActionDeps<'a> {
     pub(super) sink: SharedSink,
     pub(super) background_tasks: Arc<BackgroundTaskRegistry>,
     pub(super) terminals: Arc<crate::terminal::TerminalRegistry>,
+    pub(super) peer_bus: Option<Arc<crate::peer::PeerBus>>,
 }
 
 impl RuntimeActionDeps<'_> {

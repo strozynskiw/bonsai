@@ -729,6 +729,7 @@ fn runtime_action_deps<'a>(
         sink: Arc::new(NullSink),
         background_tasks: Arc::new(BackgroundTaskRegistry::new()),
         terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+        peer_bus: None,
     }
 }
 
@@ -762,6 +763,7 @@ fn runtime_action_deps_with_permissions<'a>(
         sink: Arc::new(NullSink),
         background_tasks: Arc::new(BackgroundTaskRegistry::new()),
         terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+        peer_bus: None,
     }
 }
 
@@ -2900,6 +2902,7 @@ async fn agent_browser_edit_and_toggle_do_not_block_on_held_agent_lock() {
             sink: Arc::new(NullSink),
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            peer_bus: None,
         }
     };
 
@@ -3215,6 +3218,7 @@ async fn model_picker_submit_while_running_queues_selected_model() {
             sink: Arc::new(NullSink),
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            peer_bus: None,
         },
         &mut state,
     )
@@ -7919,6 +7923,7 @@ async fn discard_confirm_deletes_saved_record_and_clears_canvas() {
             sink: Arc::new(NullSink),
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            peer_bus: None,
         },
         &mut state,
     )
@@ -8108,7 +8113,9 @@ fn peer_wake_authority_is_message_bound_and_keeps_the_maximum_hop() {
     );
 
     let wrong_done = message(3, PeerMessageKind::DoneNotice, 0, Some(100));
-    assert_eq!(peer_wake_authority(&[wrong_done], wait), Some((0, false)));
+    // A stale completion is informational only; it cannot be downgraded into
+    // an unsolicited automatic wake.
+    assert_eq!(peer_wake_authority(&[wrong_done], wait), None);
 
     // Merging a lower-hop message never lowers an earlier pending cap.
     let capped = message(4, PeerMessageKind::Text, crate::peer::MAX_PEER_HOPS, None);

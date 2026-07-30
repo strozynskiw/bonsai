@@ -918,11 +918,12 @@ impl Storage {
         Ok(())
     }
 
-    /// Messages still awaiting agent injection for `to` — the actionable-inbox
-    /// gate a peer wake re-checks before starting a turn.
+    /// Distinct peer senders with messages still awaiting agent injection for
+    /// `to`. This drives the peer badge; every row remains available for
+    /// delivery even when several came from the same sender.
     pub async fn pending_agent_message_count(&self, to: SessionId) -> Result<i64> {
         sqlx::query_scalar(
-            "SELECT COUNT(*) FROM agent_messages
+            "SELECT COUNT(DISTINCT from_session_id) FROM agent_messages
              WHERE to_session_id = ?
                AND delivered_agent_at_ms IS NULL
                AND kind != ?",
@@ -1377,6 +1378,20 @@ impl Storage {
         })?;
 
         let registration = if let Some(subscription_id) = created_subscription_id {
+            // This requester can park on only one blocker. The new subscription
+            // is durable before older waits are terminally claimed, so a refused
+            // registration never discards a valid existing wait.
+            storage_op!(
+                &mut tx,
+                "supersede requester wake subscriptions",
+                sqlx::query(
+                    "UPDATE peer_wake_subscriptions SET fired_at_ms = ? \
+                     WHERE requester_session_id = ? AND id != ? AND fired_at_ms IS NULL",
+                )
+                .bind(now)
+                .bind(operation.requester.as_i64())
+                .bind(subscription_id),
+            )?;
             WakeSubscriptionRegistration {
                 outcome: WakeSubscriptionOutcome::Created,
                 subscription_id: Some(subscription_id),
@@ -1480,6 +1495,22 @@ impl Storage {
             fyi_message,
             newly_committed: true,
         })
+    }
+
+    /// Terminally cancel every unfired wake requested by `requester`, without
+    /// emitting a done notice. Cancellation and target firing share the
+    /// `fired_at_ms IS NULL` claim, so exactly one wins.
+    pub async fn cancel_wake_subscriptions(&self, requester: SessionId) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE peer_wake_subscriptions SET fired_at_ms = ? \
+             WHERE requester_session_id = ? AND fired_at_ms IS NULL",
+        )
+        .bind(now_ms())
+        .bind(requester.as_i64())
+        .execute(&self.pool)
+        .await
+        .context("Failed to cancel pending wake subscriptions")?;
+        Ok(result.rows_affected())
     }
 
     /// Return this session's unfired outgoing waits and incoming waiters.
