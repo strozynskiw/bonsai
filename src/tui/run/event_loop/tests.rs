@@ -2,6 +2,7 @@ use super::*;
 use crate::background::{BackgroundTaskEvent, BackgroundTaskRegistry};
 use crate::interaction::QuestionOption;
 use crate::output::OutputSink;
+use crate::plan::SharedPlanStore;
 use crate::provider::{
     AuthInput, AuthorizeOutcome, Provider, ProviderFactory, ProviderMetadata, ReasoningSelection,
     StreamedResponse,
@@ -565,6 +566,139 @@ fn persistence_deps<'a>(
         project_root,
         active_session_id: Arc::new(Mutex::new(Some(current_session_id))),
     }
+}
+
+#[tokio::test]
+async fn fresh_plan_protection_clears_an_empty_canvas_without_saving() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(crate::plan::PlanDoc::default()));
+    let mut app = app();
+
+    protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+        .await
+        .unwrap();
+
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    assert!(app.active_saved_plan_session_id.is_none());
+    assert!(
+        storage
+            .saved_plans_for_project(temp_dir.path(), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn fresh_plan_protection_saves_then_clears_an_unsaved_canvas() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(sample_plan("Protect me")));
+    let mut app = app();
+
+    protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+        .await
+        .unwrap();
+
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    assert!(app.active_saved_plan_session_id.is_none());
+    let saved = storage
+        .saved_plans_for_project(temp_dir.path(), 10)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].title, "Protect me");
+}
+
+#[tokio::test]
+async fn fresh_plan_protection_refreshes_linked_plan_in_place() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(sample_plan("First title")));
+    let mut app = app();
+    app.plan = plan_store.lock().await.clone();
+    let saved = storage
+        .save_plan_to_library(session_id, None, &app.plan, None)
+        .await
+        .unwrap();
+    app.active_saved_plan_session_id = Some(saved.id);
+    let saved_id = saved.id;
+    plan_store.lock().await.edit().set_title("Refreshed title");
+
+    protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+        .await
+        .unwrap();
+
+    assert!(app.plan.is_empty());
+    assert!(app.active_saved_plan_session_id.is_none());
+    let saved = storage.load_saved_plan(saved_id).await.unwrap().unwrap();
+    assert_eq!(saved.plan.title, "Refreshed title");
+    assert_eq!(
+        storage
+            .saved_plans_for_project(temp_dir.path(), 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn fresh_plan_protection_keeps_an_invalid_canvas_intact() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let mut invalid = crate::plan::PlanDoc::default();
+    invalid.edit().add_task("Untitled task");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let mut app = app();
+
+    let err = protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("untitled"));
+    assert_eq!(*plan_store.lock().await, invalid);
+    assert_eq!(app.plan, invalid);
+    assert!(app.active_saved_plan_session_id.is_none());
+}
+
+#[tokio::test]
+async fn start_new_plan_save_failure_keeps_coding_and_skips_continuation() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let mut invalid = crate::plan::PlanDoc::default();
+    invalid.edit().add_task("Untitled task");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let agent = test_agent(Box::new(CompleteProvider));
+    let mut app = app();
+    app.pending_start_new_plan = true;
+    let mut repo_map = empty_repo_map_injector();
+
+    let started = maybe_start_new_plan(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        &mut repo_map,
+        &storage,
+        session_id,
+        plan_store.clone(),
+    )
+    .await;
+
+    assert!(!started);
+    assert_eq!(app.view, View::Agent);
+    assert_eq!(app.active_mode(), AgentMode::Coding);
+    assert_eq!(app.task_state, TaskState::Idle);
+    assert!(!tasks.is_busy());
+    assert!(!app.pending_start_new_plan);
+    assert_eq!(app.plan, invalid);
+    assert_eq!(*plan_store.lock().await, invalid);
 }
 
 fn runtime_action_deps<'a>(
@@ -4882,6 +5016,64 @@ async fn deferred_model_command_applies_after_idle_drain() {
     assert_eq!(app.provider, "codex");
     assert_eq!(app.model, "openai/gpt-5.5");
     drain_tasks(&mut tasks).await;
+}
+
+#[tokio::test]
+async fn deferred_command_waits_for_fresh_plan_transition() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(sample_plan("Protect this plan")));
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let agent = test_agent(Box::new(CompleteProvider));
+    let mut app = app();
+    app.pending_start_new_plan = true;
+    app.reduce(AppAction::QueueDeferredCommand {
+        input: "/new-plan".to_string(),
+        label: "/new-plan".to_string(),
+    });
+
+    let started_deferred = start_next_deferred_command_if_idle(
+        &mut app,
+        &mut tasks,
+        agent.clone(),
+        Arc::new(Mutex::new(SessionStore::default())),
+        temp_dir.path(),
+        DeferredCommandDeps {
+            registry: Arc::new(ProviderRegistry::default_registry()),
+            model_catalog: test_model_catalog(),
+            storage: Some(&storage),
+        },
+    )
+    .await;
+
+    assert!(!started_deferred);
+    assert_eq!(app.task_state, TaskState::Idle);
+    assert!(!tasks.is_busy());
+    assert_eq!(app.deferred_commands.len(), 1);
+
+    let mut repo_map = empty_repo_map_injector();
+    let started_new_plan = maybe_start_new_plan(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        &mut repo_map,
+        &storage,
+        session_id,
+        plan_store,
+    )
+    .await;
+
+    assert!(started_new_plan);
+    assert_eq!(
+        storage
+            .saved_plans_for_project(temp_dir.path(), 10)
+            .await
+            .unwrap()[0]
+            .title,
+        "Protect this plan"
+    );
 }
 
 #[tokio::test]

@@ -354,11 +354,10 @@ pub struct AppState {
     /// Set by the `AgentFinished` reducer when a phased run terminates, then
     /// consumed by the event loop to auto-advance to the next phase or halt.
     pub(crate) phase_advance: Option<PhaseAdvance>,
-    /// Set by the `AgentFinished` reducer when the coding agent ended its turn
-    /// with a confirmed `enter_plan_mode` switch, then consumed by the event
-    /// loop to swap the active persona and re-dispatch a continuation under the
-    /// new mode. `None` on any other finish.
-    pub(crate) pending_persona_switch: Option<AgentMode>,
+    /// Set by the `AgentFinished` reducer when the coding agent asks to start a
+    /// fresh plan, then consumed by the event loop after it protects and clears
+    /// the old canvas. `None` on any other finish.
+    pub(crate) pending_start_new_plan: bool,
     pub(crate) tick: u64,
     /// The bonsai in the empty todo sidebar. Fully grown at startup; `/bonsai`
     /// replants the tree and replays the growth.
@@ -602,7 +601,7 @@ impl AppState {
             task_state: TaskState::Idle,
             plan_execution: None,
             phase_advance: None,
-            pending_persona_switch: None,
+            pending_start_new_plan: false,
             tick: 0,
             sidebar_bonsai: crate::tui::widgets::bonsai::BonsaiGrowth::sprout(),
             copy_notice: None,
@@ -1212,18 +1211,13 @@ impl AppState {
                 // Only a real interrupt (Ctrl+C) or actual failure halts phases.
                 let phase_interrupted = matches!(self.task_state, TaskState::Cancelling)
                     || matches!(&result, Ok(AgentRunOutcome::Interrupted));
-                // The coding agent confirmed a plan-mode switch: hand the mode
-                // to the event loop, which swaps persona and re-dispatches a
-                // continuation. Ignored if the run was interrupted before the
-                // switch could take effect. Computed here while `result` is
-                // still borrowable (the `match result` below moves it).
-                self.pending_persona_switch =
-                    match &result {
-                        Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::PersonaSwitch(
-                            mode,
-                        ))) if !interrupted => Some(*mode),
-                        _ => None,
-                    };
+                // A fresh-plan transition is ignored after interruption.
+                self.pending_start_new_plan = matches!(
+                    &result,
+                    Ok(AgentRunOutcome::Waiting(
+                        crate::agent::WaitReason::StartNewPlan
+                    ))
+                ) && !interrupted;
                 self.current_terminal_reason = match &result {
                     Ok(AgentRunOutcome::BudgetExhausted(reason)) => Some(*reason),
                     _ => None,
@@ -1696,6 +1690,22 @@ mod tests {
         let activity = app.tool_activity("bash-1").expect("tool present");
         assert_eq!(activity.status, ToolStatus::Running);
         assert!(activity.finished_at.is_none());
+    }
+
+    #[test]
+    fn start_new_plan_wait_sets_the_fresh_plan_transition() {
+        let mut app = app();
+        app.task_state = TaskState::Running;
+        app.mark_run_started(Instant::now());
+
+        app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
+            AgentRunOutcome::Waiting(crate::agent::WaitReason::StartNewPlan),
+        ))));
+
+        assert_eq!(app.task_state, TaskState::Idle);
+        assert_eq!(app.current_session_status, SessionStatus::Completed);
+        assert!(app.pending_start_new_plan);
+        assert!(app.waiting_for_peer.is_none());
     }
 
     #[test]

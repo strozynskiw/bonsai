@@ -12,7 +12,6 @@ use crate::permissions::PermissionManager;
 use crate::storage::Storage;
 use crate::tool::apply_patch::ApplyPatchTool;
 use crate::tool::diagnostics::DiagnosticsTool;
-use crate::tool::enter_plan_mode::EnterPlanModeTool;
 use crate::tool::git::GitTool;
 use crate::tool::glob::GlobTool;
 use crate::tool::grep::GrepTool;
@@ -32,6 +31,7 @@ use crate::tool::question::QuestionTool;
 use crate::tool::recall::RecallTool;
 use crate::tool::set_session_title::SetSessionTitleTool;
 use crate::tool::skill::SkillTool;
+use crate::tool::start_new_plan::StartNewPlanTool;
 use crate::tool::symbol_search::SymbolSearchTool;
 use crate::tool::tasks::TasksTool;
 use crate::tool::terminal::TerminalTool;
@@ -608,8 +608,8 @@ pub(crate) fn build_tool_registries(
     coding_instances.insert(ToolFactoryKey::ReadSymbol, read_symbol_tool.clone());
     coding_instances.insert(ToolFactoryKey::Skill, skill_tool.clone());
     coding_instances.insert(
-        ToolFactoryKey::EnterPlanMode,
-        Arc::new(EnterPlanModeTool::new(interaction.clone())),
+        ToolFactoryKey::StartNewPlan,
+        Arc::new(StartNewPlanTool::new(interaction.clone())),
     );
     if let Some(agent_tool) = &agent_tool {
         coding_instances.insert(ToolFactoryKey::Agent, agent_tool.clone());
@@ -1024,7 +1024,7 @@ mod tests {
             "tasks",
             "question",
             "webfetch",
-            "enter_plan_mode",
+            "start_new_plan",
         ];
         if websearch_configured {
             expected_coding.insert(expected_coding.len() - 1, "websearch");
