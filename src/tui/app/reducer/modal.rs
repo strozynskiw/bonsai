@@ -1,5 +1,6 @@
 use crate::tui::event::{AppAction, Focus, ModalKind, ModeRow, SubtaskListPane, UsageTab};
 
+mod low_volume;
 mod mode_picker_seeding;
 use mode_picker_seeding::seed_mode_picker_rows;
 
@@ -24,6 +25,7 @@ fn reconcile_cursor<T, Id: PartialEq>(
 
 pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
     match action {
+        AppAction::Modal(action) => return low_volume::handle(app, action),
         AppAction::OpenTaskList => {
             let (tasks, cursor) =
                 if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList {
@@ -526,25 +528,6 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // Runtime effect: finalized by `tui::runtime_actions` with the
             // current request id.
         }
-        AppAction::McpServersMove(delta) => {
-            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::McpServers {
-                rows,
-                cursor,
-            })) = &mut app.modal
-            {
-                let max = rows.len().saturating_sub(1);
-                let next = move_index(*cursor, delta, max);
-                if next != *cursor {
-                    *cursor = next;
-                    app.modal_scroll = 0;
-                }
-            }
-        }
-        AppAction::McpServersToggle
-        | AppAction::McpServersReload
-        | AppAction::McpServersAuthorize => {
-            // Runtime effect: handled by `tui::runtime_actions`.
-        }
         AppAction::MemoryManagerMove(delta) => {
             if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager {
                 rows,
@@ -644,54 +627,6 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             })) = &mut app.modal
             {
                 state.back();
-            }
-        }
-        AppAction::SandboxMove(delta) => {
-            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus {
-                cursor,
-            })) = &mut app.modal
-            {
-                *cursor = move_index(*cursor, delta, 1);
-            }
-        }
-        AppAction::SandboxToggle => {
-            // Runtime effect: handled by `tui::runtime_actions`.
-        }
-        AppAction::ThemePickerMove(delta) => {
-            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker {
-                cursor,
-                ..
-            })) = &mut app.modal
-            {
-                let max = crate::tui::theme::theme_count().saturating_sub(1);
-                *cursor = move_index(*cursor, delta, max);
-            }
-        }
-        AppAction::ThemePickerSubmit | AppAction::ThemePickerCancel => {
-            // Runtime effect: preview persistence / cancel restore is handled by
-            // `tui::runtime_actions`.
-        }
-        AppAction::BusyCommandMove(delta) => {
-            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand {
-                rows,
-                cursor,
-                ..
-            })) = &mut app.modal
-            {
-                let max = rows.len().saturating_sub(1);
-                *cursor = move_index(*cursor, delta, max);
-            }
-        }
-        AppAction::BusyCommandSubmit => {
-            // Runtime effect: `tui::runtime_actions` queues, opens, cancels, or dismisses.
-        }
-        AppAction::ModePickerMove(delta) => {
-            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
-                rows,
-                cursor,
-            })) = &mut app.modal
-            {
-                *cursor = move_mode_cursor(rows, *cursor, delta);
             }
         }
         AppAction::SettingsMove(delta) => {
@@ -815,7 +750,7 @@ fn first_value_row(rows: &[ModeRow]) -> usize {
 /// Move the `/mode` cursor by `delta` over value rows only, skipping headers
 /// so the selection never lands on a non-cyclable axis label. Clamps to the
 /// first/last value row.
-fn move_mode_cursor(rows: &[ModeRow], current: usize, delta: i16) -> usize {
+pub(super) fn move_mode_cursor(rows: &[ModeRow], current: usize, delta: i16) -> usize {
     let values: Vec<usize> = rows
         .iter()
         .enumerate()

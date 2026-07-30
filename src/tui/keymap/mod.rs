@@ -3473,24 +3473,35 @@ mod tests {
         app.focus = Focus::Modal;
 
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
-        assert!(matches!(up, KeyIntent::Action(AppAction::SandboxMove(-1))));
+        assert!(matches!(
+            up,
+            KeyIntent::Action(AppAction::Modal(crate::tui::event::ModalAction::Sandbox(
+                crate::tui::event::SandboxAction::Move(-1)
+            )))
+        ));
 
         let page_down = map_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &app);
         assert!(matches!(
             page_down,
-            KeyIntent::Action(AppAction::SandboxMove(8))
+            KeyIntent::Action(AppAction::Modal(crate::tui::event::ModalAction::Sandbox(
+                crate::tui::event::SandboxAction::Move(8)
+            )))
         ));
 
         let home = map_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &app);
         assert!(matches!(
             home,
-            KeyIntent::Action(AppAction::SandboxMove(i16::MIN))
+            KeyIntent::Action(AppAction::Modal(crate::tui::event::ModalAction::Sandbox(
+                crate::tui::event::SandboxAction::Move(i16::MIN)
+            )))
         ));
 
         let end = map_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &app);
         assert!(matches!(
             end,
-            KeyIntent::Action(AppAction::SandboxMove(i16::MAX))
+            KeyIntent::Action(AppAction::Modal(crate::tui::event::ModalAction::Sandbox(
+                crate::tui::event::SandboxAction::Move(i16::MAX)
+            )))
         ));
 
         let ctrl_end = map_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL), &app);
@@ -3514,7 +3525,11 @@ mod tests {
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
         assert!(matches!(
             down,
-            KeyIntent::Action(AppAction::McpServersMove(1))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::McpServers(
+                    crate::tui::event::McpServersAction::Move(1)
+                )
+            ))
         ));
 
         let page_down = map_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &app);
@@ -3526,25 +3541,41 @@ mod tests {
         let space = map_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &app);
         assert!(matches!(
             space,
-            KeyIntent::Action(AppAction::McpServersToggle)
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::McpServers(
+                    crate::tui::event::McpServersAction::Toggle
+                )
+            ))
         ));
 
         let reload = map_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &app);
         assert!(matches!(
             reload,
-            KeyIntent::Action(AppAction::McpServersReload)
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::McpServers(
+                    crate::tui::event::McpServersAction::Reload
+                )
+            ))
         ));
 
         let authorize = map_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &app);
         assert!(matches!(
             authorize,
-            KeyIntent::Action(AppAction::McpServersAuthorize)
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::McpServers(
+                    crate::tui::event::McpServersAction::Authorize
+                )
+            ))
         ));
 
         let home = map_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &app);
         assert!(matches!(
             home,
-            KeyIntent::Action(AppAction::McpServersMove(i16::MIN))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::McpServers(
+                    crate::tui::event::McpServersAction::Move(i16::MIN)
+                )
+            ))
         ));
 
         let esc = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
@@ -4207,25 +4238,41 @@ mod tests {
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
         assert!(matches!(
             up,
-            KeyIntent::Action(AppAction::ModePickerMove(-1))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ModePicker(
+                    crate::tui::event::ModePickerAction::Move(-1)
+                )
+            ))
         ));
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
         assert!(matches!(
             down,
-            KeyIntent::Action(AppAction::ModePickerMove(1))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ModePicker(
+                    crate::tui::event::ModePickerAction::Move(1)
+                )
+            ))
         ));
 
         let right = map_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &app);
         assert!(matches!(
             right,
-            KeyIntent::Action(AppAction::ModePickerCycle(1))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ModePicker(
+                    crate::tui::event::ModePickerAction::Cycle(1)
+                )
+            ))
         ));
 
         let left = map_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &app);
         assert!(matches!(
             left,
-            KeyIntent::Action(AppAction::ModePickerCycle(-1))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ModePicker(
+                    crate::tui::event::ModePickerAction::Cycle(-1)
+                )
+            ))
         ));
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
@@ -4240,13 +4287,21 @@ mod tests {
         let home = map_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &app);
         assert!(matches!(
             home,
-            KeyIntent::Action(AppAction::ModePickerMove(i16::MIN))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ModePicker(
+                    crate::tui::event::ModePickerAction::Move(i16::MIN)
+                )
+            ))
         ));
 
         let end = map_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &app);
         assert!(matches!(
             end,
-            KeyIntent::Action(AppAction::ModePickerMove(i16::MAX))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ModePicker(
+                    crate::tui::event::ModePickerAction::Move(i16::MAX)
+                )
+            ))
         ));
     }
 
@@ -4276,28 +4331,51 @@ mod tests {
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
         assert!(matches!(
             up,
-            KeyIntent::Action(AppAction::ThemePickerMove(-1))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ThemePicker(
+                    crate::tui::event::ThemePickerAction::Move(-1)
+                )
+            ))
         ));
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
         assert!(matches!(
             down,
-            KeyIntent::Action(AppAction::ThemePickerMove(1))
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ThemePicker(
+                    crate::tui::event::ThemePickerAction::Move(1)
+                )
+            ))
         ));
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
         assert!(matches!(
             enter,
-            KeyIntent::Action(AppAction::ThemePickerSubmit)
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ThemePicker(
+                    crate::tui::event::ThemePickerAction::Submit
+                )
+            ))
         ));
 
         let esc = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
         assert!(matches!(
             esc,
-            KeyIntent::Action(AppAction::ThemePickerCancel)
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ThemePicker(
+                    crate::tui::event::ThemePickerAction::Cancel
+                )
+            ))
         ));
 
         let q = map_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &app);
-        assert!(matches!(q, KeyIntent::Action(AppAction::ThemePickerCancel)));
+        assert!(matches!(
+            q,
+            KeyIntent::Action(AppAction::Modal(
+                crate::tui::event::ModalAction::ThemePicker(
+                    crate::tui::event::ThemePickerAction::Cancel
+                )
+            ))
+        ));
     }
 }

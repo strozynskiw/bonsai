@@ -3,6 +3,7 @@ use crate::util::tool_args::normalize_tool_call_arguments_json;
 
 mod context;
 mod coordinator;
+mod deferred_output;
 mod tools;
 mod verification;
 
@@ -95,138 +96,6 @@ struct ToolResultBatchContext<'state, 'group> {
 impl QueuedMessageState<'_, '_> {
     fn next(&mut self) -> Vec<QueuedUserMessage> {
         next_queued_messages(self.receiver, self.pending, self.cancelled_ids)
-    }
-}
-
-#[derive(Default)]
-struct DeferredAssistantOutput {
-    /// Accumulated answer text. One growing buffer, not a `Vec` of per-delta
-    /// `String`s: this sink sits on the per-token path of deferred turns, and
-    /// the flush never needed the original delta boundaries — downstream
-    /// sinks only append.
-    text: String,
-    done: bool,
-}
-
-struct DeferredAssistantSink {
-    inner: SharedSink,
-    assistant: std::sync::Mutex<DeferredAssistantOutput>,
-}
-
-impl DeferredAssistantSink {
-    fn new(inner: SharedSink) -> Arc<Self> {
-        Arc::new(Self {
-            inner,
-            assistant: std::sync::Mutex::new(DeferredAssistantOutput::default()),
-        })
-    }
-
-    fn flush(&self) {
-        let output = self.take_output();
-        if !output.text.is_empty() {
-            self.inner.assistant_delta(&output.text);
-        }
-        if output.done {
-            self.inner.assistant_done();
-        }
-    }
-
-    fn discard(&self) {
-        let _ = self.take_output();
-    }
-
-    fn take_output(&self) -> DeferredAssistantOutput {
-        self.assistant
-            .lock()
-            .map(|mut output| std::mem::take(&mut *output))
-            .unwrap_or_default()
-    }
-}
-
-impl crate::output::OutputSink for DeferredAssistantSink {
-    fn assistant_delta(&self, text: &str) {
-        if let Ok(mut output) = self.assistant.lock() {
-            output.text.push_str(text);
-        }
-    }
-
-    fn assistant_done(&self) {
-        if let Ok(mut output) = self.assistant.lock() {
-            output.done = true;
-        }
-    }
-
-    fn reasoning_delta(&self, text: &str) {
-        self.inner.reasoning_delta(text);
-    }
-
-    fn attempt_started(&self) {
-        self.inner.attempt_started();
-    }
-
-    fn attempt_discarded(&self) {
-        // The abandoned attempt's buffered answer text must go with it, or
-        // the retry's deltas would splice onto it at the next flush.
-        self.discard();
-        self.inner.attempt_discarded();
-    }
-
-    fn thinking(&self, text: &str) {
-        self.inner.thinking(text);
-    }
-
-    fn tool_calls_started(&self, calls: &[crate::output::ToolCallStart]) {
-        self.inner.tool_calls_started(calls);
-    }
-
-    fn tool_started(&self, id: &str, name: &str, arguments: &str) {
-        self.inner.tool_started(id, name, arguments);
-    }
-
-    fn tool_output(&self, id: &str, output: &str) {
-        self.inner.tool_output(id, output);
-    }
-
-    fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
-        self.inner.tool_finished(id, result, status);
-    }
-
-    fn tool_finished_with_diff(
-        &self,
-        id: &str,
-        result: &str,
-        status: crate::output::ToolExecutionStatus,
-        diff: crate::diff::FileDiff,
-    ) {
-        self.inner.tool_finished_with_diff(id, result, status, diff);
-    }
-
-    fn workspace_changed(&self, paths: &[String], intent: &str) {
-        self.inner.workspace_changed(paths, intent);
-    }
-
-    fn queued_user_message_sent(&self, id: u64, text: &str) {
-        self.inner.queued_user_message_sent(id, text);
-    }
-
-    fn context_updated(&self, report: ContextReport) {
-        self.inner.context_updated(report);
-    }
-
-    fn transient_status(&self, text: &str) {
-        self.inner.transient_status(text);
-    }
-
-    fn status(&self, text: &str) {
-        self.inner.status(text);
-    }
-
-    fn compaction_status(&self, text: &str) {
-        self.inner.compaction_status(text);
-    }
-
-    fn error(&self, text: &str) {
-        self.inner.error(text);
     }
 }
 

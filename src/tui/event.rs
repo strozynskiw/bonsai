@@ -993,6 +993,87 @@ pub enum MemoryAddWizardAction {
     Back,
 }
 
+/// Actions local to infrequently used modal families. Keeping these under one
+/// top-level action avoids expanding `AppAction` for every key in a modal that
+/// has its own state and runtime effects.
+#[derive(Debug, Clone)]
+pub enum ModalAction {
+    McpServers(McpServersAction),
+    Sandbox(SandboxAction),
+    ThemePicker(ThemePickerAction),
+    BusyCommand(BusyCommandModalAction),
+    ModePicker(ModePickerAction),
+}
+
+#[derive(Debug, Clone)]
+pub enum McpServersAction {
+    Move(i16),
+    Toggle,
+    Reload,
+    Authorize,
+}
+
+#[derive(Debug, Clone)]
+pub enum SandboxAction {
+    Move(i16),
+    Toggle,
+}
+
+#[derive(Debug, Clone)]
+pub enum ThemePickerAction {
+    Move(i16),
+    Submit,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+pub enum BusyCommandModalAction {
+    Move(i16),
+    Submit,
+}
+
+#[derive(Debug, Clone)]
+pub enum ModePickerAction {
+    /// Move the `/mode` picker cursor. Delta is clamped against the rows
+    /// length. On `Header` rows, Enter/Right jump to the next value row of
+    /// the same axis instead of cycling.
+    Move(i16),
+    /// Cycle the focused `/mode` value row by `delta` (positive = forward).
+    /// On `Header` rows this is a no-op; runtime handlers can also use it
+    /// to advance the value at a specific axis when invoked programmatically.
+    Cycle(i16),
+}
+
+impl From<McpServersAction> for ModalAction {
+    fn from(action: McpServersAction) -> Self {
+        Self::McpServers(action)
+    }
+}
+
+impl From<SandboxAction> for ModalAction {
+    fn from(action: SandboxAction) -> Self {
+        Self::Sandbox(action)
+    }
+}
+
+impl From<ThemePickerAction> for ModalAction {
+    fn from(action: ThemePickerAction) -> Self {
+        Self::ThemePicker(action)
+    }
+}
+
+impl From<BusyCommandModalAction> for ModalAction {
+    fn from(action: BusyCommandModalAction) -> Self {
+        Self::BusyCommand(action)
+    }
+}
+
+impl From<ModePickerAction> for ModalAction {
+    fn from(action: ModePickerAction) -> Self {
+        Self::ModePicker(action)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AppAction {
     Tick,
@@ -1301,25 +1382,7 @@ pub enum AppAction {
     QuestionToggle,
     QuestionSubmit,
     QuestionCancel,
-    McpServersMove(i16),
-    McpServersToggle,
-    McpServersReload,
-    McpServersAuthorize,
-    SandboxMove(i16),
-    SandboxToggle,
-    ThemePickerMove(i16),
-    ThemePickerSubmit,
-    ThemePickerCancel,
-    BusyCommandMove(i16),
-    BusyCommandSubmit,
-    /// Move the `/mode` picker cursor. Delta is clamped against the rows
-    /// length. On `Header` rows, Enter/Right jump to the next value row of
-    /// the same axis instead of cycling.
-    ModePickerMove(i16),
-    /// Cycle the focused `/mode` value row by `delta` (positive = forward).
-    /// On `Header` rows this is a no-op; runtime handlers can also use it
-    /// to advance the value at a specific axis when invoked programmatically.
-    ModePickerCycle(i16),
+    Modal(ModalAction),
     InsertNewline,
     PasteText(String),
     /// Read the system clipboard and paste its image (preferred) or text into

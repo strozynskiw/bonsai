@@ -158,7 +158,9 @@ pub(super) async fn handle_runtime_action(
             app.reduce(AppAction::SetApprovalLevel(next));
             persist_approval_level(app, deps.storage, next).await;
         }
-        AppAction::ModePickerCycle(delta) => {
+        AppAction::Modal(crate::tui::event::ModalAction::ModePicker(
+            crate::tui::event::ModePickerAction::Cycle(delta),
+        )) => {
             // The runtime handler runs before the reducer, so the reducer's
             // `cycled()` mutation would be wasted — the handler would read the
             // *old* `current` and re-apply the same label. Advance `current`
@@ -201,7 +203,9 @@ pub(super) async fn handle_runtime_action(
         AppAction::OnboardingSubmit => {
             submit_first_run_step(app, deps).await;
         }
-        AppAction::SandboxToggle => {
+        AppAction::Modal(crate::tui::event::ModalAction::Sandbox(
+            crate::tui::event::SandboxAction::Toggle,
+        )) => {
             let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { cursor })) =
                 &app.modal
             else {
@@ -233,8 +237,14 @@ pub(super) async fn handle_runtime_action(
                 _ => {}
             }
         }
-        AppAction::ThemePickerMove(delta) => {
-            app.reduce(AppAction::ThemePickerMove(delta));
+        AppAction::Modal(crate::tui::event::ModalAction::ThemePicker(
+            crate::tui::event::ThemePickerAction::Move(delta),
+        )) => {
+            app.reduce(AppAction::Modal(
+                crate::tui::event::ModalAction::ThemePicker(
+                    crate::tui::event::ThemePickerAction::Move(delta),
+                ),
+            ));
             if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker {
                 cursor,
                 ..
@@ -244,10 +254,14 @@ pub(super) async fn handle_runtime_action(
                 crate::tui::theme::set_theme(palette.name);
             }
         }
-        AppAction::ThemePickerSubmit => {
+        AppAction::Modal(crate::tui::event::ModalAction::ThemePicker(
+            crate::tui::event::ThemePickerAction::Submit,
+        )) => {
             submit_theme_picker(app, deps.session_store).await;
         }
-        AppAction::ThemePickerCancel => {
+        AppAction::Modal(crate::tui::event::ModalAction::ThemePicker(
+            crate::tui::event::ThemePickerAction::Cancel,
+        )) => {
             cancel_theme_picker(app);
         }
         AppAction::PromptDecision { family, decision } => {
@@ -259,13 +273,19 @@ pub(super) async fn handle_runtime_action(
         AppAction::QuestionCancel => {
             respond_to_question_cancel(app, deps.interaction);
         }
-        AppAction::McpServersToggle => {
+        AppAction::Modal(crate::tui::event::ModalAction::McpServers(
+            crate::tui::event::McpServersAction::Toggle,
+        )) => {
             toggle_selected_mcp_server(app, deps).await;
         }
-        AppAction::McpServersReload => {
+        AppAction::Modal(crate::tui::event::ModalAction::McpServers(
+            crate::tui::event::McpServersAction::Reload,
+        )) => {
             reload_selected_mcp_server(app, deps).await;
         }
-        AppAction::McpServersAuthorize => {
+        AppAction::Modal(crate::tui::event::ModalAction::McpServers(
+            crate::tui::event::McpServersAction::Authorize,
+        )) => {
             authorize_selected_mcp_server(app, deps).await;
         }
         AppAction::ApiKeyInputSubmit => {
@@ -381,7 +401,9 @@ pub(super) async fn handle_runtime_action(
         AppAction::ModelPicker(crate::tui::event::ModelPickerAction::AssignShortcut(key)) => {
             assign_model_picker_shortcut(app, deps, key).await;
         }
-        AppAction::BusyCommandSubmit => {
+        AppAction::Modal(crate::tui::event::ModalAction::BusyCommand(
+            crate::tui::event::BusyCommandModalAction::Submit,
+        )) => {
             submit_busy_command(app, tasks, deps, state).await;
         }
         AppAction::SessionPickerSubmit => {

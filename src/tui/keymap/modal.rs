@@ -9,11 +9,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::app::{AppState, ModelPickerPane};
 use crate::tui::event::{
-    AppAction, ModalKind, PromptDecision, PromptFamily, SubtaskListPane, UsageTab,
+    AppAction, BusyCommandModalAction, McpServersAction, ModalAction, ModalKind, ModePickerAction,
+    PromptDecision, PromptFamily, SandboxAction, SubtaskListPane, ThemePickerAction, UsageTab,
 };
 use crate::tui::memory_manager::{MemoryWizardField, MemoryWizardStep};
 
 use super::KeyIntent;
+
+fn modal_action(action: impl Into<ModalAction>) -> KeyIntent {
+    KeyIntent::Action(AppAction::Modal(action.into()))
+}
 
 /// Per-family key differences for the shared approval-prompt keymap. Only two
 /// families deviate from the common shape, and only in these two ways.
@@ -1164,13 +1169,13 @@ pub(super) fn map_sandbox_modal_key(key: KeyEvent) -> KeyIntent {
         }
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
         KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Up => KeyIntent::Action(AppAction::SandboxMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::SandboxMove(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::SandboxMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::SandboxMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::SandboxMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::SandboxMove(i16::MAX)),
-        KeyCode::Left | KeyCode::Right => KeyIntent::Action(AppAction::SandboxToggle),
+        KeyCode::Up => modal_action(SandboxAction::Move(-1)),
+        KeyCode::Down => modal_action(SandboxAction::Move(1)),
+        KeyCode::PageUp => modal_action(SandboxAction::Move(-8)),
+        KeyCode::PageDown => modal_action(SandboxAction::Move(8)),
+        KeyCode::Home => modal_action(SandboxAction::Move(i16::MIN)),
+        KeyCode::End => modal_action(SandboxAction::Move(i16::MAX)),
+        KeyCode::Left | KeyCode::Right => modal_action(SandboxAction::Toggle),
         _ => KeyIntent::Noop,
     }
 }
@@ -1179,15 +1184,13 @@ pub(super) fn map_mcp_servers_key(key: KeyEvent) -> KeyIntent {
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
         KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Char(' ') => KeyIntent::Action(AppAction::McpServersToggle),
-        KeyCode::Char('r') | KeyCode::Char('R') => KeyIntent::Action(AppAction::McpServersReload),
-        KeyCode::Char('a') | KeyCode::Char('A') => {
-            KeyIntent::Action(AppAction::McpServersAuthorize)
-        }
-        KeyCode::Up => KeyIntent::Action(AppAction::McpServersMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::McpServersMove(1)),
-        KeyCode::Home => KeyIntent::Action(AppAction::McpServersMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::McpServersMove(i16::MAX)),
+        KeyCode::Char(' ') => modal_action(McpServersAction::Toggle),
+        KeyCode::Char('r') | KeyCode::Char('R') => modal_action(McpServersAction::Reload),
+        KeyCode::Char('a') | KeyCode::Char('A') => modal_action(McpServersAction::Authorize),
+        KeyCode::Up => modal_action(McpServersAction::Move(-1)),
+        KeyCode::Down => modal_action(McpServersAction::Move(1)),
+        KeyCode::Home => modal_action(McpServersAction::Move(i16::MIN)),
+        KeyCode::End => modal_action(McpServersAction::Move(i16::MAX)),
         KeyCode::PageUp => KeyIntent::Action(AppAction::ScrollModal(-8)),
         KeyCode::PageDown => KeyIntent::Action(AppAction::ScrollModal(8)),
         _ => KeyIntent::Noop,
@@ -1196,15 +1199,15 @@ pub(super) fn map_mcp_servers_key(key: KeyEvent) -> KeyIntent {
 
 pub(super) fn map_theme_picker_key(key: KeyEvent) -> KeyIntent {
     match key.code {
-        KeyCode::Esc => KeyIntent::Action(AppAction::ThemePickerCancel),
-        KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::ThemePickerCancel),
-        KeyCode::Enter => KeyIntent::Action(AppAction::ThemePickerSubmit),
-        KeyCode::Up => KeyIntent::Action(AppAction::ThemePickerMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::ThemePickerMove(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::ThemePickerMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::ThemePickerMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::ThemePickerMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::ThemePickerMove(i16::MAX)),
+        KeyCode::Esc => modal_action(ThemePickerAction::Cancel),
+        KeyCode::Char('q') | KeyCode::Char('Q') => modal_action(ThemePickerAction::Cancel),
+        KeyCode::Enter => modal_action(ThemePickerAction::Submit),
+        KeyCode::Up => modal_action(ThemePickerAction::Move(-1)),
+        KeyCode::Down => modal_action(ThemePickerAction::Move(1)),
+        KeyCode::PageUp => modal_action(ThemePickerAction::Move(-8)),
+        KeyCode::PageDown => modal_action(ThemePickerAction::Move(8)),
+        KeyCode::Home => modal_action(ThemePickerAction::Move(i16::MIN)),
+        KeyCode::End => modal_action(ThemePickerAction::Move(i16::MAX)),
         _ => KeyIntent::Noop,
     }
 }
@@ -1218,15 +1221,15 @@ pub(super) fn map_mode_picker_key(key: KeyEvent) -> KeyIntent {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
         // q mirrors Esc — close the picker without changing any axis.
         KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Up => KeyIntent::Action(AppAction::ModePickerMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::ModePickerMove(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::ModePickerMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::ModePickerMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::ModePickerMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::ModePickerMove(i16::MAX)),
+        KeyCode::Up => modal_action(ModePickerAction::Move(-1)),
+        KeyCode::Down => modal_action(ModePickerAction::Move(1)),
+        KeyCode::PageUp => modal_action(ModePickerAction::Move(-8)),
+        KeyCode::PageDown => modal_action(ModePickerAction::Move(8)),
+        KeyCode::Home => modal_action(ModePickerAction::Move(i16::MIN)),
+        KeyCode::End => modal_action(ModePickerAction::Move(i16::MAX)),
         // Left cycles backward and Right advances the focused value.
-        KeyCode::Left => KeyIntent::Action(AppAction::ModePickerCycle(-1)),
-        KeyCode::Right => KeyIntent::Action(AppAction::ModePickerCycle(1)),
+        KeyCode::Left => modal_action(ModePickerAction::Cycle(-1)),
+        KeyCode::Right => modal_action(ModePickerAction::Cycle(1)),
         KeyCode::Enter => KeyIntent::Action(AppAction::CloseModal),
         _ => KeyIntent::Noop,
     }
@@ -1268,13 +1271,13 @@ pub(super) fn map_busy_command_key(key: KeyEvent) -> KeyIntent {
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
         KeyCode::Char('q') | KeyCode::Char('Q') => KeyIntent::Action(AppAction::CloseModal),
-        KeyCode::Enter => KeyIntent::Action(AppAction::BusyCommandSubmit),
-        KeyCode::Up => KeyIntent::Action(AppAction::BusyCommandMove(-1)),
-        KeyCode::Down => KeyIntent::Action(AppAction::BusyCommandMove(1)),
-        KeyCode::PageUp => KeyIntent::Action(AppAction::BusyCommandMove(-8)),
-        KeyCode::PageDown => KeyIntent::Action(AppAction::BusyCommandMove(8)),
-        KeyCode::Home => KeyIntent::Action(AppAction::BusyCommandMove(i16::MIN)),
-        KeyCode::End => KeyIntent::Action(AppAction::BusyCommandMove(i16::MAX)),
+        KeyCode::Enter => modal_action(BusyCommandModalAction::Submit),
+        KeyCode::Up => modal_action(BusyCommandModalAction::Move(-1)),
+        KeyCode::Down => modal_action(BusyCommandModalAction::Move(1)),
+        KeyCode::PageUp => modal_action(BusyCommandModalAction::Move(-8)),
+        KeyCode::PageDown => modal_action(BusyCommandModalAction::Move(8)),
+        KeyCode::Home => modal_action(BusyCommandModalAction::Move(i16::MIN)),
+        KeyCode::End => modal_action(BusyCommandModalAction::Move(i16::MAX)),
         _ => KeyIntent::Noop,
     }
 }

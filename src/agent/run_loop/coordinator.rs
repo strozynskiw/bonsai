@@ -1,3 +1,4 @@
+use super::deferred_output::DeferredAssistantSink;
 use super::*;
 
 pub(super) async fn run(

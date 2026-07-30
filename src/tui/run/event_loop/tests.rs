@@ -3134,7 +3134,9 @@ async fn theme_picker_move_previews_and_cancel_restores_original_theme() {
     )));
 
     let result = handle_runtime_action(
-        AppAction::ThemePickerMove(1),
+        AppAction::Modal(crate::tui::event::ModalAction::ThemePicker(
+            crate::tui::event::ThemePickerAction::Move(1),
+        )),
         &mut app,
         &mut tasks,
         runtime_action_deps(
@@ -3158,7 +3160,9 @@ async fn theme_picker_move_previews_and_cancel_restores_original_theme() {
     ));
 
     let result = handle_runtime_action(
-        AppAction::ThemePickerCancel,
+        AppAction::Modal(crate::tui::event::ModalAction::ThemePicker(
+            crate::tui::event::ThemePickerAction::Cancel,
+        )),
         &mut app,
         &mut tasks,
         runtime_action_deps(
@@ -3213,7 +3217,9 @@ async fn theme_picker_submit_persists_selected_theme() {
     )));
 
     let result = handle_runtime_action(
-        AppAction::ThemePickerSubmit,
+        AppAction::Modal(crate::tui::event::ModalAction::ThemePicker(
+            crate::tui::event::ThemePickerAction::Submit,
+        )),
         &mut app,
         &mut tasks,
         runtime_action_deps(

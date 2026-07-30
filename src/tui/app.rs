@@ -5348,7 +5348,11 @@ mod tests {
                 if cursor == crate::tui::theme::theme_count().saturating_sub(1)
         ));
 
-        app.reduce(AppAction::ThemePickerMove(i16::MIN));
+        app.reduce(AppAction::Modal(
+            crate::tui::event::ModalAction::ThemePicker(
+                crate::tui::event::ThemePickerAction::Move(i16::MIN),
+            ),
+        ));
         assert!(matches!(
             app.modal,
             Some(ModalKind::Picker(
@@ -5356,7 +5360,11 @@ mod tests {
             ))
         ));
 
-        app.reduce(AppAction::ThemePickerMove(i16::MAX));
+        app.reduce(AppAction::Modal(
+            crate::tui::event::ModalAction::ThemePicker(
+                crate::tui::event::ThemePickerAction::Move(i16::MAX),
+            ),
+        ));
         assert!(matches!(
             app.modal,
             Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { cursor, .. }))
@@ -5446,7 +5454,11 @@ mod tests {
             _ => panic!(),
         };
         // Overshoot clamps to the last row, which is always a value row.
-        app.reduce(AppAction::ModePickerMove(100));
+        app.reduce(AppAction::Modal(
+            crate::tui::event::ModalAction::ModePicker(crate::tui::event::ModePickerAction::Move(
+                100,
+            )),
+        ));
         let cursor = match &app.modal {
             Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
                 cursor, ..
@@ -5456,7 +5468,11 @@ mod tests {
         assert_eq!(cursor, rows_len - 1);
         // Undershoot clamps to the first value row (index 1), skipping the
         // leading Autonomy header at index 0.
-        app.reduce(AppAction::ModePickerMove(-100));
+        app.reduce(AppAction::Modal(
+            crate::tui::event::ModalAction::ModePicker(crate::tui::event::ModePickerAction::Move(
+                -100,
+            )),
+        ));
         let cursor = match &app.modal {
             Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
                 cursor, ..
@@ -5478,7 +5494,11 @@ mod tests {
         // Rows start [Header, Value(level), Header, Value(self-review), ...].
         // Stepping down from the autonomy value (1) must jump over the
         // Self-review header (2) and land on its value (3).
-        app.reduce(AppAction::ModePickerMove(1));
+        app.reduce(AppAction::Modal(
+            crate::tui::event::ModalAction::ModePicker(crate::tui::event::ModePickerAction::Move(
+                1,
+            )),
+        ));
         let cursor = match &app.modal {
             Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
                 rows,
@@ -5503,7 +5523,11 @@ mod tests {
         )));
         // The picker opens on the first value row and navigation only ever
         // rests on value rows, so move down to land on another value row.
-        app.reduce(AppAction::ModePickerMove(1));
+        app.reduce(AppAction::Modal(
+            crate::tui::event::ModalAction::ModePicker(crate::tui::event::ModePickerAction::Move(
+                1,
+            )),
+        ));
         let row = match &app.modal {
             Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
                 rows,
@@ -5513,7 +5537,7 @@ mod tests {
         };
 
         // Production cycles in the runtime handler (`handle_runtime_action`) via
-        // `ModeRow::cycled` — `app.reduce(ModePickerCycle)` is intentionally
+        // `ModeRow::cycled` — `app.reduce(Modal(ModePicker(Cycle)))` is intentionally
         // unhandled by the reducer. Exercise the underlying math here: a Value
         // row advances modulo its value count, and a Header stays put.
         let (before, count) = match &row {
