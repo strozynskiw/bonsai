@@ -182,7 +182,7 @@ impl AppState {
     pub fn uses_endpoint_auth_form(&self) -> bool {
         matches!(
             self.modal.as_ref(),
-            Some(ModalKind::ApiKeyPrompt { provider_id, .. })
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::ApiKeyPrompt { provider_id, .. }))
                 if self.provider_uses_endpoint_auth_form(provider_id)
         )
     }
@@ -241,10 +241,12 @@ mod tests {
             current: false,
             uses_endpoint_auth_form: true,
         }];
-        app.reduce(AppAction::OpenModal(ModalKind::ApiKeyPrompt {
-            provider_id: "local-endpoint".to_string(),
-            initial_form: None,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt {
+                provider_id: "local-endpoint".to_string(),
+                initial_form: None,
+            },
+        )));
 
         app.reduce(AppAction::ApiKeyInputPaste(
             "localhost:11434/v1\n".to_string(),
@@ -315,10 +317,12 @@ mod tests {
             origins,
             false,
         );
-        app.reduce(AppAction::OpenModal(ModalKind::ApiKeyPrompt {
-            provider_id: "regional".to_string(),
-            initial_form: Some(form),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt {
+                provider_id: "regional".to_string(),
+                initial_form: Some(form),
+            },
+        )));
 
         assert_eq!(
             app.provider_auth_form
@@ -374,10 +378,12 @@ mod tests {
             current: false,
             uses_endpoint_auth_form: true,
         }];
-        app.reduce(AppAction::OpenModal(ModalKind::ApiKeyPrompt {
-            provider_id: "local-example".to_string(),
-            initial_form: None,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt {
+                provider_id: "local-example".to_string(),
+                initial_form: None,
+            },
+        )));
 
         assert!(app.uses_endpoint_auth_form());
         app.reduce(AppAction::ApiKeyInputPaste(
@@ -399,13 +405,15 @@ mod tests {
         );
         session.context_window = Some(65_536);
 
-        app.reduce(AppAction::OpenModal(ModalKind::ApiKeyPrompt {
-            provider_id: "openai-compatible".to_string(),
-            initial_form: Some(ProviderAuthForm::from_endpoint_session(
-                &session,
-                crate::session::CredentialPersistence::File,
-            )),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt {
+                provider_id: "openai-compatible".to_string(),
+                initial_form: Some(ProviderAuthForm::from_endpoint_session(
+                    &session,
+                    crate::session::CredentialPersistence::File,
+                )),
+            },
+        )));
 
         assert_eq!(
             app.provider_auth_form.provider_base_url_input,
@@ -435,10 +443,12 @@ mod tests {
     fn new_authorization_uses_global_default_and_cycles_per_credential() {
         let mut app = app();
         app.credential_persistence = crate::session::CredentialPersistence::Session;
-        app.reduce(AppAction::OpenModal(ModalKind::ApiKeyPrompt {
-            provider_id: "opencode".to_string(),
-            initial_form: None,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt {
+                provider_id: "opencode".to_string(),
+                initial_form: None,
+            },
+        )));
         assert_eq!(
             app.provider_auth_form.credential_persistence,
             crate::session::CredentialPersistence::Session

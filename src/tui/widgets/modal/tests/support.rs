@@ -425,7 +425,7 @@ pub(super) fn render_help_to_buffer(area: Rect) -> ratatui::buffer::Buffer {
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-    app.modal = Some(ModalKind::Help);
+    app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
     terminal
         .draw(|frame| {
             render(frame, area, &app);
@@ -438,7 +438,9 @@ pub(super) fn render_command_help_to_buffer(area: Rect) -> ratatui::buffer::Buff
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-    app.modal = Some(ModalKind::CommandHelp);
+    app.modal = Some(ModalKind::Detail(
+        crate::tui::event::DetailModal::CommandHelp,
+    ));
     terminal
         .draw(|frame| {
             render(frame, area, &app);
@@ -515,10 +517,12 @@ pub(super) fn render_tasks_to_buffer(
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-    app.modal = Some(ModalKind::TaskList {
-        tasks: tasks.to_vec(),
-        cursor,
-    });
+    app.modal = Some(ModalKind::Manager(
+        crate::tui::event::ManagerModal::TaskList {
+            tasks: tasks.to_vec(),
+            cursor,
+        },
+    ));
     terminal
         .draw(|frame| {
             render(frame, area, &app);

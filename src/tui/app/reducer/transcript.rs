@@ -262,9 +262,13 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                     app.modal_scroll = 0;
                     app.modal_return_focus = Some(Focus::Transcript);
                     app.modal = if let Some(tool_id) = tool_id {
-                        Some(ModalKind::ToolDetail { tool_id })
+                        Some(ModalKind::Detail(
+                            crate::tui::event::DetailModal::ToolDetail { tool_id },
+                        ))
                     } else {
-                        Some(ModalKind::BlockDetail { item_index: index })
+                        Some(ModalKind::Detail(
+                            crate::tui::event::DetailModal::BlockDetail { item_index: index },
+                        ))
                     };
                     app.focus = Focus::Modal;
                 }
@@ -281,24 +285,34 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if !app.plan.findings.is_empty() {
                 app.modal_scroll = 0;
                 app.modal_return_focus = Some(Focus::Plan);
-                app.modal = Some(ModalKind::PlanFindingDetail { index: 0 });
+                app.modal = Some(ModalKind::Detail(
+                    crate::tui::event::DetailModal::PlanFindingDetail { index: 0 },
+                ));
                 app.focus = Focus::Modal;
             }
         }
         AppAction::CyclePlanFinding(delta) => {
-            if let Some(ModalKind::PlanFindingDetail { index }) = app.modal {
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::PlanFindingDetail {
+                index,
+            })) = app.modal
+            {
                 let count = app.plan.findings.len();
                 if count > 0 {
                     let next = (index as i64 + delta as i64).clamp(0, count as i64 - 1) as usize;
                     if next != index {
                         app.modal_scroll = 0;
-                        app.modal = Some(ModalKind::PlanFindingDetail { index: next });
+                        app.modal = Some(ModalKind::Detail(
+                            crate::tui::event::DetailModal::PlanFindingDetail { index: next },
+                        ));
                     }
                 }
             }
         }
         AppAction::OpenFindingEvidence => {
-            if let Some(ModalKind::PlanFindingDetail { index }) = app.modal {
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::PlanFindingDetail {
+                index,
+            })) = app.modal
+            {
                 // Jump to the first evidence id that still resolves to a tool
                 // card in the live transcript (same-session best effort).
                 let tool_id =
@@ -315,7 +329,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 if let Some(tool_id) = tool_id {
                     app.modal_scroll = 0;
                     app.modal_return_focus = Some(Focus::Plan);
-                    app.modal = Some(ModalKind::ToolDetail { tool_id });
+                    app.modal = Some(ModalKind::Detail(
+                        crate::tui::event::DetailModal::ToolDetail { tool_id },
+                    ));
                 }
             }
         }
@@ -328,7 +344,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             } else {
                 None
             };
-            app.modal = Some(ModalKind::ToolDetail { tool_id });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::ToolDetail { tool_id },
+            ));
             app.focus = Focus::Modal;
         }
         AppAction::OpenDiffPreview(tool_id) => {
@@ -343,7 +361,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 } else {
                     None
                 };
-                app.modal = Some(ModalKind::DiffPreview { tool_id });
+                app.modal = Some(ModalKind::Detail(
+                    crate::tui::event::DetailModal::DiffPreview { tool_id },
+                ));
                 app.focus = Focus::Modal;
             }
         }

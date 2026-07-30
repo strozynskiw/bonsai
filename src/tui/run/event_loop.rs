@@ -601,12 +601,31 @@ fn handle_paste_event(
     model_catalog: &Arc<crate::model_catalog::ModelCatalog>,
 ) {
     clear_ctrl_c_prompt(app, ctrl_c_prompt);
-    if matches!(app.modal, Some(ModalKind::ApiKeyPrompt { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt { .. }
+        ))
+    ) {
         app.reduce(AppAction::ApiKeyInputPaste(text));
-    } else if matches!(app.modal, Some(ModalKind::LocalModelWizard { .. })) {
-        app.reduce(AppAction::LocalModelWizardPaste(text));
-    } else if matches!(app.modal, Some(ModalKind::AgentComposer { .. })) {
-        app.reduce(AppAction::AgentComposerPaste(text));
+    } else if matches!(
+        app.modal,
+        Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::LocalModelWizard { .. }
+        ))
+    ) {
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Paste(text),
+        ));
+    } else if matches!(
+        app.modal,
+        Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::AgentComposer { .. }
+        ))
+    ) {
+        app.reduce(AppAction::AgentComposer(
+            crate::tui::event::AgentComposerAction::Paste(text),
+        ));
     } else if matches!(app.focus, Focus::Input) && text.trim().is_empty() {
         // Some terminals deliver an empty bracketed paste when the clipboard
         // holds only an image; recover it via the clipboard-image path rather
@@ -869,10 +888,9 @@ async fn handle_toplevel_submit_command(
             &crate::resource::agent::snapshot(&app.custom_agents),
             &app.builtin_subagents.snapshot(),
         );
-        app.reduce(AppAction::OpenModal(ModalKind::AgentBrowser {
-            rows,
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Manager(
+            crate::tui::event::ManagerModal::AgentBrowser { rows, cursor: 0 },
+        )));
         return true;
     }
     // `/skills` works in any task state: rows build from the shared registry
@@ -883,10 +901,9 @@ async fn handle_toplevel_submit_command(
             &crate::resource::skill::snapshot(&app.skills),
             &app.loaded_skills,
         );
-        app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
-            rows,
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SkillManager { rows, cursor: 0 },
+        )));
         return true;
     }
     // `/update` works in any task state: the forced update runs in its own
@@ -1035,9 +1052,9 @@ async fn handle_idle_slash_command(
         }
         IdleSlashCommand::Review => {
             if !app.task_state.is_busy() {
-                app.reduce(AppAction::OpenModal(ModalKind::ReviewScopePicker {
-                    cursor: 0,
-                }));
+                app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                    crate::tui::event::PickerModal::ReviewScopePicker { cursor: 0 },
+                )));
             }
         }
         IdleSlashCommand::SecurityReview => {
@@ -1046,10 +1063,12 @@ async fn handle_idle_slash_command(
         IdleSlashCommand::Mode => {
             // Rows are seeded by the reducer from current app state; pass an empty
             // placeholder so OpenModal can rebind them.
-            app.reduce(AppAction::OpenModal(ModalKind::ModePicker {
-                rows: Vec::new(),
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                crate::tui::event::PickerModal::ModePicker {
+                    rows: Vec::new(),
+                    cursor: 0,
+                },
+            )));
         }
         IdleSlashCommand::Settings => {
             // SMOL lives on the agent, so seed here (with the lock) rather than in
@@ -1057,7 +1076,9 @@ async fn handle_idle_slash_command(
             let smol_profile = { deps.agent.lock().await.smol_profile() };
             let rows = crate::tui::settings::seed_settings_rows(app, smol_profile);
             let cursor = crate::tui::settings::first_selectable(&rows);
-            app.reduce(AppAction::OpenModal(ModalKind::Settings { rows, cursor }));
+            app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                crate::tui::event::ManagerModal::Settings { rows, cursor },
+            )));
         }
         IdleSlashCommand::Wizard => {
             match local_model_wizard_state_for_input(
@@ -1067,9 +1088,11 @@ async fn handle_idle_slash_command(
                 app.credential_persistence,
             ) {
                 Ok(state) => {
-                    app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
-                        state: Box::new(state),
-                    }));
+                    app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+                        crate::tui::event::WizardModal::LocalModelWizard {
+                            state: Box::new(state),
+                        },
+                    )));
                 }
                 Err(message) => {
                     push_command_message(app, CommandOutputKind::Error, &message);
@@ -1084,25 +1107,25 @@ async fn handle_idle_slash_command(
                 &crate::resource::skill::snapshot(&app.skills),
                 &app.loaded_skills,
             );
-            app.reduce(AppAction::OpenModal(ModalKind::SkillManager {
-                rows,
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                crate::tui::event::ManagerModal::SkillManager { rows, cursor: 0 },
+            )));
         }
         IdleSlashCommand::AgentComposer => {
-            app.reduce(AppAction::OpenModal(ModalKind::AgentComposer {
-                state: Box::new(crate::tui::agent_composer::AgentComposerState::new()),
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+                crate::tui::event::WizardModal::AgentComposer {
+                    state: Box::new(crate::tui::agent_composer::AgentComposerState::new()),
+                },
+            )));
         }
         IdleSlashCommand::AgentBrowser => {
             let rows = crate::tui::agent_composer::browser_rows_with_settings(
                 &crate::resource::agent::snapshot(&app.custom_agents),
                 &app.builtin_subagents.snapshot(),
             );
-            app.reduce(AppAction::OpenModal(ModalKind::AgentBrowser {
-                rows,
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Manager(
+                crate::tui::event::ManagerModal::AgentBrowser { rows, cursor: 0 },
+            )));
         }
         IdleSlashCommand::Model => {
             open_cached_model_picker(
@@ -2384,17 +2407,19 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     }
     if let Some(step) = first_run_step {
         app.first_run_step = Some(step);
-        app.reduce(AppAction::OpenModal(ModalKind::Onboarding {
-            step,
-            cursor: if step == crate::onboarding::FirstRunStep::CredentialStorage {
-                crate::session::CredentialPersistence::ALL
-                    .iter()
-                    .position(|value| *value == credential_persistence)
-                    .unwrap_or(0)
-            } else {
-                step.default_choice()
+        app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::Onboarding {
+                step,
+                cursor: if step == crate::onboarding::FirstRunStep::CredentialStorage {
+                    crate::session::CredentialPersistence::ALL
+                        .iter()
+                        .position(|value| *value == credential_persistence)
+                        .unwrap_or(0)
+                } else {
+                    step.default_choice()
+                },
             },
-        }));
+        )));
     } else {
         workspace_trust.prompt_after_startup(interaction.clone(), &session_project_root);
     }
@@ -3897,13 +3922,13 @@ fn apply_interaction_request(
     if matches!(
         app.modal,
         Some(
-            ModalKind::Onboarding { .. }
-                | ModalKind::PermissionPrompt { .. }
-                | ModalKind::SandboxEscalationPrompt { .. }
-                | ModalKind::WebDomainPrompt { .. }
-                | ModalKind::ExtensionToolPrompt { .. }
-                | ModalKind::HookTrustPrompt { .. }
-                | ModalKind::QuestionPrompt { .. }
+            ModalKind::Wizard(crate::tui::event::WizardModal::Onboarding { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt { .. })
+                | ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt { .. })
         )
     ) {
         return false;
@@ -3921,11 +3946,13 @@ fn apply_interaction_request(
         } => {
             app.pending_question_visibility = false;
             app.modal_scroll = 0;
-            app.modal = Some(ModalKind::PermissionPrompt {
-                request_id,
-                command: command.clone(),
-                origin,
-            });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::PermissionPrompt {
+                    request_id,
+                    command: command.clone(),
+                    origin,
+                },
+            ));
             app.focus = Focus::Modal;
             app.reduce(AppAction::ResetPermissionToolTimer {
                 command,
@@ -3940,12 +3967,14 @@ fn apply_interaction_request(
         } => {
             app.pending_question_visibility = false;
             app.modal_scroll = 0;
-            app.modal = Some(ModalKind::SandboxEscalationPrompt {
-                request_id,
-                command,
-                origin,
-                kind,
-            });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::SandboxEscalationPrompt {
+                    request_id,
+                    command,
+                    origin,
+                    kind,
+                },
+            ));
             app.focus = Focus::Modal;
         }
         InteractionRequest::WebDomain {
@@ -3957,13 +3986,15 @@ fn apply_interaction_request(
         } => {
             app.pending_question_visibility = false;
             app.modal_scroll = 0;
-            app.modal = Some(ModalKind::WebDomainPrompt {
-                request_id,
-                url: url.clone(),
-                host,
-                redirected_from,
-                origin,
-            });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::WebDomainPrompt {
+                    request_id,
+                    url: url.clone(),
+                    host,
+                    redirected_from,
+                    origin,
+                },
+            ));
             app.focus = Focus::Modal;
             app.reduce(AppAction::ResetPermissionToolTimer {
                 command: url,
@@ -3979,13 +4010,15 @@ fn apply_interaction_request(
         } => {
             app.pending_question_visibility = false;
             app.modal_scroll = 0;
-            app.modal = Some(ModalKind::ExtensionToolPrompt {
-                request_id,
-                id: id.clone(),
-                server,
-                capabilities,
-                args_preview,
-            });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::ExtensionToolPrompt {
+                    request_id,
+                    id: id.clone(),
+                    server,
+                    capabilities,
+                    args_preview,
+                },
+            ));
             app.focus = Focus::Modal;
             app.reduce(AppAction::ResetPermissionToolTimer {
                 command: id,
@@ -4001,13 +4034,15 @@ fn apply_interaction_request(
         } => {
             app.pending_question_visibility = false;
             app.modal_scroll = 0;
-            app.modal = Some(ModalKind::HookTrustPrompt {
-                request_id,
-                name: name.clone(),
-                event,
-                action_kind,
-                action_preview,
-            });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::HookTrustPrompt {
+                    request_id,
+                    name: name.clone(),
+                    event,
+                    action_kind,
+                    action_preview,
+                },
+            ));
             app.focus = Focus::Modal;
             app.reduce(AppAction::ResetPermissionToolTimer {
                 command: name,
@@ -4028,16 +4063,18 @@ fn apply_interaction_request(
             let selected = options.iter().map(|option| option.preselected).collect();
             app.pending_question_visibility = false;
             app.modal_scroll = 0;
-            app.modal = Some(ModalKind::QuestionPrompt {
-                request_id,
-                prompt,
-                header,
-                options,
-                multiple,
-                origin,
-                cursor: 0,
-                selected,
-            });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::QuestionPrompt {
+                    request_id,
+                    prompt,
+                    header,
+                    options,
+                    multiple,
+                    origin,
+                    cursor: 0,
+                    selected,
+                },
+            ));
             app.focus = Focus::Modal;
         }
     }

@@ -1525,11 +1525,13 @@ fn inline_group_selection_highlights_only_selected_nested_tool_row() {
 fn running_bash_waiting_for_permission_uses_stable_pending_text() {
     let now = std::time::Instant::now();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.modal = Some(crate::tui::event::ModalKind::PermissionPrompt {
-        request_id: 1,
-        command: "sleep 5".to_string(),
-        origin: None,
-    });
+    app.modal = Some(crate::tui::event::ModalKind::Detail(
+        crate::tui::event::DetailModal::PermissionPrompt {
+            request_id: 1,
+            command: "sleep 5".to_string(),
+            origin: None,
+        },
+    ));
     app.transcript
         .push(TranscriptItem::ExecutionGroup(execution_group(
             1,
@@ -1576,13 +1578,15 @@ fn running_websearch_marks_only_an_active_domain_prompt_as_pending() {
     ));
 
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.modal = Some(crate::tui::event::ModalKind::WebDomainPrompt {
-        request_id: 2,
-        url: "https://api.search.brave.com/res/v1/web/search".to_string(),
-        host: "api.search.brave.com".to_string(),
-        redirected_from: None,
-        origin: None,
-    });
+    app.modal = Some(crate::tui::event::ModalKind::Detail(
+        crate::tui::event::DetailModal::WebDomainPrompt {
+            request_id: 2,
+            url: "https://api.search.brave.com/res/v1/web/search".to_string(),
+            host: "api.search.brave.com".to_string(),
+            redirected_from: None,
+            origin: None,
+        },
+    ));
     app.transcript
         .push(TranscriptItem::ExecutionGroup(execution_group(
             1,

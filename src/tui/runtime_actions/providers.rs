@@ -32,23 +32,25 @@ pub(super) async fn open_provider_manager(app: &mut AppState, deps: &RuntimeActi
             &deps.model_catalog,
         )
     };
-    app.reduce(AppAction::OpenModal(ModalKind::ProviderManager {
-        rows,
-        filter: String::new(),
-        searching: false,
-        cursor: 0,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::ProviderManager {
+            rows,
+            filter: String::new(),
+            searching: false,
+            cursor: 0,
+        },
+    )));
 }
 
 fn selected_provider_row(
     app: &AppState,
 ) -> Option<crate::tui::provider_manager::ProviderManagerRow> {
-    let Some(ModalKind::ProviderManager {
+    let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
         rows,
         filter,
         cursor,
         ..
-    }) = app.modal.as_ref()
+    })) = app.modal.as_ref()
     else {
         return None;
     };
@@ -80,9 +82,11 @@ pub(super) fn open_provider_manager_edit(app: &mut AppState, deps: &RuntimeActio
         deps.storage.home_dir(),
         app.credential_persistence,
     ) {
-        Ok(state) => app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
-            state: Box::new(state),
-        })),
+        Ok(state) => app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::LocalModelWizard {
+                state: Box::new(state),
+            },
+        ))),
         Err(message) => push_command_message(app, CommandOutputKind::Error, &message),
     }
 }
@@ -92,12 +96,12 @@ pub(super) fn open_provider_manager_edit(app: &mut AppState, deps: &RuntimeActio
 /// list and cursor ride along so Esc restores it losslessly.
 pub(super) fn open_provider_detail(app: &mut AppState, deps: &RuntimeActionDeps<'_>) {
     let (row, cursor, return_rows, return_filter) = {
-        let Some(ModalKind::ProviderManager {
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
             rows,
             filter,
             cursor,
             ..
-        }) = app.modal.as_ref()
+        })) = app.modal.as_ref()
         else {
             return;
         };
@@ -136,9 +140,11 @@ pub(super) fn open_provider_detail(app: &mut AppState, deps: &RuntimeActionDeps<
         cursor,
         return_filter,
     );
-    app.reduce(AppAction::OpenModal(ModalKind::ProviderDetail {
-        detail: Box::new(detail),
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::ProviderDetail {
+            detail: Box::new(detail),
+        },
+    )));
     app.modal_scroll = 0;
 }
 
@@ -155,11 +161,13 @@ pub(super) fn provider_manager_remove_selected(app: &mut AppState, deps: Runtime
     };
     match row.origin {
         ProviderOrigin::Custom => {
-            app.reduce(AppAction::OpenModal(ModalKind::ProviderRemoveConfirm {
-                connection_id: row.connection_id,
-                display_name: row.display_name,
-                disable_builtin: false,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+                crate::tui::event::ConfirmModal::ProviderRemove {
+                    connection_id: row.connection_id,
+                    display_name: row.display_name,
+                    disable_builtin: false,
+                },
+            )));
         }
         ProviderOrigin::Project => push_command_message(
             app,
@@ -167,11 +175,13 @@ pub(super) fn provider_manager_remove_selected(app: &mut AppState, deps: Runtime
             "Project providers are managed by trusted `.bonsai/providers` and `.bonsai/models` files.",
         ),
         ProviderOrigin::BuiltIn if row.enabled => {
-            app.reduce(AppAction::OpenModal(ModalKind::ProviderRemoveConfirm {
-                connection_id: row.connection_id,
-                display_name: row.display_name,
-                disable_builtin: true,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+                crate::tui::event::ConfirmModal::ProviderRemove {
+                    connection_id: row.connection_id,
+                    display_name: row.display_name,
+                    disable_builtin: true,
+                },
+            )));
         }
         // Re-enabling a disabled built-in needs no confirmation.
         ProviderOrigin::BuiltIn => {
@@ -181,11 +191,11 @@ pub(super) fn provider_manager_remove_selected(app: &mut AppState, deps: Runtime
 }
 
 pub(super) fn submit_provider_remove_confirm(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    let Some(ModalKind::ProviderRemoveConfirm {
+    let Some(ModalKind::Confirm(crate::tui::event::ConfirmModal::ProviderRemove {
         connection_id,
         disable_builtin,
         ..
-    }) = app.modal.as_ref()
+    })) = app.modal.as_ref()
     else {
         return;
     };
@@ -212,11 +222,13 @@ pub(in crate::tui) async fn handle_providers_command(
     match (subcommand, id_arg) {
         ("" | "list", _) => open_provider_manager(app, &deps).await,
         ("add", _) => {
-            app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
-                state: Box::new(LocalModelWizardState::with_persistence(
-                    app.credential_persistence,
-                )),
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+                crate::tui::event::WizardModal::LocalModelWizard {
+                    state: Box::new(LocalModelWizardState::with_persistence(
+                        app.credential_persistence,
+                    )),
+                },
+            )));
         }
         ("edit", id) if !id.is_empty() => {
             match crate::tui::local_model_wizard::wizard_state_for_provider_id(
@@ -226,9 +238,11 @@ pub(in crate::tui) async fn handle_providers_command(
                 app.credential_persistence,
             ) {
                 Ok(state) => {
-                    app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
-                        state: Box::new(state),
-                    }));
+                    app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+                        crate::tui::event::WizardModal::LocalModelWizard {
+                            state: Box::new(state),
+                        },
+                    )));
                 }
                 Err(message) => push_command_message(app, CommandOutputKind::Error, &message),
             }
@@ -284,11 +298,13 @@ pub(super) fn open_provider_mutation_for_args(
             ),
         ),
         "remove" if is_custom => {
-            app.reduce(AppAction::OpenModal(ModalKind::ProviderRemoveConfirm {
-                connection_id: id.to_string(),
-                display_name,
-                disable_builtin: false,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+                crate::tui::event::ConfirmModal::ProviderRemove {
+                    connection_id: id.to_string(),
+                    display_name,
+                    disable_builtin: false,
+                },
+            )));
         }
         "remove" => push_command_message(
             app,
@@ -296,11 +312,13 @@ pub(super) fn open_provider_mutation_for_args(
             &format!("`{id}` is not a custom provider; built-ins can only be disabled."),
         ),
         "disable" if !is_custom => {
-            app.reduce(AppAction::OpenModal(ModalKind::ProviderRemoveConfirm {
-                connection_id: id.to_string(),
-                display_name,
-                disable_builtin: true,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+                crate::tui::event::ConfirmModal::ProviderRemove {
+                    connection_id: id.to_string(),
+                    display_name,
+                    disable_builtin: true,
+                },
+            )));
         }
         "disable" => push_command_message(
             app,
@@ -470,12 +488,14 @@ fn start_provider_mutation(
                         provider: Some(Box::new(provider)),
                         context_report: Some(Box::new(context_report)),
                         quit: false,
-                        open_modal: Some(ModalKind::ProviderManager {
-                            rows,
-                            filter: String::new(),
-                            searching: false,
-                            cursor: 0,
-                        }),
+                        open_modal: Some(ModalKind::Manager(
+                            crate::tui::event::ManagerModal::ProviderManager {
+                                rows,
+                                filter: String::new(),
+                                searching: false,
+                                cursor: 0,
+                            },
+                        )),
                     }),
                 }
             }

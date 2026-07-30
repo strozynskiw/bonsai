@@ -32,7 +32,12 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         return KeyIntent::Noop;
     }
 
-    if matches!(app.modal, Some(ModalKind::Onboarding { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::Onboarding { .. }
+        ))
+    ) {
         return map_onboarding_key(key);
     }
 
@@ -42,163 +47,363 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         return map_prompt_decision_key(family, key);
     }
 
-    if matches!(app.modal, Some(ModalKind::QuestionPrompt { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::QuestionPrompt { .. }
+        ))
+    ) {
         return map_question_prompt_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::ApiKeyPrompt { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt { .. }
+        ))
+    ) {
         return map_api_key_prompt_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::UnauthorizeProviderPicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::UnauthorizeProviderPicker { .. }
+        ))
+    ) {
         return map_unauthorize_provider_picker_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::UnauthorizeConfirm { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::Unauthorize { .. }
+        ))
+    ) {
         return map_unauthorize_confirm_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::AuthorizeProviderPicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::AuthorizeProviderPicker { .. }
+        ))
+    ) {
         return map_authorize_provider_picker_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::ReviewScopePicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ReviewScopePicker { .. }
+        ))
+    ) {
         return map_review_scope_picker_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::LocalModelWizard { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::LocalModelWizard { .. }
+        ))
+    ) {
         return map_local_model_wizard_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::AgentBrowser { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::AgentBrowser { .. }
+        ))
+    ) {
         return map_agent_browser_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::ProviderManager { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::ProviderManager { .. }
+        ))
+    ) {
         return map_provider_manager_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::ProviderDetail { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::ProviderDetail { .. }
+        ))
+    ) {
         return map_provider_detail_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::ProviderRemoveConfirm { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::ProviderRemove { .. }
+        ))
+    ) {
         return map_provider_remove_confirm_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::SkillManager { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SkillManager { .. }
+        ))
+    ) {
         return map_skill_manager_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::MemoryManager { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::MemoryManager { .. }
+        ))
+    ) {
         return map_memory_manager_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::PermissionsManager { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::PermissionsManager { .. }
+        ))
+    ) {
         return map_permissions_manager_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::MemoryAddWizard { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::MemoryAddWizard { .. }
+        ))
+    ) {
         return map_memory_add_wizard_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::AgentComposer { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::AgentComposer { .. }
+        ))
+    ) {
         return map_agent_composer_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::AgentDeleteConfirm { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::AgentDelete { .. }
+        ))
+    ) {
         return map_agent_delete_confirm_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::ModelPicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker { .. }
+        ))
+    ) {
         return map_model_picker_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::SessionPicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::SessionPicker { .. }
+        ))
+    ) {
         return map_session_picker_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::PlanPicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanPicker { .. }
+        ))
+    ) {
         return map_plan_picker_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::PlanOpenChoice { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanOpenChoice { .. }
+        ))
+    ) {
         return map_plan_open_choice_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::StartPlanChoice { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::StartPlanChoice { .. }
+        ))
+    ) {
         return map_start_plan_choice_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::PlanDeleteConfirm { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::PlanDelete { .. }
+        ))
+    ) {
         return map_plan_delete_confirm_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::SessionDeleteConfirm { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::SessionDelete { .. }
+        ))
+    ) {
         return map_session_delete_confirm_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::PlanDiscardConfirm { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::PlanDiscard { .. }
+        ))
+    ) {
         return map_plan_discard_confirm_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::TaskList { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::TaskList { .. }
+        ))
+    ) {
         return map_task_list_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::PeerList { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::PeerList { .. }
+        ))
+    ) {
         return map_peer_list_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::Doctor { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::Doctor { .. }
+        ))
+    ) {
         return map_doctor_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::Refresh { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::Refresh { .. }
+        ))
+    ) {
         return map_refresh_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::UsageDashboard { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::UsageDashboard { .. }
+        ))
+    ) {
         return map_usage_dashboard_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::SubtaskList { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SubtaskList { .. }
+        ))
+    ) {
         return map_subtask_list_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::Context(_))) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            _
+        )))
+    ) {
         return map_context_modal_key(key, app);
     }
 
-    if matches!(app.modal, Some(ModalKind::Episodes { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::Episodes { .. }
+        ))
+    ) {
         return map_episodes_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::McpServers { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::McpServers { .. }
+        ))
+    ) {
         return map_mcp_servers_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::SandboxStatus { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SandboxStatus { .. }
+        ))
+    ) {
         return map_sandbox_modal_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::ThemePicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ThemePicker { .. }
+        ))
+    ) {
         return map_theme_picker_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::ModePicker { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModePicker { .. }
+        ))
+    ) {
         return map_mode_picker_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::Settings { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::Settings { .. }
+        ))
+    ) {
         return map_settings_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::BusyCommand { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::BusyCommand { .. }
+        ))
+    ) {
         return map_busy_command_key(key);
     }
 
-    if matches!(app.modal, Some(ModalKind::PlanFindingDetail { .. })) {
+    if matches!(
+        app.modal,
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::PlanFindingDetail { .. }
+        ))
+    ) {
         return map_plan_finding_detail_key(key, app);
     }
 
@@ -989,13 +1194,15 @@ mod tests {
     #[test]
     fn web_domain_prompt_keys_map_to_decisions() {
         let mut app = app();
-        app.modal = Some(ModalKind::WebDomainPrompt {
-            request_id: 1,
-            url: "https://example.com/p".to_string(),
-            host: "example.com".to_string(),
-            redirected_from: None,
-            origin: None,
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::WebDomainPrompt {
+                request_id: 1,
+                url: "https://example.com/p".to_string(),
+                host: "example.com".to_string(),
+                redirected_from: None,
+                origin: None,
+            },
+        ));
         let press =
             |app: &AppState, code: KeyCode| map_key(KeyEvent::new(code, KeyModifiers::NONE), app);
         assert!(matches!(
@@ -1065,11 +1272,13 @@ mod tests {
 
         // The permission prompt offers a project scope, so `n` denies-for-project.
         let mut perm = app();
-        perm.modal = Some(ModalKind::PermissionPrompt {
-            request_id: 1,
-            command: "rm secrets".to_string(),
-            origin: None,
-        });
+        perm.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::PermissionPrompt {
+                request_id: 1,
+                command: "rm secrets".to_string(),
+                origin: None,
+            },
+        ));
         assert!(matches!(
             press(&perm, KeyCode::Char('n')),
             KeyIntent::Action(AppAction::PromptDecision {
@@ -1081,12 +1290,14 @@ mod tests {
         // Sandbox escapes are never persisted: `n` has no per-project deny to
         // map to, so it stays a no-op rather than silently denying.
         let mut escape = app();
-        escape.modal = Some(ModalKind::SandboxEscalationPrompt {
-            request_id: 2,
-            command: "curl https://example.com".to_string(),
-            origin: None,
-            kind: crate::interaction::SandboxEscalationKind::SandboxOnly,
-        });
+        escape.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::SandboxEscalationPrompt {
+                request_id: 2,
+                command: "curl https://example.com".to_string(),
+                origin: None,
+                kind: crate::interaction::SandboxEscalationKind::SandboxOnly,
+            },
+        ));
         assert!(matches!(
             press(&escape, KeyCode::Char('n')),
             KeyIntent::Noop
@@ -1097,25 +1308,27 @@ mod tests {
     fn usage_dashboard_keys_switch_tabs_and_scroll() {
         use crate::tui::event::UsageTab;
         let mut app = app();
-        app.modal = Some(ModalKind::UsageDashboard {
-            dashboard: Box::new(crate::storage::UsageDashboard {
-                today: crate::storage::LocalToday {
-                    day: "2026-07-10".to_string(),
-                    julian_day: 2_461_231,
-                    weekday: 5,
-                },
-                days: Vec::new(),
-                models: Vec::new(),
-                top_sessions: Vec::new(),
-                session_stats: Default::default(),
-                projects: Vec::new(),
-                status_counts: Vec::new(),
-                tools: Vec::new(),
-                self_review: Default::default(),
-                lifetime: Default::default(),
-            }),
-            tab: UsageTab::Activity,
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::UsageDashboard {
+                dashboard: Box::new(crate::storage::UsageDashboard {
+                    today: crate::storage::LocalToday {
+                        day: "2026-07-10".to_string(),
+                        julian_day: 2_461_231,
+                        weekday: 5,
+                    },
+                    days: Vec::new(),
+                    models: Vec::new(),
+                    top_sessions: Vec::new(),
+                    session_stats: Default::default(),
+                    projects: Vec::new(),
+                    status_counts: Vec::new(),
+                    tools: Vec::new(),
+                    self_review: Default::default(),
+                    lifetime: Default::default(),
+                }),
+                tab: UsageTab::Activity,
+            },
+        ));
         let press =
             |app: &AppState, code: KeyCode| map_key(KeyEvent::new(code, KeyModifiers::NONE), app);
         assert!(matches!(
@@ -1934,10 +2147,12 @@ mod tests {
     #[test]
     fn task_list_modal_keys_drive_selection_detail_and_delete() {
         let mut app = app();
-        app.modal = Some(ModalKind::TaskList {
-            tasks: Vec::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::TaskList {
+                tasks: Vec::new(),
+                cursor: 0,
+            },
+        ));
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
         assert!(matches!(
@@ -1958,11 +2173,13 @@ mod tests {
     #[test]
     fn subtask_list_modal_keys_switch_panes_and_scroll_detail() {
         let mut app = app();
-        app.modal = Some(ModalKind::SubtaskList {
-            subtasks: Vec::new(),
-            cursor: 0,
-            pane: SubtaskListPane::List,
-        });
+        app.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SubtaskList {
+                subtasks: Vec::new(),
+                cursor: 0,
+                pane: SubtaskListPane::List,
+            },
+        ));
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
         assert!(matches!(
@@ -1982,11 +2199,13 @@ mod tests {
             KeyIntent::Action(AppAction::SubtaskListTogglePane)
         ));
 
-        app.modal = Some(ModalKind::SubtaskList {
-            subtasks: Vec::new(),
-            cursor: 0,
-            pane: SubtaskListPane::Detail,
-        });
+        app.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SubtaskList {
+                subtasks: Vec::new(),
+                cursor: 0,
+                pane: SubtaskListPane::Detail,
+            },
+        ));
 
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
         assert!(matches!(up, KeyIntent::Action(AppAction::ScrollModal(-1))));
@@ -2009,38 +2228,48 @@ mod tests {
     #[test]
     fn plan_picker_keys_search_open_and_delete() {
         let mut app = app();
-        app.modal = Some(ModalKind::PlanPicker {
-            plans: vec![saved_plan(1, "Plan library")],
-            query: String::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanPicker {
+                plans: vec![saved_plan(1, "Plan library")],
+                query: String::new(),
+                cursor: 0,
+            },
+        ));
 
         let input = map_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &app);
         assert!(matches!(
             input,
-            KeyIntent::Action(AppAction::PlanPickerInputChar('p'))
+            KeyIntent::Action(AppAction::PlanPicker(
+                crate::tui::event::PlanPickerAction::InputChar('p')
+            ))
         ));
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
         assert!(matches!(
             enter,
-            KeyIntent::Action(AppAction::PlanPickerSubmit)
+            KeyIntent::Action(AppAction::PlanPicker(
+                crate::tui::event::PlanPickerAction::Submit
+            ))
         ));
 
         let delete = map_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), &app);
         assert!(matches!(
             delete,
-            KeyIntent::Action(AppAction::PlanPickerDeleteSelected)
+            KeyIntent::Action(AppAction::PlanPicker(
+                crate::tui::event::PlanPickerAction::DeleteSelected
+            ))
         ));
     }
 
     #[test]
     fn plan_open_choice_and_delete_confirm_keys_submit_typed_actions() {
         let mut app = app();
-        app.modal = Some(ModalKind::PlanOpenChoice {
-            plan: saved_plan(1, "Plan library"),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanOpenChoice {
+                plan: saved_plan(1, "Plan library"),
+                cursor: 0,
+            },
+        ));
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
         assert!(matches!(
@@ -2048,9 +2277,11 @@ mod tests {
             KeyIntent::Action(AppAction::PlanOpenChoiceSubmit)
         ));
 
-        app.modal = Some(ModalKind::PlanDeleteConfirm {
-            plan: saved_plan(1, "Plan library"),
-        });
+        app.modal = Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::PlanDelete {
+                plan: saved_plan(1, "Plan library"),
+            },
+        ));
         let confirm = map_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &app);
         assert!(matches!(
             confirm,
@@ -2061,7 +2292,9 @@ mod tests {
     #[test]
     fn start_plan_choice_keys_submit_typed_actions() {
         let mut app = app();
-        app.modal = Some(ModalKind::StartPlanChoice { cursor: 0 });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::StartPlanChoice { cursor: 0 },
+        ));
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
         assert!(matches!(
@@ -2078,10 +2311,12 @@ mod tests {
     #[test]
     fn session_picker_keys_resume_and_delete() {
         let mut app = app();
-        app.modal = Some(ModalKind::SessionPicker {
-            sessions: vec![session_summary(1, "Test session")],
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::SessionPicker {
+                sessions: vec![session_summary(1, "Test session")],
+                cursor: 0,
+            },
+        ));
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
         assert!(matches!(
@@ -2099,9 +2334,11 @@ mod tests {
     #[test]
     fn session_delete_confirm_keys_submit_or_cancel() {
         let mut app = app();
-        app.modal = Some(ModalKind::SessionDeleteConfirm {
-            session: session_summary(1, "Test session"),
-        });
+        app.modal = Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::SessionDelete {
+                session: session_summary(1, "Test session"),
+            },
+        ));
 
         for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
             let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
@@ -2133,10 +2370,12 @@ mod tests {
         // All confirm dialogs speak the same dialect: Enter/y/Y confirm,
         // Esc/n/N cancel, q/Q mirrors Esc.
         let mut app = app();
-        app.modal = Some(ModalKind::AgentDeleteConfirm {
-            name: "explorer".to_string(),
-            path: std::path::PathBuf::from(".bonsai/agents/explorer.md"),
-        });
+        app.modal = Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::AgentDelete {
+                name: "explorer".to_string(),
+                path: std::path::PathBuf::from(".bonsai/agents/explorer.md"),
+            },
+        ));
 
         for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
             let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
@@ -2170,19 +2409,25 @@ mod tests {
     fn model_picker_page_keys_move_by_page() {
         // The largest list in the app pages like every other picker.
         let mut app = app();
-        app.modal = Some(ModalKind::ModelPicker {
-            entries: Vec::new(),
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: Vec::new(),
+            },
+        ));
 
         let up = map_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &app);
         assert!(matches!(
             up,
-            KeyIntent::Action(AppAction::ModelPickerMove(-8))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::Move(-8)
+            ))
         ));
         let down = map_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &app);
         assert!(matches!(
             down,
-            KeyIntent::Action(AppAction::ModelPickerMove(8))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::Move(8)
+            ))
         ));
     }
 
@@ -2448,17 +2693,19 @@ mod tests {
     #[test]
     fn enter_submits_authorize_provider_picker() {
         let mut app = app();
-        app.modal = Some(ModalKind::AuthorizeProviderPicker {
-            providers: vec![ProviderOption {
-                provider_id: "opencode".to_string(),
-                provider_label: "OpenCode Go".to_string(),
-                authorized: false,
-                current: false,
-                uses_endpoint_auth_form: false,
-            }],
-            query: String::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::AuthorizeProviderPicker {
+                providers: vec![ProviderOption {
+                    provider_id: "opencode".to_string(),
+                    provider_label: "OpenCode Go".to_string(),
+                    authorized: false,
+                    current: false,
+                    uses_endpoint_auth_form: false,
+                }],
+                query: String::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
@@ -2472,11 +2719,13 @@ mod tests {
     #[test]
     fn authorize_provider_picker_letters_type_into_filter() {
         let mut app = app();
-        app.modal = Some(ModalKind::AuthorizeProviderPicker {
-            providers: Vec::new(),
-            query: String::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::AuthorizeProviderPicker {
+                providers: Vec::new(),
+                query: String::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         // `q` no longer closes — it types, like the plan/model pickers.
@@ -2492,17 +2741,19 @@ mod tests {
     #[test]
     fn enter_submits_unauthorize_provider_picker() {
         let mut app = app();
-        app.modal = Some(ModalKind::UnauthorizeProviderPicker {
-            providers: vec![ProviderOption {
-                provider_id: "opencode".to_string(),
-                provider_label: "OpenCode Go".to_string(),
-                authorized: true,
-                current: true,
-                uses_endpoint_auth_form: false,
-            }],
-            query: String::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::UnauthorizeProviderPicker {
+                providers: vec![ProviderOption {
+                    provider_id: "opencode".to_string(),
+                    provider_label: "OpenCode Go".to_string(),
+                    authorized: true,
+                    current: true,
+                    uses_endpoint_auth_form: false,
+                }],
+                query: String::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         let enter = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
@@ -2516,11 +2767,13 @@ mod tests {
     #[test]
     fn unauthorize_provider_picker_letters_type_into_filter() {
         let mut app = app();
-        app.modal = Some(ModalKind::UnauthorizeProviderPicker {
-            providers: Vec::new(),
-            query: String::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::UnauthorizeProviderPicker {
+                providers: Vec::new(),
+                query: String::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         // `q` types into the filter, mirroring the authorize picker.
@@ -2536,10 +2789,12 @@ mod tests {
     #[test]
     fn unauthorize_confirm_keys_submit_or_close() {
         let mut app = app();
-        app.modal = Some(ModalKind::UnauthorizeConfirm {
-            provider_id: "opencode".to_string(),
-            display_name: "OpenCode Go".to_string(),
-        });
+        app.modal = Some(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::Unauthorize {
+                provider_id: "opencode".to_string(),
+                display_name: "OpenCode Go".to_string(),
+            },
+        ));
         app.focus = Focus::Modal;
 
         for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char('Y')] {
@@ -2564,24 +2819,26 @@ mod tests {
     fn provider_manager_slash_toggles_search_mode_routing() {
         use crate::tui::provider_manager::{ProviderManagerRow, ProviderOrigin};
         let manager = |filter: &str, searching: bool| {
-            Some(ModalKind::ProviderManager {
-                rows: vec![ProviderManagerRow {
-                    connection_id: "qwencloud".to_string(),
-                    display_name: "Qwen Cloud API".to_string(),
-                    origin: ProviderOrigin::BuiltIn,
-                    enabled: true,
-                    authorized: false,
-                    current: false,
-                    model_count: 0,
-                    discovery: crate::model_catalog::DiscoveryKind::Generic,
-                    base_url: String::new(),
-                    credential_label: None,
-                    auth_hint: None,
-                }],
-                filter: filter.to_string(),
-                searching,
-                cursor: 0,
-            })
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::ProviderManager {
+                    rows: vec![ProviderManagerRow {
+                        connection_id: "qwencloud".to_string(),
+                        display_name: "Qwen Cloud API".to_string(),
+                        origin: ProviderOrigin::BuiltIn,
+                        enabled: true,
+                        authorized: false,
+                        current: false,
+                        model_count: 0,
+                        discovery: crate::model_catalog::DiscoveryKind::Generic,
+                        base_url: String::new(),
+                        credential_label: None,
+                        auth_hint: None,
+                    }],
+                    filter: filter.to_string(),
+                    searching,
+                    cursor: 0,
+                },
+            ))
         };
         let mut app = app();
         app.focus = Focus::Modal;
@@ -2590,29 +2847,39 @@ mod tests {
         app.modal = manager("", false);
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::ProviderManagerRemove)
+            KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::Remove
+            ))
         ));
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::ProviderManagerBeginSearch)
+            KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::BeginSearch
+            ))
         ));
 
         // Searching: the same `d` now types into the filter; Esc leaves search.
         app.modal = manager("", true);
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::ProviderManagerSearchChar('d'))
+            KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::SearchChar('d')
+            ))
         ));
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::ProviderManagerSearchExit)
+            KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::SearchExit
+            ))
         ));
 
         // Filter applied but not typing: Esc clears it before closing.
         app.modal = manager("qwen", false);
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::ProviderManagerClearFilter)
+            KeyIntent::Action(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::ClearFilter
+            ))
         ));
     }
 
@@ -2620,18 +2887,20 @@ mod tests {
     fn permissions_manager_slash_toggles_search_mode_routing() {
         use crate::tui::permissions_manager::{PermissionRuleRow, RuleLane};
         let manager = |filter: &str, searching: bool| {
-            Some(ModalKind::PermissionsManager {
-                rows: vec![PermissionRuleRow {
-                    lane: RuleLane::Bash,
-                    source: crate::permissions::RuleSource::Project,
-                    pattern: "make *".to_string(),
-                    permission: crate::permissions::Permission::Allow,
-                    id: Some(1),
-                }],
-                filter: filter.to_string(),
-                searching,
-                cursor: 0,
-            })
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::PermissionsManager {
+                    rows: vec![PermissionRuleRow {
+                        lane: RuleLane::Bash,
+                        source: crate::permissions::RuleSource::Project,
+                        pattern: "make *".to_string(),
+                        permission: crate::permissions::Permission::Allow,
+                        id: Some(1),
+                    }],
+                    filter: filter.to_string(),
+                    searching,
+                    cursor: 0,
+                },
+            ))
         };
         let mut app = app();
         app.focus = Focus::Modal;
@@ -2640,38 +2909,50 @@ mod tests {
         app.modal = manager("", false);
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::PermissionsManagerDelete)
+            KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::Delete
+            ))
         ));
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::PermissionsManagerBeginSearch)
+            KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::BeginSearch
+            ))
         ));
 
         // Searching: the same `d` now types into the filter; Esc leaves search.
         app.modal = manager("", true);
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::PermissionsManagerSearchChar('d'))
+            KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::SearchChar('d')
+            ))
         ));
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::PermissionsManagerSearchExit)
+            KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::SearchExit
+            ))
         ));
 
         // Filter applied but not typing: Esc clears it before closing.
         app.modal = manager("make", false);
         assert!(matches!(
             map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app),
-            KeyIntent::Action(AppAction::PermissionsManagerClearFilter)
+            KeyIntent::Action(AppAction::PermissionsManager(
+                crate::tui::event::PermissionsManagerAction::ClearFilter
+            ))
         ));
     }
 
     #[test]
     fn local_model_wizard_keys_route_to_wizard_actions() {
         let mut app = app();
-        app.modal = Some(ModalKind::LocalModelWizard {
-            state: Box::default(),
-        });
+        app.modal = Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::LocalModelWizard {
+                state: Box::default(),
+            },
+        ));
         app.focus = Focus::Modal;
 
         let typed = map_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &app);
@@ -2681,19 +2962,27 @@ mod tests {
 
         assert!(matches!(
             typed,
-            KeyIntent::Action(AppAction::LocalModelWizardInputChar('q'))
+            KeyIntent::Action(AppAction::LocalModelWizard(
+                crate::tui::event::LocalModelWizardAction::InputChar('q')
+            ))
         ));
         assert!(matches!(
             tab,
-            KeyIntent::Action(AppAction::LocalModelWizardMoveField(1))
+            KeyIntent::Action(AppAction::LocalModelWizard(
+                crate::tui::event::LocalModelWizardAction::MoveField(1)
+            ))
         ));
         assert!(matches!(
             enter,
-            KeyIntent::Action(AppAction::LocalModelWizardSubmit)
+            KeyIntent::Action(AppAction::LocalModelWizard(
+                crate::tui::event::LocalModelWizardAction::Submit
+            ))
         ));
         assert!(matches!(
             space,
-            KeyIntent::Action(AppAction::LocalModelWizardToggle)
+            KeyIntent::Action(AppAction::LocalModelWizard(
+                crate::tui::event::LocalModelWizardAction::Toggle
+            ))
         ));
     }
 
@@ -2910,20 +3199,22 @@ mod tests {
     #[test]
     fn esc_cancels_question_prompt() {
         let mut app = app();
-        app.modal = Some(ModalKind::QuestionPrompt {
-            request_id: 1,
-            prompt: "pick".to_string(),
-            header: None,
-            options: vec![QuestionOption {
-                label: "Yes".to_string(),
-                description: String::new(),
-                preselected: false,
-            }],
-            multiple: false,
-            origin: None,
-            cursor: 0,
-            selected: vec![false],
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::QuestionPrompt {
+                request_id: 1,
+                prompt: "pick".to_string(),
+                header: None,
+                options: vec![QuestionOption {
+                    label: "Yes".to_string(),
+                    description: String::new(),
+                    preselected: false,
+                }],
+                multiple: false,
+                origin: None,
+                cursor: 0,
+                selected: vec![false],
+            },
+        ));
 
         let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
 
@@ -3016,7 +3307,9 @@ mod tests {
     #[test]
     fn context_modal_keys_route_to_tree_navigation() {
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(context_report())));
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report()),
+        )));
         app.focus = Focus::Modal;
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
@@ -3038,10 +3331,12 @@ mod tests {
     #[test]
     fn episodes_modal_keys_select_rows_and_scroll_details() {
         let mut app = app();
-        app.modal = Some(ModalKind::Episodes {
-            report: Box::new(context_report()),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::Episodes {
+                report: Box::new(context_report()),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
@@ -3092,7 +3387,9 @@ mod tests {
     #[test]
     fn context_wire_keys_route_to_modal_scrolling() {
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(context_report())));
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report()),
+        )));
         app.focus = Focus::Modal;
         app.context_state.view_mode = ContextViewMode::Wire;
 
@@ -3133,7 +3430,9 @@ mod tests {
     #[test]
     fn context_turns_keys_route_like_wire() {
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(context_report())));
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report()),
+        )));
         app.focus = Focus::Modal;
         app.context_state.view_mode = ContextViewMode::Turns;
 
@@ -3168,7 +3467,9 @@ mod tests {
     #[test]
     fn sandbox_modal_keys_route_to_picker_and_global_jump() {
         let mut app = app();
-        app.modal = Some(ModalKind::SandboxStatus { cursor: 0 });
+        app.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SandboxStatus { cursor: 0 },
+        ));
         app.focus = Focus::Modal;
 
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
@@ -3202,10 +3503,12 @@ mod tests {
     #[test]
     fn mcp_modal_keys_route_to_server_navigation_and_detail_scroll() {
         let mut app = app();
-        app.modal = Some(ModalKind::McpServers {
-            rows: Vec::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::McpServers {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
@@ -3251,10 +3554,12 @@ mod tests {
     #[test]
     fn settings_keys_route_move_cycle_and_activate() {
         let mut app = app();
-        app.modal = Some(ModalKind::Settings {
-            rows: Vec::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::Settings {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
@@ -3294,10 +3599,12 @@ mod tests {
     #[test]
     fn onboarding_keys_choose_submit_or_defer() {
         let mut app = app();
-        app.modal = Some(ModalKind::Onboarding {
-            step: crate::onboarding::FirstRunStep::CredentialStorage,
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::Onboarding {
+                step: crate::onboarding::FirstRunStep::CredentialStorage,
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         assert!(matches!(
@@ -3317,10 +3624,12 @@ mod tests {
     #[test]
     fn skill_manager_keys_route_move_scroll_toggle_and_load() {
         let mut app = app();
-        app.modal = Some(ModalKind::SkillManager {
-            rows: Vec::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::SkillManager {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
@@ -3442,51 +3751,75 @@ mod tests {
         // Modal kinds that flow through the fallthrough arm because they
         // have no per-modal `if matches!` block in `map_key`. `Confirm` is
         // dead-coded (no constructor) so it is excluded.
-        assert_q_closes_modal(ModalKind::Help);
-        assert_q_closes_modal(ModalKind::CommandHelp);
-        assert_q_closes_modal(ModalKind::ToolDetail {
-            tool_id: "call-1".to_string(),
-        });
-        assert_q_closes_modal(ModalKind::BlockDetail { item_index: 0 });
-        assert_q_closes_modal(ModalKind::DiffPreview {
-            tool_id: "call-1".to_string(),
-        });
+        assert_q_closes_modal(ModalKind::Detail(crate::tui::event::DetailModal::Help));
+        assert_q_closes_modal(ModalKind::Detail(
+            crate::tui::event::DetailModal::CommandHelp,
+        ));
+        assert_q_closes_modal(ModalKind::Detail(
+            crate::tui::event::DetailModal::ToolDetail {
+                tool_id: "call-1".to_string(),
+            },
+        ));
+        assert_q_closes_modal(ModalKind::Detail(
+            crate::tui::event::DetailModal::BlockDetail { item_index: 0 },
+        ));
+        assert_q_closes_modal(ModalKind::Detail(
+            crate::tui::event::DetailModal::DiffPreview {
+                tool_id: "call-1".to_string(),
+            },
+        ));
 
         // Modal kinds that have their own per-modal arm but delegate `q` to
         // CloseModal so the binding works the same as Esc. PlanPicker and
         // AuthorizeProviderPicker are deliberately excluded: their per-modal
         // arms own a search box, so `q` must type into the query (mirrors
         // ModelPicker and ApiKeyPrompt).
-        assert_q_closes_modal(ModalKind::SessionPicker {
-            sessions: Vec::new(),
-            cursor: 0,
-        });
-        assert_q_closes_modal(ModalKind::PlanOpenChoice {
-            plan: saved_plan(1, "Plan library"),
-            cursor: 0,
-        });
-        assert_q_closes_modal(ModalKind::PlanDeleteConfirm {
-            plan: saved_plan(1, "Plan library"),
-        });
-        assert_q_closes_modal(ModalKind::ReviewScopePicker { cursor: 0 });
-        assert_q_closes_modal(ModalKind::TaskList {
-            tasks: Vec::new(),
-            cursor: 0,
-        });
-        assert_q_closes_modal(ModalKind::PeerList {
-            peers: Vec::new(),
-            cursor: 0,
-        });
-        assert_q_closes_modal(ModalKind::Context(Box::new(context_report())));
+        assert_q_closes_modal(ModalKind::Picker(
+            crate::tui::event::PickerModal::SessionPicker {
+                sessions: Vec::new(),
+                cursor: 0,
+            },
+        ));
+        assert_q_closes_modal(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanOpenChoice {
+                plan: saved_plan(1, "Plan library"),
+                cursor: 0,
+            },
+        ));
+        assert_q_closes_modal(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::PlanDelete {
+                plan: saved_plan(1, "Plan library"),
+            },
+        ));
+        assert_q_closes_modal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ReviewScopePicker { cursor: 0 },
+        ));
+        assert_q_closes_modal(ModalKind::Manager(
+            crate::tui::event::ManagerModal::TaskList {
+                tasks: Vec::new(),
+                cursor: 0,
+            },
+        ));
+        assert_q_closes_modal(ModalKind::Manager(
+            crate::tui::event::ManagerModal::PeerList {
+                peers: Vec::new(),
+                cursor: 0,
+            },
+        ));
+        assert_q_closes_modal(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report()),
+        )));
     }
 
     #[test]
     fn peer_list_arrows_move_and_page() {
         let mut state = app();
-        state.modal = Some(ModalKind::PeerList {
-            peers: Vec::new(),
-            cursor: 0,
-        });
+        state.modal = Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::PeerList {
+                peers: Vec::new(),
+                cursor: 0,
+            },
+        ));
         let intent = |code| map_key(KeyEvent::new(code, KeyModifiers::NONE), &state);
         assert!(matches!(
             intent(KeyCode::Down),
@@ -3511,11 +3844,13 @@ mod tests {
         // `q` mirrors Esc on a permission prompt: deny the bash command
         // rather than close the modal and leave the invocation half-allowed.
         let mut app = app();
-        app.modal = Some(ModalKind::PermissionPrompt {
-            request_id: 1,
-            command: "rm -rf /".to_string(),
-            origin: None,
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::PermissionPrompt {
+                request_id: 1,
+                command: "rm -rf /".to_string(),
+                origin: None,
+            },
+        ));
 
         let intent = map_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &app);
 
@@ -3533,20 +3868,22 @@ mod tests {
         // `q` mirrors Esc on a question prompt: cancel the question rather
         // than close the modal and leave the request unanswered.
         let mut app = app();
-        app.modal = Some(ModalKind::QuestionPrompt {
-            request_id: 1,
-            prompt: "pick".to_string(),
-            header: None,
-            options: vec![QuestionOption {
-                label: "Yes".to_string(),
-                description: String::new(),
-                preselected: false,
-            }],
-            multiple: false,
-            origin: None,
-            cursor: 0,
-            selected: vec![false],
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::QuestionPrompt {
+                request_id: 1,
+                prompt: "pick".to_string(),
+                header: None,
+                options: vec![QuestionOption {
+                    label: "Yes".to_string(),
+                    description: String::new(),
+                    preselected: false,
+                }],
+                multiple: false,
+                origin: None,
+                cursor: 0,
+                selected: vec![false],
+            },
+        ));
 
         let intent = map_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &app);
 
@@ -3562,7 +3899,9 @@ mod tests {
         // modifier. The fallthrough arm matches both cases so the binding
         // works the same regardless of which key the terminal surfaces.
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(context_report())));
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report()),
+        )));
 
         let intent = map_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT), &app);
 
@@ -3587,10 +3926,12 @@ mod tests {
         // rather than closing the modal, otherwise users lose the ability
         // to filter the list.
         let mut api_state = app();
-        api_state.modal = Some(ModalKind::ApiKeyPrompt {
-            provider_id: "opencode".to_string(),
-            initial_form: None,
-        });
+        api_state.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt {
+                provider_id: "opencode".to_string(),
+                initial_form: None,
+            },
+        ));
         let api = map_key(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             &api_state,
@@ -3601,31 +3942,39 @@ mod tests {
         ));
 
         let mut model_state = app();
-        model_state.modal = Some(ModalKind::ModelPicker {
-            entries: Vec::new(),
-        });
+        model_state.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: Vec::new(),
+            },
+        ));
         let model = map_key(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             &model_state,
         );
         assert!(matches!(
             model,
-            KeyIntent::Action(AppAction::ModelPickerInputChar('q'))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::InputChar('q')
+            ))
         ));
 
         let mut plan_state = app();
-        plan_state.modal = Some(ModalKind::PlanPicker {
-            plans: Vec::new(),
-            query: String::new(),
-            cursor: 0,
-        });
+        plan_state.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::PlanPicker {
+                plans: Vec::new(),
+                query: String::new(),
+                cursor: 0,
+            },
+        ));
         let plan = map_key(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             &plan_state,
         );
         assert!(matches!(
             plan,
-            KeyIntent::Action(AppAction::PlanPickerInputChar('q'))
+            KeyIntent::Action(AppAction::PlanPicker(
+                crate::tui::event::PlanPickerAction::InputChar('q')
+            ))
         ));
     }
 
@@ -3634,15 +3983,19 @@ mod tests {
         let mut state = crate::tui::agent_composer::AgentComposerState::new();
         state.field = crate::tui::agent_composer::AgentComposerField::Model;
         let mut app = app();
-        app.modal = Some(ModalKind::AgentComposer {
-            state: Box::new(state),
-        });
+        app.modal = Some(ModalKind::Wizard(
+            crate::tui::event::WizardModal::AgentComposer {
+                state: Box::new(state),
+            },
+        ));
 
         for code in [KeyCode::Enter, KeyCode::Char(' ')] {
             let intent = map_key(KeyEvent::new(code, KeyModifiers::NONE), &app);
             assert!(matches!(
                 intent,
-                KeyIntent::Action(AppAction::AgentComposerOpenModelPicker)
+                KeyIntent::Action(AppAction::AgentComposer(
+                    crate::tui::event::AgentComposerAction::OpenModelPicker
+                ))
             ));
         }
 
@@ -3652,16 +4005,20 @@ mod tests {
         let tab = map_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &app);
         assert!(matches!(
             tab,
-            KeyIntent::Action(AppAction::AgentComposerNextPage)
+            KeyIntent::Action(AppAction::AgentComposer(
+                crate::tui::event::AgentComposerAction::NextPage
+            ))
         ));
     }
 
     #[test]
     fn model_picker_shortcut_keys_assign_only_in_reasoning_pane() {
         let mut app = app();
-        app.modal = Some(ModalKind::ModelPicker {
-            entries: Vec::new(),
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: Vec::new(),
+            },
+        ));
 
         // Default (Model) pane: bare letters type into the filter so common
         // search input keeps working.
@@ -3670,7 +4027,7 @@ mod tests {
             let intent = map_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &app);
             assert!(matches!(
                 intent,
-                KeyIntent::Action(AppAction::ModelPickerInputChar(input)) if input == ch
+                KeyIntent::Action(AppAction::ModelPicker(crate::tui::event::ModelPickerAction::InputChar(input))) if input == ch
             ));
         }
 
@@ -3682,7 +4039,7 @@ mod tests {
             let intent = map_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &app);
             assert!(matches!(
                 intent,
-                KeyIntent::Action(AppAction::ModelPickerAssignShortcut(assigned)) if assigned == key
+                KeyIntent::Action(AppAction::ModelPicker(crate::tui::event::ModelPickerAction::AssignShortcut(assigned))) if assigned == key
             ));
         }
 
@@ -3690,14 +4047,18 @@ mod tests {
         let other = map_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE), &app);
         assert!(matches!(
             other,
-            KeyIntent::Action(AppAction::ModelPickerInputChar('-'))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::InputChar('-')
+            ))
         ));
 
         // Alt is not a shortcut modifier: Alt+c is plain filter input everywhere.
         let alt_c = map_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT), &app);
         assert!(matches!(
             alt_c,
-            KeyIntent::Action(AppAction::ModelPickerInputChar('c'))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::InputChar('c')
+            ))
         ));
     }
 
@@ -3713,10 +4074,12 @@ mod tests {
             current: false,
             uses_endpoint_auth_form: true,
         }];
-        app.modal = Some(ModalKind::ApiKeyPrompt {
-            provider_id: "local-endpoint".to_string(),
-            initial_form: None,
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::ApiKeyPrompt {
+                provider_id: "local-endpoint".to_string(),
+                initial_form: None,
+            },
+        ));
 
         let tab = map_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &app);
         assert!(matches!(
@@ -3750,7 +4113,9 @@ mod tests {
         // bottom match before the modal checks does not silently let
         // Ctrl+q quit out of an open dialog.
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(context_report())));
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report()),
+        )));
 
         let intent = map_key(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
@@ -3763,9 +4128,11 @@ mod tests {
     #[test]
     fn model_picker_left_right_move_panes_from_every_pane() {
         let mut app = app();
-        app.modal = Some(ModalKind::ModelPicker {
-            entries: Vec::new(),
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker {
+                entries: Vec::new(),
+            },
+        ));
 
         // On the default Model pane, Left/Right move between panes.
         app.model_picker.active_pane = ModelPickerPane::Model;
@@ -3773,11 +4140,15 @@ mod tests {
         let right = map_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &app);
         assert!(matches!(
             left,
-            KeyIntent::Action(AppAction::ModelPickerMovePane(-1))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::MovePane(-1)
+            ))
         ));
         assert!(matches!(
             right,
-            KeyIntent::Action(AppAction::ModelPickerMovePane(1))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::MovePane(1)
+            ))
         ));
 
         // On the Reasoning pane, Left/Right also move panes (not cycle reasoning choices);
@@ -3787,38 +4158,50 @@ mod tests {
         let right = map_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &app);
         assert!(matches!(
             left,
-            KeyIntent::Action(AppAction::ModelPickerMovePane(-1))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::MovePane(-1)
+            ))
         ));
         assert!(matches!(
             right,
-            KeyIntent::Action(AppAction::ModelPickerMovePane(1))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::MovePane(1)
+            ))
         ));
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
         let down = map_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &app);
         assert!(matches!(
             up,
-            KeyIntent::Action(AppAction::ModelPickerMove(-1))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::Move(-1)
+            ))
         ));
         assert!(matches!(
             down,
-            KeyIntent::Action(AppAction::ModelPickerMove(1))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::Move(1)
+            ))
         ));
 
         // Tab still advances panes from the Reasoning pane (wraps to Provider).
         let tab = map_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &app);
         assert!(matches!(
             tab,
-            KeyIntent::Action(AppAction::ModelPickerMovePane(1))
+            KeyIntent::Action(AppAction::ModelPicker(
+                crate::tui::event::ModelPickerAction::MovePane(1)
+            ))
         ));
     }
 
     #[test]
     fn mode_picker_keys_move_cycle_close() {
         let mut app = app();
-        app.modal = Some(ModalKind::ModePicker {
-            rows: Vec::new(),
-            cursor: 0,
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModePicker {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        ));
         app.focus = Focus::Modal;
 
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
@@ -3882,10 +4265,12 @@ mod tests {
     #[test]
     fn theme_picker_keys_move_submit_and_cancel() {
         let mut app = app();
-        app.modal = Some(ModalKind::ThemePicker {
-            cursor: 0,
-            original_theme: "forest".to_string(),
-        });
+        app.modal = Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ThemePicker {
+                cursor: 0,
+                original_theme: "forest".to_string(),
+            },
+        ));
         app.focus = Focus::Modal;
 
         let up = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);

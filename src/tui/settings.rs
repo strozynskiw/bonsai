@@ -1,4 +1,4 @@
-//! Seeding for the `/settings` screen (`ModalKind::Settings`): read the live
+//! Seeding for the `/settings` screen (`ModalKind::Manager(crate::tui::event::ManagerModal::Settings)`): read the live
 //! posture holders and the current model/theme/SMOL/presentation state into a
 //! grouped list
 //! of [`SettingsRow`]s. Rebuilt fresh on open and after each change, so the

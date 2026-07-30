@@ -471,11 +471,13 @@ pub(in crate::tui::run) async fn apply_persistence_command(
                 .storage
                 .saved_plans_for_project(deps.project_root, 100)
                 .await?;
-            app.reduce(AppAction::OpenModal(ModalKind::PlanPicker {
-                plans,
-                query: String::new(),
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                crate::tui::event::PickerModal::PlanPicker {
+                    plans,
+                    query: String::new(),
+                    cursor: 0,
+                },
+            )));
         }
         PersistenceCommand::Sessions => {
             let sessions = deps
@@ -485,10 +487,12 @@ pub(in crate::tui::run) async fn apply_persistence_command(
                 .into_iter()
                 .filter(|session| session.id != *state.current_session_id)
                 .collect::<Vec<_>>();
-            app.reduce(AppAction::OpenModal(ModalKind::SessionPicker {
-                sessions,
-                cursor: 0,
-            }));
+            app.reduce(AppAction::OpenModal(ModalKind::Picker(
+                crate::tui::event::PickerModal::SessionPicker {
+                    sessions,
+                    cursor: 0,
+                },
+            )));
         }
         PersistenceCommand::Search(query) => {
             if query.trim().is_empty() {
@@ -697,10 +701,12 @@ async fn discard_current_plan(app: &mut AppState, deps: PersistenceCommandDeps<'
         return Ok(());
     }
     if let Some(saved_plan_id) = app.active_saved_plan_session_id {
-        app.reduce(AppAction::OpenModal(ModalKind::PlanDiscardConfirm {
-            saved_plan_id,
-            title: app.plan.title.clone(),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Confirm(
+            crate::tui::event::ConfirmModal::PlanDiscard {
+                saved_plan_id,
+                title: app.plan.title.clone(),
+            },
+        )));
         return Ok(());
     }
     clear_canvas_plan(app, &deps.plan_store).await;
@@ -880,11 +886,13 @@ pub(in crate::tui) async fn delete_saved_plan_from_picker(
         app.reduce(AppAction::SetActiveSavedPlan(None));
     }
     let plans = storage.saved_plans_for_project(project_root, 100).await?;
-    app.reduce(AppAction::OpenModal(ModalKind::PlanPicker {
-        plans,
-        query: String::new(),
-        cursor: 0,
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::PlanPicker {
+            plans,
+            query: String::new(),
+            cursor: 0,
+        },
+    )));
     if deleted {
         push_command_message(
             app,

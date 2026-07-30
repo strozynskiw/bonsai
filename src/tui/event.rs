@@ -29,58 +29,16 @@ use crate::storage::SavedPlanId;
 use crate::tui::pickers::{ModelOption, ProviderOption};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModalKind {
-    /// Guided first-run setup. Complex provider/model selection delegates to
-    /// the normal pickers while `AppState::first_run_step` retains the return
-    /// point.
-    Onboarding {
-        step: crate::onboarding::FirstRunStep,
-        cursor: usize,
-    },
-    Help,
-    CommandHelp,
-    ToolDetail {
-        tool_id: String,
-    },
-    BlockDetail {
-        item_index: usize,
-    },
-    /// Full detail of a single review finding, with in-modal navigation across
-    /// the plan's findings (most-severe first) and a jump to its source tool
-    /// card when the evidence id still resolves in the current transcript.
-    PlanFindingDetail {
-        index: usize,
-    },
-    DiffPreview {
-        tool_id: String,
-    },
-    ApiKeyPrompt {
-        provider_id: String,
-        initial_form: Option<crate::tui::app::ProviderAuthForm>,
-    },
-    /// `/authorize` with no argument — pick a provider to authorize from a
-    /// type-to-filter list. `query` narrows `providers` (matched on id + label);
-    /// `cursor` indexes the *filtered* view, so every reader resolves the
-    /// selection through [`crate::tui::pickers::filter_authorize_providers`].
+pub enum PickerModal {
     AuthorizeProviderPicker {
         providers: Vec<ProviderOption>,
         query: String,
         cursor: usize,
     },
-    /// `/unauthorize` with no argument — pick a provider to unauthorize from a
-    /// type-to-filter list holding only already-authorized providers. Same
-    /// shape and filtered-cursor rule as [`Self::AuthorizeProviderPicker`].
     UnauthorizeProviderPicker {
         providers: Vec<ProviderOption>,
         query: String,
         cursor: usize,
-    },
-    /// Confirmation step after picking a provider in the unauthorize picker —
-    /// clearing stored credentials is destructive, so Enter/Y here is what
-    /// actually runs `/unauthorize <provider_id>`.
-    UnauthorizeConfirm {
-        provider_id: String,
-        display_name: String,
     },
     ModelPicker {
         entries: Vec<ModelOption>,
@@ -101,110 +59,51 @@ pub enum ModalKind {
     StartPlanChoice {
         cursor: usize,
     },
-    PlanDeleteConfirm {
-        plan: crate::storage::SavedPlanSummary,
-    },
-    SessionDeleteConfirm {
-        session: crate::storage::SessionSummary,
-    },
-    /// `/discard` confirm — throwing away the canvas plan would also delete its
-    /// saved library record, which is irreversible. Only opened when the canvas
-    /// plan is linked to a saved record; an unsaved canvas is cleared without a
-    /// prompt.
-    PlanDiscardConfirm {
-        saved_plan_id: crate::storage::SavedPlanId,
-        title: String,
-    },
-    /// `/review` — choose which set of pending changes to review.
     ReviewScopePicker {
         cursor: usize,
     },
-    LocalModelWizard {
-        state: Box<crate::tui::local_model_wizard::LocalModelWizardState>,
+    ThemePicker {
+        cursor: usize,
+        original_theme: String,
     },
-    /// `/agents` — an interactive list of built-in + custom subagents. `a` add,
-    /// `e` edit, `d` delete (custom only).
+    ModePicker {
+        rows: Vec<ModeRow>,
+        cursor: usize,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagerModal {
     AgentBrowser {
         rows: Vec<crate::tui::agent_composer::AgentBrowserRow>,
         cursor: usize,
     },
-    /// `/providers` — manage catalog providers: `a` add (wizard), `e` edit,
-    /// `d` remove custom entries / disable built-ins (re-enable disabled ones).
-    ///
-    /// `/` starts an inline search that narrows `rows` by `filter` (matched on
-    /// display name + id). `searching` distinguishes "typing the filter" (bare
-    /// letters edit `filter`) from "filter applied, shortcuts live" (bare
-    /// `a`/`e`/`d` act on the filtered selection). `cursor` always indexes the
-    /// *filtered* view — resolve via
-    /// [`crate::tui::provider_manager::provider_manager_filtered`].
     ProviderManager {
         rows: Vec<crate::tui::provider_manager::ProviderManagerRow>,
         filter: String,
         searching: bool,
         cursor: usize,
     },
-    /// Read-only inspector for a single provider (opened from the manager with
-    /// Enter): connection info, environment variables, and available models.
-    /// Esc returns to the manager list carried in `return_rows`/`return_cursor`.
     ProviderDetail {
         detail: Box<crate::tui::provider_manager::ProviderDetail>,
     },
-    /// Confirm removing a custom provider or disabling a built-in before
-    /// mutating catalog files.
-    ProviderRemoveConfirm {
-        connection_id: String,
-        display_name: String,
-        /// `true` → disable the built-in (credentials kept for re-enable);
-        /// `false` → delete the custom provider's files and credentials.
-        disable_builtin: bool,
-    },
-    /// `/skills` — an interactive manager: list every skill with its status and
-    /// loaded state, review the selected one's body in the detail pane, load it
-    /// into context (`l`), and enable/disable built-ins (`Space`).
     SkillManager {
         rows: Vec<crate::tui::skill_manager::SkillRow>,
         cursor: usize,
     },
-    /// `/memory` — a memory manager with exact row selection, toggles, delete,
-    /// and create wizard.
     MemoryManager {
         rows: Vec<crate::memory::entry::MemoryEntry>,
         cursor: usize,
     },
-    /// `/permissions` — an interactive manager listing every editable permission
-    /// rule (bash command + web-domain, session + persisted) with type-to-filter
-    /// search and delete. `cursor` indexes the *filtered* view (see
-    /// `permission_manager_filtered`); `searching` distinguishes "typing a
-    /// filter" from "filter applied, shortcuts live", like the provider manager.
     PermissionsManager {
         rows: Vec<crate::tui::permissions_manager::PermissionRuleRow>,
         filter: String,
         searching: bool,
         cursor: usize,
     },
-    /// The create/edit memory wizard opened from the manager (`state.editing`
-    /// carries the original identity in edit mode).
-    MemoryAddWizard {
-        state: Box<crate::tui::memory_manager::MemoryAddWizardState>,
-    },
-    /// `/settings` — a combined settings screen: model + theme (Enter opens the
-    /// relevant picker) plus cyclable autonomy, self-review, SMOL, serenity,
-    /// and sandbox
-    /// axes (Left/Right/Space), each applied live. Rows are seeded at open.
     Settings {
         rows: Vec<SettingsRow>,
         cursor: usize,
     },
-    /// The create/edit agent wizard (Details → Tools → Prompt → Review).
-    AgentComposer {
-        state: Box<crate::tui::agent_composer::AgentComposerState>,
-    },
-    /// Confirm deletion of a custom agent file before removing it.
-    AgentDeleteConfirm {
-        name: String,
-        path: std::path::PathBuf,
-    },
-    /// `/mcp` — review detected MCP servers and their discovered methods.
     McpServers {
         rows: Vec<crate::tui::mcp::McpServerRow>,
         cursor: usize,
@@ -212,64 +111,102 @@ pub enum ModalKind {
     SandboxStatus {
         cursor: usize,
     },
-    /// `/doctor` — a read-only release-diagnostics summary: the aggregate
-    /// pass/warn/fail counts as a header, one selectable row per check, and the
-    /// highlighted check's remediation in the footer.
     Doctor {
         report: Box<crate::doctor::DoctorReport>,
-        cursor: usize,
-    },
-    /// `/theme` — browse built-in themes with live preview. Cancelling restores
-    /// `original_theme`; submitting persists the selected theme.
-    ThemePicker {
-        cursor: usize,
-        original_theme: String,
-    },
-    /// `/mode` — toggle runtime posture axes (autonomy, sandbox confinement,
-    /// sandbox network). Renders as a static hierarchical picker: each axis has
-    /// a header row and one or more value rows. The rows vector carries the
-    /// current state so reopening the picker reflects the latest values.
-    ModePicker {
-        rows: Vec<ModeRow>,
-        cursor: usize,
-    },
-    BusyCommand {
-        input: String,
-        rows: Vec<BusyCommandRow>,
         cursor: usize,
     },
     TaskList {
         tasks: Vec<crate::background::BackgroundTaskSnapshot>,
         cursor: usize,
     },
-    /// `/peers` — live view of the other bonsai sessions in this project root,
-    /// their claims, and recently changed files (peers P5). View-only.
     PeerList {
         peers: Vec<crate::peer::PeerOverview>,
         cursor: usize,
     },
-    /// `/subagents` — live view of nested subagent runs.
     SubtaskList {
         subtasks: Vec<crate::subagent::SubagentSnapshot>,
         cursor: usize,
         pane: SubtaskListPane,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WizardModal {
+    Onboarding {
+        step: crate::onboarding::FirstRunStep,
+        cursor: usize,
+    },
+    LocalModelWizard {
+        state: Box<crate::tui::local_model_wizard::LocalModelWizardState>,
+    },
+    MemoryAddWizard {
+        state: Box<crate::tui::memory_manager::MemoryAddWizardState>,
+    },
+    AgentComposer {
+        state: Box<crate::tui::agent_composer::AgentComposerState>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmModal {
+    Unauthorize {
+        provider_id: String,
+        display_name: String,
+    },
+    PlanDelete {
+        plan: crate::storage::SavedPlanSummary,
+    },
+    SessionDelete {
+        session: crate::storage::SessionSummary,
+    },
+    PlanDiscard {
+        saved_plan_id: crate::storage::SavedPlanId,
+        title: String,
+    },
+    ProviderRemove {
+        connection_id: String,
+        display_name: String,
+        disable_builtin: bool,
+    },
+    AgentDelete {
+        name: String,
+        path: std::path::PathBuf,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailModal {
+    Help,
+    CommandHelp,
+    ToolDetail {
+        tool_id: String,
+    },
+    BlockDetail {
+        item_index: usize,
+    },
+    PlanFindingDetail {
+        index: usize,
+    },
+    DiffPreview {
+        tool_id: String,
+    },
+    ApiKeyPrompt {
+        provider_id: String,
+        initial_form: Option<crate::tui::app::ProviderAuthForm>,
+    },
+    BusyCommand {
+        input: String,
+        rows: Vec<BusyCommandRow>,
+        cursor: usize,
     },
     PermissionPrompt {
         request_id: u64,
         command: String,
         origin: Option<String>,
     },
-    /// Approval to run a single command OUTSIDE the OS sandbox (the enforcement
-    /// floor — never auto-approved). Offers once / session / deny.
     SandboxEscalationPrompt {
         request_id: u64,
         command: String,
         origin: Option<String>,
         kind: crate::interaction::SandboxEscalationKind,
     },
-    /// Approval to access a web domain (WebSearch/WebFetch). Offers once /
-    /// session / project / deny, and warns when the host was reached via a
-    /// cross-domain redirect.
     WebDomainPrompt {
         request_id: u64,
         url: String,
@@ -277,8 +214,6 @@ pub enum ModalKind {
         redirected_from: Option<String>,
         origin: Option<String>,
     },
-    /// Approval to run one namespaced extension tool call. Offers
-    /// once / session / project / deny, like [`Self::WebDomainPrompt`].
     ExtensionToolPrompt {
         request_id: u64,
         id: String,
@@ -286,9 +221,6 @@ pub enum ModalKind {
         capabilities: Vec<String>,
         args_preview: String,
     },
-    /// One-time trust approval for a project-config hook's shell/http action
-    ///. Offers once / session / project / deny, like
-    /// [`Self::ExtensionToolPrompt`].
     HookTrustPrompt {
         request_id: u64,
         name: String,
@@ -306,39 +238,33 @@ pub enum ModalKind {
         cursor: usize,
         selected: Vec<bool>,
     },
-    /// `/ctx` — a visual breakdown of the current context window.
     Context(Box<crate::agent::ContextReport>),
-    /// `/episodes` — task-scoped context lifecycle, backed by the cached context snapshot.
     Episodes {
         report: Box<crate::agent::ContextReport>,
         cursor: usize,
     },
-    /// `/perf` and `/cost` — a readable report overlay instead of a transcript
-    /// status block.
     PerfReport {
         title: String,
         lines: Vec<String>,
     },
-    /// `/usage` — global (all-projects) usage analytics dashboard. Data is
-    /// loaded once at open; rendering is pure over the boxed aggregates.
     UsageDashboard {
         dashboard: Box<crate::storage::UsageDashboard>,
         tab: UsageTab,
     },
-    /// `/refresh` — live per-source refresh status modal. Rows start `Pending`
-    /// (yellow dot) and flip to green (Ok, with added/removed model counts) or
-    /// red (Failed) as each source settles. Stays open after completion so the
-    /// diffs are readable; Esc/Enter dismisses.
     Refresh {
         sources: Vec<crate::commands::RefreshSourceState>,
         cursor: usize,
-        /// Generation tag: stale `RefreshSourceCompleted` events (from a
-        /// superseded refresh) are dropped when the id doesn't match.
         generation: u64,
     },
 }
-
-/// The five approval-prompt modals that share the AllowOnce / AllowSession /
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModalKind {
+    Picker(PickerModal),
+    Manager(ManagerModal),
+    Wizard(WizardModal),
+    Confirm(ConfirmModal),
+    Detail(DetailModal),
+}
 /// AllowProject / Deny decision shape. Keys, mouse dismissal, and the runtime
 /// responder are generic over this; only the outcome mapping and the sandbox
 /// audit banner are family-specific.
@@ -356,11 +282,13 @@ impl PromptFamily {
     /// approval prompts. `None` for every other modal kind.
     pub fn of_modal(kind: &ModalKind) -> Option<Self> {
         Some(match kind {
-            ModalKind::PermissionPrompt { .. } => Self::Permission,
-            ModalKind::SandboxEscalationPrompt { .. } => Self::SandboxEscalation,
-            ModalKind::WebDomainPrompt { .. } => Self::WebDomain,
-            ModalKind::ExtensionToolPrompt { .. } => Self::ExtensionTool,
-            ModalKind::HookTrustPrompt { .. } => Self::HookTrust,
+            ModalKind::Detail(DetailModal::PermissionPrompt { .. }) => Self::Permission,
+            ModalKind::Detail(DetailModal::SandboxEscalationPrompt { .. }) => {
+                Self::SandboxEscalation
+            }
+            ModalKind::Detail(DetailModal::WebDomainPrompt { .. }) => Self::WebDomain,
+            ModalKind::Detail(DetailModal::ExtensionToolPrompt { .. }) => Self::ExtensionTool,
+            ModalKind::Detail(DetailModal::HookTrustPrompt { .. }) => Self::HookTrust,
             _ => return None,
         })
     }
@@ -445,10 +373,10 @@ impl ModalKind {
         if lines.is_empty() {
             lines.push("No performance data is available yet.".to_string());
         }
-        Self::PerfReport {
+        Self::Detail(DetailModal::PerfReport {
             title: title.into(),
             lines,
-        }
+        })
     }
 }
 
@@ -984,6 +912,86 @@ pub struct CommandOutputEvent {
 }
 
 #[derive(Debug, Clone)]
+pub enum ModelPickerAction {
+    InputChar(char),
+    InputBackspace,
+    Move(i16),
+    MovePane(i16),
+    AssignShortcut(crate::model_role::ModelShortcutKey),
+    Submit,
+}
+#[derive(Debug, Clone)]
+pub enum PlanPickerAction {
+    InputChar(char),
+    InputBackspace,
+    Move(i16),
+    Submit,
+    DeleteSelected,
+}
+#[derive(Debug, Clone)]
+pub enum AgentComposerAction {
+    InputChar(char),
+    Backspace,
+    Paste(String),
+    Move(i16),
+    Toggle(i16),
+    Back,
+    NextPage,
+    Submit,
+    Generate,
+    OpenModelPicker,
+    DeleteModel,
+    Cursor(crate::tui::agent_composer::CursorMotion),
+    DeleteForward,
+    InsertNewline,
+}
+#[derive(Debug, Clone)]
+pub enum LocalModelWizardAction {
+    InputChar(char),
+    Backspace,
+    Paste(String),
+    MoveField(i16),
+    MoveModel(i16),
+    Toggle,
+    CycleChoice(i16),
+    Submit,
+    Back,
+}
+#[derive(Debug, Clone)]
+pub enum ProviderManagerAction {
+    Move(i16),
+    BeginSearch,
+    SearchChar(char),
+    SearchBackspace,
+    SearchExit,
+    ClearFilter,
+    Add,
+    Edit,
+    ShowDetail,
+    Remove,
+}
+#[derive(Debug, Clone)]
+pub enum PermissionsManagerAction {
+    Move(i16),
+    Delete,
+    BeginSearch,
+    SearchChar(char),
+    SearchBackspace,
+    SearchExit,
+    ClearFilter,
+}
+#[derive(Debug, Clone)]
+pub enum MemoryAddWizardAction {
+    MoveField(i16),
+    InputChar(char),
+    Backspace,
+    CycleValue(i16),
+    ToggleValue,
+    Submit,
+    Back,
+}
+
+#[derive(Debug, Clone)]
 pub enum AppAction {
     Tick,
     /// `/bonsai` — reseed and regrow the decorative trees (welcome screen and
@@ -1211,21 +1219,12 @@ pub enum AppAction {
     UnauthorizeProviderPickerInputBackspace,
     UnauthorizeProviderPickerSubmit,
     UnauthorizeConfirmSubmit,
-    ModelPickerInputChar(char),
-    ModelPickerInputBackspace,
-    ModelPickerMove(i16),
-    ModelPickerMovePane(i16),
-    ModelPickerAssignShortcut(crate::model_role::ModelShortcutKey),
-    ModelPickerSubmit,
+    ModelPicker(ModelPickerAction),
     SessionPickerMove(i16),
     SessionPickerSubmit,
     SessionPickerDeleteSelected,
     SessionDeleteConfirmSubmit,
-    PlanPickerInputChar(char),
-    PlanPickerInputBackspace,
-    PlanPickerMove(i16),
-    PlanPickerSubmit,
-    PlanPickerDeleteSelected,
+    PlanPicker(PlanPickerAction),
     PlanOpenChoiceMove(i16),
     PlanOpenChoiceSubmit,
     StartPlanChoiceMove(i16),
@@ -1234,46 +1233,18 @@ pub enum AppAction {
     PlanDiscardConfirmSubmit,
     ReviewScopePickerMove(i16),
     ReviewScopePickerSubmit,
-    LocalModelWizardInputChar(char),
-    LocalModelWizardBackspace,
-    LocalModelWizardPaste(String),
-    LocalModelWizardMoveField(i16),
-    LocalModelWizardMoveModel(i16),
-    LocalModelWizardToggle,
-    /// Cycle the active Setup choice field (Server preset / Store key)
-    /// backward or forward — bound to ←/→ while such a field is focused.
-    LocalModelWizardCycleChoice(i16),
-    LocalModelWizardSubmit,
-    LocalModelWizardBack,
+    LocalModelWizard(LocalModelWizardAction),
     AgentBrowserMove(i16),
     AgentBrowserAdd,
     AgentBrowserEdit,
     AgentBrowserDelete,
     AgentBrowserToggleEnabled,
     /// `/providers` manager: move the list selection.
-    ProviderManagerMove(i16),
-    /// Enter inline-search mode (`/`): bare letters now edit the filter.
-    ProviderManagerBeginSearch,
-    /// Append a typed character to the manager filter (resets cursor).
-    ProviderManagerSearchChar(char),
-    /// Delete the last character of the manager filter.
-    ProviderManagerSearchBackspace,
-    /// Leave search-typing mode but keep the filter applied (so `a`/`e`/`d`
-    /// operate on the narrowed selection).
-    ProviderManagerSearchExit,
-    /// Clear an applied filter without closing the manager.
-    ProviderManagerClearFilter,
-    /// Open the add-provider wizard from the manager.
-    ProviderManagerAdd,
-    /// Edit the selected custom provider in the wizard.
-    ProviderManagerEdit,
-    /// Open the read-only detail view for the selected provider.
-    ProviderManagerShowDetail,
+    ProviderManager(ProviderManagerAction),
     /// Close the provider detail view and return to the manager list.
     ProviderDetailBack,
     /// Remove the selected custom provider / disable the selected built-in
     /// (or re-enable a disabled built-in directly).
-    ProviderManagerRemove,
     ProviderRemoveConfirmSubmit,
     ProviderRemoveConfirmCancel,
     /// Skills manager (`/skills`): move the list selection (resets detail scroll).
@@ -1294,32 +1265,9 @@ pub enum AppAction {
     /// Edit the selected memory entry in the wizard (prefilled, identity kept).
     MemoryManagerEdit,
     /// `/permissions`: move the selection over the filtered rule list.
-    PermissionsManagerMove(i16),
-    /// Delete the selected permission rule (persisted → storage; session →
-    /// memory), then rebuild the manager list.
-    PermissionsManagerDelete,
-    /// Begin type-to-filter search in the permissions manager.
-    PermissionsManagerBeginSearch,
-    /// Append a character to the permissions-manager filter.
-    PermissionsManagerSearchChar(char),
-    /// Delete the last character of the permissions-manager filter.
-    PermissionsManagerSearchBackspace,
-    /// Leave search mode, keeping the applied filter.
-    PermissionsManagerSearchExit,
-    /// Clear the applied filter and leave search mode.
-    PermissionsManagerClearFilter,
+    PermissionsManager(PermissionsManagerAction),
     /// Move between wizard fields.
-    MemoryAddWizardMoveField(i16),
-    /// Input into the active wizard field.
-    MemoryAddWizardInputChar(char),
-    MemoryAddWizardBackspace,
-    /// Cycle or toggle the active wizard field's current value.
-    MemoryAddWizardCycleValue(i16),
-    MemoryAddWizardToggleValue,
-    /// Advance the wizard to the next step or save on the review step.
-    MemoryAddWizardSubmit,
-    /// Back up one wizard step.
-    MemoryAddWizardBack,
+    MemoryAddWizard(MemoryAddWizardAction),
     /// `/settings`: move the cursor between selectable rows (skips headers).
     SettingsMove(i16),
     /// Cycle the selected `Choice` setting by `delta` and apply it live.
@@ -1327,27 +1275,7 @@ pub enum AppAction {
     /// Activate the selected row: open the model/theme picker for an `Action`,
     /// or cycle forward for a `Choice`.
     SettingsActivate,
-    AgentComposerInputChar(char),
-    AgentComposerBackspace,
-    AgentComposerPaste(String),
-    AgentComposerMove(i16),
-    AgentComposerToggle(i16),
-    AgentComposerBack,
-    AgentComposerNextPage,
-    AgentComposerSubmit,
-    AgentComposerGenerate,
-    /// Open the `/model` picker to choose the composer's model (any authorized
-    /// provider); the picker submit writes back into the composer.
-    AgentComposerOpenModelPicker,
-    /// Clear the focused model-chain slot: primary reverts to inheriting the
-    /// parent, backup disables failover.
-    AgentComposerDeleteModel,
-    /// Move the caret within the focused composer text field.
-    AgentComposerCursor(crate::tui::agent_composer::CursorMotion),
-    /// Delete the grapheme after the caret in the focused text field.
-    AgentComposerDeleteForward,
-    /// Insert a newline in the multi-line Prompt field.
-    AgentComposerInsertNewline,
+    AgentComposer(AgentComposerAction),
     AgentDeleteConfirmSubmit,
     AgentDeleteConfirmCancel,
     SetActiveSavedPlan(Option<SavedPlanId>),

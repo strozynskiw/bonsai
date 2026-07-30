@@ -61,7 +61,9 @@ impl AppState {
     }
 
     fn active_context_report(&self) -> Option<&crate::agent::ContextReport> {
-        if let Some(ModalKind::Context(report)) = self.modal.as_ref() {
+        if let Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(report))) =
+            self.modal.as_ref()
+        {
             Some(report.as_ref())
         } else {
             self.latest_context_report.as_ref()

@@ -165,11 +165,16 @@ fn modal_identity(kind: &ModalKind) -> (std::mem::Discriminant<ModalKind>, u64) 
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
     match kind {
-        ModalKind::ToolDetail { tool_id } | ModalKind::DiffPreview { tool_id } => {
+        ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { tool_id })
+        | ModalKind::Detail(crate::tui::event::DetailModal::DiffPreview { tool_id }) => {
             tool_id.hash(&mut hasher)
         }
-        ModalKind::BlockDetail { item_index } => item_index.hash(&mut hasher),
-        ModalKind::PlanFindingDetail { index } => index.hash(&mut hasher),
+        ModalKind::Detail(crate::tui::event::DetailModal::BlockDetail { item_index }) => {
+            item_index.hash(&mut hasher)
+        }
+        ModalKind::Detail(crate::tui::event::DetailModal::PlanFindingDetail { index }) => {
+            index.hash(&mut hasher)
+        }
         _ => {}
     }
     (std::mem::discriminant(kind), hasher.finish())
@@ -694,21 +699,38 @@ impl AppState {
     }
 
     pub(crate) fn is_task_list_open(&self) -> bool {
-        matches!(self.modal, Some(ModalKind::TaskList { .. }))
+        matches!(
+            self.modal,
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::TaskList { .. }
+            ))
+        )
     }
 
     pub(crate) fn is_subtask_list_open(&self) -> bool {
-        matches!(self.modal, Some(ModalKind::SubtaskList { .. }))
+        matches!(
+            self.modal,
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::SubtaskList { .. }
+            ))
+        )
     }
 
     pub(crate) fn is_peer_list_open(&self) -> bool {
-        matches!(self.modal, Some(ModalKind::PeerList { .. }))
+        matches!(
+            self.modal,
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::PeerList { .. }
+            ))
+        )
     }
 
     pub(crate) fn selected_background_task(
         &self,
     ) -> Option<&crate::background::BackgroundTaskSnapshot> {
-        let Some(ModalKind::TaskList { tasks, cursor }) = self.modal.as_ref() else {
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList { tasks, cursor })) =
+            self.modal.as_ref()
+        else {
             return None;
         };
         tasks.get((*cursor).min(tasks.len().saturating_sub(1)))
@@ -791,9 +813,11 @@ impl AppState {
     }
 
     pub(crate) fn selected_subtask(&self) -> Option<&crate::subagent::SubagentSnapshot> {
-        let Some(ModalKind::SubtaskList {
-            subtasks, cursor, ..
-        }) = self.modal.as_ref()
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList {
+            subtasks,
+            cursor,
+            ..
+        })) = self.modal.as_ref()
         else {
             return None;
         };
@@ -1326,7 +1350,10 @@ impl AppState {
                 self.reasoning = selection.reasoning;
             }
             RuntimeEvent::LocalModelWizardFetchFinished { request_id, result } => {
-                if let Some(ModalKind::LocalModelWizard { state }) = &mut self.modal {
+                if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                    state,
+                })) = &mut self.modal
+                {
                     if state.active_fetch_request_id != Some(request_id) {
                         return;
                     }
@@ -1337,7 +1364,10 @@ impl AppState {
                 }
             }
             RuntimeEvent::AgentComposerPromptGenerated { request_id, result } => {
-                if let Some(ModalKind::AgentComposer { state }) = &mut self.modal {
+                if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer {
+                    state,
+                })) = &mut self.modal
+                {
                     if state.active_request_id != Some(request_id) {
                         return;
                     }
@@ -1968,7 +1998,7 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Modal);
         assert!(
-            matches!(app.modal, Some(ModalKind::Context(ref modal_report)) if modal_report.as_ref() == &report)
+            matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(ref modal_report))) if modal_report.as_ref() == &report)
         );
         assert_eq!(app.modal_return_focus, Some(Focus::Todo));
         assert_eq!(app.context_state.view_mode, ContextViewMode::Ledger);
@@ -1986,10 +2016,10 @@ mod tests {
         assert_eq!(app.focus, Focus::Modal);
         assert!(matches!(
             app.modal,
-            Some(ModalKind::Episodes {
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::Episodes {
                 report: ref modal_report,
                 cursor: 0,
-            }) if modal_report.as_ref() == &report
+            })) if modal_report.as_ref() == &report
         ));
         assert_eq!(app.modal_return_focus, Some(Focus::Todo));
     }
@@ -2006,7 +2036,7 @@ mod tests {
 
         assert_eq!(app.latest_context_report, Some(stored));
         assert!(
-            matches!(app.modal, Some(ModalKind::Context(ref modal_report)) if modal_report.as_ref() == &preview)
+            matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(ref modal_report))) if modal_report.as_ref() == &preview)
         );
         assert_eq!(app.modal_return_focus, Some(Focus::Todo));
         assert_eq!(app.context_state.view_mode, ContextViewMode::Ledger);
@@ -2017,7 +2047,7 @@ mod tests {
         let mut app = app();
         let (clipboard, copied) = crate::copy::test_support::fake_clipboard();
         app.set_clipboard(clipboard);
-        app.modal = Some(ModalKind::Help);
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
         *app.modal_body_lines.borrow_mut() = vec![Line::from("hello world")];
 
         app.reduce(AppAction::ModalClick {
@@ -2042,7 +2072,7 @@ mod tests {
         let mut app = app();
         let (clipboard, copied) = crate::copy::test_support::fake_clipboard();
         app.set_clipboard(clipboard);
-        app.modal = Some(ModalKind::Help);
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
         *app.modal_body_lines.borrow_mut() = vec![Line::from("abc"), Line::from("def")];
 
         app.reduce(AppAction::ModalClick {
@@ -2062,7 +2092,7 @@ mod tests {
     #[test]
     fn modal_swap_clears_text_selection() {
         let mut app = app();
-        app.modal = Some(ModalKind::Help);
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
         app.modal_selection = Some(ModalSelection {
             anchor: 0,
             caret: 3,
@@ -2080,7 +2110,9 @@ mod tests {
     #[test]
     fn context_toggle_view_cycles_modes_and_resets_scroll() {
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(context_report(42))));
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report(42)),
+        )));
         app.context_state.view_mode = ContextViewMode::Ledger;
         app.modal_scroll = 12;
         app.context_state.manual_scroll = true;
@@ -2105,9 +2137,9 @@ mod tests {
     #[test]
     fn context_wire_view_moves_and_expands_wire_rows_only() {
         let mut app = app();
-        app.modal = Some(ModalKind::Context(
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
             Box::new(context_report_with_wire_rows()),
-        ));
+        )));
         app.context_state.view_mode = ContextViewMode::Wire;
         app.context_state.cursor = 3;
         app.context_state.wire_cursor = 0;
@@ -2126,8 +2158,8 @@ mod tests {
     #[test]
     fn context_turns_view_moves_and_expands_turn_details_only() {
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(
-            context_report_with_usage_turns(),
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report_with_usage_turns()),
         )));
         app.context_state.view_mode = ContextViewMode::Turns;
         app.context_state.cursor = 3;
@@ -2148,8 +2180,8 @@ mod tests {
     #[test]
     fn refresh_context_modal_clamps_turns_cursor() {
         let mut app = app();
-        app.modal = Some(ModalKind::Context(Box::new(
-            context_report_with_usage_turns(),
+        app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            Box::new(context_report_with_usage_turns()),
         )));
         app.context_state.view_mode = ContextViewMode::Turns;
         app.reduce(AppAction::ContextMove(2));
@@ -2173,10 +2205,10 @@ mod tests {
 
         assert!(matches!(
             app.modal,
-            Some(ModalKind::TaskList {
+            Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList {
                 ref tasks,
                 cursor: 0,
-            }) if tasks[0].id == "bg-1"
+            })) if tasks[0].id == "bg-1"
         ));
         assert_eq!(app.focus, Focus::Modal);
     }
@@ -2203,14 +2235,16 @@ mod tests {
             RefreshSourceState::pending("Models.dev"),
             RefreshSourceState::pending("Anthropic"),
         ];
-        app.reduce(AppAction::OpenModal(ModalKind::Refresh {
-            sources,
-            cursor: 0,
-            generation: 1,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::Refresh {
+                sources,
+                cursor: 0,
+                generation: 1,
+            },
+        )));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::Refresh { .. }) if app.focus == Focus::Modal
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh { .. })) if app.focus == Focus::Modal
         ));
 
         // A source completes — the row flips from Pending to Ok.
@@ -2225,7 +2259,10 @@ mod tests {
                 removed: vec![],
             },
         });
-        if let Some(ModalKind::Refresh { sources, .. }) = &app.modal {
+        if let Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
+            sources, ..
+        })) = &app.modal
+        {
             assert_eq!(sources[0].status, RefreshSourceStatus::Ok);
             assert_eq!(sources[0].model_count, Some(300));
             assert_eq!(sources[1].status, RefreshSourceStatus::Pending);
@@ -2243,14 +2280,19 @@ mod tests {
                 removed: vec![],
             },
         });
-        if let Some(ModalKind::Refresh { sources, .. }) = &app.modal {
+        if let Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
+            sources, ..
+        })) = &app.modal
+        {
             // Still pending — stale event was ignored.
             assert_eq!(sources[1].status, RefreshSourceStatus::Pending);
         }
 
         // Move the cursor.
         app.reduce(AppAction::RefreshMove(1));
-        if let Some(ModalKind::Refresh { cursor, .. }) = &app.modal {
+        if let Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh { cursor, .. })) =
+            &app.modal
+        {
             assert_eq!(*cursor, 1);
         }
 
@@ -2355,10 +2397,12 @@ mod tests {
         assert!(
             matches!(
                 app.modal,
-                Some(ModalKind::SubtaskList {
-                    pane: SubtaskListPane::List,
-                    ..
-                })
+                Some(ModalKind::Manager(
+                    crate::tui::event::ManagerModal::SubtaskList {
+                        pane: SubtaskListPane::List,
+                        ..
+                    }
+                ))
             ),
             "moving selection should put focus back on the list"
         );
@@ -2400,7 +2444,9 @@ mod tests {
         app.reduce(AppAction::TaskListMove(i16::MAX));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::TaskList { cursor: 1, .. })
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::TaskList { cursor: 1, .. }
+            ))
         ));
 
         app.reduce(AppAction::RefreshTaskList {
@@ -2408,7 +2454,9 @@ mod tests {
         });
         assert!(matches!(
             app.modal,
-            Some(ModalKind::TaskList { cursor: 0, .. })
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::TaskList { cursor: 0, .. }
+            ))
         ));
     }
 
@@ -2468,7 +2516,9 @@ mod tests {
                 overview(45, "tests"),
             ],
         });
-        let Some(ModalKind::PeerList { peers, cursor }) = &app.modal else {
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PeerList { peers, cursor })) =
+            &app.modal
+        else {
             panic!("peer list should still be open");
         };
         assert_eq!(peers[*cursor].id, SessionId::from_raw(46));
@@ -2549,20 +2599,30 @@ mod tests {
     #[test]
     fn local_model_wizard_reducer_routes_fields_selection_and_metadata() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
-            state: Box::default(),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::LocalModelWizard {
+                state: Box::default(),
+            },
+        )));
 
         // Focus starts on the server-preset row; move to the name field first.
-        app.reduce(AppAction::LocalModelWizardMoveField(1));
-        app.reduce(AppAction::LocalModelWizardPaste("My Local".to_string()));
-        let Some(ModalKind::LocalModelWizard { state }) = &app.modal else {
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveField(1),
+        ));
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Paste("My Local".to_string()),
+        ));
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+            &app.modal
+        else {
             panic!("wizard should be open");
         };
         assert_eq!(state.display_name, "My Local");
         assert_eq!(state.provider_id, "my-local");
 
-        if let Some(ModalKind::LocalModelWizard { state }) = &mut app.modal {
+        if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+            &mut app.modal
+        {
             state.mark_fetch_started(1);
         }
         app.reduce(AppAction::Runtime(
@@ -2577,9 +2637,15 @@ mod tests {
                 }),
             },
         ));
-        app.reduce(AppAction::LocalModelWizardToggle);
-        app.reduce(AppAction::LocalModelWizardSubmit);
-        let Some(ModalKind::LocalModelWizard { state }) = &app.modal else {
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Toggle,
+        ));
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Submit,
+        ));
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+            &app.modal
+        else {
             panic!("wizard should remain open");
         };
         assert_eq!(
@@ -2594,14 +2660,28 @@ mod tests {
             Some("beta")
         );
 
-        app.reduce(AppAction::LocalModelWizardMoveField(1));
-        app.reduce(AppAction::LocalModelWizardInputChar('8'));
-        app.reduce(AppAction::LocalModelWizardInputChar('1'));
-        app.reduce(AppAction::LocalModelWizardInputChar('9'));
-        app.reduce(AppAction::LocalModelWizardInputChar('2'));
-        app.reduce(AppAction::LocalModelWizardSubmit);
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::MoveField(1),
+        ));
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::InputChar('8'),
+        ));
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::InputChar('1'),
+        ));
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::InputChar('9'),
+        ));
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::InputChar('2'),
+        ));
+        app.reduce(AppAction::LocalModelWizard(
+            crate::tui::event::LocalModelWizardAction::Submit,
+        ));
 
-        let Some(ModalKind::LocalModelWizard { state }) = &app.modal else {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+            &app.modal
+        else {
             panic!("wizard should remain open");
         };
         assert_eq!(
@@ -2621,9 +2701,11 @@ mod tests {
         let mut app = app();
         let mut state = crate::tui::local_model_wizard::LocalModelWizardState::default();
         state.mark_fetch_started(2);
-        app.reduce(AppAction::OpenModal(ModalKind::LocalModelWizard {
-            state: Box::new(state),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Wizard(
+            crate::tui::event::WizardModal::LocalModelWizard {
+                state: Box::new(state),
+            },
+        )));
 
         app.reduce(AppAction::Runtime(
             RuntimeEvent::LocalModelWizardFetchFinished {
@@ -2635,7 +2717,9 @@ mod tests {
             },
         ));
 
-        let Some(ModalKind::LocalModelWizard { state }) = &app.modal else {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+            &app.modal
+        else {
             panic!("wizard should remain open");
         };
         assert!(state.loading);
@@ -2652,7 +2736,9 @@ mod tests {
             },
         ));
 
-        let Some(ModalKind::LocalModelWizard { state }) = &app.modal else {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state })) =
+            &app.modal
+        else {
             panic!("wizard should remain open");
         };
         assert!(!state.loading);
@@ -3092,16 +3178,18 @@ mod tests {
                 preselected: false,
             })
             .collect::<Vec<_>>();
-        app.modal = Some(ModalKind::QuestionPrompt {
-            request_id: 1,
-            prompt: "Pick one".to_string(),
-            header: None,
-            options,
-            multiple: false,
-            origin: None,
-            cursor: 0,
-            selected: vec![false; 12],
-        });
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::QuestionPrompt {
+                request_id: 1,
+                prompt: "Pick one".to_string(),
+                header: None,
+                options,
+                multiple: false,
+                origin: None,
+                cursor: 0,
+                selected: vec![false; 12],
+            },
+        ));
 
         for _ in 0..8 {
             app.reduce(AppAction::QuestionMove(1));
@@ -3803,7 +3891,7 @@ mod tests {
 
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ToolDetail { ref tool_id }) if tool_id == "call-1"
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if tool_id == "call-1"
         ));
         assert_eq!(app.focus, Focus::Modal);
         assert_eq!(app.modal_return_focus, Some(Focus::Transcript));
@@ -3903,7 +3991,7 @@ mod tests {
 
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ToolDetail { ref tool_id }) if tool_id == "call-2"
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if tool_id == "call-2"
         ));
         assert_eq!(app.focus, Focus::Modal);
         assert_eq!(app.modal_return_focus, Some(Focus::Transcript));
@@ -4056,7 +4144,9 @@ mod tests {
         app.reduce(AppAction::OpenFocusedDetail);
         assert!(matches!(
             app.modal,
-            Some(ModalKind::BlockDetail { item_index: 1 })
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::BlockDetail { item_index: 1 }
+            ))
         ));
         assert_eq!(app.focus, Focus::Modal);
 
@@ -4084,7 +4174,7 @@ mod tests {
         app.reduce(AppAction::OpenFocusedDetail);
 
         assert!(
-            matches!(app.modal, Some(ModalKind::ToolDetail { ref tool_id }) if tool_id == "call-1")
+            matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if tool_id == "call-1")
         );
     }
 
@@ -4130,30 +4220,38 @@ mod tests {
         app.reduce(AppAction::OpenPlanFindings);
         assert!(matches!(
             app.modal,
-            Some(ModalKind::PlanFindingDetail { index: 0 })
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::PlanFindingDetail { index: 0 }
+            ))
         ));
 
         // Cycle forward to the Nit, then clamp at the end.
         app.reduce(AppAction::CyclePlanFinding(1));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::PlanFindingDetail { index: 1 })
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::PlanFindingDetail { index: 1 }
+            ))
         ));
         app.reduce(AppAction::CyclePlanFinding(1));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::PlanFindingDetail { index: 1 })
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::PlanFindingDetail { index: 1 }
+            ))
         ));
 
         // Back to the Blocker and jump to its resolvable evidence card.
         app.reduce(AppAction::CyclePlanFinding(-5));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::PlanFindingDetail { index: 0 })
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::PlanFindingDetail { index: 0 }
+            ))
         ));
         app.reduce(AppAction::OpenFindingEvidence);
         assert!(
-            matches!(app.modal, Some(ModalKind::ToolDetail { ref tool_id }) if tool_id == "call-7")
+            matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if tool_id == "call-7")
         );
     }
 
@@ -4217,7 +4315,7 @@ mod tests {
             .map(|activity| activity.id.clone());
         app.reduce(AppAction::OpenSelectedExecutionGroupTool);
         assert!(
-            matches!(app.modal, Some(ModalKind::ToolDetail { ref tool_id }) if Some(tool_id.clone()) == selected_id)
+            matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if Some(tool_id.clone()) == selected_id)
         );
         app.reduce(AppAction::CloseModal);
         assert_eq!(app.focus, Focus::Transcript);
@@ -4268,7 +4366,7 @@ mod tests {
 
         app.reduce(AppAction::OpenSelectedExecutionGroupDiff);
         assert!(
-            matches!(app.modal, Some(ModalKind::DiffPreview { ref tool_id }) if tool_id == "call-1")
+            matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::DiffPreview { ref tool_id })) if tool_id == "call-1")
         );
         app.reduce(AppAction::CloseModal);
         assert_eq!(app.focus, Focus::Transcript);
@@ -4668,7 +4766,9 @@ mod tests {
         let mut app = app();
         app.focus = Focus::Transcript;
 
-        app.reduce(AppAction::OpenModal(ModalKind::Help));
+        app.reduce(AppAction::OpenModal(ModalKind::Detail(
+            crate::tui::event::DetailModal::Help,
+        )));
         app.reduce(AppAction::CloseModal);
 
         assert_eq!(app.focus, Focus::Input);
@@ -4687,7 +4787,7 @@ mod tests {
 
         assert_eq!(app.latest_tool_id().as_deref(), Some("call-1"));
         assert!(
-            matches!(app.modal, Some(ModalKind::ToolDetail { ref tool_id }) if tool_id == "call-1")
+            matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if tool_id == "call-1")
         );
     }
 
@@ -4951,38 +5051,46 @@ mod tests {
     #[test]
     fn authorize_provider_picker_move_clamps_to_entries() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::AuthorizeProviderPicker {
-            providers: vec![
-                authorize_provider_entry("opencode", "OpenCode Go"),
-                authorize_provider_entry("codex", "Codex"),
-            ],
-            query: String::new(),
-            cursor: 20,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::AuthorizeProviderPicker {
+                providers: vec![
+                    authorize_provider_entry("opencode", "OpenCode Go"),
+                    authorize_provider_entry("codex", "Codex"),
+                ],
+                query: String::new(),
+                cursor: 20,
+            },
+        )));
 
         assert!(matches!(
             app.modal,
-            Some(ModalKind::AuthorizeProviderPicker { cursor: 1, .. })
+            Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::AuthorizeProviderPicker { cursor: 1, .. }
+            ))
         ));
         app.reduce(AppAction::AuthorizeProviderPickerMove(-20));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::AuthorizeProviderPicker { cursor: 0, .. })
+            Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::AuthorizeProviderPicker { cursor: 0, .. }
+            ))
         ));
     }
 
     #[test]
     fn authorize_provider_picker_filters_by_query_and_clamps() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::AuthorizeProviderPicker {
-            providers: vec![
-                authorize_provider_entry("opencode", "OpenCode Go"),
-                authorize_provider_entry("codex", "Codex"),
-                authorize_provider_entry("qwencloud", "Qwen Cloud API"),
-            ],
-            query: String::new(),
-            cursor: 2,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::AuthorizeProviderPicker {
+                providers: vec![
+                    authorize_provider_entry("opencode", "OpenCode Go"),
+                    authorize_provider_entry("codex", "Codex"),
+                    authorize_provider_entry("qwencloud", "Qwen Cloud API"),
+                ],
+                query: String::new(),
+                cursor: 2,
+            },
+        )));
 
         // Typing narrows to the single Qwen row; the cursor resets to it and
         // End can't move past the filtered length.
@@ -4990,7 +5098,12 @@ mod tests {
             app.reduce(AppAction::AuthorizeProviderPickerInputChar(ch));
         }
         app.reduce(AppAction::AuthorizeProviderPickerMove(i16::MAX));
-        let Some(ModalKind::AuthorizeProviderPicker { query, cursor, .. }) = &app.modal else {
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {
+            query,
+            cursor,
+            ..
+        })) = &app.modal
+        else {
             panic!("authorize picker should be open");
         };
         assert_eq!(query, "qwen");
@@ -4998,7 +5111,11 @@ mod tests {
 
         // Backspacing widens the match set again.
         app.reduce(AppAction::AuthorizeProviderPickerInputBackspace);
-        let Some(ModalKind::AuthorizeProviderPicker { query, .. }) = &app.modal else {
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {
+            query,
+            ..
+        })) = &app.modal
+        else {
             panic!("authorize picker should be open");
         };
         assert_eq!(query, "qwe");
@@ -5021,37 +5138,51 @@ mod tests {
             auth_hint: None,
         };
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::ProviderManager {
-            rows: vec![
-                row("opencode", "OpenCode Go"),
-                row("qwencloud", "Qwen Cloud API"),
-                row("qwencloud-token-plan", "Qwen Cloud Token Plan"),
-            ],
-            filter: String::new(),
-            searching: false,
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Manager(
+            crate::tui::event::ManagerModal::ProviderManager {
+                rows: vec![
+                    row("opencode", "OpenCode Go"),
+                    row("qwencloud", "Qwen Cloud API"),
+                    row("qwencloud-token-plan", "Qwen Cloud Token Plan"),
+                ],
+                filter: String::new(),
+                searching: false,
+                cursor: 0,
+            },
+        )));
 
         // Before `/`, letters are shortcuts, not filter input.
-        app.reduce(AppAction::ProviderManagerSearchChar('q'));
-        let Some(ModalKind::ProviderManager { filter, .. }) = &app.modal else {
+        app.reduce(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::SearchChar('q'),
+        ));
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
+            filter,
+            ..
+        })) = &app.modal
+        else {
             panic!("manager open");
         };
         assert!(filter.is_empty(), "typing is inert until search begins");
 
         // `/` engages search; typing narrows to the two Qwen rows and the
         // cursor can't leave the filtered range.
-        app.reduce(AppAction::ProviderManagerBeginSearch);
+        app.reduce(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::BeginSearch,
+        ));
         for ch in "qwen".chars() {
-            app.reduce(AppAction::ProviderManagerSearchChar(ch));
+            app.reduce(AppAction::ProviderManager(
+                crate::tui::event::ProviderManagerAction::SearchChar(ch),
+            ));
         }
-        app.reduce(AppAction::ProviderManagerMove(i16::MAX));
-        let Some(ModalKind::ProviderManager {
+        app.reduce(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::Move(i16::MAX),
+        ));
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
             filter,
             searching,
             cursor,
             rows,
-        }) = &app.modal
+        })) = &app.modal
         else {
             panic!("manager open");
         };
@@ -5064,10 +5195,14 @@ mod tests {
         assert_eq!(*cursor, 1, "End lands on the last filtered row, not row 2");
 
         // Exit search keeps the filter applied (so a/e/d act on the narrowing).
-        app.reduce(AppAction::ProviderManagerSearchExit);
-        let Some(ModalKind::ProviderManager {
-            filter, searching, ..
-        }) = &app.modal
+        app.reduce(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::SearchExit,
+        ));
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
+            filter,
+            searching,
+            ..
+        })) = &app.modal
         else {
             panic!("manager open");
         };
@@ -5075,8 +5210,15 @@ mod tests {
         assert!(!*searching);
 
         // Clear resets to the full list at the top.
-        app.reduce(AppAction::ProviderManagerClearFilter);
-        let Some(ModalKind::ProviderManager { filter, cursor, .. }) = &app.modal else {
+        app.reduce(AppAction::ProviderManager(
+            crate::tui::event::ProviderManagerAction::ClearFilter,
+        ));
+        let Some(ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
+            filter,
+            cursor,
+            ..
+        })) = &app.modal
+        else {
             panic!("manager open");
         };
         assert!(filter.is_empty());
@@ -5086,52 +5228,62 @@ mod tests {
     #[test]
     fn review_scope_picker_move_wraps_and_clamps() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::ReviewScopePicker {
-            cursor: 5,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ReviewScopePicker { cursor: 5 },
+        )));
 
         // Overshoot clamps to the last scope (index 2).
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ReviewScopePicker { cursor: 2 })
+            Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::ReviewScopePicker { cursor: 2 }
+            ))
         ));
         // Move down past the end wraps/clamps to the last entry.
         app.reduce(AppAction::ReviewScopePickerMove(1));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ReviewScopePicker { cursor: 2 })
+            Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::ReviewScopePicker { cursor: 2 }
+            ))
         ));
         // Move back to the first entry.
         app.reduce(AppAction::ReviewScopePickerMove(-5));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ReviewScopePicker { cursor: 0 })
+            Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::ReviewScopePicker { cursor: 0 }
+            ))
         ));
     }
 
     #[test]
     fn theme_picker_open_and_move_clamp_to_themes() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::ThemePicker {
-            cursor: usize::MAX,
-            original_theme: "forest".to_string(),
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ThemePicker {
+                cursor: usize::MAX,
+                original_theme: "forest".to_string(),
+            },
+        )));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ThemePicker { cursor, .. })
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { cursor, .. }))
                 if cursor == crate::tui::theme::theme_count().saturating_sub(1)
         ));
 
         app.reduce(AppAction::ThemePickerMove(i16::MIN));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ThemePicker { cursor: 0, .. })
+            Some(ModalKind::Picker(
+                crate::tui::event::PickerModal::ThemePicker { cursor: 0, .. }
+            ))
         ));
 
         app.reduce(AppAction::ThemePickerMove(i16::MAX));
         assert!(matches!(
             app.modal,
-            Some(ModalKind::ThemePicker { cursor, .. })
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { cursor, .. }))
                 if cursor == crate::tui::theme::theme_count().saturating_sub(1)
         ));
     }
@@ -5167,12 +5319,17 @@ mod tests {
     fn mode_picker_open_seeds_rows_from_current_state() {
         let mut app = app();
         app.approval_level = crate::tool::ApprovalLevel::AutoAccept;
-        app.reduce(AppAction::OpenModal(ModalKind::ModePicker {
-            rows: Vec::new(),
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModePicker {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        )));
         match &app.modal {
-            Some(ModalKind::ModePicker { rows, cursor }) => {
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                rows,
+                cursor,
+            })) => {
                 // 3 axes: autonomy has 1 value row, self-review has 1,
                 // sandbox has 2.
                 assert_eq!(rows.len(), 3 + 4, "rows: {rows:?}");
@@ -5200,18 +5357,24 @@ mod tests {
     #[test]
     fn mode_picker_move_clamps_to_value_rows() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::ModePicker {
-            rows: Vec::new(),
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModePicker {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        )));
         let rows_len = match &app.modal {
-            Some(ModalKind::ModePicker { rows, .. }) => rows.len(),
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                rows, ..
+            })) => rows.len(),
             _ => panic!(),
         };
         // Overshoot clamps to the last row, which is always a value row.
         app.reduce(AppAction::ModePickerMove(100));
         let cursor = match &app.modal {
-            Some(ModalKind::ModePicker { cursor, .. }) => *cursor,
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                cursor, ..
+            })) => *cursor,
             _ => panic!(),
         };
         assert_eq!(cursor, rows_len - 1);
@@ -5219,7 +5382,9 @@ mod tests {
         // leading Autonomy header at index 0.
         app.reduce(AppAction::ModePickerMove(-100));
         let cursor = match &app.modal {
-            Some(ModalKind::ModePicker { cursor, .. }) => *cursor,
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                cursor, ..
+            })) => *cursor,
             _ => panic!(),
         };
         assert_eq!(cursor, 1);
@@ -5228,16 +5393,21 @@ mod tests {
     #[test]
     fn mode_picker_move_skips_headers() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::ModePicker {
-            rows: Vec::new(),
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModePicker {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        )));
         // Rows start [Header, Value(level), Header, Value(self-review), ...].
         // Stepping down from the autonomy value (1) must jump over the
         // Self-review header (2) and land on its value (3).
         app.reduce(AppAction::ModePickerMove(1));
         let cursor = match &app.modal {
-            Some(ModalKind::ModePicker { rows, cursor }) => {
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                rows,
+                cursor,
+            })) => {
                 assert!(rows[*cursor].is_value(), "must land on a value row");
                 *cursor
             }
@@ -5249,15 +5419,20 @@ mod tests {
     #[test]
     fn mode_picker_cycle_advances_value_rows_only() {
         let mut app = app();
-        app.reduce(AppAction::OpenModal(ModalKind::ModePicker {
-            rows: Vec::new(),
-            cursor: 0,
-        }));
+        app.reduce(AppAction::OpenModal(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModePicker {
+                rows: Vec::new(),
+                cursor: 0,
+            },
+        )));
         // The picker opens on the first value row and navigation only ever
         // rests on value rows, so move down to land on another value row.
         app.reduce(AppAction::ModePickerMove(1));
         let row = match &app.modal {
-            Some(ModalKind::ModePicker { rows, cursor }) => rows[*cursor].clone(),
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                rows,
+                cursor,
+            })) => rows[*cursor].clone(),
             _ => panic!(),
         };
 

@@ -656,7 +656,10 @@ async fn permissions_manager_delete_removes_session_rule_and_rebuilds() {
     );
 
     let removed_pattern = match &app.modal {
-        Some(ModalKind::PermissionsManager { rows, .. }) => {
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
+            rows,
+            ..
+        })) => {
             assert_eq!(rows.len(), 2, "both session rules should be listed");
             rows[0].pattern.clone()
         }
@@ -664,7 +667,7 @@ async fn permissions_manager_delete_removes_session_rule_and_rebuilds() {
     };
 
     let result = handle_runtime_action(
-        AppAction::PermissionsManagerDelete,
+        AppAction::PermissionsManager(crate::tui::event::PermissionsManagerAction::Delete),
         &mut app,
         &mut tasks,
         runtime_action_deps_with_permissions(
@@ -683,7 +686,10 @@ async fn permissions_manager_delete_removes_session_rule_and_rebuilds() {
     assert!(matches!(result, RuntimeActionResult::Handled));
     // The manager rebuilt in place with the deleted rule gone.
     match &app.modal {
-        Some(ModalKind::PermissionsManager { rows, .. }) => {
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
+            rows,
+            ..
+        })) => {
             assert_eq!(rows.len(), 1);
             assert!(rows.iter().all(|row| row.pattern != removed_pattern));
         }
@@ -1397,7 +1403,12 @@ async fn running_ctx_command_opens_modal_without_user_message() {
     assert!(handled);
     assert!(app.input().is_empty());
     assert!(app.transcript.is_empty());
-    assert!(matches!(app.modal, Some(ModalKind::Context(_))));
+    assert!(matches!(
+        app.modal,
+        Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+            _
+        )))
+    ));
     assert_eq!(app.composer.history, vec!["/ctx".to_string()]);
 }
 
@@ -1455,7 +1466,12 @@ async fn running_model_command_opens_picker_without_user_message() {
             .iter()
             .any(|item| matches!(item, TranscriptItem::UserMessage { text } if text == "/model"))
     );
-    assert!(matches!(app.modal, Some(ModalKind::ModelPicker { .. })));
+    assert!(matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ModelPicker { .. }
+        ))
+    ));
     assert!(!app.transcript.iter().any(|item| matches!(
         item,
         TranscriptItem::CommandOutput {
@@ -1517,7 +1533,7 @@ async fn running_model_selection_command_opens_queue_modal() {
     assert!(app.deferred_commands.is_empty());
     assert!(matches!(
         app.modal,
-        Some(ModalKind::BusyCommand { ref input, ref rows, cursor: 0 })
+        Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
             if input == "/model codex:openai/gpt-5.5"
                 && rows.first().is_some_and(|row| row.label == "Queue for next run")
     ));
@@ -1578,10 +1594,10 @@ async fn running_perf_and_cost_open_cached_usage_modal() {
         );
         assert!(matches!(
             app.modal,
-            Some(ModalKind::PerfReport {
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::PerfReport {
                 ref title,
                 ref lines,
-            }) if title == "Usage"
+            })) if title == "Usage"
                 && lines.iter().any(|line| line.contains("Usage: session"))
                 && lines.iter().any(|line| line.contains("session "))
         ));
@@ -1656,7 +1672,7 @@ async fn running_memory_command_opens_manager() {
     // The manager opens mid-run instead of falling to the busy-command modal.
     assert!(matches!(
         app.modal,
-        Some(ModalKind::MemoryManager { ref rows, cursor: 0 })
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager { ref rows, cursor: 0 }))
             if rows.len() == 1 && rows[0].name == "tests-run-with-quiet"
     ));
 }
@@ -1740,10 +1756,12 @@ fn runtime_action_deps_with_memory<'a>(
 }
 
 fn open_memory_manager_modal(app: &mut AppState, memory: &crate::memory::MemoryService) {
-    app.modal = Some(ModalKind::MemoryManager {
-        rows: memory.store().entries(),
-        cursor: 0,
-    });
+    app.modal = Some(ModalKind::Manager(
+        crate::tui::event::ManagerModal::MemoryManager {
+            rows: memory.store().entries(),
+            cursor: 0,
+        },
+    ));
 }
 
 #[tokio::test]
@@ -1798,7 +1816,9 @@ async fn memory_manager_edit_updates_entry_in_place() {
 
     assert!(matches!(result, RuntimeActionResult::Handled));
     {
-        let Some(ModalKind::MemoryAddWizard { state }) = app.modal.as_mut() else {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard { state })) =
+            app.modal.as_mut()
+        else {
             panic!("edit should open the wizard, got {:?}", app.modal);
         };
         assert_eq!(
@@ -1818,7 +1838,7 @@ async fn memory_manager_edit_updates_entry_in_place() {
     }
 
     let result = handle_runtime_action(
-        AppAction::MemoryAddWizardSubmit,
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::Submit),
         &mut app,
         &mut tasks,
         runtime_action_deps_with_memory(
@@ -1837,7 +1857,7 @@ async fn memory_manager_edit_updates_entry_in_place() {
     // Back on the manager with the same (unrenamed) entry reselected.
     assert!(matches!(
         app.modal,
-        Some(ModalKind::MemoryManager { ref rows, cursor: 0 }) if rows.len() == 1
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager { ref rows, cursor: 0 })) if rows.len() == 1
     ));
     let entry = memory
         .store()
@@ -1887,12 +1907,14 @@ async fn memory_manager_edit_moves_entry_across_tiers() {
     let mut wizard = crate::tui::memory_manager::MemoryAddWizardState::for_edit(&written.entry);
     wizard.tier = crate::memory::entry::MemoryTier::User;
     wizard.step = crate::tui::memory_manager::MemoryWizardStep::Review;
-    app.modal = Some(ModalKind::MemoryAddWizard {
-        state: Box::new(wizard),
-    });
+    app.modal = Some(ModalKind::Wizard(
+        crate::tui::event::WizardModal::MemoryAddWizard {
+            state: Box::new(wizard),
+        },
+    ));
 
     let result = handle_runtime_action(
-        AppAction::MemoryAddWizardSubmit,
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::Submit),
         &mut app,
         &mut tasks,
         runtime_action_deps_with_memory(
@@ -1975,12 +1997,14 @@ async fn memory_manager_edit_refuses_cross_tier_name_collision() {
         crate::tui::memory_manager::MemoryAddWizardState::for_edit(&project_entry.entry);
     wizard.tier = crate::memory::entry::MemoryTier::User;
     wizard.step = crate::tui::memory_manager::MemoryWizardStep::Review;
-    app.modal = Some(ModalKind::MemoryAddWizard {
-        state: Box::new(wizard),
-    });
+    app.modal = Some(ModalKind::Wizard(
+        crate::tui::event::WizardModal::MemoryAddWizard {
+            state: Box::new(wizard),
+        },
+    ));
 
     let result = handle_runtime_action(
-        AppAction::MemoryAddWizardSubmit,
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::Submit),
         &mut app,
         &mut tasks,
         runtime_action_deps_with_memory(
@@ -1997,7 +2021,9 @@ async fn memory_manager_edit_refuses_cross_tier_name_collision() {
 
     assert!(matches!(result, RuntimeActionResult::Handled));
     // The wizard stays open with an error; both tiers keep their copies.
-    let Some(ModalKind::MemoryAddWizard { state }) = app.modal.as_ref() else {
+    let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard { state })) =
+        app.modal.as_ref()
+    else {
         panic!("collision should keep the wizard open, got {:?}", app.modal);
     };
     assert!(
@@ -2067,7 +2093,7 @@ async fn running_sessions_command_opens_picker() {
     assert!(handled);
     assert!(matches!(
         app.modal,
-        Some(ModalKind::SessionPicker { ref sessions, cursor: 0 }) if sessions.is_empty()
+        Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { ref sessions, cursor: 0 })) if sessions.is_empty()
     ));
     assert!(app.queued_inputs.is_empty());
 }
@@ -2128,7 +2154,7 @@ async fn session_picker_delete_end_to_end() {
     // Picker shows 1 session (current active is filtered out)
     assert!(matches!(
         app.modal,
-        Some(ModalKind::SessionPicker { ref sessions, cursor: 0 }) if sessions.len() == 1
+        Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { ref sessions, cursor: 0 })) if sessions.len() == 1
     ));
 
     // Simulate Delete keypress: dispatch SessionPickerDeleteSelected
@@ -2150,7 +2176,12 @@ async fn session_picker_delete_end_to_end() {
 
     // Confirm modal should be open
     assert!(
-        matches!(app.modal, Some(ModalKind::SessionDeleteConfirm { .. })),
+        matches!(
+            app.modal,
+            Some(ModalKind::Confirm(
+                crate::tui::event::ConfirmModal::SessionDelete { .. }
+            ))
+        ),
         "expected SessionDeleteConfirm modal, got {:?}",
         app.modal
     );
@@ -2174,7 +2205,10 @@ async fn session_picker_delete_end_to_end() {
 
     // Picker refreshed with only the current session
     let (sessions_after, cursor_after) = match &app.modal {
-        Some(ModalKind::SessionPicker { sessions, cursor }) => (sessions.clone(), *cursor),
+        Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker {
+            sessions,
+            cursor,
+        })) => (sessions.clone(), *cursor),
         other => panic!("expected SessionPicker after delete, got {other:?}"),
     };
     assert_eq!(sessions_after.len(), 0, "deleted session should be gone");
@@ -2232,7 +2266,7 @@ async fn running_compact_command_is_blocked_without_mutation() {
     assert!(app.queued_inputs.is_empty());
     assert!(matches!(
         app.modal,
-        Some(ModalKind::BusyCommand { ref input, ref rows, cursor: 0 })
+        Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
             if input == "/compact"
                 && rows.iter().any(|row| row.label == "Cancel current run")
                 && !rows.iter().any(|row| row.label == "Queue for next run")
@@ -2365,7 +2399,12 @@ async fn running_sandbox_off_applies_and_persists_mid_run() {
         "mid-run /sandbox off must persist"
     );
     assert!(
-        !matches!(app.modal, Some(ModalKind::BusyCommand { .. })),
+        !matches!(
+            app.modal,
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::BusyCommand { .. }
+            ))
+        ),
         "setting toggles must not open the busy-command modal"
     );
 }
@@ -2430,7 +2469,12 @@ async fn running_smol_on_applies_preference_mid_run() {
         "mid-run /smol on must persist the preference"
     );
     assert!(
-        !matches!(app.modal, Some(ModalKind::BusyCommand { .. })),
+        !matches!(
+            app.modal,
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::BusyCommand { .. }
+            ))
+        ),
         "setting toggles must not open the busy-command modal"
     );
     assert!(app.transcript.iter().any(|item| matches!(
@@ -2500,7 +2544,12 @@ async fn running_self_review_off_applies_mid_run() {
         "mid-run /self-review off must apply to the app mirror"
     );
     assert!(
-        !matches!(app.modal, Some(ModalKind::BusyCommand { .. })),
+        !matches!(
+            app.modal,
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::BusyCommand { .. }
+            ))
+        ),
         "setting toggles must not open the busy-command modal"
     );
 }
@@ -2554,7 +2603,12 @@ async fn busy_modal_read_only_executor_matches_running_path() {
     .await;
 
     assert!(
-        matches!(app.modal, Some(ModalKind::SandboxStatus { .. })),
+        matches!(
+            app.modal,
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::SandboxStatus { .. }
+            ))
+        ),
         "/sandbox status through the shared read-only executor must open the SandboxStatus modal"
     );
 }
@@ -2617,12 +2671,22 @@ async fn skills_and_agents_modals_open_while_agent_lock_is_held() {
         .unwrap_or_else(|_| panic!("{input} must not await the held agent lock"));
         if expect_skill_manager {
             assert!(
-                matches!(app.modal, Some(ModalKind::SkillManager { .. })),
+                matches!(
+                    app.modal,
+                    Some(ModalKind::Manager(
+                        crate::tui::event::ManagerModal::SkillManager { .. }
+                    ))
+                ),
                 "/skills must open its manager mid-run"
             );
         } else {
             assert!(
-                matches!(app.modal, Some(ModalKind::AgentBrowser { .. })),
+                matches!(
+                    app.modal,
+                    Some(ModalKind::Manager(
+                        crate::tui::event::ManagerModal::AgentBrowser { .. }
+                    ))
+                ),
                 "/agents must open its browser mid-run"
             );
         }
@@ -2669,10 +2733,12 @@ async fn agent_browser_edit_and_toggle_do_not_block_on_held_agent_lock() {
     let mut app = app();
     app.task_state = TaskState::Running;
     app.builtin_subagents = crate::subagent::SharedBuiltinSubagentSettings::default();
-    app.modal = Some(ModalKind::AgentBrowser {
-        rows: rows.clone(),
-        cursor: 0,
-    });
+    app.modal = Some(ModalKind::Manager(
+        crate::tui::event::ManagerModal::AgentBrowser {
+            rows: rows.clone(),
+            cursor: 0,
+        },
+    ));
 
     // Fresh deps per dispatch (each is consumed by value); all borrow the same
     // held-lock agent so a stray `agent.lock().await` would deadlock the test.
@@ -2724,7 +2790,12 @@ async fn agent_browser_edit_and_toggle_do_not_block_on_held_agent_lock() {
         "toggle must flip the built-in in the shared handle, off the agent lock"
     );
     assert!(
-        matches!(app.modal, Some(ModalKind::AgentBrowser { .. })),
+        matches!(
+            app.modal,
+            Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::AgentBrowser { .. }
+            ))
+        ),
         "toggle must reopen the browser"
     );
 
@@ -2742,7 +2813,12 @@ async fn agent_browser_edit_and_toggle_do_not_block_on_held_agent_lock() {
     .await
     .expect("editing a built-in must not await the held agent lock");
     assert!(
-        matches!(app.modal, Some(ModalKind::AgentComposer { .. })),
+        matches!(
+            app.modal,
+            Some(ModalKind::Wizard(
+                crate::tui::event::WizardModal::AgentComposer { .. }
+            ))
+        ),
         "edit must open the composer mid-run"
     );
 }
@@ -2758,7 +2834,9 @@ async fn cached_model_picker_opens_without_command_task() {
 
     assert_eq!(app.task_state, TaskState::Idle);
     assert!(app.transcript.is_empty());
-    let Some(ModalKind::ModelPicker { entries }) = &app.modal else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+        &app.modal
+    else {
         panic!("model picker should be open");
     };
     assert!(entries.iter().any(|entry| {
@@ -2785,7 +2863,9 @@ async fn cached_model_picker_does_not_refresh_provider_models() {
     )
     .await;
 
-    let Some(ModalKind::ModelPicker { entries }) = &app.modal else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+        &app.modal
+    else {
         panic!("model picker should be open");
     };
     assert!(entries.iter().all(|entry| entry.model != "gpt-new"));
@@ -2827,7 +2907,9 @@ async fn model_picker_shortcut_key_persists_and_toggles_selection() {
     open_cached_model_picker(&mut app, session_store.clone(), registry, model_catalog).await;
     app.model_picker.active_pane = ModelPickerPane::Reasoning;
     let selected_model = {
-        let Some(ModalKind::ModelPicker { entries }) = &app.modal else {
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+            &app.modal
+        else {
             panic!("model picker should be open");
         };
         app.model_picker_selected_model(entries)
@@ -2838,7 +2920,7 @@ async fn model_picker_shortcut_key_persists_and_toggles_selection() {
     let key = crate::model_role::ModelShortcutKey::new('z').unwrap();
 
     let assigned = handle_runtime_action(
-        AppAction::ModelPickerAssignShortcut(key),
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::AssignShortcut(key)),
         &mut app,
         &mut tasks,
         runtime_action_deps(
@@ -2861,7 +2943,9 @@ async fn model_picker_shortcut_key_persists_and_toggles_selection() {
         assert_eq!(binding.provider_id.as_str(), "codex");
         assert_eq!(binding.model, selected_model);
     }
-    let Some(ModalKind::ModelPicker { entries }) = &app.modal else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+        &app.modal
+    else {
         panic!("model picker should stay open");
     };
     let entry = app
@@ -2875,7 +2959,7 @@ async fn model_picker_shortcut_key_persists_and_toggles_selection() {
     );
 
     let toggled = handle_runtime_action(
-        AppAction::ModelPickerAssignShortcut(key),
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::AssignShortcut(key)),
         &mut app,
         &mut tasks,
         runtime_action_deps(
@@ -2897,7 +2981,9 @@ async fn model_picker_shortcut_key_persists_and_toggles_selection() {
             .model_shortcut_binding(key)
             .is_none()
     );
-    let Some(ModalKind::ModelPicker { entries }) = &app.modal else {
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+        &app.modal
+    else {
         panic!("model picker should stay open");
     };
     let entry = app
@@ -2947,7 +3033,9 @@ async fn model_picker_submit_while_running_queues_selected_model() {
     )
     .await;
     let selected_reasoning = {
-        let Some(ModalKind::ModelPicker { entries }) = &app.modal else {
+        let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries })) =
+            &app.modal
+        else {
             panic!("model picker should be open");
         };
         let entry = app
@@ -2968,7 +3056,7 @@ async fn model_picker_submit_while_running_queues_selected_model() {
     let (interaction, _interaction_rx) = InteractionService::new();
 
     let result = handle_runtime_action(
-        AppAction::ModelPickerSubmit,
+        AppAction::ModelPicker(crate::tui::event::ModelPickerAction::Submit),
         &mut app,
         &mut tasks,
         RuntimeActionDeps {
@@ -3036,10 +3124,12 @@ async fn theme_picker_move_previews_and_cancel_restores_original_theme() {
     let session_store = Arc::new(Mutex::new(SessionStore::default()));
     crate::tui::theme::set_theme("forest");
     let mut app = app();
-    app.reduce(AppAction::OpenModal(ModalKind::ThemePicker {
-        cursor: 0,
-        original_theme: "forest".to_string(),
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::ThemePicker {
+            cursor: 0,
+            original_theme: "forest".to_string(),
+        },
+    )));
 
     let result = handle_runtime_action(
         AppAction::ThemePickerMove(1),
@@ -3060,7 +3150,9 @@ async fn theme_picker_move_previews_and_cancel_restores_original_theme() {
     assert_eq!(crate::tui::theme::current_theme_name(), "ocean");
     assert!(matches!(
         app.modal,
-        Some(ModalKind::ThemePicker { cursor: 1, .. })
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::ThemePicker { cursor: 1, .. }
+        ))
     ));
 
     let result = handle_runtime_action(
@@ -3111,10 +3203,12 @@ async fn theme_picker_submit_persists_selected_theme() {
     };
     crate::tui::theme::set_theme("forest");
     let mut app = app();
-    app.reduce(AppAction::OpenModal(ModalKind::ThemePicker {
-        cursor: 2,
-        original_theme: "forest".to_string(),
-    }));
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::ThemePicker {
+            cursor: 2,
+            original_theme: "forest".to_string(),
+        },
+    )));
 
     let result = handle_runtime_action(
         AppAction::ThemePickerSubmit,
@@ -3163,7 +3257,9 @@ async fn settings_cycle_persists_serenity_preference() {
         .iter()
         .position(|row| row.id() == Some(crate::tui::event::SettingId::Serenity))
         .expect("settings should include the serenity row");
-    app.reduce(AppAction::OpenModal(ModalKind::Settings { rows, cursor }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::Settings { rows, cursor },
+    )));
 
     let result = handle_runtime_action(
         AppAction::SettingsCycle(1),
@@ -3207,7 +3303,9 @@ async fn settings_cycle_persists_explicit_smol_preference() {
         .iter()
         .position(|row| row.id() == Some(crate::tui::event::SettingId::Smol))
         .expect("settings should include the SMOL row");
-    app.reduce(AppAction::OpenModal(ModalKind::Settings { rows, cursor }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::Settings { rows, cursor },
+    )));
 
     let result = handle_runtime_action(
         AppAction::SettingsCycle(1),
@@ -3251,7 +3349,9 @@ async fn settings_cycle_opts_into_and_persists_a_run_budget() {
         .iter()
         .position(|row| row.id() == Some(crate::tui::event::SettingId::BudgetTurns))
         .expect("settings should include the turn budget row");
-    app.reduce(AppAction::OpenModal(ModalKind::Settings { rows, cursor }));
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::Settings { rows, cursor },
+    )));
 
     let result = handle_runtime_action(
         AppAction::SettingsCycle(1),
@@ -3440,7 +3540,7 @@ async fn running_commit_command_is_blocked_without_user_message() {
     assert!(app.queued_inputs.is_empty());
     assert!(matches!(
         app.modal,
-        Some(ModalKind::BusyCommand { ref input, ref rows, cursor: 0 })
+        Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
             if input == "/commit"
                 && rows.iter().any(|row| row.label == "Cancel current run")
                 && !rows.iter().any(|row| row.label == "Queue for next run")
@@ -3503,7 +3603,7 @@ async fn running_pr_command_is_blocked_without_user_message() {
     assert!(app.queued_inputs.is_empty());
     assert!(matches!(
         app.modal,
-        Some(ModalKind::BusyCommand { ref input, ref rows, cursor: 0 })
+        Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
             if input == "/pr"
                 && rows.iter().any(|row| row.label == "Cancel current run")
                 && !rows.iter().any(|row| row.label == "Queue for next run")
@@ -3594,7 +3694,12 @@ async fn exact_tasks_command_opens_modal_while_agent_is_running() {
     assert!(handled);
     assert!(app.input().is_empty());
     assert!(app.transcript.is_empty());
-    assert!(matches!(app.modal, Some(ModalKind::TaskList { .. })));
+    assert!(matches!(
+        app.modal,
+        Some(ModalKind::Manager(
+            crate::tui::event::ManagerModal::TaskList { .. }
+        ))
+    ));
 }
 
 #[cfg(unix)]
@@ -3613,7 +3718,7 @@ async fn task_list_includes_interactive_terminals() {
 
     assert!(matches!(
         app.modal,
-        Some(ModalKind::TaskList { ref tasks, .. })
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList { ref tasks, .. }))
             if tasks.iter().any(|task| task.id == terminal.id)
     ));
     let _ = terminals.stop(&terminal.id).await;
@@ -3664,7 +3769,7 @@ async fn deleting_selected_running_task_stops_then_removes_it() {
     ));
     assert!(matches!(
         app.modal,
-        Some(ModalKind::TaskList { ref tasks, .. }) if tasks.is_empty()
+        Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList { ref tasks, .. })) if tasks.is_empty()
     ));
 }
 
@@ -5239,11 +5344,11 @@ async fn authorize_command_task_opens_provider_picker() {
     };
     let CommandOutcomeEvent::Applied {
         open_modal:
-            Some(ModalKind::AuthorizeProviderPicker {
+            Some(ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {
                 providers,
                 cursor: 0,
                 ..
-            }),
+            })),
         ..
     } = *event
     else {
@@ -5296,10 +5401,10 @@ async fn authorize_command_task_opens_key_prompt_without_status_message() {
     let CommandOutcomeEvent::Applied {
         messages,
         open_modal:
-            Some(ModalKind::ApiKeyPrompt {
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::ApiKeyPrompt {
                 provider_id,
                 initial_form: Some(initial_form),
-            }),
+            })),
         ..
     } = *event
     else {
@@ -5347,7 +5452,8 @@ async fn perf_command_task_opens_report_modal_without_status_message() {
     };
     let CommandOutcomeEvent::Applied {
         messages,
-        open_modal: Some(ModalKind::PerfReport { title, lines }),
+        open_modal:
+            Some(ModalKind::Detail(crate::tui::event::DetailModal::PerfReport { title, lines })),
         ..
     } = *event
     else {
@@ -5419,7 +5525,7 @@ async fn sessions_command_opens_project_picker_empty_state() {
 
     assert!(matches!(
         app.modal,
-        Some(ModalKind::SessionPicker { ref sessions, cursor: 0 }) if sessions.is_empty()
+        Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { ref sessions, cursor: 0 })) if sessions.is_empty()
     ));
 }
 
@@ -5514,7 +5620,7 @@ async fn save_and_plans_commands_persist_and_open_project_picker() {
 
     assert!(matches!(
         app.modal,
-        Some(ModalKind::PlanPicker { ref plans, cursor: 0, .. })
+        Some(ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker { ref plans, cursor: 0, .. }))
             if plans.len() == 1 && plans[0].title == "Plan library"
     ));
 }
@@ -6627,16 +6733,18 @@ fn question_move_keeps_selected_option_visible_in_compact_modal() {
             preselected: false,
         })
         .collect::<Vec<_>>();
-    app.modal = Some(ModalKind::QuestionPrompt {
-        request_id: 1,
-        prompt: "Pick one".to_string(),
-        header: Some("Need input".to_string()),
-        options,
-        multiple: false,
-        origin: None,
-        cursor: 0,
-        selected: vec![false; 16],
-    });
+    app.modal = Some(ModalKind::Detail(
+        crate::tui::event::DetailModal::QuestionPrompt {
+            request_id: 1,
+            prompt: "Pick one".to_string(),
+            header: Some("Need input".to_string()),
+            options,
+            multiple: false,
+            origin: None,
+            cursor: 0,
+            selected: vec![false; 16],
+        },
+    ));
 
     for _ in 0..12 {
         app.reduce(AppAction::QuestionMove(1));
@@ -6652,14 +6760,14 @@ fn question_move_keeps_selected_option_visible_in_compact_modal() {
     );
     assert!(!app.pending_question_visibility);
 
-    let Some(ModalKind::QuestionPrompt {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
         prompt,
         origin,
         options,
         multiple,
         cursor,
         ..
-    }) = app.modal.as_ref()
+    })) = app.modal.as_ref()
     else {
         panic!("question modal should still be open");
     };
@@ -6689,16 +6797,18 @@ fn question_move_keeps_last_option_visible_in_tiny_modal() {
             preselected: false,
         })
         .collect::<Vec<_>>();
-    app.modal = Some(ModalKind::QuestionPrompt {
-        request_id: 1,
-        prompt: "Pick one".to_string(),
-        header: Some("Need input".to_string()),
-        options,
-        multiple: false,
-        origin: None,
-        cursor: 0,
-        selected: vec![false; 20],
-    });
+    app.modal = Some(ModalKind::Detail(
+        crate::tui::event::DetailModal::QuestionPrompt {
+            request_id: 1,
+            prompt: "Pick one".to_string(),
+            header: Some("Need input".to_string()),
+            options,
+            multiple: false,
+            origin: None,
+            cursor: 0,
+            selected: vec![false; 20],
+        },
+    ));
 
     // Move all the way to the last option in a very short terminal.
     for _ in 0..19 {
@@ -6709,14 +6819,14 @@ fn question_move_keeps_last_option_visible_in_tiny_modal() {
     let area = Rect::new(0, 0, 60, 10);
     clamp_scrolls(&mut app, area);
 
-    let Some(ModalKind::QuestionPrompt {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
         prompt,
         origin,
         options,
         multiple,
         cursor,
         ..
-    }) = app.modal.as_ref()
+    })) = app.modal.as_ref()
     else {
         panic!("question modal should still be open");
     };
@@ -6746,8 +6856,8 @@ fn question_move_keeps_last_option_visible_in_tiny_modal() {
 #[test]
 fn clamp_scrolls_keeps_context_cursor_visible_below_header_lines() {
     let mut app = app();
-    app.modal = Some(ModalKind::Context(Box::new(
-        context_report_with_ledger_rows(48),
+    app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+        Box::new(context_report_with_ledger_rows(48)),
     )));
     app.focus = Focus::Modal;
     app.context_state.cursor = 42;
@@ -6773,8 +6883,8 @@ fn clamp_scrolls_keeps_context_cursor_visible_below_header_lines() {
 #[test]
 fn clamp_scrolls_preserves_manual_context_modal_page_scroll() {
     let mut app = app();
-    app.modal = Some(ModalKind::Context(Box::new(
-        context_report_with_ledger_rows(48),
+    app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+        Box::new(context_report_with_ledger_rows(48)),
     )));
     app.focus = Focus::Modal;
     app.context_state.cursor = 0;
@@ -6868,9 +6978,11 @@ fn tool_detail_modal_scroll_is_clamped_to_rendered_content() {
             started_at: now,
             finished_at: Some(now),
         }));
-    app.modal = Some(ModalKind::ToolDetail {
-        tool_id: "call-1".to_string(),
-    });
+    app.modal = Some(ModalKind::Detail(
+        crate::tui::event::DetailModal::ToolDetail {
+            tool_id: "call-1".to_string(),
+        },
+    ));
 
     for _ in 0..20 {
         app.reduce(AppAction::ScrollModal(8));
@@ -6907,14 +7019,18 @@ fn interaction_requests_wait_while_permission_prompt_is_open() {
     apply_interaction_request(&mut app, &mut rx);
     assert!(matches!(
         app.modal,
-        Some(ModalKind::PermissionPrompt { request_id: 1, .. })
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::PermissionPrompt { request_id: 1, .. }
+        ))
     ));
 
     apply_interaction_request(&mut app, &mut rx);
     assert!(
         matches!(
             app.modal,
-            Some(ModalKind::PermissionPrompt { request_id: 1, .. })
+            Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::PermissionPrompt { request_id: 1, .. }
+            ))
         ),
         "an active permission prompt must not be replaced by the next queued request"
     );
@@ -6923,7 +7039,9 @@ fn interaction_requests_wait_while_permission_prompt_is_open() {
     apply_interaction_request(&mut app, &mut rx);
     assert!(matches!(
         app.modal,
-        Some(ModalKind::PermissionPrompt { request_id: 2, .. })
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::PermissionPrompt { request_id: 2, .. }
+        ))
     ));
 }
 
@@ -6945,7 +7063,10 @@ fn question_request_seeds_multi_select_checkboxes_from_preselected() {
     .expect("question request should enqueue");
 
     apply_interaction_request(&mut app, &mut rx);
-    let Some(ModalKind::QuestionPrompt { selected, .. }) = &app.modal else {
+    let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
+        selected, ..
+    })) = &app.modal
+    else {
         panic!("question modal should open");
     };
     assert_eq!(
@@ -6979,14 +7100,18 @@ fn web_domain_request_opens_prompt_and_waits_behind_an_open_modal() {
     apply_interaction_request(&mut app, &mut rx);
     assert!(matches!(
         app.modal,
-        Some(ModalKind::WebDomainPrompt { request_id: 7, .. })
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::WebDomainPrompt { request_id: 7, .. }
+        ))
     ));
 
     // A second request must not clobber the open prompt.
     apply_interaction_request(&mut app, &mut rx);
     assert!(matches!(
         app.modal,
-        Some(ModalKind::WebDomainPrompt { request_id: 7, .. })
+        Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::WebDomainPrompt { request_id: 7, .. }
+        ))
     ));
 
     // Once answered, the redirect-hop request surfaces with its warning context.
@@ -6994,7 +7119,7 @@ fn web_domain_request_opens_prompt_and_waits_behind_an_open_modal() {
     apply_interaction_request(&mut app, &mut rx);
     assert!(matches!(
         &app.modal,
-        Some(ModalKind::WebDomainPrompt { request_id: 8, redirected_from: Some(from), .. })
+        Some(ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt { request_id: 8, redirected_from: Some(from), .. }))
             if from == "example.com"
     ));
 }
@@ -7694,7 +7819,7 @@ async fn discard_saved_plan_opens_confirm_without_deleting() {
     assert!(
         matches!(
             app.modal,
-            Some(ModalKind::PlanDiscardConfirm { saved_plan_id, .. }) if saved_plan_id == saved_id
+            Some(ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDiscard { saved_plan_id, .. })) if saved_plan_id == saved_id
         ),
         "discarding a saved plan should open the confirm modal"
     );
@@ -7773,10 +7898,12 @@ async fn discard_confirm_deletes_saved_record_and_clears_canvas() {
     let saved_id = app
         .active_saved_plan_session_id
         .expect("plan should be saved");
-    app.modal = Some(ModalKind::PlanDiscardConfirm {
-        saved_plan_id: saved_id,
-        title: app.plan.title.clone(),
-    });
+    app.modal = Some(ModalKind::Confirm(
+        crate::tui::event::ConfirmModal::PlanDiscard {
+            saved_plan_id: saved_id,
+            title: app.plan.title.clone(),
+        },
+    ));
 
     let (interaction, _interaction_rx) = InteractionService::new();
     let result = handle_runtime_action(

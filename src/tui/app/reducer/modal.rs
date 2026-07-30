@@ -26,7 +26,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
     match action {
         AppAction::OpenTaskList => {
             let (tasks, cursor) =
-                if let Some(ModalKind::TaskList { tasks, cursor }) = app.modal.clone() {
+                if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList {
+                    tasks,
+                    cursor,
+                })) = app.modal.clone()
+                {
                     let max = tasks.len().saturating_sub(1);
                     (tasks, cursor.min(max))
                 } else {
@@ -35,15 +39,17 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.modal_scroll = 0;
             app.pending_question_visibility = false;
             app.modal_return_focus = Some(app.focus);
-            app.modal = Some(ModalKind::TaskList { tasks, cursor });
+            app.modal = Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::TaskList { tasks, cursor },
+            ));
             app.focus = Focus::Modal;
         }
         AppAction::RefreshTaskList { tasks } => {
             app.background_tasks = tasks.clone();
-            if let Some(ModalKind::TaskList {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList {
                 tasks: current_tasks,
                 cursor,
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 let previous_id = current_tasks.get(*cursor).map(|task| task.id.clone());
                 let previous_cursor = *cursor;
@@ -56,7 +62,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::TaskListMove(delta) => {
-            if let Some(ModalKind::TaskList { tasks, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::TaskList {
+                tasks,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = tasks.len().saturating_sub(1);
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
@@ -73,22 +83,29 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.task_list_status = status;
         }
         AppAction::OpenPeerList { peers } => {
-            let cursor = if let Some(ModalKind::PeerList { cursor, .. }) = &app.modal {
-                (*cursor).min(peers.len().saturating_sub(1))
-            } else {
-                0
-            };
+            let cursor =
+                if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PeerList {
+                    cursor,
+                    ..
+                })) = &app.modal
+                {
+                    (*cursor).min(peers.len().saturating_sub(1))
+                } else {
+                    0
+                };
             app.modal_scroll = 0;
             app.pending_question_visibility = false;
             app.modal_return_focus = Some(app.focus);
-            app.modal = Some(ModalKind::PeerList { peers, cursor });
+            app.modal = Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::PeerList { peers, cursor },
+            ));
             app.focus = Focus::Modal;
         }
         AppAction::RefreshPeerList { peers } => {
-            if let Some(ModalKind::PeerList {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PeerList {
                 peers: current_peers,
                 cursor,
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 // Preserve the selected peer across refreshes by session id.
                 let previous_id = current_peers.get(*cursor).map(|peer| peer.id);
@@ -99,37 +116,59 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::PeerListMove(delta) => {
-            if let Some(ModalKind::PeerList { peers, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::PeerList {
+                peers,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = peers.len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
             }
         }
         AppAction::DoctorMove(delta) => {
-            if let Some(ModalKind::Doctor { report, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::Doctor {
+                report,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = report.checks.len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
             }
         }
         AppAction::OpenUsageDashboard { dashboard } => {
-            let tab = if let Some(ModalKind::UsageDashboard { tab, .. }) = &app.modal {
-                *tab
-            } else {
-                UsageTab::Activity
-            };
+            let tab =
+                if let Some(ModalKind::Detail(crate::tui::event::DetailModal::UsageDashboard {
+                    tab,
+                    ..
+                })) = &app.modal
+                {
+                    *tab
+                } else {
+                    UsageTab::Activity
+                };
             app.modal_scroll = 0;
             app.pending_question_visibility = false;
             app.modal_return_focus = Some(app.focus);
-            app.modal = Some(ModalKind::UsageDashboard { dashboard, tab });
+            app.modal = Some(ModalKind::Detail(
+                crate::tui::event::DetailModal::UsageDashboard { dashboard, tab },
+            ));
             app.focus = Focus::Modal;
         }
         AppAction::UsageDashboardCycleTab(steps) => {
-            if let Some(ModalKind::UsageDashboard { tab, .. }) = &mut app.modal {
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::UsageDashboard {
+                tab,
+                ..
+            })) = &mut app.modal
+            {
                 *tab = tab.cycled(steps);
                 app.modal_scroll = 0;
             }
         }
         AppAction::UsageDashboardSelectTab(selected) => {
-            if let Some(ModalKind::UsageDashboard { tab, .. }) = &mut app.modal
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::UsageDashboard {
+                tab,
+                ..
+            })) = &mut app.modal
                 && *tab != selected
             {
                 *tab = selected;
@@ -137,9 +176,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::RefreshMove(delta) => {
-            if let Some(ModalKind::Refresh {
-                sources, cursor, ..
-            }) = &mut app.modal
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
+                sources,
+                cursor,
+                ..
+            })) = &mut app.modal
             {
                 let max = sources.len().saturating_sub(1);
                 let next = move_index(*cursor, delta, max);
@@ -159,11 +200,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             index,
             source,
         } => {
-            if let Some(ModalKind::Refresh {
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
                 sources,
                 generation: modal_gen,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 if *modal_gen != generation {
                     return ActionResult::Handled;
@@ -181,34 +222,37 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             let _ = generation;
         }
         AppAction::OpenSubtaskList => {
-            let (subtasks, cursor, pane) = if let Some(ModalKind::SubtaskList {
-                subtasks,
-                cursor,
-                pane,
-            }) = app.modal.clone()
-            {
-                let max = subtasks.len().saturating_sub(1);
-                (subtasks, cursor.min(max), pane)
-            } else {
-                (app.subtasks.clone(), 0, SubtaskListPane::List)
-            };
+            let (subtasks, cursor, pane) =
+                if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList {
+                    subtasks,
+                    cursor,
+                    pane,
+                })) = app.modal.clone()
+                {
+                    let max = subtasks.len().saturating_sub(1);
+                    (subtasks, cursor.min(max), pane)
+                } else {
+                    (app.subtasks.clone(), 0, SubtaskListPane::List)
+                };
             app.modal_scroll = 0;
             app.pending_question_visibility = false;
             app.modal_return_focus = Some(app.focus);
-            app.modal = Some(ModalKind::SubtaskList {
-                subtasks,
-                cursor,
-                pane,
-            });
+            app.modal = Some(ModalKind::Manager(
+                crate::tui::event::ManagerModal::SubtaskList {
+                    subtasks,
+                    cursor,
+                    pane,
+                },
+            ));
             app.focus = Focus::Modal;
         }
         AppAction::RefreshSubtaskList { subtasks } => {
             app.subtasks = subtasks.clone();
-            if let Some(ModalKind::SubtaskList {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList {
                 subtasks: current,
                 cursor,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 let previous_id = current.get(*cursor).map(|sub| sub.id.clone());
                 let previous_cursor = *cursor;
@@ -220,11 +264,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::SubtaskListMove(delta) => {
-            if let Some(ModalKind::SubtaskList {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList {
                 subtasks,
                 cursor,
                 pane,
-            }) = &mut app.modal
+            })) = &mut app.modal
             {
                 *pane = SubtaskListPane::List;
                 let max = subtasks.len().saturating_sub(1);
@@ -236,12 +280,20 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::SubtaskListSetPane(next) => {
-            if let Some(ModalKind::SubtaskList { pane, .. }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList {
+                pane,
+                ..
+            })) = &mut app.modal
+            {
                 *pane = next;
             }
         }
         AppAction::SubtaskListTogglePane => {
-            if let Some(ModalKind::SubtaskList { pane, .. }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList {
+                pane,
+                ..
+            })) = &mut app.modal
+            {
                 *pane = pane.toggled();
             }
         }
@@ -256,7 +308,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::EpisodesMove(delta) => {
-            if let Some(ModalKind::Episodes { report, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::Episodes {
+                report,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = report.episodes.len().saturating_sub(1);
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
@@ -269,14 +325,18 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.modal_scroll = 0;
             app.pending_question_visibility = false;
             app.modal_return_focus = None;
-            if let ModalKind::Context(report) = &kind {
+            if let ModalKind::Detail(crate::tui::event::DetailModal::Context(report)) = &kind {
                 app.init_context_view_state(report);
                 app.latest_context_report = Some((**report).clone());
             }
-            if let ModalKind::Episodes { report, .. } = &kind {
+            if let ModalKind::Detail(crate::tui::event::DetailModal::Episodes { report, .. }) =
+                &kind
+            {
                 app.latest_context_report = Some((**report).clone());
             }
-            if let ModalKind::ModelPicker { entries } = &kind {
+            if let ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries }) =
+                &kind
+            {
                 app.cached_model_choices = entries.clone();
                 app.model_picker.filter.clear();
                 app.model_picker.active_pane = ModelPickerPane::Model;
@@ -370,17 +430,22 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                     app.model_picker.reasoning_cursor = 0;
                 }
             }
-            if let ModalKind::ApiKeyPrompt { initial_form, .. } = &kind {
+            if let ModalKind::Detail(crate::tui::event::DetailModal::ApiKeyPrompt {
+                initial_form,
+                ..
+            }) = &kind
+            {
                 app.provider_auth_form = initial_form.clone().unwrap_or_else(|| {
                     crate::tui::app::ProviderAuthForm::with_persistence(app.credential_persistence)
                 });
             }
-            if let ModalKind::ModePicker { .. } = &kind {
+            if let ModalKind::Picker(crate::tui::event::PickerModal::ModePicker { .. }) = &kind {
                 let rows = seed_mode_picker_rows(app);
                 // Open on the first cyclable value so the cursor never starts
                 // on a non-selectable header.
                 let cursor = first_value_row(&rows);
-                kind = ModalKind::ModePicker { rows, cursor };
+                kind =
+                    ModalKind::Picker(crate::tui::event::PickerModal::ModePicker { rows, cursor });
             }
             clamp_open_cursor(&mut kind);
             app.modal = Some(kind);
@@ -408,7 +473,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // reopen the composer unchanged (cancel path). The submit path takes
             // this stash first, so it won't double-fire here.
             if let Some(state) = app.pending_composer_state.take() {
-                app.modal = Some(ModalKind::AgentComposer { state });
+                app.modal = Some(ModalKind::Wizard(
+                    crate::tui::event::WizardModal::AgentComposer { state },
+                ));
                 app.focus = Focus::Modal;
             }
         }
@@ -422,9 +489,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.reset_permission_tool_timer(&command, at);
         }
         AppAction::QuestionMove(delta) => {
-            if let Some(ModalKind::QuestionPrompt {
-                cursor, options, ..
-            }) = &mut app.modal
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
+                cursor,
+                options,
+                ..
+            })) = &mut app.modal
             {
                 let max = options.len().saturating_sub(1);
                 if delta.is_negative() {
@@ -437,12 +506,12 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::QuestionToggle => {
-            if let Some(ModalKind::QuestionPrompt {
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
                 cursor,
                 selected,
                 multiple,
                 ..
-            }) = &mut app.modal
+            })) = &mut app.modal
                 && *multiple
                 && let Some(value) = selected.get_mut(*cursor)
             {
@@ -458,7 +527,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // current request id.
         }
         AppAction::McpServersMove(delta) => {
-            if let Some(ModalKind::McpServers { rows, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::McpServers {
+                rows,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = rows.len().saturating_sub(1);
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
@@ -473,7 +546,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // Runtime effect: handled by `tui::runtime_actions`.
         }
         AppAction::MemoryManagerMove(delta) => {
-            if let Some(ModalKind::MemoryManager { rows, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager {
+                rows,
+                cursor,
+            })) = &mut app.modal
+            {
                 let max = rows.len().saturating_sub(1);
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
@@ -488,8 +565,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         | AppAction::MemoryManagerEdit => {
             // Runtime effect: handled by `tui::runtime_actions`.
         }
-        AppAction::MemoryAddWizardMoveField(delta) => {
-            if let Some(ModalKind::MemoryAddWizard { state }) = &mut app.modal
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::MoveField(delta)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
+                state,
+            })) = &mut app.modal
                 && matches!(
                     state.step,
                     crate::tui::memory_manager::MemoryWizardStep::Details
@@ -498,18 +577,26 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 state.move_field(delta);
             }
         }
-        AppAction::MemoryAddWizardInputChar(ch) => {
-            if let Some(ModalKind::MemoryAddWizard { state }) = &mut app.modal {
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::InputChar(ch)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
+                state,
+            })) = &mut app.modal
+            {
                 state.input_char(ch);
             }
         }
-        AppAction::MemoryAddWizardBackspace => {
-            if let Some(ModalKind::MemoryAddWizard { state }) = &mut app.modal {
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::Backspace) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
+                state,
+            })) = &mut app.modal
+            {
                 state.backspace();
             }
         }
-        AppAction::MemoryAddWizardCycleValue(delta) => {
-            if let Some(ModalKind::MemoryAddWizard { state }) = &mut app.modal
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::CycleValue(delta)) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
+                state,
+            })) = &mut app.modal
                 && matches!(
                     state.step,
                     crate::tui::memory_manager::MemoryWizardStep::Details
@@ -523,8 +610,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 }
             }
         }
-        AppAction::MemoryAddWizardToggleValue => {
-            if let Some(ModalKind::MemoryAddWizard { state }) = &mut app.modal
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::ToggleValue) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
+                state,
+            })) = &mut app.modal
                 && matches!(
                     state.step,
                     crate::tui::memory_manager::MemoryWizardStep::Details
@@ -537,8 +626,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 state.toggle_enabled();
             }
         }
-        AppAction::MemoryAddWizardSubmit => {
-            if let Some(ModalKind::MemoryAddWizard { state }) = &mut app.modal
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::Submit) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
+                state,
+            })) = &mut app.modal
                 && !matches!(
                     state.step,
                     crate::tui::memory_manager::MemoryWizardStep::Review
@@ -547,13 +638,19 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 state.submit();
             }
         }
-        AppAction::MemoryAddWizardBack => {
-            if let Some(ModalKind::MemoryAddWizard { state }) = &mut app.modal {
+        AppAction::MemoryAddWizard(crate::tui::event::MemoryAddWizardAction::Back) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
+                state,
+            })) = &mut app.modal
+            {
                 state.back();
             }
         }
         AppAction::SandboxMove(delta) => {
-            if let Some(ModalKind::SandboxStatus { cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus {
+                cursor,
+            })) = &mut app.modal
+            {
                 *cursor = move_index(*cursor, delta, 1);
             }
         }
@@ -561,7 +658,11 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // Runtime effect: handled by `tui::runtime_actions`.
         }
         AppAction::ThemePickerMove(delta) => {
-            if let Some(ModalKind::ThemePicker { cursor, .. }) = &mut app.modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker {
+                cursor,
+                ..
+            })) = &mut app.modal
+            {
                 let max = crate::tui::theme::theme_count().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
             }
@@ -571,7 +672,12 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // `tui::runtime_actions`.
         }
         AppAction::BusyCommandMove(delta) => {
-            if let Some(ModalKind::BusyCommand { rows, cursor, .. }) = &mut app.modal {
+            if let Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand {
+                rows,
+                cursor,
+                ..
+            })) = &mut app.modal
+            {
                 let max = rows.len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
             }
@@ -580,17 +686,29 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // Runtime effect: `tui::runtime_actions` queues, opens, cancels, or dismisses.
         }
         AppAction::ModePickerMove(delta) => {
-            if let Some(ModalKind::ModePicker { rows, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
+                rows,
+                cursor,
+            })) = &mut app.modal
+            {
                 *cursor = move_mode_cursor(rows, *cursor, delta);
             }
         }
         AppAction::SettingsMove(delta) => {
-            if let Some(ModalKind::Settings { rows, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Manager(crate::tui::event::ManagerModal::Settings {
+                rows,
+                cursor,
+            })) = &mut app.modal
+            {
                 *cursor = move_settings_cursor(rows, *cursor, delta);
             }
         }
         AppAction::OnboardingMove(delta) => {
-            if let Some(ModalKind::Onboarding { step, cursor }) = &mut app.modal {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::Onboarding {
+                step,
+                cursor,
+            })) = &mut app.modal
+            {
                 *cursor = move_index(*cursor, delta, step.choice_count().saturating_sub(1));
             }
         }
@@ -610,68 +728,79 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
 /// (`ModelPicker`, `ModePicker`) — fall through untouched.
 fn clamp_open_cursor(kind: &mut ModalKind) {
     let (cursor, max) = match kind {
-        ModalKind::Episodes { report, cursor } => (cursor, report.episodes.len().saturating_sub(1)),
-        ModalKind::SessionPicker { sessions, cursor } => (cursor, sessions.len().saturating_sub(1)),
-        ModalKind::PlanPicker {
+        ModalKind::Detail(crate::tui::event::DetailModal::Episodes { report, cursor }) => {
+            (cursor, report.episodes.len().saturating_sub(1))
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { sessions, cursor }) => {
+            (cursor, sessions.len().saturating_sub(1))
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker {
             plans,
             query,
             cursor,
-        } => {
+        }) => {
             let max = AppState::plan_picker_filtered_plans(plans, query)
                 .len()
                 .saturating_sub(1);
             (cursor, max)
         }
-        ModalKind::PlanOpenChoice { cursor, .. } | ModalKind::StartPlanChoice { cursor } => {
+        ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice { cursor, .. })
+        | ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor }) => {
             (cursor, 1)
         }
-        ModalKind::AuthorizeProviderPicker {
+        ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {
             providers,
             query,
             cursor,
-        }
-        | ModalKind::UnauthorizeProviderPicker {
+        })
+        | ModalKind::Picker(crate::tui::event::PickerModal::UnauthorizeProviderPicker {
             providers,
             query,
             cursor,
-        } => {
+        }) => {
             let max = crate::tui::pickers::filter_authorize_providers(providers, query)
                 .len()
                 .saturating_sub(1);
             (cursor, max)
         }
-        ModalKind::ProviderManager {
+        ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
             rows,
             filter,
             cursor,
             ..
-        } => {
+        }) => {
             let max = crate::tui::provider_manager::provider_manager_filtered(rows, filter)
                 .len()
                 .saturating_sub(1);
             (cursor, max)
         }
-        ModalKind::McpServers { rows, cursor } => (cursor, rows.len().saturating_sub(1)),
-        ModalKind::MemoryManager { rows, cursor } => (cursor, rows.len().saturating_sub(1)),
-        ModalKind::PermissionsManager {
+        ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { rows, cursor }) => {
+            (cursor, rows.len().saturating_sub(1))
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager { rows, cursor }) => {
+            (cursor, rows.len().saturating_sub(1))
+        }
+        ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager {
             rows,
             filter,
             cursor,
             ..
-        } => {
+        }) => {
             let max = crate::tui::permissions_manager::permission_manager_filtered(rows, filter)
                 .len()
                 .saturating_sub(1);
             (cursor, max)
         }
-        ModalKind::ReviewScopePicker { cursor } => (
+        ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor }) => (
             cursor,
             crate::agent::ReviewScope::all().len().saturating_sub(1),
         ),
-        ModalKind::ThemePicker { cursor, .. } => {
+        ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { cursor, .. }) => {
             (cursor, crate::tui::theme::theme_count().saturating_sub(1))
         }
-        ModalKind::BusyCommand { rows, cursor, .. } => (cursor, rows.len().saturating_sub(1)),
+        ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { rows, cursor, .. }) => {
+            (cursor, rows.len().saturating_sub(1))
+        }
         _ => return,
     };
     *cursor = (*cursor).min(max);
