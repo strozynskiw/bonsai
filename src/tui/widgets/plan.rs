@@ -50,6 +50,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
 
     let title = if !app.plan.title.is_empty() {
         format!("Plan · {}", app.plan.title)
+    } else if let Some(title) = app.current_session_title() {
+        format!("Plan · {title}")
     } else if app.plan.is_empty() {
         "Plan".to_string()
     } else if app.plan.is_phased() {
@@ -1354,11 +1356,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_frame_falls_back_to_task_count_when_title_missing() {
+    fn plan_frame_uses_session_title_until_plan_title_is_set() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let mut app = app();
+        app.current_session_summary = "Ship queued tasks".to_string();
         app.plan.edit().set_section("Goal", "Do the thing.");
         app.plan.edit().add_task("One");
 
@@ -1373,8 +1376,33 @@ mod tests {
         let top_row: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
 
         assert!(
+            top_row.contains("Ship queued tasks"),
+            "frame should use the session title until a plan title is set, got: {top_row:?}"
+        );
+    }
+
+    #[test]
+    fn plan_frame_falls_back_to_task_count_without_a_title() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app();
+        app.plan.edit().set_section("Goal", "Do the thing.");
+        app.plan.edit().add_task("One");
+
+        let area = Rect::new(0, 0, 80, 20);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| render(frame, area, &app))
+            .expect("untitled plan should render");
+
+        let buffer = terminal.backend().buffer().clone();
+        let top_row: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+
+        assert!(
             top_row.contains("1 tasks"),
-            "frame should fall back to the task count when no title is set, got: {top_row:?}"
+            "frame should fall back to the task count without a title, got: {top_row:?}"
         );
     }
 
