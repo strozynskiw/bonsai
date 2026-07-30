@@ -3748,6 +3748,94 @@ async fn heartbeat_carries_working_state_to_peer_listing() {
 }
 
 #[tokio::test]
+async fn memory_refresh_fanout_scopes_project_and_user_tiers() {
+    let fixture = TestStorage::new().await;
+    let storage = &fixture.storage;
+    let sender = fixture.start_session().await;
+    let same_project = fixture.start_session().await;
+    let other_dir = tempfile::TempDir::new().unwrap();
+    let other_project = storage
+        .start_session(
+            other_dir.path(),
+            "anthropic",
+            "claude-sonnet-4-5",
+            ReasoningSelection::default(),
+        )
+        .await
+        .unwrap();
+    for session in [sender, same_project, other_project] {
+        storage
+            .record_session_heartbeat(session, false)
+            .await
+            .unwrap();
+    }
+    let project_id = storage
+        .ensure_project(fixture.project_path())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .publish_memory_refresh(
+                project_id,
+                sender,
+                crate::memory::entry::MemoryTier::Project
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let project_delivery = storage
+        .claim_ui_undelivered_messages(same_project)
+        .await
+        .unwrap();
+    assert_eq!(project_delivery.len(), 1);
+    assert_eq!(
+        project_delivery[0].kind,
+        peers::PeerMessageKind::MemoryRefresh
+    );
+    assert!(project_delivery[0].body.is_empty());
+    assert!(
+        storage
+            .claim_ui_undelivered_messages(other_project)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    assert_eq!(
+        storage
+            .publish_memory_refresh(project_id, sender, crate::memory::entry::MemoryTier::User)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        storage
+            .claim_agent_undelivered_messages(other_project)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        storage
+            .claim_ui_undelivered_messages(sender)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        storage
+            .pending_agent_message_count(same_project)
+            .await
+            .unwrap(),
+        0,
+        "internal refresh notifications are not actionable peer messages"
+    );
+}
+
+#[tokio::test]
 async fn peer_message_consumers_lease_and_ack_independently() {
     let fixture = TestStorage::new().await;
     let storage = &fixture.storage;

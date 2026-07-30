@@ -2008,6 +2008,7 @@ struct RuntimeEventDrainDeps<'a> {
     background_tasks: &'a Arc<BackgroundTaskRegistry>,
     terminals: &'a Arc<TerminalRegistry>,
     peer_bus: &'a Arc<crate::peer::PeerBus>,
+    memory: &'a Option<Arc<crate::memory::MemoryService>>,
 }
 
 /// Drain every `RuntimeEvent` enqueued so far this frame. Each event either
@@ -2083,10 +2084,40 @@ async fn drain_runtime_events_for_frame(
             // the gate brakes don't apply (see peer_wake_gate_allows).
             let wake_worthy_messages = messages
                 .iter()
-                .filter(|message| message.kind != crate::storage::PeerMessageKind::WakeRequest)
+                .filter(|message| {
+                    !matches!(
+                        message.kind,
+                        crate::storage::PeerMessageKind::WakeRequest
+                            | crate::storage::PeerMessageKind::MemoryRefresh
+                    )
+                })
                 .map(|delivery| delivery.message.clone())
                 .collect::<Vec<_>>();
             for delivery in messages {
+                if delivery.message.kind == crate::storage::PeerMessageKind::MemoryRefresh {
+                    if let Some(memory) = deps.memory {
+                        memory.apply_refresh(delivery.message.id);
+                        if let Some(ModalKind::Manager(
+                            crate::tui::event::ManagerModal::MemoryManager { rows, cursor },
+                        )) = app.modal.as_mut()
+                        {
+                            let selected = rows
+                                .get(*cursor)
+                                .map(|entry| (entry.tier, entry.name.clone()));
+                            *rows = memory.store().entries();
+                            *cursor = selected
+                                .and_then(|(tier, name)| {
+                                    rows.iter()
+                                        .position(|entry| entry.tier == tier && entry.name == name)
+                                })
+                                .unwrap_or(0)
+                                .min(rows.len().saturating_sub(1));
+                        }
+                    }
+                    app.pending_peer_delivery_receipts
+                        .insert(delivery.message.id, delivery.receipt);
+                    continue;
+                }
                 let mut text = delivery.message.body;
                 crate::redact::redact_in_place(&mut text);
                 app.reduce(AppAction::PeerMessage {
@@ -2835,6 +2866,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 background_tasks: &background_tasks,
                 terminals: &terminals,
                 peer_bus: &peer_bus,
+                memory: &memory,
             },
         )
         .await;

@@ -195,6 +195,21 @@ impl PeerBus {
             .await
     }
 
+    /// Notify live sessions that one persistent memory tier changed. This is
+    /// deliberately separate from user-facing sends: it has no echo, rate
+    /// accounting, wake behavior, or model-visible body.
+    pub(crate) async fn publish_memory_refresh(
+        &self,
+        project_id: i64,
+        tier: crate::memory::entry::MemoryTier,
+    ) -> Result<()> {
+        let self_id = self.self_id().await?;
+        self.storage
+            .publish_memory_refresh(project_id, self_id, tier)
+            .await?;
+        Ok(())
+    }
+
     /// A full overview of every live peer — title, claims, and recently changed
     /// files — for the `/peers` view and its live-refresh watcher (peers P5).
     pub async fn overview(&self) -> Result<Vec<PeerOverview>> {
@@ -567,7 +582,7 @@ pub fn peer_injection_body(messages: &[PeerMessage]) -> String {
         // (pointer at how to reply), wake-request FYIs are explicitly not —
         // inviting a reply there would spend the peer turn the ask/ack
         // protocol exists to avoid.
-        sections.push(match message.kind {
+        let section = match message.kind {
             PeerMessageKind::Text => format!(
                 "Message from bonsai session #{from}:\n{body}\n\n\
                  If it asks a question you can answer, reply with the peers tool \
@@ -584,7 +599,9 @@ pub fn peer_injection_body(messages: &[PeerMessage]) -> String {
                  No reply is needed and none is expected; session #{from} resumes \
                  automatically when your run ends."
             ),
-        });
+            PeerMessageKind::MemoryRefresh => continue,
+        };
+        sections.push(section);
     }
     sections.join("\n\n")
 }
@@ -700,6 +717,11 @@ mod tests {
             "session #45 finished its run.",
         )]);
         assert!(framed.contains("Notice from bonsai session #45:"));
+    }
+
+    #[test]
+    fn memory_refresh_is_never_injected() {
+        assert!(peer_injection_body(&[message(PeerMessageKind::MemoryRefresh, "")]).is_empty());
     }
 
     #[tokio::test]

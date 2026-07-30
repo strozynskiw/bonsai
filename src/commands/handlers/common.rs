@@ -181,14 +181,17 @@ pub(crate) async fn handle_command_with_catalog(
                         MemoryTier::User => MemoryEntryType::Preference,
                         MemoryTier::Project => MemoryEntryType::Project,
                     };
-                    match memory.store().write(
-                        request.tier,
-                        entry_type,
-                        None,
-                        &request.fact,
-                        &request.fact,
-                        None,
-                    ) {
+                    match memory
+                        .write(
+                            request.tier,
+                            entry_type,
+                            None,
+                            &request.fact,
+                            &request.fact,
+                            None,
+                        )
+                        .await
+                    {
                         Ok(written) => outcome.messages.push(status(format!(
                             "remembered: {} ({}) — indexed next session",
                             written.entry.description,

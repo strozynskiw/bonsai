@@ -234,11 +234,17 @@ impl Agent {
         let mut messages = Vec::new();
         for delivery in deliveries {
             let message_id = delivery.message.id;
+            let is_memory_refresh =
+                delivery.message.kind == crate::storage::PeerMessageKind::MemoryRefresh;
             if !self
                 .pending_peer_delivery_receipts
                 .contains_key(&message_id)
+                && !is_memory_refresh
             {
                 messages.push(delivery.message);
+            }
+            if is_memory_refresh && let Some(memory) = self.memory.as_ref() {
+                memory.apply_refresh(message_id);
             }
             // An expired lease can be reacquired while a persistence retry is
             // pending. Replace the stale receipt without injecting twice.

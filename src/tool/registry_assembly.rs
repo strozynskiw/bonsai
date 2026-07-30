@@ -192,6 +192,7 @@ impl ReadOnlyCore {
 /// The write/apply_patch/edit trio bound to one read tracker (the parent's or
 /// a subagent's). Bash and rename stay at the call sites — their constructor
 /// inputs differ per registry.
+#[allow(clippy::too_many_arguments)]
 fn insert_file_mutation_tools(
     instances: &mut ToolInstances,
     project_root: &Path,
@@ -200,39 +201,49 @@ fn insert_file_mutation_tools(
     hooks: &Arc<crate::hooks::HookEngine>,
     workspace_locks: &crate::tool::WorkspaceLockContext,
     action_policy: &ActionPolicy,
+    memory: Option<&Arc<crate::memory::MemoryService>>,
 ) {
     instances.insert(
         ToolFactoryKey::Write,
-        Arc::new(WriteTool::with_hooks_and_locks(
-            project_root.to_path_buf(),
-            read_tracker.clone(),
-            yolo_mode.clone(),
-            hooks.clone(),
-            workspace_locks.clone(),
-            action_policy.clone(),
-        )),
+        Arc::new(
+            WriteTool::with_hooks_and_locks(
+                project_root.to_path_buf(),
+                read_tracker.clone(),
+                yolo_mode.clone(),
+                hooks.clone(),
+                workspace_locks.clone(),
+                action_policy.clone(),
+            )
+            .with_memory(memory.cloned()),
+        ),
     );
     instances.insert(
         ToolFactoryKey::ApplyPatch,
-        Arc::new(ApplyPatchTool::with_hooks_and_locks(
-            project_root.to_path_buf(),
-            read_tracker.clone(),
-            yolo_mode.clone(),
-            hooks.clone(),
-            workspace_locks.clone(),
-            action_policy.clone(),
-        )),
+        Arc::new(
+            ApplyPatchTool::with_hooks_and_locks(
+                project_root.to_path_buf(),
+                read_tracker.clone(),
+                yolo_mode.clone(),
+                hooks.clone(),
+                workspace_locks.clone(),
+                action_policy.clone(),
+            )
+            .with_memory(memory.cloned()),
+        ),
     );
     instances.insert(
         ToolFactoryKey::Edit,
-        Arc::new(EditTool::with_hooks_and_locks(
-            project_root.to_path_buf(),
-            read_tracker.clone(),
-            yolo_mode.clone(),
-            hooks.clone(),
-            workspace_locks.clone(),
-            action_policy.clone(),
-        )),
+        Arc::new(
+            EditTool::with_hooks_and_locks(
+                project_root.to_path_buf(),
+                read_tracker.clone(),
+                yolo_mode.clone(),
+                hooks.clone(),
+                workspace_locks.clone(),
+                action_policy.clone(),
+            )
+            .with_memory(memory.cloned()),
+        ),
     );
 }
 
@@ -450,6 +461,7 @@ pub(crate) fn build_tool_registries(
             &hooks,
             &workspace_locks,
             &action_policy,
+            memory.as_ref(),
         );
         full_sub_instances.insert(
             ToolFactoryKey::Bash,
@@ -510,6 +522,7 @@ pub(crate) fn build_tool_registries(
             hooks: hooks.clone(),
             workspace_locks: workspace_locks.clone(),
             authorization_ledger: authorization_ledger.clone(),
+            memory: memory.clone(),
         });
         let runner = SubagentRunner::new_with_registry_factory(
             provider_factory,
@@ -564,6 +577,7 @@ pub(crate) fn build_tool_registries(
         &hooks,
         &workspace_locks,
         &action_policy,
+        memory.as_ref(),
     );
     coding_instances.insert(ToolFactoryKey::Bash, bash_tool.clone());
     coding_instances.insert(ToolFactoryKey::Terminal, terminal_tool.clone());
@@ -773,6 +787,7 @@ struct SubagentToolRunDeps {
     hooks: Arc<crate::hooks::HookEngine>,
     workspace_locks: crate::tool::WorkspaceLockContext,
     authorization_ledger: crate::tool::AuthorizationLedger,
+    memory: Option<Arc<crate::memory::MemoryService>>,
 }
 
 impl SubagentToolRunDeps {
@@ -808,45 +823,54 @@ impl SubagentToolRunDeps {
             "read_region" => Arc::new(ReadRegionTool::new(self.project_root.clone(), read_tracker)),
             "read_symbol" => Arc::new(ReadSymbolTool::new(self.project_root.clone(), read_tracker)),
             "grep" => Arc::new(GrepTool::new(self.project_root.clone(), read_tracker)),
-            "write" => Arc::new(WriteTool::with_hooks_and_locks(
-                self.project_root.clone(),
-                read_tracker,
-                self.yolo_mode.clone(),
-                self.hooks.clone(),
-                self.workspace_locks.clone(),
-                ActionPolicy::with_ledger(
-                    self.permissions.clone(),
-                    self.interaction.clone(),
+            "write" => Arc::new(
+                WriteTool::with_hooks_and_locks(
+                    self.project_root.clone(),
+                    read_tracker,
                     self.yolo_mode.clone(),
-                    self.authorization_ledger.clone(),
-                ),
-            )),
-            "apply_patch" => Arc::new(ApplyPatchTool::with_hooks_and_locks(
-                self.project_root.clone(),
-                read_tracker,
-                self.yolo_mode.clone(),
-                self.hooks.clone(),
-                self.workspace_locks.clone(),
-                ActionPolicy::with_ledger(
-                    self.permissions.clone(),
-                    self.interaction.clone(),
+                    self.hooks.clone(),
+                    self.workspace_locks.clone(),
+                    ActionPolicy::with_ledger(
+                        self.permissions.clone(),
+                        self.interaction.clone(),
+                        self.yolo_mode.clone(),
+                        self.authorization_ledger.clone(),
+                    ),
+                )
+                .with_memory(self.memory.clone()),
+            ),
+            "apply_patch" => Arc::new(
+                ApplyPatchTool::with_hooks_and_locks(
+                    self.project_root.clone(),
+                    read_tracker,
                     self.yolo_mode.clone(),
-                    self.authorization_ledger.clone(),
-                ),
-            )),
-            "edit" => Arc::new(EditTool::with_hooks_and_locks(
-                self.project_root.clone(),
-                read_tracker,
-                self.yolo_mode.clone(),
-                self.hooks.clone(),
-                self.workspace_locks.clone(),
-                ActionPolicy::with_ledger(
-                    self.permissions.clone(),
-                    self.interaction.clone(),
+                    self.hooks.clone(),
+                    self.workspace_locks.clone(),
+                    ActionPolicy::with_ledger(
+                        self.permissions.clone(),
+                        self.interaction.clone(),
+                        self.yolo_mode.clone(),
+                        self.authorization_ledger.clone(),
+                    ),
+                )
+                .with_memory(self.memory.clone()),
+            ),
+            "edit" => Arc::new(
+                EditTool::with_hooks_and_locks(
+                    self.project_root.clone(),
+                    read_tracker,
                     self.yolo_mode.clone(),
-                    self.authorization_ledger.clone(),
-                ),
-            )),
+                    self.hooks.clone(),
+                    self.workspace_locks.clone(),
+                    ActionPolicy::with_ledger(
+                        self.permissions.clone(),
+                        self.interaction.clone(),
+                        self.yolo_mode.clone(),
+                        self.authorization_ledger.clone(),
+                    ),
+                )
+                .with_memory(self.memory.clone()),
+            ),
             "bash" => Arc::new(BashTool::from_runtime(BashRuntimeDeps::new(
                 self.project_root.clone(),
                 self.permissions.clone(),

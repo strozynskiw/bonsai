@@ -16,14 +16,17 @@ pub(crate) mod index;
 pub(crate) mod retrieval;
 pub(crate) mod store;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
+
+use anyhow::Context;
 
 use crate::storage::Storage;
 
 use self::entry::MemoryEntry;
 use self::retrieval::MemoryRetrieval;
-use self::store::MemoryStore;
+use self::store::{MemoryStore, WrittenEntry};
 
 /// Recall queries look at the tail of the user message only; enough for topic
 /// signal without embedding a pasted wall of text.
@@ -44,11 +47,13 @@ pub(crate) struct MemoryService {
     store: MemoryStore,
     storage: Storage,
     project_id: i64,
+    peer_bus: OnceLock<Arc<crate::peer::PeerBus>>,
     retrieval: MemoryRetrieval,
     /// Names already in the conversation this session — recalled entries and
     /// fresh `memory_write` captures — so recall never re-injects them. Lives
     /// here (not on `Agent`) because the tool has no `&mut Agent` to reach.
     recalled: std::sync::Mutex<HashSet<String>>,
+    applied_refreshes: std::sync::Mutex<VecDeque<i64>>,
 }
 
 impl MemoryService {
@@ -67,7 +72,9 @@ impl MemoryService {
             retrieval: MemoryRetrieval::new(storage.clone(), project_id, embedder),
             storage,
             project_id,
+            peer_bus: OnceLock::new(),
             recalled: std::sync::Mutex::new(HashSet::new()),
+            applied_refreshes: std::sync::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -79,6 +86,95 @@ impl MemoryService {
     /// The underlying two-tier file store (commands: list/view/remember).
     pub(crate) fn store(&self) -> &MemoryStore {
         &self.store
+    }
+
+    /// Attach the process peer bus after runtime construction.
+    pub(crate) fn attach_peer_bus(&self, peer_bus: Arc<crate::peer::PeerBus>) {
+        let _ = self.peer_bus.set(peer_bus);
+    }
+
+    /// Re-scan both persistent tiers without changing the frozen diagnostics
+    /// index captured at session startup.
+    pub(crate) fn refresh(&self) {
+        self.store.reload();
+    }
+
+    /// Apply one durable refresh notification at most once across the UI and
+    /// agent delivery lanes.
+    pub(crate) fn apply_refresh(&self, message_id: i64) {
+        let mut applied = self.applied_refreshes.lock().expect("memory refresh lock");
+        if applied.contains(&message_id) {
+            return;
+        }
+        const RECENT_REFRESH_LIMIT: usize = 256;
+        if applied.len() == RECENT_REFRESH_LIMIT {
+            applied.pop_front();
+        }
+        applied.push_back(message_id);
+        self.store.reload();
+    }
+
+    /// Best-effort notification after a durable memory mutation.
+    pub(crate) async fn publish_refresh(&self, tier: entry::MemoryTier) {
+        let Some(peer_bus) = self.peer_bus.get() else {
+            return;
+        };
+        if let Err(err) = peer_bus.publish_memory_refresh(self.project_id, tier).await {
+            tracing::warn!(%err, ?tier, "failed to publish memory refresh");
+        }
+    }
+
+    /// Create or update an entry, then notify sessions affected by its tier.
+    pub(crate) async fn write(
+        &self,
+        tier: entry::MemoryTier,
+        entry_type: entry::MemoryEntryType,
+        name: Option<&str>,
+        description: &str,
+        body: &str,
+        enabled: Option<bool>,
+    ) -> anyhow::Result<WrittenEntry> {
+        let written = match name {
+            Some(name) => {
+                self.store
+                    .write(tier, entry_type, Some(name), description, body, enabled)?
+            }
+            None => self
+                .store
+                .create(tier, entry_type, description, body, enabled)?,
+        };
+        self.publish_refresh(tier).await;
+        Ok(written)
+    }
+
+    /// Move an entry between tiers, publishing only after both file mutations
+    /// have completed. A user-tier notice is broad enough for either direction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn move_entry(
+        &self,
+        from_tier: entry::MemoryTier,
+        to_tier: entry::MemoryTier,
+        name: &str,
+        entry_type: entry::MemoryEntryType,
+        description: &str,
+        body: &str,
+        enabled: bool,
+    ) -> anyhow::Result<WrittenEntry> {
+        let written =
+            self.store
+                .create_exact(to_tier, entry_type, name, description, body, enabled)?;
+        self.forget_exact_without_refresh(from_tier, name)
+            .await
+            .with_context(|| {
+                format!(
+                    "created the {} memory copy at {}, but could not remove the old {} copy",
+                    to_tier.label(),
+                    written.entry.path.display(),
+                    from_tier.label()
+                )
+            })?;
+        self.publish_refresh(entry::MemoryTier::User).await;
+        Ok(written)
     }
 
     /// Per-turn recall: sync the shadow, then retrieve relevant entries not
@@ -125,6 +221,7 @@ impl MemoryService {
         {
             tracing::warn!(%err, "failed to delete memory shadow row");
         }
+        self.publish_refresh(entry.tier).await;
         Ok(path)
     }
 
@@ -154,11 +251,22 @@ impl MemoryService {
         {
             tracing::warn!(%err, "failed to sync memory shadow after enable toggle");
         }
+        self.publish_refresh(tier).await;
         Ok(written.entry.path)
     }
 
     /// Delete a specific `(tier, name)` row for the memory manager.
     pub(crate) async fn forget_exact(
+        &self,
+        tier: entry::MemoryTier,
+        name: &str,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        let path = self.forget_exact_without_refresh(tier, name).await?;
+        self.publish_refresh(tier).await;
+        Ok(path)
+    }
+
+    async fn forget_exact_without_refresh(
         &self,
         tier: entry::MemoryTier,
         name: &str,

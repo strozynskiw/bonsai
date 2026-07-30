@@ -47,7 +47,7 @@ impl MemoryWriteTool {
         Self { memory }
     }
 
-    fn save(&self, args: MemoryWriteArgs) -> Result<ToolOutput> {
+    async fn save(&self, args: MemoryWriteArgs) -> Result<ToolOutput> {
         let tier = match args.tier.as_deref() {
             Some("user") => MemoryTier::User,
             Some("project") => MemoryTier::Project,
@@ -106,7 +106,10 @@ impl MemoryWriteTool {
             );
         }
 
-        let written = store.write(tier, entry_type, name, description, body, None)?;
+        let written = self
+            .memory
+            .write(tier, entry_type, name, description, body, None)
+            .await?;
         self.memory.note_captured(&written.entry.name);
         let summary = if written.created {
             format!("remembered: {}", written.entry.description)
@@ -215,7 +218,7 @@ impl Tool for MemoryWriteTool {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: MemoryWriteArgs = parse_args("memory_write", args)?;
         match args.action.as_str() {
-            "save" => self.save(args),
+            "save" => self.save(args).await,
             "forget" => self.forget(args).await,
             other => bail!("unknown action {other:?} (expected save or forget)"),
         }

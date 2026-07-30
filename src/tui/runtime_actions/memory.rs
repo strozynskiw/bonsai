@@ -110,56 +110,40 @@ pub(super) async fn submit_memory_add_wizard(app: &mut AppState, deps: RuntimeAc
     };
     let result = match &editing {
         // Create: slug from the description, suffixing on collisions.
-        None => memory
-            .store()
-            .write(tier, entry_type, None, &description, &body, Some(enabled)),
+        None => {
+            memory
+                .write(tier, entry_type, None, &description, &body, Some(enabled))
+                .await
+        }
         // Edit in place: same tier and name, `created` preserved.
-        Some((orig_tier, orig_name)) if *orig_tier == tier => memory.store().write(
-            tier,
-            entry_type,
-            Some(orig_name),
-            &description,
-            &body,
-            Some(enabled),
-        ),
+        Some((orig_tier, orig_name)) if *orig_tier == tier => {
+            memory
+                .write(
+                    tier,
+                    entry_type,
+                    Some(orig_name),
+                    &description,
+                    &body,
+                    Some(enabled),
+                )
+                .await
+        }
         // Tier move: `write` with an explicit name updates in place, so an
         // unrelated same-name entry in the target tier must be refused rather
         // than clobbered. Write-first ordering: a failure between the two
         // steps leaves a duplicate, never a lost entry.
         Some((orig_tier, orig_name)) => {
-            if memory.store().get_exact(tier, orig_name).is_some() {
-                if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard {
-                    state,
-                })) = app.modal.as_mut()
-                {
-                    state.error = Some(format!(
-                        "A {} entry named {orig_name:?} already exists; delete it first to move this one.",
-                        tier.label()
-                    ));
-                }
-                return;
-            }
-            let written = memory.store().write(
-                tier,
-                entry_type,
-                Some(orig_name),
-                &description,
-                &body,
-                Some(enabled),
-            );
-            if written.is_ok()
-                && let Err(err) = memory.forget_exact(*orig_tier, orig_name).await
-            {
-                push_command_message(
-                    app,
-                    CommandOutputKind::Error,
-                    &format!(
-                        "Moved memory entry {orig_name} but could not remove the old {} copy: {err:#}",
-                        orig_tier.label()
-                    ),
-                );
-            }
-            written
+            memory
+                .move_entry(
+                    *orig_tier,
+                    tier,
+                    orig_name,
+                    entry_type,
+                    &description,
+                    &body,
+                    enabled,
+                )
+                .await
         }
     };
     match result {

@@ -1024,7 +1024,7 @@ impl Tool for ApplyPatchTool {
         }
         for evidence in &preflighted {
             let post = async {
-                write_guard.post_file_write(evidence).await;
+                write_guard.post_file_write_hook(evidence).await;
                 Ok(())
             };
             match workspace_lock.as_ref() {
@@ -1034,6 +1034,9 @@ impl Tool for ApplyPatchTool {
                 None => post.await?,
             }
         }
+        write_guard
+            .notify_memory_changes(preflighted.iter().map(|evidence| evidence.args_path))
+            .await;
 
         if let Some(diff) = structured_diff {
             let stats = diff.stats();

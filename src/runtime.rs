@@ -283,6 +283,7 @@ impl RuntimeBuilder {
             active_session_id.clone(),
             session_project_root.clone(),
         ));
+        memory.attach_peer_bus(peer_bus.clone());
 
         let mcp_permissions = PermissionManager::load_mcp(storage.clone(), project_id).await?;
         let extensions = Arc::new(crate::extension::status::ExtensionRegistry::new());

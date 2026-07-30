@@ -51,6 +51,7 @@ pub(crate) struct FileMutationGuard<'a> {
     workspace_locks: &'a WorkspaceLockContext,
     policy: &'a ActionPolicy,
     action: FileMutationAction,
+    memory: Option<&'a Arc<crate::memory::MemoryService>>,
 }
 
 impl<'a> FileMutationGuard<'a> {
@@ -71,6 +72,7 @@ impl<'a> FileMutationGuard<'a> {
             workspace_locks,
             policy,
             action,
+            memory: None,
         }
     }
 
@@ -234,6 +236,12 @@ impl<'a> FileMutationGuard<'a> {
     /// has fully committed. The evidence is the same `FileDiff` preflighted
     /// before the write.
     pub(crate) async fn post_file_write(&self, preflighted: &PreflightedFileWrite<'_>) {
+        self.post_file_write_hook(preflighted).await;
+        self.notify_memory_changes(std::iter::once(preflighted.args_path))
+            .await;
+    }
+
+    pub(crate) async fn post_file_write_hook(&self, preflighted: &PreflightedFileWrite<'_>) {
         let rendered_diff = preflighted.diff.render_for_hook();
         let outcome = self
             .hooks
@@ -248,6 +256,28 @@ impl<'a> FileMutationGuard<'a> {
             )
             .await;
         log_hook_warnings(&outcome.warnings);
+    }
+
+    fn is_project_memory_path(&self, path: &str) -> bool {
+        self.resolve_path(path)
+            .ok()
+            .and_then(|resolved| resolved.project_relative_path)
+            .is_some_and(|relative| relative.starts_with(Path::new(".bonsai/memory")))
+    }
+
+    pub(crate) async fn notify_memory_changes<'path>(
+        &self,
+        paths: impl IntoIterator<Item = &'path str>,
+    ) {
+        let changed = paths
+            .into_iter()
+            .any(|path| self.is_project_memory_path(path));
+        if changed && let Some(memory) = self.memory {
+            memory.refresh();
+            memory
+                .publish_refresh(crate::memory::entry::MemoryTier::Project)
+                .await;
+        }
     }
 
     /// Commit one already-authorized and already-preflighted file image.
@@ -319,7 +349,7 @@ impl<'a> FileMutationGuard<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PreflightedFileWrite<'a> {
     tool_name: &'a str,
-    args_path: &'a str,
+    pub(crate) args_path: &'a str,
     diff: &'a FileDiff,
 }
 
@@ -398,6 +428,14 @@ fn log_hook_warnings(warnings: &[String]) {
 macro_rules! file_mutation_tool_ctors {
     ($tool:ty) => {
         impl $tool {
+            pub(crate) fn with_memory(
+                mut self,
+                memory: Option<std::sync::Arc<crate::memory::MemoryService>>,
+            ) -> Self {
+                self.ctx.set_memory(memory);
+                self
+            }
+
             #[cfg(test)]
             pub fn new(project_root: PathBuf, read_tracker: ReadTracker) -> Self {
                 Self::with_yolo_mode(project_root, read_tracker, YoloMode::new())
@@ -452,9 +490,14 @@ pub(crate) struct FileMutationContext {
     hooks: Arc<HookEngine>,
     workspace_locks: WorkspaceLockContext,
     policy: ActionPolicy,
+    memory: Option<Arc<crate::memory::MemoryService>>,
 }
 
 impl FileMutationContext {
+    pub(crate) fn set_memory(&mut self, memory: Option<Arc<crate::memory::MemoryService>>) {
+        self.memory = memory;
+    }
+
     pub(crate) fn new_with_locks(
         project_root: PathBuf,
         read_tracker: ReadTracker,
@@ -471,11 +514,12 @@ impl FileMutationContext {
             hooks,
             workspace_locks,
             policy,
+            memory: None,
         }
     }
 
     pub(crate) fn guard(&self, action: FileMutationAction) -> FileMutationGuard<'_> {
-        FileMutationGuard::new(
+        let mut guard = FileMutationGuard::new(
             &self.project_root,
             &self.read_tracker,
             &self.yolo_mode,
@@ -483,7 +527,9 @@ impl FileMutationContext {
             &self.workspace_locks,
             &self.policy,
             action,
-        )
+        );
+        guard.memory = self.memory.as_ref();
+        guard
     }
 
     /// The shared freshness ledger used to plan mutations before the guard
@@ -938,6 +984,36 @@ mod tests {
         assert_eq!(request.project_relative_path, Some(project_relative_path));
         assert_eq!(request.mark_read_path, Some(read_tracking_path));
         assert!(request.workspace_lock.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn memory_path_detection_uses_resolved_project_relative_path() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TestFixture::new();
+        let memory_dir = fixture.project_root.join(".bonsai/memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        let symlink_path = fixture.project_root.join("memory-link");
+        symlink(&memory_dir, &symlink_path).unwrap();
+        let yolo_mode = YoloMode::new();
+        let hooks = Arc::new(HookEngine::disabled());
+        let workspace_locks = WorkspaceLockContext::disabled(fixture.project_root.clone());
+        let policy = ActionPolicy::testing();
+        let guard = FileMutationGuard::new(
+            &fixture.project_root,
+            &fixture.read_tracker,
+            &yolo_mode,
+            &hooks,
+            &workspace_locks,
+            &policy,
+            FileMutationAction::Write,
+        );
+        let canonical = memory_dir.join("canonical.md");
+        let through_symlink = symlink_path.join("linked.md");
+
+        assert!(guard.is_project_memory_path(canonical.to_str().unwrap()));
+        assert!(guard.is_project_memory_path(through_symlink.to_str().unwrap()));
     }
 
     #[tokio::test]

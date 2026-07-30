@@ -5,6 +5,7 @@
 //! updated synchronously by [`MemoryStore::write`]/[`MemoryStore::delete`].
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, bail};
 
@@ -17,6 +18,7 @@ use crate::util::time::{now_ms, utc_date_string};
 
 /// How many `-2`-style suffixes to try before giving up on a create collision.
 const MAX_NAME_SUFFIX: usize = 100;
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The two-tier store. `entries` is kept sorted `(tier, name)` so every
 /// consumer (index, list, retrieval) sees a deterministic order.
@@ -24,11 +26,13 @@ pub(crate) struct MemoryStore {
     user_dir: PathBuf,
     project_dir: PathBuf,
     entries: std::sync::RwLock<Vec<MemoryEntry>>,
+    mutation_gate: std::sync::Mutex<()>,
 }
 
 /// Result of a [`MemoryStore::write`]: the stored entry, the previous file
 /// content when it replaced one (for diff rendering), and whether it created a
 /// new file.
+#[derive(Debug)]
 pub(crate) struct WrittenEntry {
     pub entry: MemoryEntry,
     pub previous: Option<String>,
@@ -50,6 +54,7 @@ impl MemoryStore {
             user_dir,
             project_dir: project_root.join(".bonsai/memory"),
             entries: std::sync::RwLock::new(Vec::new()),
+            mutation_gate: std::sync::Mutex::new(()),
         };
         store.reload();
         store
@@ -57,6 +62,11 @@ impl MemoryStore {
 
     /// Re-scan both tiers, replacing the in-memory snapshot.
     pub(crate) fn reload(&self) {
+        let _mutation = self.mutation_gate.lock().expect("memory mutation lock");
+        self.reload_inner();
+    }
+
+    fn reload_inner(&self) {
         let mut entries = Vec::new();
         for (tier, dir) in [
             (MemoryTier::User, &self.user_dir),
@@ -137,6 +147,7 @@ impl MemoryStore {
         body: &str,
         enabled: Option<bool>,
     ) -> anyhow::Result<WrittenEntry> {
+        let _mutation = self.mutation_gate.lock().expect("memory mutation lock");
         if tier == MemoryTier::User && self.user_dir.as_os_str().is_empty() {
             bail!("user-tier memory is unavailable: no bonsai home directory");
         }
@@ -203,9 +214,123 @@ impl MemoryStore {
         })
     }
 
+    /// Create an entry without replacing any file chosen concurrently by
+    /// another process. Name collisions advance to the next numeric suffix.
+    pub(crate) fn create(
+        &self,
+        tier: MemoryTier,
+        entry_type: MemoryEntryType,
+        description: &str,
+        body: &str,
+        enabled: Option<bool>,
+    ) -> anyhow::Result<WrittenEntry> {
+        let _mutation = self.mutation_gate.lock().expect("memory mutation lock");
+        let description = normalize_description(description);
+        if description.is_empty() {
+            bail!("memory entries need a non-empty description");
+        }
+        let slug = slugify(&description);
+        if !is_valid_name(&slug) {
+            bail!("description does not reduce to a usable name: {slug:?}");
+        }
+        for suffix in 1..=MAX_NAME_SUFFIX {
+            let name = if suffix == 1 {
+                slug.clone()
+            } else {
+                format!("{slug}-{suffix}")
+            };
+            if name.len() > crate::memory::entry::MAX_NAME_CHARS {
+                continue;
+            }
+            if let Some(written) = self.create_exact_inner(
+                tier,
+                entry_type,
+                &name,
+                &description,
+                body,
+                enabled.unwrap_or(true),
+            )? {
+                return Ok(written);
+            }
+        }
+        bail!("too many memory entries named like {slug:?}")
+    }
+
+    /// Create one exact name, refusing to replace an existing destination.
+    pub(crate) fn create_exact(
+        &self,
+        tier: MemoryTier,
+        entry_type: MemoryEntryType,
+        name: &str,
+        description: &str,
+        body: &str,
+        enabled: bool,
+    ) -> anyhow::Result<WrittenEntry> {
+        let _mutation = self.mutation_gate.lock().expect("memory mutation lock");
+        if !is_valid_name(name) {
+            bail!("not a valid memory name (kebab-case, max 64 chars): {name:?}");
+        }
+        let description = normalize_description(description);
+        if description.is_empty() {
+            bail!("memory entries need a non-empty description");
+        }
+        self.create_exact_inner(tier, entry_type, name, &description, body, enabled)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "a {} memory entry named {name:?} already exists",
+                    tier.label()
+                )
+            })
+    }
+
+    fn create_exact_inner(
+        &self,
+        tier: MemoryTier,
+        entry_type: MemoryEntryType,
+        name: &str,
+        description: &str,
+        body: &str,
+        enabled: bool,
+    ) -> anyhow::Result<Option<WrittenEntry>> {
+        if tier == MemoryTier::User && self.user_dir.as_os_str().is_empty() {
+            bail!("user-tier memory is unavailable: no bonsai home directory");
+        }
+        let today = utc_date_string(now_ms());
+        let entry = MemoryEntry {
+            tier,
+            name: name.to_string(),
+            description: description.to_string(),
+            entry_type,
+            enabled,
+            created: today.clone(),
+            updated: today,
+            body: normalize_body(body),
+            content_hash: String::new(),
+            path: self.dir(tier).join(format!("{name}.md")),
+        };
+        let rendered = render_memory_file(&entry);
+        let entry = MemoryEntry {
+            content_hash: blake3::hash(rendered.as_bytes()).to_hex().to_string(),
+            ..entry
+        };
+        if !write_new_atomically(&entry.path, &rendered)? {
+            return Ok(None);
+        }
+        let mut entries = self.entries.write().expect("memory store lock");
+        entries.retain(|other| !(other.tier == tier && other.name == name));
+        entries.push(entry.clone());
+        entries.sort_by(|a, b| (a.tier, &a.name).cmp(&(b.tier, &b.name)));
+        Ok(Some(WrittenEntry {
+            entry,
+            previous: None,
+            created: true,
+        }))
+    }
+
     /// Delete an entry by name (project tier wins on a clash, mirroring
     /// [`Self::get`]). Returns the removed file's path.
     pub(crate) fn delete(&self, name: &str) -> anyhow::Result<PathBuf> {
+        let _mutation = self.mutation_gate.lock().expect("memory mutation lock");
         let Some(entry) = self.get(name) else {
             bail!("no memory entry named {name:?}");
         };
@@ -220,6 +345,7 @@ impl MemoryStore {
 
     /// Delete an entry by exact `(tier, name)` identity.
     pub(crate) fn delete_exact(&self, tier: MemoryTier, name: &str) -> anyhow::Result<PathBuf> {
+        let _mutation = self.mutation_gate.lock().expect("memory mutation lock");
         let Some(entry) = self.get_exact(tier, name) else {
             bail!("no memory entry named {name:?} in {tier:?} tier");
         };
@@ -296,13 +422,46 @@ fn write_atomically(path: &Path, content: &str) -> anyhow::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("non-UTF-8 memory path: {}", path.display()))?;
-    let tmp = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    let tmp = dir.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("renaming into place: {}", path.display()))
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })
+}
+
+/// Publish a complete new file atomically, returning false when another
+/// process already created the destination.
+fn write_new_atomically(path: &Path, content: &str) -> anyhow::Result<bool> {
+    let dir = path
+        .parent()
+        .with_context(|| format!("memory path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("non-UTF-8 memory path: {}", path.display()))?;
+    let tmp = dir.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
+    let linked = match std::fs::hard_link(&tmp, path) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err).with_context(|| format!("creating {}", path.display()));
+        }
+    };
+    let _ = std::fs::remove_file(&tmp);
+    Ok(linked)
 }
 
 #[cfg(test)]
@@ -381,20 +540,18 @@ mod tests {
     fn create_collision_gets_numeric_suffix() {
         let (_home, _project, store) = stores();
         let first = store
-            .write(
+            .create(
                 MemoryTier::User,
                 MemoryEntryType::User,
-                None,
                 "Same fact",
                 "a",
                 None,
             )
             .unwrap();
         let second = store
-            .write(
+            .create(
                 MemoryTier::User,
                 MemoryEntryType::User,
-                None,
                 "Same fact",
                 "b",
                 None,
@@ -403,6 +560,70 @@ mod tests {
         assert_eq!(first.entry.name, "same-fact");
         assert_eq!(second.entry.name, "same-fact-2");
         assert!(second.created);
+    }
+
+    #[test]
+    fn concurrent_creates_with_same_description_do_not_clobber() {
+        let (home, project, _) = stores();
+        let first_store = MemoryStore::load(home.path(), project.path());
+        let second_store = MemoryStore::load(home.path(), project.path());
+        let first = std::thread::spawn(move || {
+            first_store.create(
+                MemoryTier::Project,
+                MemoryEntryType::Project,
+                "Concurrent fact",
+                "first",
+                None,
+            )
+        });
+        let second = std::thread::spawn(move || {
+            second_store.create(
+                MemoryTier::Project,
+                MemoryEntryType::Project,
+                "Concurrent fact",
+                "second",
+                None,
+            )
+        });
+
+        let first = first.join().unwrap().unwrap();
+        let second = second.join().unwrap().unwrap();
+        assert_ne!(first.entry.name, second.entry.name);
+        assert!(first.entry.path.is_file());
+        assert!(second.entry.path.is_file());
+    }
+
+    #[test]
+    fn exact_create_refuses_to_replace_existing_file() {
+        let (_home, _project, store) = stores();
+        let first = store
+            .create_exact(
+                MemoryTier::Project,
+                MemoryEntryType::Project,
+                "shared-name",
+                "first",
+                "first body",
+                true,
+            )
+            .unwrap();
+
+        let err = store
+            .create_exact(
+                MemoryTier::Project,
+                MemoryEntryType::Project,
+                "shared-name",
+                "second",
+                "second body",
+                true,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("already exists"));
+        assert!(
+            std::fs::read_to_string(first.entry.path)
+                .unwrap()
+                .contains("first body")
+        );
     }
 
     #[test]

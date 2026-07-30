@@ -88,12 +88,15 @@ pub enum PeerMessageKind {
     /// loop never arms an auto-wake for it — the whole point is zero peer
     /// turns.
     WakeRequest,
+    /// Internal, content-free notification that persistent memory changed.
+    MemoryRefresh,
 }
 
 crate::impl_db_enum!(PeerMessageKind {
     Text => "text",
     DoneNotice => "done_notice",
     WakeRequest => "wake_request",
+    MemoryRefresh => "memory_refresh",
 } else Text);
 
 /// One inter-agent message row, as claimed by the receiving process.
@@ -436,6 +439,47 @@ impl Storage {
                 })
             })
             .collect()
+    }
+
+    /// Fan out a content-free memory refresh to live sessions. Project-tier
+    /// changes stay within `project_id`; user-tier changes reach every live
+    /// session sharing this database. The writer and stale sessions are
+    /// excluded.
+    pub(crate) async fn publish_memory_refresh(
+        &self,
+        project_id: i64,
+        from: SessionId,
+        tier: crate::memory::entry::MemoryTier,
+    ) -> Result<u64> {
+        let live_floor = now_ms().saturating_sub(PEER_LIVENESS_THRESHOLD_MS);
+        let all_projects = tier == crate::memory::entry::MemoryTier::User;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO agent_messages (
+              project_id, from_session_id, to_session_id, kind, body,
+              hop_count, created_at_ms
+            )
+            SELECT ?, ?, sessions.id, ?, '', 0, ?
+            FROM sessions
+            WHERE sessions.status = ?
+              AND sessions.id != ?
+              AND sessions.last_heartbeat_ms >= ?
+              AND (? OR sessions.project_id = ?)
+            "#,
+        )
+        .bind(project_id)
+        .bind(from.as_i64())
+        .bind(PeerMessageKind::MemoryRefresh.as_db_str())
+        .bind(now_ms())
+        .bind(SessionStatus::Active.as_db_str())
+        .bind(from.as_i64())
+        .bind(live_floor)
+        .bind(all_projects)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to publish memory refresh")?;
+        Ok(result.rows_affected())
     }
 
     /// Insert one inter-agent message addressed to `to`. Broadcast is fan-out
@@ -879,9 +923,12 @@ impl Storage {
     pub async fn pending_agent_message_count(&self, to: SessionId) -> Result<i64> {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM agent_messages
-             WHERE to_session_id = ? AND delivered_agent_at_ms IS NULL",
+             WHERE to_session_id = ?
+               AND delivered_agent_at_ms IS NULL
+               AND kind != ?",
         )
         .bind(to.as_i64())
+        .bind(PeerMessageKind::MemoryRefresh.as_db_str())
         .fetch_one(&self.pool)
         .await
         .context("Failed to count pending peer messages")

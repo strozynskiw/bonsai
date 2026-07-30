@@ -968,7 +968,7 @@ async fn apply_non_idle_immediate_command(
         // Memory writes go to the file store, never the live conversation, so
         // they are declared safe mid-run — but they need an arm here (the
         // generic command task can't start while a run holds the task slot).
-        "/remember" => apply_remember_command(input, app, deps.memory.as_deref()),
+        "/remember" => apply_remember_command(input, app, deps.memory.as_deref()).await,
         "/memory" => apply_memory_forget_command(input, app, deps.memory.as_deref()).await,
         "/mode" => {
             app.reduce(AppAction::OpenModal(ModalKind::Picker(
@@ -1019,7 +1019,7 @@ async fn apply_non_idle_immediate_command(
 /// Mid-run `/remember`: writes through the memory service directly (the file
 /// store, agent-lock-free), mirroring the headless handler in
 /// `commands::handlers::common`.
-fn apply_remember_command(
+async fn apply_remember_command(
     input: &str,
     app: &mut AppState,
     memory: Option<&crate::memory::MemoryService>,
@@ -1043,14 +1043,17 @@ fn apply_remember_command(
         crate::memory::entry::MemoryTier::User => crate::memory::entry::MemoryEntryType::Preference,
         crate::memory::entry::MemoryTier::Project => crate::memory::entry::MemoryEntryType::Project,
     };
-    match memory.store().write(
-        request.tier,
-        entry_type,
-        None,
-        &request.fact,
-        &request.fact,
-        None,
-    ) {
+    match memory
+        .write(
+            request.tier,
+            entry_type,
+            None,
+            &request.fact,
+            &request.fact,
+            None,
+        )
+        .await
+    {
         Ok(written) => push_command_message(
             app,
             CommandOutputKind::Status,
