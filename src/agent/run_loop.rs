@@ -1960,6 +1960,13 @@ impl ReadStormGuard {
             {
                 stop_target.get_or_insert_with(|| target.clone());
             }
+            // A rejected call returned no file evidence, so do not let it push
+            // the target permanently above the admission limit. An immediate
+            // repeat still stops through `rejections_by_target`; a turn spent
+            // following the redirect may decay the target and make a later
+            // focused read admissible again.
+            self.turns_by_target
+                .insert(target.clone(), READ_STORM_TARGET_TURN_LIMIT);
             stormed.insert(target);
         }
         if let Some(target) = stop_target {
@@ -1976,11 +1983,15 @@ impl ReadStormGuard {
             .cloned()
             .collect::<Vec<_>>();
         for target in stale {
+            // A different inspection is compliance with the rejection's
+            // redirect, so a later return to this target starts a new strike.
+            // This keeps terminal stops for models that immediately repeat the
+            // rejected call rather than punishing a corrected approach.
+            self.rejections_by_target.remove(&target);
             if let Some(count) = self.turns_by_target.get_mut(&target) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
                     self.turns_by_target.remove(&target);
-                    self.rejections_by_target.remove(&target);
                 }
             }
         }
@@ -2444,7 +2455,7 @@ fn repair_read_only_stop_message() -> String {
 
 fn read_storm_loop_message(target: &str) -> String {
     format!(
-        "Error: repeated read storm detected for {target} after {READ_STORM_TARGET_TURN_LIMIT} prior turns. The current evidence for this target is already in the conversation or restorable through /ctx. Stop re-reading the same file/diff; use the existing evidence, inspect a different target, make a concrete change, ask a focused question if blocked, or provide the final review."
+        "Error: repeated read storm detected for {target} after {READ_STORM_TARGET_TURN_LIMIT} prior turns. The current evidence for this target is already in the conversation or restorable through /ctx. Do not immediately request another range from the same file. For a large source file, navigate symbol-first: use `symbol_search` with the file path and a type/function name, then `read_symbol` for that definition; use `grep` once when you need call sites rather than the definition. Example: `symbol_search {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`, then `read_symbol {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`. Otherwise use the existing evidence, inspect a different target, make a concrete change, ask a focused question if blocked, or provide the final answer. A changed approach clears this rejection; immediately repeating the same target stops the run."
     )
 }
 
@@ -3267,6 +3278,45 @@ mod tests {
     }
 
     #[test]
+    fn read_storm_guard_allows_redirect_before_returning_to_target() {
+        let target = call("read_region", r#"{"path":"src/tui/run/event_loop.rs"}"#);
+        let redirect = call(
+            "symbol_search",
+            r#"{"path":"src/tui/run/event_loop.rs","query":"RuntimeEventDrainDeps"}"#,
+        );
+        let mut guard = ReadStormGuard::default();
+
+        for _ in 0..READ_STORM_TARGET_TURN_LIMIT {
+            assert!(guard.action_for(std::slice::from_ref(&target)).is_none());
+        }
+        assert!(is_storm_reject(
+            guard.action_for(std::slice::from_ref(&target))
+        ));
+        assert!(guard.action_for(&[redirect]).is_none());
+        assert!(
+            guard.action_for(&[target]).is_none(),
+            "following the redirect must clear the rejection strike"
+        );
+    }
+
+    #[test]
+    fn read_storm_guard_stops_an_immediate_repeat_after_rejection() {
+        let target = call("read", r#"{"path":"src/tool/agent.rs"}"#);
+        let mut guard = ReadStormGuard::default();
+
+        for _ in 0..READ_STORM_TARGET_TURN_LIMIT {
+            assert!(guard.action_for(std::slice::from_ref(&target)).is_none());
+        }
+        assert!(is_storm_reject(
+            guard.action_for(std::slice::from_ref(&target))
+        ));
+        assert!(matches!(
+            guard.action_for(&[target]),
+            Some(ReadStormAction::Stop(_))
+        ));
+    }
+
+    #[test]
     fn read_storm_guard_decays_when_path_is_not_seen() {
         let mut guard = ReadStormGuard::default();
         for _ in 0..READ_STORM_TARGET_TURN_LIMIT {
@@ -3307,6 +3357,12 @@ mod tests {
             ))
             .expect("stormed target should be rejected");
         assert!(blocked.contains("src/tool/agent.rs"), "message: {blocked}");
+        assert!(blocked.contains("symbol_search"), "message: {blocked}");
+        assert!(blocked.contains("read_symbol"), "message: {blocked}");
+        assert!(
+            blocked.contains("RuntimeEventDrainDeps"),
+            "message should include a concrete navigation example: {blocked}"
+        );
 
         // A sibling read of a *different* file in the same batch passes through
         // instead of inheriting the stormed file's message.
