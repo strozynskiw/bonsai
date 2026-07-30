@@ -267,6 +267,20 @@ fn planning_prompt_keeps_todos_short_and_context_in_sections() {
 }
 
 #[test]
+fn planning_prompt_requires_a_clean_context_implementation_handoff() {
+    let content = system_content(AgentMode::Planning, "");
+    assert!(content.contains("dedicated `Implementation details` section"));
+    assert!(content.contains("repository-specific change points"));
+    assert!(content.contains("contracts or data flow"));
+    assert!(content.contains("verification anchors"));
+    assert!(
+        content.contains("research conclusions the executor would otherwise have to rediscover")
+    );
+    assert!(content.contains("not pseudocode or a file-by-file edit script"));
+    assert!(content.contains("task or phase arrays remain the execution checklist"));
+}
+
+#[test]
 fn planning_prompt_plans_behavior_not_code() {
     // The user's bar (aligned with Codex plan mode): decision complete — the
     // executor inherits no open choices — but the plan describes behavior,
@@ -321,7 +335,7 @@ fn planning_prompt_requires_evidence_based_precise_plans() {
     assert!(content.contains("Make plans clean and precise"));
     assert!(content.contains("Concise, not sparse"));
     assert!(content.contains("nothing consequential is left to guess"));
-    assert!(content.contains("Context, Goals, Non-goals, Phases, and Validation"));
+    assert!(content.contains("Context, Goals, Non-goals, Risks, Assumptions, and Validation"));
     assert!(content.contains("Do not invent line counts, test counts, performance claims"));
     assert!(content.contains("start with a verb"));
 }

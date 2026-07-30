@@ -1111,6 +1111,44 @@ mod tests {
     }
 
     #[test]
+    fn handoff_markdown_preserves_implementation_details() {
+        let mut doc = PlanDoc::default();
+        doc.set_title("Handoff plan");
+        doc.set_section(
+            "Implementation details",
+            "Change `src/example.rs::run` and preserve its caller contract.",
+        );
+        doc.add_task("Implement the change");
+
+        let markdown = doc.to_markdown_for_handoff();
+
+        assert!(markdown.contains("## Implementation details"));
+        assert!(markdown.contains("`src/example.rs::run`"));
+        assert!(markdown.contains("preserve its caller contract"));
+    }
+
+    #[test]
+    fn legacy_saved_plan_deserializes_and_hands_off_without_implementation_details() {
+        let snapshot = serde_json::json!({
+            "title": "Legacy saved plan",
+            "sections": [{
+                "heading": "Approach",
+                "body": "Preserve snapshots created before the handoff contract."
+            }],
+            "questions": [],
+            "tasks": [{"text": "Implement the legacy plan", "done": false}],
+            "revision": 1
+        });
+        let doc: PlanDoc = serde_json::from_value(snapshot)
+            .expect("legacy saved plan snapshot should remain compatible");
+
+        let markdown = doc.to_markdown_for_handoff();
+
+        assert!(markdown.contains("## Approach"));
+        assert!(markdown.contains("- [ ] Implement the legacy plan"));
+    }
+
+    #[test]
     fn markdown_body_omits_the_title_heading() {
         let mut doc = PlanDoc::default();
         doc.set_title("Feature X");

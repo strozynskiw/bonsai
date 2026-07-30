@@ -236,6 +236,8 @@ struct ReplaceDraftArgs {
     questions: Vec<String>,
 }
 
+const IMPLEMENTATION_DETAILS_HEADING: &str = "Implementation details";
+
 impl ReplaceDraftArgs {
     fn into_plan(self) -> Result<PlanDoc> {
         let ReplaceDraftArgs {
@@ -260,7 +262,6 @@ impl ReplaceDraftArgs {
                 "plans cannot contain open questions; ask the user with the question tool first"
             );
         }
-
         let mut plan = PlanDoc::default();
         {
             let mut editor = plan.edit();
@@ -274,6 +275,17 @@ impl ReplaceDraftArgs {
             for phase in phases {
                 editor.add_phase_with_tasks_checked(&phase.name, &phase.tasks)?;
             }
+        }
+        let has_implementation_details = plan.sections.iter().any(|section| {
+            section
+                .heading
+                .eq_ignore_ascii_case(IMPLEMENTATION_DETAILS_HEADING)
+                && !section.body.trim().is_empty()
+        });
+        if !has_implementation_details {
+            anyhow::bail!(
+                "a plan must include a non-empty '{IMPLEMENTATION_DETAILS_HEADING}' section"
+            );
         }
         Ok(plan)
     }
@@ -334,7 +346,8 @@ impl Tool for PlanReplaceDraftTool {
     }
 
     fn description(&self) -> &str {
-        "Write a complete plan draft atomically in one call: title, ordered sections, and \
+        "Write a complete plan draft atomically in one call: title, ordered sections including \
+         a non-empty `Implementation details` handoff section, and \
          either flat tasks or phases. Use this for the initial canvas and \
          wholesale restructuring; it preserves structured review findings. Empty collection \
          fields may be omitted. Declare whether the plan starts a distinct user topic; \
@@ -363,7 +376,7 @@ impl Tool for PlanReplaceDraftTool {
                 (
                     "sections",
                     array_property(
-                        "Ordered concise plan sections",
+                        "Ordered concise plan sections; must include a non-empty `Implementation details` section for the coding-agent handoff",
                         closed_object(
                             [
                                 ("heading", string_property("Section heading")),
@@ -404,7 +417,7 @@ impl Tool for PlanReplaceDraftTool {
                     ),
                 ),
             ],
-            &["title", "episode_action"],
+            &["title", "episode_action", "sections"],
         )
     }
 
@@ -1161,7 +1174,10 @@ mod tests {
         tool.execute(serde_json::json!({
             "title": "Fast plan",
             "episode_action": "new_topic",
-            "sections": [{"heading": "Approach", "body": "Change it once."}],
+            "sections": [{
+                "heading": "Implementation details",
+                "body": "Change the existing execution path once."
+            }],
             "tasks": ["Implement change", "Run tests"],
             "phases": [],
             "questions": []
@@ -1207,22 +1223,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replace_draft_defaults_omitted_empty_collections() {
+    async fn replace_draft_requires_implementation_details_and_defaults_other_collections() {
         let store = store();
         let tool = plan_replace_tool(store.clone()).await;
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
 
-        for optional in ["sections", "tasks", "phases"] {
+        assert!(required.contains(&serde_json::json!("sections")));
+        for optional in ["tasks", "phases"] {
             assert!(
                 !required.contains(&serde_json::json!(optional)),
                 "{optional} should default to an empty collection"
             );
         }
 
+        let missing_handoff = tool
+            .execute(serde_json::json!({
+                "title": "Sparse plan",
+                "episode_action": "same_topic",
+                "sections": [{"heading": "Overview", "body": "Change it."}],
+                "tasks": ["Implement the change"]
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            missing_handoff
+                .to_string()
+                .contains("non-empty 'Implementation details' section")
+        );
+
+        let overwritten_handoff = tool
+            .execute(serde_json::json!({
+                "title": "Overwritten handoff",
+                "episode_action": "same_topic",
+                "sections": [
+                    {"heading": "Implementation details", "body": "Useful detail."},
+                    {"heading": "implementation DETAILS", "body": ""}
+                ],
+                "tasks": ["Implement the change"]
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            overwritten_handoff
+                .to_string()
+                .contains("non-empty 'Implementation details' section")
+        );
+
         tool.execute(serde_json::json!({
             "title": "Flat plan",
             "episode_action": "same_topic",
+            "sections": [{
+                "heading": "implementation DETAILS",
+                "body": "Update the existing execution path."
+            }],
             "tasks": ["Implement the change"]
         }))
         .await
@@ -1230,7 +1284,7 @@ mod tests {
 
         let plan = store.lock().await;
         assert_eq!(plan.tasks.len(), 1);
-        assert!(plan.sections.is_empty());
+        assert_eq!(plan.sections.len(), 1);
         assert!(plan.phases.is_empty());
         assert!(plan.questions.is_empty());
     }
