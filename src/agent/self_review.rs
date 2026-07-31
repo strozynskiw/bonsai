@@ -128,6 +128,8 @@ impl SelfReviewState {
         self.typed_paths.clear();
         self.bash_window_paths.clear();
         self.unscoped_mutation = false;
+        self.pending_run_index = None;
+        self.pending_run_mutated = false;
     }
 
     pub(super) fn disarm(&mut self) {
@@ -141,6 +143,12 @@ impl SelfReviewState {
         self.typed_paths.clear();
         self.bash_window_paths.clear();
         self.unscoped_mutation = false;
+    }
+
+    /// Clear every task/session-owned review field while preserving the
+    /// operator's configured review mode.
+    pub(super) fn reset_for_new_session(&mut self) {
+        *self = Self::with_mode(self.mode);
     }
 
     /// Record a successful mutation-tool call. `paths` are known agent-owned
@@ -566,6 +574,7 @@ impl Agent {
     }
 
     pub(crate) fn restore_self_review_runs(&mut self, runs: Vec<SelfReviewRunRecord>) {
+        self.self_review.reset_for_new_session();
         self.self_review_runs = runs;
     }
 
@@ -692,6 +701,37 @@ mod tests {
         assert!(reset.typed_paths().is_empty());
         assert!(reset.bash_window_paths().is_empty());
         assert_eq!(reset.review_scope(), None);
+    }
+
+    #[test]
+    fn arming_new_task_abandons_pending_disposition() {
+        let mut state = SelfReviewState::with_mode(SelfReviewMode::On);
+        state.begin_disposition_tracking(7);
+        state.note_typed_mutation(vec!["src/lib.rs".to_string()]);
+
+        state.arm(None, Some("new task".to_string()));
+
+        assert_eq!(state.take_pending_disposition(), None);
+        assert!(!state.workspace_mutated());
+        assert_eq!(state.request(), Some("new task"));
+    }
+
+    #[test]
+    fn new_session_reset_preserves_mode_and_clears_pending_disposition() {
+        let mut state = SelfReviewState::with_mode(SelfReviewMode::On);
+        state.arm(None, Some("old task".to_string()));
+        state.note_typed_mutation(vec!["src/lib.rs".to_string()]);
+        state.begin_disposition_tracking(7);
+
+        state.reset_for_new_session();
+
+        assert_eq!(state.mode(), SelfReviewMode::On);
+        assert!(!state.is_armed());
+        assert_eq!(state.baseline(), None);
+        assert_eq!(state.request(), None);
+        assert!(state.checks_run().is_empty());
+        assert_eq!(state.take_pending_disposition(), None);
+        assert!(!state.workspace_mutated());
     }
 
     #[test]

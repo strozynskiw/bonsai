@@ -151,6 +151,17 @@ impl LifetimeTotals {
     }
 }
 
+/// Cross-session quality-evidence rows quarantined from aggregate reporting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QualityEvidenceIntegrity {
+    /// Exact verification rows excluded from trust because the same evidence
+    /// fingerprint occurs in more than one durable session.
+    pub quarantined_verification_runs: i64,
+    /// Exact self-review rows excluded from aggregate effectiveness metrics
+    /// because the same fingerprint occurs in more than one durable session.
+    pub quarantined_self_review_runs: i64,
+}
+
 /// Everything the `/usage` modal renders, loaded in one call so the modal
 /// variant owns immutable data and rendering stays pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +181,8 @@ pub struct UsageDashboard {
     /// Ordered by call count, descending.
     pub tools: Vec<ToolUsage>,
     pub self_review: crate::self_review::SelfReviewStats,
+    /// Exact cross-session duplicates excluded from trusted quality metrics.
+    pub quality_evidence: QualityEvidenceIntegrity,
     pub lifetime: LifetimeTotals,
 }
 
@@ -223,7 +236,12 @@ impl Storage {
         let projects = self.load_project_usage(8).await?;
         let status_counts = self.load_session_status_counts().await?;
         let tools = self.load_tool_usage().await?;
-        let self_review = self.load_self_review_stats().await?;
+        let (self_review, quarantined_self_review_runs) =
+            self.load_self_review_stats_with_quarantine().await?;
+        let quality_evidence = QualityEvidenceIntegrity {
+            quarantined_verification_runs: self.load_quarantined_verification_run_count().await?,
+            quarantined_self_review_runs,
+        };
         let lifetime = self.load_lifetime_totals().await?;
         Ok(UsageDashboard {
             today,
@@ -235,6 +253,7 @@ impl Storage {
             status_counts,
             tools,
             self_review,
+            quality_evidence,
             lifetime,
         })
     }
@@ -543,6 +562,7 @@ mod derived_tests {
             status_counts: Vec::new(),
             tools: Vec::new(),
             self_review: Default::default(),
+            quality_evidence: Default::default(),
             lifetime: LifetimeTotals::default(),
         }
     }

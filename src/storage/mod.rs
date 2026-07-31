@@ -46,6 +46,7 @@ mod peers;
 mod permissions;
 mod plans;
 mod providers;
+mod quality_evidence;
 mod read_evidence;
 mod recovery;
 mod self_review;
@@ -73,7 +74,9 @@ pub use peers::{
 };
 pub use permissions::{PermissionScope, RuleKind, StoredPermissionRule};
 pub(crate) use recovery::{NewRecoveryPoint, RecoveryId, RecoveryPoint, RecoveryState};
-pub use usage_stats::{DailyUsage, LocalToday, ModelUsage, UsageDashboard};
+pub use usage_stats::{
+    DailyUsage, LocalToday, ModelUsage, QualityEvidenceIntegrity, UsageDashboard,
+};
 pub(crate) use workspace_locks::WorkspaceLeaseFence;
 pub use workspace_locks::WorkspaceLockGuard;
 
@@ -492,6 +495,21 @@ impl Storage {
     /// open transaction and a single `now` timestamp shared by all its writes;
     /// it is responsible for its own DELETE/INSERT statements and for calling
     /// [`touch_session`] where the session's `updated_at_ms` should advance.
+    pub(crate) async fn replace_quality_evidence_snapshot(
+        &self,
+        session_id: SessionId,
+        verification_runs: &[crate::verification::VerificationRunRecord],
+        self_review_runs: &[crate::self_review::SelfReviewRunRecord],
+    ) -> Result<()> {
+        self.with_session_snapshot_tx("quality evidence snapshot", async move |tx, now| {
+            self.replace_verification_runs_snapshot_in_tx(tx, session_id, verification_runs, now)
+                .await?;
+            self.replace_self_review_runs_snapshot_in_tx(tx, session_id, self_review_runs, now)
+                .await
+        })
+        .await
+    }
+
     pub(crate) async fn with_session_snapshot_tx<F>(
         &self,
         label: &'static str,

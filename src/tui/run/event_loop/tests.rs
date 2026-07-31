@@ -352,6 +352,51 @@ fn sample_plan(title: &str) -> crate::plan::PlanDoc {
     plan
 }
 
+fn sample_verification_run(
+    started_at_ms: i64,
+    command: &str,
+) -> crate::verification::VerificationRunRecord {
+    crate::verification::VerificationRunRecord {
+        kind: crate::verification::VerificationKind::Test,
+        status: crate::verification::VerificationRunStatus::Passed,
+        checks: vec![crate::verification::VerificationCheckRecord {
+            name: "Rust tests".to_string(),
+            command: command.to_string(),
+            status: crate::verification::VerificationCheckStatus::Passed,
+            tool_call_id: Some(format!("call-{started_at_ms}")),
+            exit_code: Some(0),
+            completed_at_ms: Some(started_at_ms + 10),
+            attempt_count: 1,
+            last_failure_signature: None,
+        }],
+        started_at_ms,
+        finished_at_ms: Some(started_at_ms + 20),
+        observed_final_workspace: Some(true),
+        workspace_changes_after_last_check: Vec::new(),
+        repair_attempts: 0,
+        reasoning_escalations: Vec::new(),
+        terminal_reason: None,
+    }
+}
+
+fn sample_self_review_run(
+    started_at_ms: i64,
+    diff_line_count: u32,
+) -> crate::self_review::SelfReviewRunRecord {
+    crate::self_review::SelfReviewRunRecord {
+        started_at_ms,
+        mode: crate::self_review::SelfReviewMode::Auto,
+        scope: crate::self_review::SelfReviewScope::Scoped,
+        diff_line_count,
+        reviewer_duration_ms: 25,
+        reviewer_prompt_tokens: 100,
+        reviewer_completion_tokens: 20,
+        reviewer_cost_micros: Some(5),
+        findings: crate::self_review::SelfReviewFindingCounts::default(),
+        disposition: Some(crate::self_review::SelfReviewDisposition::NoneNeeded),
+    }
+}
+
 #[tokio::test]
 async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
     let temp_dir = tempfile::TempDir::new().unwrap();
@@ -380,7 +425,12 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
             )
             .await
             .unwrap();
-        agent.clear().await;
+        agent.restore_verification_runs(vec![sample_verification_run(
+            1_700_000_000_000,
+            "cargo test --locked",
+        )]);
+        agent.restore_self_review_runs(vec![sample_self_review_run(1_700_000_000_100, 4)]);
+        agent.clear_for_session_rotation().await;
     }
     let command = CommandOutcomeEvent::Applied {
         generation: None,
@@ -421,6 +471,13 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
         Some(crate::episode::EpisodeCloseReason::HardBoundary)
     );
     assert_eq!(outgoing[0].status(), crate::episode::EpisodeStatus::Closed);
+    let outgoing_snapshot = storage
+        .load_session_snapshot(old_session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outgoing_snapshot.verification_runs.len(), 1);
+    assert_eq!(outgoing_snapshot.self_review_runs.len(), 1);
     assert!(
         agent
             .lock()
@@ -437,6 +494,29 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
             .unwrap()
             .is_empty()
     );
+    persist_changed_snapshots(
+        &storage,
+        current_session_id,
+        &mut app,
+        agent.clone(),
+        &mut signatures,
+    )
+    .await;
+    persist_changed_snapshots(
+        &storage,
+        current_session_id,
+        &mut app,
+        agent.clone(),
+        &mut signatures,
+    )
+    .await;
+    let rotated = storage
+        .load_session_snapshot(current_session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rotated.verification_runs.is_empty());
+    assert!(rotated.self_review_runs.is_empty());
 }
 
 #[tokio::test]
@@ -4458,6 +4538,48 @@ async fn commit_handoff_starts_coding_agent_with_commit_workflow_prompt() {
 }
 
 #[tokio::test]
+async fn init_handoff_starts_coding_agent_with_project_aware_workflow_prompt() {
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let (provider, requests) = CapturingProvider::new();
+    let agent = test_agent(Box::new(provider));
+    let mut app = app();
+
+    let started = initialize_agents_md(&mut app, &mut tasks, agent, Arc::new(NullSink)).await;
+
+    assert!(started, "init command should start a focused agent run");
+    assert_eq!(app.view, View::Agent);
+    assert_eq!(app.task_state, TaskState::Running);
+    assert_eq!(app.active_mode(), AgentMode::Coding);
+    assert!(tasks.is_busy());
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while tasks.poll_finished().await.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("init workflow run should finish");
+
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .iter()
+            .any(|message| message.contains("project-aware root `AGENTS.md`")),
+        "request messages: {:?}",
+        requests[0]
+    );
+    assert!(
+        requests[0]
+            .iter()
+            .any(|message| message.contains("exactly two choices")),
+        "request messages: {:?}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
 async fn pr_handoff_starts_coding_agent_with_pr_workflow_prompt() {
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
@@ -5919,6 +6041,16 @@ async fn resume_without_argument_restores_latest_prior_project_session() {
         )
         .await
         .unwrap();
+    let prior_verification = sample_verification_run(1_700_000_001_000, "cargo test --workspace");
+    let prior_review = sample_self_review_run(1_700_000_001_100, 8);
+    storage
+        .replace_verification_runs_snapshot(prior_id, std::slice::from_ref(&prior_verification))
+        .await
+        .unwrap();
+    storage
+        .replace_self_review_runs_snapshot(prior_id, std::slice::from_ref(&prior_review))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(2)).await;
     let current_id = storage
         .start_session(
@@ -5947,13 +6079,21 @@ async fn resume_without_argument_restores_latest_prior_project_session() {
         signatures: &mut signatures,
     };
     let mut app = app();
+    let agent = test_agent(Box::new(CompleteProvider));
+    let outgoing_verification = sample_verification_run(1_700_000_002_000, "cargo test --locked");
+    let outgoing_review = sample_self_review_run(1_700_000_002_100, 4);
+    {
+        let mut agent = agent.lock().await;
+        agent.restore_verification_runs(vec![outgoing_verification.clone()]);
+        agent.restore_self_review_runs(vec![outgoing_review.clone()]);
+    }
 
     apply_persistence_command(
         PersistenceCommand::Resume(""),
         &mut app,
         PersistenceCommandDeps {
             storage: &storage,
-            agent: test_agent(Box::new(CompleteProvider)),
+            agent: agent.clone(),
             memory: None,
             session_store,
             registry,
@@ -5985,6 +6125,39 @@ async fn resume_without_argument_restores_latest_prior_project_session() {
     assert!(app.transcript.iter().any(|item| {
         matches!(item, TranscriptItem::UserMessage { text } if text == "restore me")
     }));
+    {
+        let agent = agent.lock().await;
+        assert_eq!(
+            agent.verification_runs(),
+            std::slice::from_ref(&prior_verification)
+        );
+        assert_eq!(
+            agent.self_review_runs(),
+            std::slice::from_ref(&prior_review)
+        );
+    }
+    persist_changed_snapshots(
+        &storage,
+        *state.current_session_id,
+        &mut app,
+        agent.clone(),
+        state.signatures,
+    )
+    .await;
+    let resumed = storage
+        .load_session_snapshot(prior_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.verification_runs, [prior_verification]);
+    assert_eq!(resumed.self_review_runs, [prior_review]);
+    let outgoing = storage
+        .load_session_snapshot(current_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outgoing.verification_runs, [outgoing_verification]);
+    assert_eq!(outgoing.self_review_runs, [outgoing_review]);
     // The resume confirmation is now an ephemeral toast, not a persisted
     // transcript row — so resumes don't accumulate "Resumed session #N" lines.
     assert_eq!(

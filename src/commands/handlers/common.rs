@@ -454,23 +454,6 @@ pub(crate) async fn handle_command_with_catalog(
                 .messages
                 .push(error("Usage: /tasks or /tasks stop <id>".to_string())),
         },
-        Some("/init") => {
-            let path = project_root.join("AGENTS.md");
-            if path.exists() {
-                outcome.messages.push(status(
-                    "AGENTS.md already exists — not overwriting. Edit it directly.",
-                ));
-            } else {
-                match std::fs::write(&path, starter_agents_md(project_root)) {
-                    Ok(()) => outcome.messages.push(status(
-                        "Created AGENTS.md — edit it to steer the agent; it loads automatically on next launch.",
-                    )),
-                    Err(err) => outcome
-                        .messages
-                        .push(error(format!("Failed to write AGENTS.md: {err}"))),
-                }
-            }
-        }
         Some("/skills") => match (parts.get(1).copied(), parts.get(2).copied()) {
             (None, _) => {
                 outcome
@@ -608,7 +591,7 @@ pub(crate) async fn handle_command_with_catalog(
             }
         }
         Some("/clear") | Some("/new") => {
-            agent.clear().await;
+            agent.clear_for_session_rotation().await;
             outcome.clear_transcript = true;
             let message = if parts.first() == Some(&"/new") {
                 "Started new session"
@@ -1267,26 +1250,4 @@ fn available_skills_hint(skills: &SkillRegistry) -> String {
     } else {
         format!(" Available: {}.", names.join(", "))
     }
-}
-
-fn starter_agents_md(root: &Path) -> String {
-    let commands = if root.join("Cargo.toml").exists() {
-        "```bash\ncargo build\ncargo test\ncargo clippy --all-targets --all-features -- -D warnings\ncargo fmt --all\n```"
-    } else if root.join("package.json").exists() {
-        "```bash\nnpm install\nnpm test\nnpm run build\n```"
-    } else if root.join("go.mod").exists() {
-        "```bash\ngo build ./...\ngo test ./...\n```"
-    } else {
-        "```bash\n# add your build / test / lint commands\n```"
-    };
-    format!(
-        "# AGENTS.md\n\n\
-         Instructions for AI coding agents working in this repository.\n\n\
-         ## Commands\n\n{commands}\n\n\
-         ## Conventions\n\n\
-         - Describe the code style, naming, and patterns to follow.\n\
-         - Note anything the agent should avoid.\n\n\
-         ## Architecture\n\n\
-         - Briefly describe the project layout and key modules.\n"
-    )
 }

@@ -298,12 +298,21 @@ pub(crate) struct PerfCaches {
 
 /// State for verification workflows (`/test`, `/build`, post-edit verification).
 /// Four fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct VerificationState {
     pub(crate) verification_runs: Vec<crate::verification::VerificationRunRecord>,
     pub(crate) active_verification: Option<ActiveVerificationRun>,
     pub(crate) after_edit_verification_pending: bool,
     pub(crate) after_edit_verification_injected: bool,
+}
+
+/// Quality evidence staged while `/clear` or `/new` rotates the durable
+/// session. The live agent starts empty, while the outgoing rows remain
+/// available for one final persistence flush.
+#[derive(Debug)]
+pub(crate) struct SessionQualityEvidenceSnapshot {
+    pub(crate) verification_runs: Vec<crate::verification::VerificationRunRecord>,
+    pub(crate) self_review_runs: Vec<SelfReviewRunRecord>,
 }
 
 /// Read evidence maps (inspections, mentions, delegation) populated during
@@ -463,6 +472,7 @@ pub struct Agent {
     /// in evals and most unit tests, where it never matches any hook.
     hooks: Arc<crate::hooks::HookEngine>,
     verification: VerificationState,
+    pending_session_quality_evidence: Option<SessionQualityEvidenceSnapshot>,
     /// Whether this context contains a human-submitted turn that `/retry` may
     /// continue without replaying its prompt.
     last_retryable_turn: bool,

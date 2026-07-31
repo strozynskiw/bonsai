@@ -87,71 +87,122 @@ impl Storage {
         .await
         .context("Failed to load self-review runs")?;
 
-        rows.into_iter()
+        rows.iter().map(self_review_run_from_row).collect()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn load_self_review_stats(&self) -> Result<SelfReviewStats> {
+        self.load_self_review_stats_with_quarantine()
+            .await
+            .map(|(stats, _)| stats)
+    }
+
+    pub(super) async fn load_self_review_stats_with_quarantine(
+        &self,
+    ) -> Result<(SelfReviewStats, i64)> {
+        let runs = self.load_all_self_review_runs().await?;
+        let duplicates =
+            super::quality_evidence::duplicate_self_review_fingerprints(runs.as_slice())?;
+        let mut stats = SelfReviewStats::default();
+        let mut quarantined = 0_i64;
+
+        for (_, run) in runs {
+            let fingerprint = super::quality_evidence::self_review_fingerprint(&run)?;
+            if duplicates.contains(&fingerprint) {
+                quarantined = quarantined.saturating_add(1);
+                continue;
+            }
+
+            stats.runs = stats.runs.saturating_add(1);
+            if run.findings.total() > 0 {
+                stats.runs_with_findings = stats.runs_with_findings.saturating_add(1);
+            }
+            match run.disposition {
+                Some(SelfReviewDisposition::Fixed) => {
+                    stats.fixed = stats.fixed.saturating_add(1);
+                }
+                Some(SelfReviewDisposition::NoneNeeded) => {
+                    stats.none_needed = stats.none_needed.saturating_add(1);
+                }
+                Some(SelfReviewDisposition::Rebutted) => {
+                    stats.rebutted = stats.rebutted.saturating_add(1);
+                }
+                None => {}
+            }
+            stats.findings = stats
+                .findings
+                .saturating_add(i64::from(run.findings.total()));
+            stats.reviewer_duration_ms = stats.reviewer_duration_ms.saturating_add(
+                i64::try_from(run.reviewer_duration_ms)
+                    .context("Reviewer duration is out of range")?,
+            );
+            if let Some(cost) = run.reviewer_cost_micros {
+                stats.reviewer_cost_micros = stats
+                    .reviewer_cost_micros
+                    .saturating_add(i64::try_from(cost).context("Reviewer cost is out of range")?);
+            }
+        }
+
+        Ok((stats, quarantined))
+    }
+
+    async fn load_all_self_review_runs(&self) -> Result<Vec<(SessionId, SelfReviewRunRecord)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT session_id, seq, started_at_ms, mode, scope, diff_line_count,
+                   reviewer_duration_ms, reviewer_prompt_tokens,
+                   reviewer_completion_tokens, reviewer_cost_micros,
+                   blocker_count, major_count, minor_count, nit_count, disposition
+            FROM self_review_runs
+            ORDER BY session_id, seq
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to load all self-review runs")?;
+
+        rows.iter()
             .map(|row| {
-                let mode: String = row.try_get("mode")?;
-                let scope: String = row.try_get("scope")?;
-                let disposition: Option<String> = row.try_get("disposition")?;
-                Ok(SelfReviewRunRecord {
-                    started_at_ms: row.try_get("started_at_ms")?,
-                    mode: SelfReviewMode::parse(&mode)
-                        .with_context(|| format!("Unknown self-review mode {mode:?}"))?,
-                    scope: SelfReviewScope::from_label(&scope)
-                        .with_context(|| format!("Unknown self-review scope {scope:?}"))?,
-                    diff_line_count: read_u32(&row, "diff_line_count")?,
-                    reviewer_duration_ms: read_u64(&row, "reviewer_duration_ms")?,
-                    reviewer_prompt_tokens: read_u64(&row, "reviewer_prompt_tokens")?,
-                    reviewer_completion_tokens: read_u64(&row, "reviewer_completion_tokens")?,
-                    reviewer_cost_micros: row
-                        .try_get::<Option<i64>, _>("reviewer_cost_micros")?
-                        .map(|value| u64::try_from(value).context("Reviewer cost is out of range"))
-                        .transpose()?,
-                    findings: SelfReviewFindingCounts {
-                        blocker: read_u32(&row, "blocker_count")?,
-                        major: read_u32(&row, "major_count")?,
-                        minor: read_u32(&row, "minor_count")?,
-                        nit: read_u32(&row, "nit_count")?,
-                    },
-                    disposition: disposition
-                        .map(|value| {
-                            SelfReviewDisposition::from_label(&value).with_context(|| {
-                                format!("Unknown self-review disposition {value:?}")
-                            })
-                        })
-                        .transpose()?,
-                })
+                Ok((
+                    SessionId::from_raw(row.try_get("session_id")?),
+                    self_review_run_from_row(row)?,
+                ))
             })
             .collect()
     }
+}
 
-    pub(super) async fn load_self_review_stats(&self) -> Result<SelfReviewStats> {
-        let row = sqlx::query(
-            r#"
-            SELECT COUNT(*) AS runs,
-                   COALESCE(SUM(CASE WHEN blocker_count + major_count + minor_count + nit_count > 0 THEN 1 ELSE 0 END), 0) AS runs_with_findings,
-                   COALESCE(SUM(CASE WHEN disposition = 'fixed' THEN 1 ELSE 0 END), 0) AS fixed,
-                   COALESCE(SUM(CASE WHEN disposition = 'none_needed' THEN 1 ELSE 0 END), 0) AS none_needed,
-                   COALESCE(SUM(CASE WHEN disposition = 'rebutted' THEN 1 ELSE 0 END), 0) AS rebutted,
-                   COALESCE(SUM(blocker_count + major_count + minor_count + nit_count), 0) AS findings,
-                   COALESCE(SUM(reviewer_duration_ms), 0) AS reviewer_duration_ms,
-                   COALESCE(SUM(reviewer_cost_micros), 0) AS reviewer_cost_micros
-            FROM self_review_runs
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to load self-review stats")?;
-        Ok(SelfReviewStats {
-            runs: row.try_get("runs")?,
-            runs_with_findings: row.try_get("runs_with_findings")?,
-            fixed: row.try_get("fixed")?,
-            none_needed: row.try_get("none_needed")?,
-            rebutted: row.try_get("rebutted")?,
-            findings: row.try_get("findings")?,
-            reviewer_duration_ms: row.try_get("reviewer_duration_ms")?,
-            reviewer_cost_micros: row.try_get("reviewer_cost_micros")?,
-        })
-    }
+fn self_review_run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SelfReviewRunRecord> {
+    let mode: String = row.try_get("mode")?;
+    let scope: String = row.try_get("scope")?;
+    let disposition: Option<String> = row.try_get("disposition")?;
+    Ok(SelfReviewRunRecord {
+        started_at_ms: row.try_get("started_at_ms")?,
+        mode: SelfReviewMode::parse(&mode)
+            .with_context(|| format!("Unknown self-review mode {mode:?}"))?,
+        scope: SelfReviewScope::from_label(&scope)
+            .with_context(|| format!("Unknown self-review scope {scope:?}"))?,
+        diff_line_count: read_u32(row, "diff_line_count")?,
+        reviewer_duration_ms: read_u64(row, "reviewer_duration_ms")?,
+        reviewer_prompt_tokens: read_u64(row, "reviewer_prompt_tokens")?,
+        reviewer_completion_tokens: read_u64(row, "reviewer_completion_tokens")?,
+        reviewer_cost_micros: row
+            .try_get::<Option<i64>, _>("reviewer_cost_micros")?
+            .map(|value| u64::try_from(value).context("Reviewer cost is out of range"))
+            .transpose()?,
+        findings: SelfReviewFindingCounts {
+            blocker: read_u32(row, "blocker_count")?,
+            major: read_u32(row, "major_count")?,
+            minor: read_u32(row, "minor_count")?,
+            nit: read_u32(row, "nit_count")?,
+        },
+        disposition: disposition
+            .map(|value| {
+                SelfReviewDisposition::from_label(&value)
+                    .with_context(|| format!("Unknown self-review disposition {value:?}"))
+            })
+            .transpose()?,
+    })
 }
 
 fn read_u32(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<u32> {

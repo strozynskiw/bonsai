@@ -783,6 +783,43 @@ async fn post_edit_ask_skips_without_an_interactive_surface() {
 }
 
 #[tokio::test]
+async fn resume_replaces_verification_state_and_interrupts_in_flight_run() {
+    let fixture = TestFixture::new();
+    let mut agent = verification_agent_with_policy(&fixture, VerifyAfterEdit::On);
+    agent
+        .begin_verification_run(
+            VerificationKind::Test,
+            &[crate::verification::VerificationCheck {
+                name: "Old check".to_string(),
+                command: "cargo test --locked".to_string(),
+            }],
+            "Run the old check.",
+        )
+        .await;
+    agent.verification.after_edit_verification_pending = true;
+    agent.verification.after_edit_verification_injected = true;
+    let restored = crate::verification::VerificationRunRecord::running(
+        VerificationKind::Build,
+        &[crate::verification::VerificationCheck {
+            name: "Resumed build".to_string(),
+            command: "cargo build --locked".to_string(),
+        }],
+    );
+
+    agent.restore_verification_runs(vec![restored]);
+
+    assert_eq!(agent.verification_runs().len(), 1);
+    assert_eq!(agent.verification_runs()[0].kind, VerificationKind::Build);
+    assert_eq!(
+        agent.verification_runs()[0].status,
+        VerificationRunStatus::Interrupted
+    );
+    assert!(agent.verification.active_verification.is_none());
+    assert!(!agent.verification.after_edit_verification_pending);
+    assert!(!agent.verification.after_edit_verification_injected);
+}
+
+#[tokio::test]
 async fn stale_verification_rearms_at_the_next_edit_quiet_point_even_when_policy_is_off() {
     let fixture = TestFixture::new();
     std::fs::write(

@@ -272,8 +272,10 @@ impl Agent {
                 run.finished_at_ms = Some(now);
             }
         }
-        self.verification.verification_runs = runs;
-        self.verification.active_verification = None;
+        self.verification = VerificationState {
+            verification_runs: runs,
+            ..VerificationState::default()
+        };
     }
 
     pub(super) async fn record_verification_tool_result(

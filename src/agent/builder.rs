@@ -265,6 +265,7 @@ impl Agent {
                 after_edit_verification_pending: false,
                 after_edit_verification_injected: false,
             },
+            pending_session_quality_evidence: None,
             last_retryable_turn: false,
             episode_store: builder.episode_store,
         };

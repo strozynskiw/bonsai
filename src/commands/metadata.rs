@@ -244,9 +244,11 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
     },
     CommandMetadata {
         name: "/init",
-        description: "Generate a starter AGENTS.md for this project",
+        description: "Create or improve concise project AGENTS.md guidance",
         usage_hint: None,
-        surface: both(),
+        surface: tui_only_no_args(
+            "/init is a TUI workflow — type /init inside the bonsai TUI to create project-aware AGENTS.md guidance.",
+        ),
     },
     CommandMetadata {
         name: "/skills",

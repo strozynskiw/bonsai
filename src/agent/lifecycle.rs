@@ -57,7 +57,13 @@ impl Agent {
         self.rebuild_project_system_context();
     }
 
-    pub async fn clear(&mut self) {
+    /// Reset every field owned by one durable session.
+    ///
+    /// `/start`, `/review`, and focused workflows deliberately use
+    /// [`Self::reset_for_hard_boundary`] instead: they replace the working
+    /// context inside the same durable session and must preserve accumulated
+    /// verification and review evidence.
+    pub(crate) async fn reset_for_new_session(&mut self) {
         // Episode hard boundary: must run before the message buffer is
         // replaced, or the active span's end could never be resolved.
         self.close_active_episode_for_hard_boundary();
@@ -73,9 +79,35 @@ impl Agent {
             memory.clear_recalled();
         }
         self.reset_transient_state();
+        self.verification = VerificationState::default();
+        self.self_review.reset_for_new_session();
+        self.self_review_runs.clear();
         self.usage = SessionUsage::default();
         // Loaded skill bodies are gone with the conversation; start fresh.
         self.loaded_skills.clear();
+    }
+
+    /// Clear the current durable conversation and all of its owned evidence.
+    pub async fn clear(&mut self) {
+        self.pending_session_quality_evidence = None;
+        self.reset_for_new_session().await;
+    }
+
+    /// Clear the live conversation while retaining its quality evidence for
+    /// the outgoing durable-session flush performed by the TUI.
+    pub(crate) async fn clear_for_session_rotation(&mut self) {
+        let snapshot = SessionQualityEvidenceSnapshot {
+            verification_runs: std::mem::take(&mut self.verification.verification_runs),
+            self_review_runs: std::mem::take(&mut self.self_review_runs),
+        };
+        self.reset_for_new_session().await;
+        self.pending_session_quality_evidence = Some(snapshot);
+    }
+
+    pub(crate) fn take_pending_session_quality_evidence(
+        &mut self,
+    ) -> Option<SessionQualityEvidenceSnapshot> {
+        self.pending_session_quality_evidence.take()
     }
 
     #[cfg(test)]
@@ -396,6 +428,9 @@ impl Agent {
         self.reset_context_messages(self.system_message_for_mode(self.mode));
         self.read_tracker.clear().await;
         self.reset_transient_state();
+        // Completed review records are durable, but arming and disposition
+        // tracking belong to the workflow whose context was just discarded.
+        self.self_review.reset_for_new_session();
     }
 
     /// Enter Review mode over a freshly captured diff, seeding the next run with

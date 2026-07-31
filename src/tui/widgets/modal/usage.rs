@@ -149,6 +149,12 @@ fn activity_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'s
             ),
         ]));
     }
+    if let Some(warning) = quality_evidence_warning(dashboard.quality_evidence) {
+        lines.push(Line::from(Span::styled(
+            format!(" Quality evidence · {warning}"),
+            theme::body(palette.error),
+        )));
+    }
     lines.push(Line::from(""));
 
     let layout = heatmap_layout(&dashboard.days, &dashboard.today, inner_width);
@@ -192,6 +198,16 @@ fn activity_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'s
         theme::dim(),
     )));
     lines
+}
+
+fn quality_evidence_warning(integrity: crate::storage::QualityEvidenceIntegrity) -> Option<String> {
+    let verification = integrity.quarantined_verification_runs;
+    let self_review = integrity.quarantined_self_review_runs;
+    (verification > 0 || self_review > 0).then(|| {
+        format!(
+            "{verification} verification + {self_review} self-review cross-session duplicate rows quarantined"
+        )
+    })
 }
 
 fn heat_cell_span(cell: HeatCell, pitch: usize) -> Span<'static> {
@@ -322,5 +338,21 @@ mod tests {
         assert_eq!(short_day_label("2026-07-10"), "Jul 10");
         assert_eq!(short_day_label("2026-01-05"), "Jan 5");
         assert_eq!(short_day_label("not-a-date"), "not-a-date");
+    }
+
+    #[test]
+    fn quality_evidence_warning_is_visible_only_for_quarantined_rows() {
+        assert_eq!(
+            quality_evidence_warning(crate::storage::QualityEvidenceIntegrity::default()),
+            None
+        );
+        assert_eq!(
+            quality_evidence_warning(crate::storage::QualityEvidenceIntegrity {
+                quarantined_verification_runs: 7,
+                quarantined_self_review_runs: 2,
+            })
+            .as_deref(),
+            Some("7 verification + 2 self-review cross-session duplicate rows quarantined")
+        );
     }
 }

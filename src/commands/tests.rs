@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 use super::CommandMessageKind;
 use super::CommandModalRequest;
 use super::metadata::{
-    BusyCommandBehavior, busy_behavior_for, command_completion_preview, command_description,
-    command_usage_hint, complete_command,
+    BusyCommandBehavior, CommandSurface, busy_behavior_for, command_completion_preview,
+    command_description, command_surface, command_usage_hint, complete_command,
 };
 use super::providers::refresh_stale_model_cache;
 use crate::agent::Agent;
@@ -928,6 +928,42 @@ async fn commit_returns_tui_handoff_message_for_non_tui_callers() {
 }
 
 #[tokio::test]
+async fn init_is_tui_only_and_rejects_arguments_for_non_tui_callers() {
+    let mut agent = agent();
+    let mut store = session_store();
+    let dir = tempdir().unwrap();
+    let registry = registry();
+
+    let bare = handle_command(
+        "/init",
+        &mut agent,
+        &mut store,
+        dir.path(),
+        &[],
+        registry.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(bare.messages.iter().any(|message| {
+        message.kind == CommandMessageKind::Status && message.text.contains("TUI workflow")
+    }));
+
+    let with_args = handle_command(
+        "/init extra",
+        &mut agent,
+        &mut store,
+        dir.path(),
+        &[],
+        registry,
+    )
+    .await
+    .unwrap();
+    assert!(with_args.messages.iter().any(|message| {
+        message.kind == CommandMessageKind::Error && message.text == "Usage: /init"
+    }));
+}
+
+#[tokio::test]
 async fn pr_returns_tui_handoff_message_for_non_tui_callers() {
     let mut agent = agent();
     let mut store = session_store();
@@ -1286,6 +1322,7 @@ async fn clear_marks_transcript_for_reset() {
     let mut store = session_store();
     let dir = tempdir().unwrap();
     let registry = registry();
+    seed_quality_evidence(&mut agent).await;
 
     let outcome = handle_command("/clear", &mut agent, &mut store, dir.path(), &[], registry)
         .await
@@ -1298,6 +1335,8 @@ async fn clear_marks_transcript_for_reset() {
             .iter()
             .any(|message| message.text.contains("Conversation cleared"))
     );
+    assert!(agent.verification_runs().is_empty());
+    assert!(agent.self_review_runs().is_empty());
 }
 
 #[tokio::test]
@@ -1306,6 +1345,7 @@ async fn new_marks_transcript_for_session_reset() {
     let mut store = session_store();
     let dir = tempdir().unwrap();
     let registry = registry();
+    seed_quality_evidence(&mut agent).await;
 
     let outcome = handle_command("/new", &mut agent, &mut store, dir.path(), &[], registry)
         .await
@@ -1318,6 +1358,33 @@ async fn new_marks_transcript_for_session_reset() {
             .iter()
             .any(|message| message.text.contains("Started new session"))
     );
+    assert!(agent.verification_runs().is_empty());
+    assert!(agent.self_review_runs().is_empty());
+}
+
+async fn seed_quality_evidence(agent: &mut Agent) {
+    agent
+        .begin_verification_run(
+            crate::verification::VerificationKind::Test,
+            &[crate::verification::VerificationCheck {
+                name: "Rust tests".to_string(),
+                command: "cargo test --locked".to_string(),
+            }],
+            "Verify this task.",
+        )
+        .await;
+    agent.restore_self_review_runs(vec![crate::self_review::SelfReviewRunRecord {
+        started_at_ms: 1_700_000_000_000,
+        mode: crate::self_review::SelfReviewMode::Auto,
+        scope: crate::self_review::SelfReviewScope::Scoped,
+        diff_line_count: 4,
+        reviewer_duration_ms: 25,
+        reviewer_prompt_tokens: 100,
+        reviewer_completion_tokens: 20,
+        reviewer_cost_micros: Some(5),
+        findings: crate::self_review::SelfReviewFindingCounts::default(),
+        disposition: Some(crate::self_review::SelfReviewDisposition::NoneNeeded),
+    }]);
 }
 
 #[tokio::test]
@@ -1895,6 +1962,17 @@ fn busy_behavior_classifies_commands_by_run_state_policy() {
     for (input, expected) in cases {
         assert_eq!(busy_behavior_for(input), expected, "input: {input}");
     }
+}
+
+#[test]
+fn init_is_tui_only_with_a_headless_explanation_and_no_arguments() {
+    assert!(matches!(
+        command_surface("/init"),
+        Some(CommandSurface::TuiOnly {
+            headless_message,
+            strict_args: true,
+        }) if headless_message.contains("TUI workflow")
+    ));
 }
 
 #[test]

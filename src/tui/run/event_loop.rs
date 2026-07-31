@@ -1056,6 +1056,12 @@ async fn handle_idle_slash_command(
         IdleSlashCommand::Commit => {
             commit_changes(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
         }
+        IdleSlashCommand::Init => {
+            initialize_agents_md(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
+        }
+        IdleSlashCommand::InitWithArgs => {
+            push_command_message(app, CommandOutputKind::Error, "Usage: /init");
+        }
         IdleSlashCommand::PullRequest => {
             create_pull_request(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
         }
@@ -1930,12 +1936,33 @@ async fn rotate_persisted_session_on_clear(
     // session, wiping it. Its agent context is already current from the periodic
     // flush.
     persist_changed_app_snapshots(storage, *current_session_id, &*app, persisted_signatures).await;
-    // `agent.clear()` has already closed the active episode as a hard boundary,
+    // `agent.clear_for_session_rotation()` has already closed the active episode as a hard boundary,
     // but the app-only flush above intentionally does not read cleared agent
     // context. Persist just the outgoing episode ledger, then empty the shared
     // store before assigning a new session id. Otherwise the old session keeps
     // an Active row and the new session can recall archives from its predecessor.
-    let outgoing_episodes = agent.lock().await.episodes_snapshot();
+    let (outgoing_episodes, outgoing_quality_evidence) = {
+        let mut agent = agent.lock().await;
+        (
+            agent.episodes_snapshot(),
+            agent.take_pending_session_quality_evidence(),
+        )
+    };
+    if let Some(evidence) = outgoing_quality_evidence
+        && let Err(err) = storage
+            .replace_quality_evidence_snapshot(
+                *current_session_id,
+                &evidence.verification_runs,
+                &evidence.self_review_runs,
+            )
+            .await
+    {
+        tracing::warn!(
+            session_id = %*current_session_id,
+            error = %format!("{err:#}"),
+            "failed to persist outgoing quality evidence during session rotation"
+        );
+    }
     if let Some(episodes) = outgoing_episodes.as_deref()
         && let Err(err) = storage
             .replace_episodes_snapshot(*current_session_id, episodes)

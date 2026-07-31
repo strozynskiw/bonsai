@@ -1324,6 +1324,7 @@ mod tests {
                     status_counts: Vec::new(),
                     tools: Vec::new(),
                     self_review: Default::default(),
+                    quality_evidence: Default::default(),
                     lifetime: Default::default(),
                 }),
                 tab: UsageTab::Activity,

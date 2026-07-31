@@ -186,6 +186,134 @@ async fn self_review_runs_roundtrip_and_roll_up_effectiveness() {
 }
 
 #[tokio::test]
+async fn cross_session_duplicate_quality_evidence_is_quarantined_from_aggregates() {
+    let fixture = TestStorage::new().await;
+    let first = fixture.start_session().await;
+    let second = fixture.start_session().await;
+    let third = fixture.start_session().await;
+    let fourth = fixture.start_session().await;
+
+    let duplicated_verification =
+        sample_verification_evidence(1_700_000_000_000, "cargo test --locked");
+    let duplicated_review = sample_self_review_evidence(1_700_000_000_100, 42);
+    for session_id in [first, second] {
+        fixture
+            .storage
+            .replace_verification_runs_snapshot(
+                session_id,
+                std::slice::from_ref(&duplicated_verification),
+            )
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .replace_self_review_runs_snapshot(session_id, std::slice::from_ref(&duplicated_review))
+            .await
+            .unwrap();
+    }
+
+    // Same timestamp is only a cheap duplicate candidate. Different complete
+    // records in separate sessions remain trusted.
+    fixture
+        .storage
+        .replace_verification_runs_snapshot(
+            third,
+            &[sample_verification_evidence(
+                1_700_000_001_000,
+                "cargo test --workspace",
+            )],
+        )
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .replace_verification_runs_snapshot(
+            fourth,
+            &[sample_verification_evidence(
+                1_700_000_001_000,
+                "cargo test --doc",
+            )],
+        )
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .replace_self_review_runs_snapshot(
+            third,
+            &[sample_self_review_evidence(1_700_000_001_100, 8)],
+        )
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .replace_self_review_runs_snapshot(
+            fourth,
+            &[sample_self_review_evidence(1_700_000_001_100, 9)],
+        )
+        .await
+        .unwrap();
+
+    let dashboard = fixture.storage.load_usage_dashboard().await.unwrap();
+    assert_eq!(dashboard.quality_evidence.quarantined_verification_runs, 2);
+    assert_eq!(dashboard.quality_evidence.quarantined_self_review_runs, 2);
+    assert_eq!(
+        dashboard.self_review.runs, 2,
+        "both members of the ambiguous duplicate group must be excluded"
+    );
+    assert_eq!(dashboard.self_review.findings, 4);
+}
+
+fn sample_verification_evidence(
+    started_at_ms: i64,
+    command: &str,
+) -> crate::verification::VerificationRunRecord {
+    crate::verification::VerificationRunRecord {
+        kind: crate::verification::VerificationKind::Test,
+        status: crate::verification::VerificationRunStatus::Passed,
+        checks: vec![crate::verification::VerificationCheckRecord {
+            name: "Rust tests".to_string(),
+            command: command.to_string(),
+            status: crate::verification::VerificationCheckStatus::Passed,
+            tool_call_id: Some("call-test".to_string()),
+            exit_code: Some(0),
+            completed_at_ms: Some(started_at_ms + 10),
+            attempt_count: 1,
+            last_failure_signature: None,
+        }],
+        started_at_ms,
+        finished_at_ms: Some(started_at_ms + 20),
+        observed_final_workspace: Some(true),
+        workspace_changes_after_last_check: Vec::new(),
+        repair_attempts: 0,
+        reasoning_escalations: Vec::new(),
+        terminal_reason: None,
+    }
+}
+
+fn sample_self_review_evidence(
+    started_at_ms: i64,
+    diff_line_count: u32,
+) -> crate::self_review::SelfReviewRunRecord {
+    crate::self_review::SelfReviewRunRecord {
+        started_at_ms,
+        mode: crate::self_review::SelfReviewMode::Auto,
+        scope: crate::self_review::SelfReviewScope::Scoped,
+        diff_line_count,
+        reviewer_duration_ms: 1_250,
+        reviewer_prompt_tokens: 1_000,
+        reviewer_completion_tokens: 200,
+        reviewer_cost_micros: Some(321),
+        findings: crate::self_review::SelfReviewFindingCounts {
+            blocker: 0,
+            major: 1,
+            minor: 1,
+            nit: 0,
+        },
+        disposition: Some(crate::self_review::SelfReviewDisposition::Fixed),
+    }
+}
+
+#[tokio::test]
 async fn read_evidence_snapshot_roundtrips_without_file_content_duplication() {
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;

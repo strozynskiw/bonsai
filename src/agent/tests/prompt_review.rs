@@ -956,6 +956,19 @@ async fn clear_resets_session_context_and_usage() {
     agent.usage.cache_read_input_tokens = 2;
     agent.usage.cache_creation_input_tokens = 1;
     agent.usage.cache_measured_input_tokens = 10;
+    agent
+        .begin_verification_run(
+            crate::verification::VerificationKind::Test,
+            &[crate::verification::VerificationCheck {
+                name: "Rust tests".to_string(),
+                command: "cargo test --locked".to_string(),
+            }],
+            "Verify the current task.",
+        )
+        .await;
+    agent.verification.after_edit_verification_pending = true;
+    agent.verification.after_edit_verification_injected = true;
+    agent.restore_self_review_runs(vec![sample_self_review_run(1_700_000_000_000)]);
 
     agent.clear().await;
 
@@ -966,6 +979,99 @@ async fn clear_resets_session_context_and_usage() {
     assert_eq!(agent.usage.prompt_tokens, 0);
     assert_eq!(agent.usage.completion_tokens, 0);
     assert_eq!(agent.context_report().session_input_cache, None);
+    assert!(agent.verification_runs().is_empty());
+    assert!(agent.verification.active_verification.is_none());
+    assert!(!agent.verification.after_edit_verification_pending);
+    assert!(!agent.verification.after_edit_verification_injected);
+    assert!(agent.self_review_runs().is_empty());
+}
+
+#[tokio::test]
+async fn start_and_review_preserve_same_session_quality_evidence() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    std::fs::create_dir_all(fixture.project_root.join("src")).unwrap();
+    commit_file(
+        &fixture.project_root,
+        "src/lib.rs",
+        "pub fn answer() -> u8 { 41 }\n",
+        "baseline",
+    );
+    std::fs::write(
+        fixture.project_root.join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .unwrap();
+    let provider = Box::new(MockProvider::new(vec![]));
+    let mut agent = Agent::new(
+        provider,
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker,
+        String::new(),
+        fixture.project_root,
+    )
+    .unwrap();
+    let verification = sample_verification_run(1_700_000_000_000);
+    let self_review = sample_self_review_run(1_700_000_000_100);
+    agent.restore_verification_runs(vec![verification.clone()]);
+    agent.restore_self_review_runs(vec![self_review.clone()]);
+
+    let mut plan = crate::plan::PlanDoc::default();
+    plan.edit().set_title("Preserve quality evidence");
+    plan.edit().add_task("Keep the existing evidence");
+    assert!(agent.implement_plan_from(&plan, None).await);
+    assert_eq!(
+        agent.verification_runs(),
+        std::slice::from_ref(&verification)
+    );
+    assert_eq!(agent.self_review_runs(), std::slice::from_ref(&self_review));
+
+    assert!(agent.review_pending_changes(ReviewScope::Uncommitted).await);
+    assert_eq!(
+        agent.verification_runs(),
+        std::slice::from_ref(&verification)
+    );
+    assert_eq!(agent.self_review_runs(), std::slice::from_ref(&self_review));
+}
+
+fn sample_verification_run(started_at_ms: i64) -> crate::verification::VerificationRunRecord {
+    crate::verification::VerificationRunRecord {
+        kind: crate::verification::VerificationKind::Test,
+        status: crate::verification::VerificationRunStatus::Passed,
+        checks: vec![crate::verification::VerificationCheckRecord {
+            name: "Rust tests".to_string(),
+            command: "cargo test --locked".to_string(),
+            status: crate::verification::VerificationCheckStatus::Passed,
+            tool_call_id: Some("call-test".to_string()),
+            exit_code: Some(0),
+            completed_at_ms: Some(started_at_ms + 10),
+            attempt_count: 1,
+            last_failure_signature: None,
+        }],
+        started_at_ms,
+        finished_at_ms: Some(started_at_ms + 20),
+        observed_final_workspace: Some(true),
+        workspace_changes_after_last_check: Vec::new(),
+        repair_attempts: 0,
+        reasoning_escalations: Vec::new(),
+        terminal_reason: None,
+    }
+}
+
+fn sample_self_review_run(started_at_ms: i64) -> crate::self_review::SelfReviewRunRecord {
+    crate::self_review::SelfReviewRunRecord {
+        started_at_ms,
+        mode: crate::self_review::SelfReviewMode::Auto,
+        scope: crate::self_review::SelfReviewScope::Scoped,
+        diff_line_count: 4,
+        reviewer_duration_ms: 25,
+        reviewer_prompt_tokens: 100,
+        reviewer_completion_tokens: 20,
+        reviewer_cost_micros: Some(5),
+        findings: crate::self_review::SelfReviewFindingCounts::default(),
+        disposition: Some(crate::self_review::SelfReviewDisposition::NoneNeeded),
+    }
 }
 
 #[tokio::test]

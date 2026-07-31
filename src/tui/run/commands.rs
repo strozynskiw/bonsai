@@ -28,6 +28,10 @@ pub(in crate::tui::run) enum IdleSlashCommand<'a> {
     Build,
     Retry,
     Commit,
+    /// `/init` generates concise, evidence-based project steering.
+    Init,
+    /// `/init` accepts no arguments.
+    InitWithArgs,
     PullRequest,
     Review,
     SecurityReview,
@@ -67,6 +71,7 @@ pub(in crate::tui::run) fn idle_slash_command(input: &str) -> Option<IdleSlashCo
         "/test" => return Some(IdleSlashCommand::Test),
         "/build" => return Some(IdleSlashCommand::Build),
         "/commit" => return Some(IdleSlashCommand::Commit),
+        "/init" => return Some(IdleSlashCommand::Init),
         "/pr" => return Some(IdleSlashCommand::PullRequest),
         "/review" => return Some(IdleSlashCommand::Review),
         "/security-review" => return Some(IdleSlashCommand::SecurityReview),
@@ -90,6 +95,11 @@ pub(in crate::tui::run) fn idle_slash_command(input: &str) -> Option<IdleSlashCo
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
         return Some(IdleSlashCommand::Retry);
+    }
+    // `/init` is deliberately bare-only: reject every prefixed form here so a
+    // typo such as `/initfoo` cannot become an ordinary coding-agent prompt.
+    if input.starts_with("/init") {
+        return Some(IdleSlashCommand::InitWithArgs);
     }
     if let Some(rest) = input.strip_prefix("/providers ") {
         return Some(IdleSlashCommand::Providers(rest.trim()));
@@ -1483,6 +1493,19 @@ Workflow:\n\
         .to_string()
 }
 
+/// Build the focused workflow prompt used by `/init`.
+pub(in crate::tui) fn init_workflow_prompt() -> String {
+    "Create concise, project-aware root `AGENTS.md` guidance through the normal read/write tools and permission flow. Do not use direct filesystem APIs or invent unverified commands.\n\n\
+Workflow:\n\
+1. Inspect a bounded set of authoritative project sources: relevant manifests, README or contributor documentation, CI and task-runner configuration, and the shallow source layout. Read further only when one of those sources points to a specific project rule.\n\
+2. Check whether root `AGENTS.md` exists. If it exists, use the `question` tool with exactly two choices: leave it unchanged, or review and improve it while preserving useful verified project rules. If the user chooses leave it unchanged, make no mutation and report that choice.\n\
+3. When creating or improving the file, include only verified, actionable facts. Keep it compact and adaptive: include a one- or two-line purpose and primary stack, exact everyday setup/run/build/test/format/lint commands only when verified, a selective map of key entry points or directories for common changes, and material project-specific conventions or hazards such as test placement or generated-file boundaries. Omit sections that have no evidence.\n\
+4. Do not add generic coding etiquette, TODO placeholders, exhaustive dependency or file lists, volatile machine state, secrets, prose already obvious from standard manifests, a redundant `# AGENTS.md` title, or copied detailed documentation. Prefer a pointer to detailed docs when useful.\n\
+5. Write only root `AGENTS.md` with the normal file tools after reading its current contents when it exists. Preserve useful verified rules during an improvement; do not overwrite it when the user chose leave unchanged.\n\
+6. Finish by summarizing the evidence used and the concise guidance written. State that newly written steering is loaded on the next launch."
+        .to_string()
+}
+
 /// Build the focused workflow prompt used by `/pr`.
 pub(in crate::tui) fn pr_workflow_prompt() -> String {
     "Create or update a GitHub pull request for the current branch.\n\n\
@@ -1537,6 +1560,25 @@ pub(in crate::tui) async fn commit_changes(
         sink,
         commit_workflow_prompt(),
         "Committing pending changes",
+    )
+    .await
+}
+
+/// Starts a focused coding-agent workflow that creates or improves root project
+/// steering using ordinary permissioned tools.
+pub(in crate::tui) async fn initialize_agents_md(
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    agent: Arc<Mutex<Agent>>,
+    sink: SharedSink,
+) -> bool {
+    start_focused_coding_workflow(
+        app,
+        tasks,
+        agent,
+        sink,
+        init_workflow_prompt(),
+        "Preparing project-aware AGENTS.md guidance",
     )
     .await
 }
@@ -2323,6 +2365,7 @@ mod tests {
         assert_eq!(idle_slash_command("/start"), Some(IdleSlashCommand::Start));
         assert_eq!(idle_slash_command("/test"), Some(IdleSlashCommand::Test));
         assert_eq!(idle_slash_command("/build"), Some(IdleSlashCommand::Build));
+        assert_eq!(idle_slash_command("/init"), Some(IdleSlashCommand::Init));
         assert_eq!(
             idle_slash_command("/security-review"),
             Some(IdleSlashCommand::SecurityReview)
@@ -2345,6 +2388,40 @@ mod tests {
         assert_eq!(idle_slash_command("/ctx foo"), None);
         assert_eq!(idle_slash_command("/episodes now"), None);
         assert_eq!(idle_slash_command("/security-review now"), None);
+        assert_eq!(
+            idle_slash_command("/init improve"),
+            Some(IdleSlashCommand::InitWithArgs)
+        );
+        assert_eq!(
+            idle_slash_command("/initfoo"),
+            Some(IdleSlashCommand::InitWithArgs),
+            "a prefixed typo must show init usage rather than reach the agent"
+        );
+    }
+
+    #[test]
+    fn init_workflow_prompt_requires_evidence_preservation_and_next_launch_notice() {
+        let prompt = init_workflow_prompt();
+
+        for required in [
+            "bounded set of authoritative project sources",
+            "exactly two choices",
+            "leave it unchanged",
+            "preserving useful verified project rules",
+            "only verified, actionable facts",
+            "exact everyday setup/run/build/test/format/lint commands only when verified",
+            "compact and adaptive",
+            "generic coding etiquette",
+            "normal file tools",
+            "loaded on the next launch",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "missing prompt contract: {required}"
+            );
+        }
+        assert!(!prompt.contains("cargo build"));
+        assert!(!prompt.contains("npm test"));
     }
 
     #[test]
