@@ -477,10 +477,11 @@ fn refresh_cached_model_choices(
 fn mirror_run_status(
     app: &mut AppState,
     tasks: &TaskController,
+    subagents: &crate::subagent::SubagentRegistry,
     busy_flag: &crate::storage::SharedBusyFlag,
 ) -> bool {
     busy_flag.store(
-        app.task_state.is_busy(),
+        app.task_state.is_busy() || tasks.is_busy() || subagents.has_running(),
         std::sync::atomic::Ordering::Relaxed,
     );
     let running_persona = tasks.active_agent_persona().cloned();
@@ -1891,6 +1892,7 @@ async fn maybe_start_peer_wake(
 #[allow(clippy::too_many_arguments)]
 async fn rotate_persisted_session_on_clear(
     command: &CommandOutcomeEvent,
+    tasks: &TaskController,
     storage: &Storage,
     active_session_id: &SharedActiveSessionId,
     project_root: &Path,
@@ -1907,6 +1909,13 @@ async fn rotate_persisted_session_on_clear(
             ..
         }
     ) {
+        return;
+    }
+    if tasks.session_activity_is_active().await {
+        app.reduce(AppAction::Agent(UiEvent::Error(UiError::new(
+            "Session still active",
+            "Wait for running subagents to finish or cancel them before rotating the session.",
+        ))));
         return;
     }
 
@@ -2044,6 +2053,7 @@ struct RuntimeEventDrainDeps<'a> {
 async fn drain_runtime_events_for_frame(
     runtime_receiver: &mut mpsc::UnboundedReceiver<RuntimeEvent>,
     app: &mut AppState,
+    tasks: &TaskController,
     current_session_id: &mut SessionId,
     persisted_signatures: &mut PersistedSnapshotSignatures,
     model_catalog: &mut Arc<crate::model_catalog::ModelCatalog>,
@@ -2070,6 +2080,7 @@ async fn drain_runtime_events_for_frame(
         if let RuntimeEvent::CommandFinished(command) = &event {
             rotate_persisted_session_on_clear(
                 command,
+                tasks,
                 deps.storage,
                 deps.active_session_id,
                 deps.project_root,
@@ -2220,6 +2231,7 @@ async fn drain_runtime_events_for_frame(
             if let RuntimeEvent::CommandFinished(command) = &event {
                 rotate_persisted_session_on_clear(
                     command,
+                    tasks,
                     deps.storage,
                     deps.active_session_id,
                     deps.project_root,
@@ -2610,6 +2622,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         storage.clone(),
         active_session_id.clone(),
         run_budget.max_session_active_duration(),
+        subagents.clone(),
     );
     tasks.set_persona_model_deps(crate::tui::task::PersonaModelDeps {
         agent: agent.clone(),
@@ -2871,6 +2884,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         frame_needs_redraw |= drain_runtime_events_for_frame(
             &mut runtime_receiver,
             &mut app,
+            &tasks,
             &mut current_session_id,
             &mut persisted_signatures,
             &mut model_catalog,
@@ -3050,7 +3064,22 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             next_persistence_flush = now + PERSISTENCE_FLUSH_INTERVAL;
         }
 
-        if mirror_run_status(&mut app, &tasks, &busy_flag) {
+        let activity = tasks.reconcile_session_activity().await?;
+        if let Some(activity) = activity {
+            if activity.active
+                && !tasks.is_busy()
+                && tasks.session_active_budget_exhausted(activity.active_run_ms)
+            {
+                agent.lock().await.cancel_running_subagents();
+                frame_needs_redraw = true;
+            }
+            if activity.active {
+                app.mark_run_started(Instant::now());
+            } else {
+                app.mark_run_finished(Instant::now());
+            }
+        }
+        if mirror_run_status(&mut app, &tasks, &subagents, &busy_flag) {
             redraw_requested = true;
         }
 

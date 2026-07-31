@@ -155,6 +155,29 @@ impl Storage {
         Ok(u64::try_from(active_run_ms).unwrap_or(0))
     }
 
+    /// Return cumulative active milliseconds, including an open segment up to
+    /// the instant of this query without mutating its start time.
+    pub(crate) async fn session_active_run_ms_now(&self, session_id: SessionId) -> Result<u64> {
+        let now = now_ms();
+        let active_run_ms: i64 = sqlx::query_scalar(
+            r#"
+            SELECT active_run_ms + CASE
+              WHEN active_run_started_at_ms IS NOT NULL AND ? > active_run_started_at_ms
+                THEN ? - active_run_started_at_ms
+              ELSE 0
+            END
+            FROM sessions WHERE id = ?
+            "#,
+        )
+        .bind(now)
+        .bind(now)
+        .bind(session_id.as_i64())
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("Failed to load active time for session {session_id}"))?;
+        Ok(u64::try_from(active_run_ms).unwrap_or(0))
+    }
+
     /// Close the current foreground execution segment and return cumulative
     /// active milliseconds. Safe to call more than once; a closed segment is a
     /// no-op.

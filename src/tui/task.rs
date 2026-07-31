@@ -22,7 +22,9 @@ use crate::output::SharedSink;
 use crate::plan::PlanDoc;
 use crate::provider::ProviderRegistry;
 use crate::session::{CredentialPersistence, SessionStore};
+use crate::session_activity::{SessionActivity, SessionActivityGate};
 use crate::storage::{SessionId, Storage};
+use crate::subagent::SubagentRegistry;
 use crate::tui::app::TranscriptItem;
 use crate::tui::event::{
     CommandOutcomeEvent, CommandOutputEvent, ModalKind, ProviderRunSelection, RuntimeEvent, UiError,
@@ -54,6 +56,8 @@ struct SessionRuntimeBudget {
     storage: Storage,
     active_session_id: crate::tool::SharedActiveSessionId,
     max_active_duration: Option<Duration>,
+    activity: SessionActivityGate,
+    subagents: Arc<SubagentRegistry>,
 }
 
 #[derive(Clone)]
@@ -229,11 +233,14 @@ impl TaskController {
         storage: Storage,
         active_session_id: crate::tool::SharedActiveSessionId,
         max_active_duration: Option<Duration>,
+        subagents: Arc<SubagentRegistry>,
     ) {
         self.session_runtime_budget = Some(SessionRuntimeBudget {
+            activity: SessionActivityGate::new(storage.clone()),
             storage,
             active_session_id,
             max_active_duration,
+            subagents,
         });
     }
 
@@ -241,6 +248,37 @@ impl TaskController {
         if let Some(runtime) = self.session_runtime_budget.as_mut() {
             runtime.max_active_duration = duration;
         }
+    }
+
+    /// Reconcile the durable union activity segment after runtime/subagent
+    /// events. Its result drives the header timer and peer busy heartbeat.
+    pub(crate) async fn reconcile_session_activity(
+        &self,
+    ) -> anyhow::Result<Option<SessionActivity>> {
+        let Some(runtime) = &self.session_runtime_budget else {
+            return Ok(None);
+        };
+        runtime
+            .activity
+            .reconcile(runtime.subagents.has_running())
+            .await
+            .map(Some)
+    }
+
+    pub(crate) async fn session_activity_is_active(&self) -> bool {
+        let Some(runtime) = &self.session_runtime_budget else {
+            return false;
+        };
+        runtime.subagents.has_running() || runtime.activity.is_active().await
+    }
+
+    pub(crate) fn session_active_budget_exhausted(&self, active_run_ms: u64) -> bool {
+        self.session_runtime_budget
+            .as_ref()
+            .and_then(|runtime| runtime.max_active_duration)
+            .is_some_and(|limit| {
+                active_run_ms >= u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)
+            })
     }
 
     pub fn runtime_sender(&self) -> mpsc::UnboundedSender<RuntimeEvent> {
@@ -1251,7 +1289,7 @@ async fn begin_session_timing(
     let Some(session_id) = session_id else {
         anyhow::bail!("No active session is available for run timing");
     };
-    let active_run_ms = runtime.storage.begin_session_run(session_id).await?;
+    let active_run_ms = runtime.activity.begin_main(session_id).await?.active_run_ms;
     Ok(Some((session_id, active_run_ms)))
 }
 
@@ -1262,7 +1300,12 @@ async fn finish_session_timing(
     let (Some(runtime), Some(session_id)) = (runtime, session_id) else {
         return Ok(0);
     };
-    runtime.storage.finish_session_run(session_id).await
+    let activity = runtime
+        .activity
+        .finish_main(runtime.subagents.has_running())
+        .await?;
+    let _ = session_id;
+    Ok(activity.active_run_ms)
 }
 
 pub(in crate::tui) fn memory_command_modal(
@@ -1660,6 +1703,7 @@ mod tests {
             fixture.storage.clone(),
             active_session_id,
             Some(Duration::from_millis(1)),
+            Arc::new(SubagentRegistry::new()),
         );
         let invoked = Arc::new(AtomicBool::new(false));
         let invoked_by_run = invoked.clone();

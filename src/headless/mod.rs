@@ -540,6 +540,7 @@ async fn run_inner_with_provider_runtime(
         peer_bus,
         hooks,
         run_budget,
+        subagents,
         ..
     } = runtime;
     agent.set_retry_backoff(retry_backoff);
@@ -558,7 +559,8 @@ async fn run_inner_with_provider_runtime(
         }
     }
 
-    let active_run_ms_before = storage.begin_session_run(current_session_id).await?;
+    let activity = crate::session_activity::SessionActivityGate::new(storage.clone());
+    let active_run_ms_before = activity.begin_main(current_session_id).await?.active_run_ms;
     let selected_timeout = crate::run_budget::select_runtime_timeout(
         config.timeout,
         run_budget.max_run_duration(),
@@ -601,7 +603,50 @@ async fn run_inner_with_provider_runtime(
         agent.run(&prompt, cancellation_token, shared_sink).await
     };
     cancellation_task.abort();
-    let active_run_ms = storage.finish_session_run(current_session_id).await?;
+    let mut active_run_ms = activity
+        .finish_main(subagents.has_running())
+        .await?
+        .active_run_ms;
+    let mut detached_budget_exhaustion = None;
+    // Headless runs do not detach their subagents: any foreground delegation is
+    // awaited by `Agent::run`, and a background request cannot enter the
+    // no-wake registry. Keep the activity ownership shared with TUI, while
+    // avoiding a detached-only waiter for a foreground record.
+    while subagents.has_active_detached() {
+        let Some(limit) = run_budget.max_session_active_duration() else {
+            let _ = subagents
+                .wait_for_any_detached(std::time::Duration::from_secs(1))
+                .await;
+            active_run_ms = activity
+                .reconcile(subagents.has_running())
+                .await?
+                .active_run_ms;
+            continue;
+        };
+        let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
+        if active_run_ms >= limit_ms {
+            agent.cancel_running_subagents();
+            let limit_seconds = limit.as_secs().max(1);
+            detached_budget_exhaustion =
+                Some(crate::run_budget::RunBudgetExhaustion::SessionTime {
+                    limit_seconds,
+                    used_seconds: active_run_ms.div_ceil(1_000).max(limit_seconds),
+                });
+            let _ = subagents
+                .wait_for_any_detached(BACKGROUND_TASK_SHUTDOWN_TIMEOUT)
+                .await;
+            break;
+        }
+        let remaining = std::time::Duration::from_millis(limit_ms - active_run_ms);
+        let _ = subagents.wait_for_any_detached(remaining).await;
+        active_run_ms = activity
+            .reconcile(subagents.has_running())
+            .await?
+            .active_run_ms;
+    }
+    // Cancellation terminalizes the registry synchronously, but retain this
+    // final reconciliation to close the durable segment exactly once.
+    active_run_ms = activity.reconcile(false).await?.active_run_ms;
     let _ = background_tasks
         .stop_all_running(BACKGROUND_TASK_SHUTDOWN_TIMEOUT)
         .await;
@@ -611,7 +656,7 @@ async fn run_inner_with_provider_runtime(
     let _ = terminal_event_stop.send(());
     let _ = terminal_event_task.await;
 
-    let (run_status, output, budget_exhaustion) = match run_result {
+    let (run_status, output, mut budget_exhaustion) = match run_result {
         Ok(AgentRunResult::Completed(output)) => (HeadlessStatus::Completed, output, None),
         Ok(AgentRunResult::Interrupted(output)) => match cancel_reason
             .get()
@@ -664,6 +709,9 @@ async fn run_inner_with_provider_runtime(
             }
         }
     };
+    if let Some(exhaustion) = detached_budget_exhaustion {
+        budget_exhaustion = Some(exhaustion);
+    }
     if let Some(reason) = budget_exhaustion {
         sink.status(&format!(
             "Budget exhausted: {reason}. Partial work and session state were preserved."

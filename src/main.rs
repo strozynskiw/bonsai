@@ -43,6 +43,7 @@ mod runtime;
 mod sandbox;
 mod self_review;
 mod session;
+mod session_activity;
 mod session_persist;
 mod smol;
 mod storage;

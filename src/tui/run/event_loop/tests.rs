@@ -396,9 +396,12 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
     let mut app = app();
     let mut current_session_id = old_session_id;
     let mut signatures = PersistedSnapshotSignatures::default();
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let tasks = TaskController::new(sender);
 
     rotate_persisted_session_on_clear(
         &command,
+        &tasks,
         &storage,
         &active_session_id,
         temp_dir.path(),
@@ -462,9 +465,12 @@ async fn clear_rotation_flushes_dirty_edit_made_since_the_last_periodic_flush() 
     });
     let mut current_session_id = old_session_id;
     let mut signatures = PersistedSnapshotSignatures::default();
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let tasks = TaskController::new(sender);
 
     rotate_persisted_session_on_clear(
         &command,
+        &tasks,
         &storage,
         &active_session_id,
         temp_dir.path(),

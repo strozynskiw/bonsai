@@ -955,8 +955,10 @@ impl AppState {
     }
 
     pub fn mark_run_started(&mut self, started_at: Instant) {
-        self.run_started_at = Some(started_at);
-        self.completed_run_elapsed = None;
+        if self.run_started_at.is_none() {
+            self.run_started_at = Some(started_at);
+            self.completed_run_elapsed = None;
+        }
     }
 
     pub fn mark_run_finished(&mut self, finished_at: Instant) {
@@ -1188,7 +1190,6 @@ impl AppState {
                 };
                 let waiting = waiting_phase.is_some();
                 if !waiting {
-                    self.mark_run_finished(finished_at);
                     // The turn is over: reconcile any tool whose completion
                     // event never landed so its spinner and group timer stop.
                     // Skipped while waiting — subagents/peers are legitimately
@@ -1622,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_label_freezes_when_agent_finishes() {
+    fn elapsed_label_stays_live_after_agent_finishes_until_activity_reconciles() {
         let mut app = app();
         app.task_state = TaskState::Running;
         app.mark_run_started(Instant::now() - Duration::from_secs(65));
@@ -1632,6 +1633,10 @@ mod tests {
         ))));
 
         assert_eq!(app.task_state, TaskState::Idle);
+        assert!(app.run_started_at.is_some());
+        assert_eq!(app.elapsed_label(), "1m 5s");
+
+        app.mark_run_finished(Instant::now());
         assert!(app.run_started_at.is_none());
         assert_eq!(app.elapsed_label(), "1m 5s");
     }

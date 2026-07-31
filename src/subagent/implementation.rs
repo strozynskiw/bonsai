@@ -815,6 +815,15 @@ impl SubagentRegistry {
         !ready_launch_groups(&inner).is_empty()
     }
 
+    /// Whether any subagent is still running. This authoritative liveness
+    /// projection deliberately includes both foreground and detached runs.
+    pub(crate) fn has_running(&self) -> bool {
+        self.lock()
+            .subagents
+            .values()
+            .any(|record| !record.status.is_finished())
+    }
+
     /// Whether any detached subagent is still running. Cheap (no snapshot
     /// clone): the redraw loop calls this per drawn frame to keep the active
     /// cadence up while background subagents animate, even when the main agent
@@ -1130,6 +1139,24 @@ mod tests {
             first.result.as_ref().unwrap(),
             second.result.as_ref().unwrap()
         ));
+    }
+
+    #[test]
+    fn has_running_includes_foreground_and_detached_runs() {
+        let reg = SubagentRegistry::new();
+        let foreground = reg.register("explore", "foreground", false);
+        let detached = reg.register("research", "detached", true);
+
+        assert!(reg.has_running());
+        assert!(reg.has_active_detached());
+
+        reg.finish(&foreground, SubagentStatus::Succeeded, None);
+        assert!(reg.has_running());
+        assert!(reg.has_active_detached());
+
+        reg.finish(&detached, SubagentStatus::Failed, None);
+        assert!(!reg.has_running());
+        assert!(!reg.has_active_detached());
     }
 
     #[test]
