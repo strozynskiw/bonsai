@@ -125,14 +125,6 @@ pub(super) fn table_row<T>(
     Line::from(spans)
 }
 
-/// Display-cell offset of a column's first character within a rendered table
-/// row. Multi-line cells use this for their continuation indentation.
-pub(super) fn table_column_offset(widths: &[usize], index: usize) -> usize {
-    TABLE_MARKER_WIDTH
-        + widths.iter().take(index).sum::<usize>()
-        + index.saturating_mul(TABLE_GAP_WIDTH)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

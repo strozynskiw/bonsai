@@ -1101,16 +1101,45 @@ fn weighted_rows_window_by_line_count_and_keep_cursor_visible() {
 }
 
 #[test]
-fn subtask_list_scrolls_multi_line_rows_to_keep_cursor_visible() {
-    // Regression: the viewport was windowed by row count while each row
-    // renders up to 3 lines (row + wrapped prompt), so with six subagents the
-    // window believed everything fit, the paragraph clipped the tail, and the
-    // cursor walked below the fold — only the first ~3 rows ever visible.
+fn subtask_modal_places_list_beside_selected_detail() {
+    let area = Rect::new(0, 0, 110, 30);
+    let subtasks = vec![subagent_snapshot("sub-1", "research", 3)];
+    let buffer = render_subtasks_to_buffer(area, &subtasks, 0, 0, None);
+    let (list_area, detail_area, footer_area) =
+        list_detail_regions(area, ListDetailSplit::Horizontal);
+
+    assert_eq!(
+        list_area.y, detail_area.y,
+        "list and detail panes should begin side-by-side"
+    );
+    let list_row = row_text(&buffer, list_area.y);
+    let list_title = list_row.find("ID").expect("subtask list header");
+    assert!(
+        list_title >= list_area.x as usize && list_title < list_area.right() as usize,
+        "list header should render in the left pane: {list_row}"
+    );
+    let detail_row = row_text(&buffer, detail_area.y);
+    let detail_title = detail_row.find("Selected Subagent").expect("detail title");
+    assert!(
+        detail_title >= detail_area.x as usize,
+        "detail title should render in the right pane: {detail_row}"
+    );
+    assert!(
+        row_text(&buffer, footer_area.y).contains("Read-only subagents"),
+        "footer should remain beneath both panes"
+    );
+}
+
+#[test]
+fn subtask_list_windows_compact_rows_to_keep_cursor_visible() {
+    // The horizontal list reserves the prompt and activity for the selected
+    // detail pane. Its compact rows must still window so the cursor reaches a
+    // long tail without clipping the list body.
     let area = Rect::new(0, 0, 84, 24);
     let long_prompt = "I need a comprehensive understanding of all growth concepts \
                        across the entire codebase including every module"
         .to_string();
-    let subtasks = (1..=6)
+    let subtasks = (1..=24)
         .map(|index| {
             let mut snapshot = subagent_snapshot(&format!("sub-{index}"), "research", 1);
             snapshot.prompt = long_prompt.clone().into();
@@ -1124,17 +1153,17 @@ fn subtask_list_scrolls_multi_line_rows_to_keep_cursor_visible() {
         "cursor at top shows the head:\n{top}"
     );
     assert!(
-        !top.contains("sub-6"),
-        "six 3-line rows cannot all fit; the tail should be windowed out:\n{top}"
+        !top.contains("sub-24"),
+        "twenty-four compact rows cannot all fit; the tail should be windowed out:\n{top}"
     );
 
-    let bottom = buffer_text(&render_subtasks_to_buffer(area, &subtasks, 5, 0, None));
+    let bottom = buffer_text(&render_subtasks_to_buffer(area, &subtasks, 23, 0, None));
     assert!(
-        bottom.contains("sub-6"),
+        bottom.contains("sub-24"),
         "moving the cursor to the last row must scroll it into view:\n{bottom}"
     );
     assert!(
-        !bottom.contains("sub-1"),
+        !bottom.contains("sub-5"),
         "the head scrolls out once the cursor reaches the tail:\n{bottom}"
     );
 }
@@ -1154,7 +1183,7 @@ fn subtask_override_block_is_reachable_at_max_scroll() {
     let buffer = render_subtasks_to_buffer(area, &subtasks, 0, u16::MAX, Some(("explorer", over)));
     let text = buffer_text(&buffer);
     assert!(
-        text.contains("Override (all explorer runs):"),
-        "override line should be reachable at max scroll:\n{text}"
+        text.contains("Override (all explorer runs") && text.contains("opus [default]"),
+        "wrapped override should be reachable at max scroll:\n{text}"
     );
 }

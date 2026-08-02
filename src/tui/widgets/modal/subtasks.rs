@@ -44,7 +44,7 @@ pub(super) fn render_subtask_list(
         ListDetailModal {
             title: PANEL_TITLE,
             detail_title: DETAIL_TITLE,
-            split: ListDetailSplit::Vertical,
+            split: ListDetailSplit::Horizontal,
             detail_focused: pane == SubtaskListPane::Detail,
             footer_lines,
             modal_scroll: app.modal_scroll,
@@ -58,17 +58,9 @@ pub(super) fn render_subtask_list(
             } else {
                 let cursor = cursor.min(subtasks.len().saturating_sub(1));
                 let visible_lines = table_area.height.saturating_sub(1).max(1) as usize;
-                // Each row renders 1–3 lines (the table row plus wrapped
-                // prompt continuation), so the viewport must window by line
-                // count, not row count.
-                let prompt_width = widths.last().copied().unwrap_or(0);
-                let heights = subtasks
-                    .iter()
-                    .map(|sub| prompt_preview_lines(&sub.prompt, prompt_width, 3).len())
-                    .collect::<Vec<_>>();
                 table_lines.extend(
-                    visible_weighted_rows(&heights, cursor, visible_lines).flat_map(|index| {
-                        subtask_list_row_lines(&subtasks[index], &columns, &widths, index == cursor)
+                    visible_picker_rows(subtasks.len(), cursor, visible_lines).map(|index| {
+                        table_row(&subtasks[index], &columns, &widths, index == cursor)
                     }),
                 );
             }
@@ -85,15 +77,7 @@ pub(super) fn render_subtask_list(
     );
 }
 
-fn subtask_columns(width: usize) -> Vec<TableColumn<SubagentSnapshot>> {
-    // Reserve room for the other columns before spending width on the model
-    // name, then keep it within a readable band.
-    const MODEL_CAP_RESERVED: usize = 48;
-    const MODEL_CAP_MIN: usize = 18;
-    const MODEL_CAP_MAX: usize = 42;
-    let model_cap = width
-        .saturating_sub(MODEL_CAP_RESERVED)
-        .clamp(MODEL_CAP_MIN, MODEL_CAP_MAX);
+fn subtask_columns(_width: usize) -> Vec<TableColumn<SubagentSnapshot>> {
     vec![
         TableColumn {
             header: "ID",
@@ -108,28 +92,16 @@ fn subtask_columns(width: usize) -> Vec<TableColumn<SubagentSnapshot>> {
             style: CellStyle::Custom(|sub| status_style(subtask_status_color(sub.status))),
         },
         TableColumn {
-            header: "Elapsed",
-            width: TableWidth::Fit { cap: 8 },
-            render: CellRender::Value(|sub| sub.duration_label()),
-            style: CellStyle::Meta,
-        },
-        TableColumn {
             header: "Agent",
-            width: TableWidth::Fit { cap: 12 },
+            width: TableWidth::Fit { cap: 16 },
             render: CellRender::Value(|sub| sub.agent.to_string()),
             style: CellStyle::Meta,
         },
         TableColumn {
             header: "Model",
-            width: TableWidth::Fit { cap: model_cap },
+            width: TableWidth::Flex { min: 0 },
             render: CellRender::Value(subtask_model_cell),
             style: CellStyle::Meta,
-        },
-        TableColumn {
-            header: "Prompt",
-            width: TableWidth::Flex { min: 0 },
-            render: CellRender::Fitted(subtask_prompt_first_line),
-            style: CellStyle::Text,
         },
     ]
 }
@@ -141,62 +113,6 @@ fn subtask_model_cell(sub: &SubagentSnapshot) -> String {
         .as_deref()
         .map(str::to_string)
         .unwrap_or_else(|| "—".to_string())
-}
-
-fn subtask_list_row_lines(
-    sub: &SubagentSnapshot,
-    columns: &[TableColumn<SubagentSnapshot>],
-    widths: &[usize],
-    selected: bool,
-) -> Vec<Line<'static>> {
-    let text_style = theme::body(theme::palette().text);
-    let meta_style = theme::muted();
-    let prompt_width = widths.last().copied().unwrap_or(0);
-    let prompt_lines = prompt_preview_lines(&sub.prompt, prompt_width, 3);
-    let mut lines = vec![table_row(sub, columns, widths, selected)];
-
-    let prompt_offset = table_column_offset(widths, widths.len().saturating_sub(1));
-    for prompt in prompt_lines.into_iter().skip(1) {
-        lines.push(Line::from(vec![
-            Span::styled(" ".repeat(prompt_offset), meta_style),
-            Span::styled(prompt, text_style),
-        ]));
-    }
-
-    lines
-}
-
-fn prompt_preview_lines(prompt: &str, width: usize, max_lines: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-    let prompt = prompt.replace(['\n', '\r', '\t'], " ");
-    let (wrapped, _) = wrapped_input_field(Vec::new(), &prompt, Style::default(), width as u16);
-    let mut lines = wrapped.iter().map(line_plain_text).collect::<Vec<String>>();
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-        if let Some(last) = lines.last_mut() {
-            *last = truncate_ascii(&format!("{last}..."), width);
-        }
-    }
-    lines
-}
-
-fn subtask_prompt_first_line(sub: &SubagentSnapshot, width: usize) -> String {
-    prompt_preview_lines(&sub.prompt, width, 1)
-        .into_iter()
-        .next()
-        .unwrap_or_default()
-}
-
-fn line_plain_text(line: &Line<'static>) -> String {
-    line.spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>()
 }
 
 fn subtask_status_color(status: SubagentStatus) -> Color {
@@ -345,7 +261,7 @@ pub(super) fn max_subtask_detail_scroll(
     subtasks: &[SubagentSnapshot],
     cursor: usize,
 ) -> u16 {
-    let (_, detail_area, _) = list_detail_regions(area, ListDetailSplit::Vertical);
+    let (_, detail_area, _) = list_detail_regions(area, ListDetailSplit::Horizontal);
     let detail_inner = detail_pane_inner(detail_area);
     let wrap_width = detail_inner.width.max(1) as usize;
     let selected = subtasks.get(cursor.min(subtasks.len().saturating_sub(1)));
