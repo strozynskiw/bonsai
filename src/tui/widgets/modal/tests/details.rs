@@ -1428,3 +1428,110 @@ fn confirm_prompt_specs_render_expected_content() {
     assert!(rendered_lines_text(&h.subtitle).contains("fires on PostToolUse · shell"));
     assert!(rendered_lines_text(&h.body).contains("prettier --write"));
 }
+
+#[test]
+fn refresh_modal_places_source_list_left_and_changes_right() {
+    let sources = vec![
+        crate::commands::RefreshSourceState {
+            display_name: "Models.dev".to_string(),
+            status: crate::commands::RefreshSourceStatus::Ok,
+            model_count: Some(120),
+            added: vec!["openai/gpt-x".to_string()],
+            removed: vec!["openai/gpt-old".to_string()],
+        },
+        crate::commands::RefreshSourceState {
+            display_name: "OpenCode".to_string(),
+            status: crate::commands::RefreshSourceStatus::Failed("connection refused".to_string()),
+            model_count: None,
+            added: Vec::new(),
+            removed: Vec::new(),
+        },
+    ];
+    let area = Rect::new(0, 0, 110, 30);
+    let kind = ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
+        sources: sources.clone(),
+        cursor: 0,
+        generation: 1,
+    });
+    let modal = modal_area(area, &kind);
+    let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+    app.modal = Some(kind);
+    let buffer = render_full_modal(area, &app);
+    let text = buffer_text(&buffer);
+
+    // Both panes start at the top of the body — the detail is beside the list,
+    // not below it.
+    let (list_area, detail_area, footer_area) =
+        list_detail_regions(modal, ListDetailSplit::Horizontal);
+    assert_eq!(
+        detail_area.y, list_area.y,
+        "horizontal split should start both panes on the same row"
+    );
+
+    // The source table renders inside the left pane.
+    let header_row = row_text(&buffer, list_area.y);
+    let source_col = header_row.find("Source").expect("source column header");
+    assert!(
+        (list_area.x as usize..list_area.right() as usize).contains(&source_col),
+        "source table should sit inside the left pane, column {source_col} vs {list_area:?}"
+    );
+    assert!(text.contains("Models.dev"), "{text}");
+    assert!(text.contains("OpenCode"), "{text}");
+
+    // The detail title renders on the right pane's top border, and its
+    // content follows.
+    let detail_border = row_text(&buffer, detail_area.y);
+    let detail_title_col = detail_border.find("Model Changes").expect("detail title");
+    assert!(
+        detail_title_col >= detail_area.x as usize,
+        "detail title should sit inside the right pane: {detail_border}"
+    );
+    assert!(text.contains("Added (1):"), "{text}");
+    assert!(text.contains("+ openai/gpt-x"), "{text}");
+    assert!(text.contains("- openai/gpt-old"), "{text}");
+
+    // The footer stays beneath both panes.
+    let footer = row_text(&buffer, footer_area.y);
+    assert!(footer.contains("Refresh complete"), "{footer}");
+    assert!(
+        row_text(&buffer, footer_area.y + 1).contains("Esc/Enter"),
+        "hint row should name the close key"
+    );
+}
+
+#[test]
+fn refresh_detail_scroll_uses_the_horizontal_detail_pane() {
+    // 20 added models: they fit the full-height right pane (no scroll) but
+    // would overflow the short pane of the vertical layout — so a zero scroll
+    // proves the helper measures the horizontal geometry.
+    let sources = vec![crate::commands::RefreshSourceState {
+        display_name: "Models.dev".to_string(),
+        status: crate::commands::RefreshSourceStatus::Ok,
+        model_count: Some(240),
+        added: (0..20).map(|i| format!("provider/model-{i}")).collect(),
+        removed: Vec::new(),
+    }];
+    let area = Rect::new(0, 0, 110, 40);
+    let kind = ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
+        sources: sources.clone(),
+        cursor: 0,
+        generation: 1,
+    });
+    let modal = modal_area(area, &kind);
+
+    let (_, vertical_detail, _) = list_detail_regions(modal, ListDetailSplit::Vertical);
+    let vertical_scroll = detail_max_scroll(
+        detail_pane_inner(vertical_detail),
+        &refresh_detail_lines(&sources[0]),
+    );
+    let horizontal_scroll = max_refresh_detail_scroll(modal, &sources, 0);
+
+    assert_eq!(
+        horizontal_scroll, 0,
+        "20 added models should fit the full-height right pane"
+    );
+    assert!(
+        vertical_scroll > horizontal_scroll,
+        "the same detail would overflow the short vertical pane (vertical scroll {vertical_scroll})"
+    );
+}

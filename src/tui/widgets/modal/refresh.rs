@@ -8,7 +8,7 @@ use super::*;
 /// `/refresh` — a live per-source status modal. Each row shows a colored
 /// status dot (yellow while pending, green on success, red on failure), the
 /// source name, model count, and added/removed deltas. The selected row's
-/// added/removed model ids are shown in the detail pane below.
+/// added/removed model ids are shown in the detail pane beside the list.
 pub(super) fn render_refresh(
     f: &mut Frame,
     area: Rect,
@@ -37,7 +37,7 @@ pub(super) fn render_refresh(
         ListDetailModal {
             title: "Refresh Model Catalogs",
             detail_title: "Model Changes",
-            split: ListDetailSplit::Vertical,
+            split: ListDetailSplit::Horizontal,
             detail_focused: false,
             footer_lines,
             modal_scroll: app.modal_scroll,
@@ -156,7 +156,7 @@ fn source_status_color(status: &RefreshSourceStatus) -> Color {
     }
 }
 
-fn refresh_detail_lines(source: &RefreshSourceState) -> Vec<Line<'static>> {
+pub(super) fn refresh_detail_lines(source: &RefreshSourceState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     if let RefreshSourceStatus::Failed(reason) = &source.status {
@@ -213,7 +213,7 @@ pub(super) fn max_refresh_detail_scroll(
     let Some(source) = sources.get(cursor.min(sources.len().saturating_sub(1))) else {
         return 0;
     };
-    let (_, detail_area, _) = list_detail_regions(area, ListDetailSplit::Vertical);
+    let (_, detail_area, _) = list_detail_regions(area, ListDetailSplit::Horizontal);
     detail_max_scroll(
         detail_pane_inner(detail_area),
         &refresh_detail_lines(source),
