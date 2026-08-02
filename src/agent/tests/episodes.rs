@@ -1679,10 +1679,9 @@ async fn evicted_episode_roundtrips_through_persistence() {
 
 #[tokio::test]
 async fn pressure_drain_prefers_episodes_over_gc_and_compaction() {
-    // 48k window: usable input = 32k, GC trigger = 24k. One closed episode
-    // carries ~26k tokens of bulk, so preflight crosses the trigger; draining
-    // the episode alone must bring the prompt back down with no Tier-1 stubs
-    // and no compaction summary.
+    // 48k window: usable input = 36k, GC trigger = 27k. One closed episode plus
+    // its surrounding live rows crosses the trigger; draining the episode alone
+    // must bring the prompt back down with no Tier-1 stubs or compaction summary.
     let (mut agent, store, _fixture) = episode_agent_with_responses(vec![card_response(
         "## Episode card\n- Goal: A\n- Outcome: done\n- Decisions: -\n- Files touched: -\n- Gotchas: -",
     )]);
@@ -1905,7 +1904,7 @@ async fn repeat_recall_collapses_to_pointer_only_while_prior_page_is_live() {
 #[tokio::test]
 async fn recalled_output_is_gc_stubbable_under_pressure() {
     let (mut agent, _store, _fixture) = episode_agent();
-    agent.set_context_budget_tokens(33_000);
+    agent.set_context_budget_tokens(24_000);
     push_user_turn(&mut agent, "old work");
     // An old recalled page big enough for the old-output stub tier.
     let recalled = format!(

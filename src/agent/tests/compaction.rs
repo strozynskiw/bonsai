@@ -33,7 +33,7 @@ async fn context_report_uses_configured_context_budget() {
 }
 
 #[tokio::test]
-async fn compaction_target_is_capped_at_the_input_budget() {
+async fn compaction_target_respects_the_scaled_output_reserve() {
     let fixture = TestFixture::new();
     let agent_for = |budget: usize| {
         Agent::builder(
@@ -48,15 +48,38 @@ async fn compaction_target_is_capped_at_the_input_budget() {
         .unwrap()
     };
 
-    // Large window: the 50% target is already under window - reserve, so it is
-    // used as-is.
-    assert_eq!(
-        agent_for(200_000).default_compaction_target_tokens(),
-        100_000
-    );
-    // Small window: 50% (12k) would exceed window - reserve (8k), so the target
-    // is capped there — otherwise compaction could never get under budget.
-    assert_eq!(agent_for(24_000).default_compaction_target_tokens(), 8_000);
+    let large = agent_for(200_000);
+    assert_eq!(large.output_reserve_tokens(), 16_000);
+    assert_eq!(large.default_compaction_target_tokens(), 100_000);
+
+    let small = agent_for(24_000);
+    assert_eq!(small.output_reserve_tokens(), 6_000);
+    assert_eq!(small.default_compaction_target_tokens(), 12_000);
+
+    let tiny = agent_for(3);
+    assert_eq!(tiny.output_reserve_tokens(), 1);
+    assert_eq!(tiny.default_compaction_target_tokens(), 1);
+}
+
+#[tokio::test]
+async fn pure_12k_window_keeps_pressure_thresholds_above_half() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .context_budget_tokens(12_000)
+    .build()
+    .unwrap();
+    agent.set_pure_mode(true);
+
+    assert_eq!(agent.output_reserve_tokens(), 3_000);
+    assert_eq!(agent.default_compaction_target_tokens(), 6_000);
+    assert_eq!(agent.context_gc_trigger_tokens(), 6_750);
+    assert_eq!(agent.automatic_compaction_trigger_tokens(), 8_550);
 }
 
 #[tokio::test]
@@ -1527,11 +1550,7 @@ async fn compaction_summarizes_when_stubbing_is_insufficient() {
 }
 
 #[tokio::test]
-async fn auto_compaction_skips_when_over_trigger_but_within_target() {
-    // On a small window the fixed 16k output reserve pushes the trigger below
-    // the 50% target, so the prompt can sit above the trigger yet under the
-    // target. Compaction there is a guaranteed no-op, so it must not run — and
-    // must not emit a "Compacting…" status — on every turn.
+async fn pure_12k_window_does_not_compact_before_half() {
     let fixture = TestFixture::new();
     let mut agent = Agent::builder(
         MockProvider::empty(),
@@ -1540,25 +1559,18 @@ async fn auto_compaction_skips_when_over_trigger_but_within_target() {
         fixture.read_tracker.clone(),
         fixture.project_root.clone(),
     )
-    .context_budget_tokens(33_000)
+    .context_budget_tokens(12_000)
     .build()
     .unwrap();
+    agent.set_pure_mode(true);
     agent.set_prompt_estimator(PromptEstimator::for_tests(
         "test",
         TokenCounterKind::Heuristic,
         None,
     ));
-    // Calibrate the history against the live trigger/target window instead of
-    // hard-coding sizes: the persona prompt rides in the estimate, so fixed
-    // padding silently breaks whenever the prompt grows. Aim mid-window, then
-    // correct once for serialization overhead (linear in the heuristic).
-    let trigger = agent.automatic_compaction_trigger_tokens();
-    let target = agent.default_compaction_target_tokens();
-    assert!(
-        trigger < target,
-        "precondition: this 33k window must put the trigger ({trigger}) below the target ({target})"
-    );
-    let desired = trigger + (target - trigger) / 2;
+    // Calibrate to 5.5k prompt tokens. The old two-thirds reserve compacted this
+    // history at ~4k even though the context chip was still below 50%.
+    let desired = 5_500_usize;
     let tool_schema = agent.active_tool_schema();
     let tools = tool_schema.tools().to_vec();
     let schema_tokens = tool_schema.model_tool_schema_tokens();
@@ -1601,9 +1613,10 @@ async fn auto_compaction_skips_when_over_trigger_but_within_target() {
         .unwrap();
     let calibrated = estimate_now(&agent).await;
     assert!(
-        calibrated >= trigger && calibrated <= target,
-        "precondition: calibrated estimate {calibrated} must sit inside (trigger {trigger}, target {target}]"
+        calibrated > 4_000 && calibrated < 6_000,
+        "precondition: calibrated estimate {calibrated} must be above the old trigger but below half of 12k"
     );
+    let message_count = agent.messages.len();
     let capture = Arc::new(CaptureSink::default());
     let sink: crate::output::SharedSink = capture.clone();
 
@@ -1621,6 +1634,8 @@ async fn auto_compaction_skips_when_over_trigger_but_within_target() {
             .any(|status| status.contains("Compacting conversation")),
         "auto-compaction must not run when the prompt is already within target"
     );
+    assert_eq!(agent.messages.len(), message_count);
+    assert!(agent.compaction_events.is_empty());
 }
 
 /// Push a file-keyed tool call (assistant request + recorded detail + result
@@ -1828,14 +1843,14 @@ fn tool_content_for_call(
 async fn context_gc_stubs_superseded_read_under_pressure() {
     let fixture = TestFixture::new();
     let (mut agent, _requests) = gc_agent(&fixture);
-    agent.set_context_budget_tokens(33_000);
+    agent.set_context_budget_tokens(24_000);
     agent.set_prompt_estimator(PromptEstimator::for_tests(
         "test",
         TokenCounterKind::Heuristic,
         None,
     ));
-    // ~13.7k heuristic tokens (chars/4): above the ~12.75k GC trigger and below
-    // the ~16.15k compaction trigger, so the batched reclaim stubs the
+    // ~13.7k heuristic tokens (chars/4): above the 13.5k GC trigger and below
+    // the 17.1k compaction trigger, so the batched reclaim stubs the
     // superseded read without invoking compaction.
     push_read(
         &mut agent,
@@ -2071,8 +2086,8 @@ async fn context_gc_reclaims_old_output_under_pressure() {
         TokenCounterKind::Heuristic,
         None,
     ));
-    // ~14.4k heuristic tokens (chars/4): above the ~12.75k GC trigger and below
-    // the ~16.15k compaction trigger, so reclaim fires but compaction does not.
+    // This output plus message/tool wrappers clears the live GC trigger; the
+    // reclaim brings it back below the automatic compaction trigger.
     let old_output = format!("{}VERY_END", "successful output\n".repeat(3_200));
     push_bash(&mut agent, "call-bash", "cargo test", &old_output, 0);
     for idx in 0..4 {
@@ -2465,14 +2480,14 @@ async fn typed_read_is_invalidated_by_any_file_edit_result() {
 async fn context_gc_clears_automatic_stub_source_when_pinned() {
     let fixture = TestFixture::new();
     let mut agent = stub_only_agent(&fixture);
-    agent.set_context_budget_tokens(33_000);
+    agent.set_context_budget_tokens(24_000);
     agent.set_prompt_estimator(PromptEstimator::for_tests(
         "test",
         TokenCounterKind::Heuristic,
         None,
     ));
-    // ~14k heuristic tokens: over the ~12.75k GC trigger so the batched reclaim
-    // stubs the superseded read, but under compaction.
+    // ~14k heuristic tokens: over the 13.5k GC trigger so the batched reclaim
+    // stubs the superseded read, but under the 17.1k compaction trigger.
     push_read(
         &mut agent,
         "call-a1",

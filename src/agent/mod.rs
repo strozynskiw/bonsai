@@ -94,12 +94,15 @@ pub enum PlanContextMode {
 }
 
 const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 16_000;
+/// Small context windows cannot afford the full default reserve. Keeping the
+/// reserve at or below one quarter of the window leaves the 50% compaction
+/// target below the 75% GC trigger, as the pressure policy requires.
+const SMALL_WINDOW_OUTPUT_RESERVE_DIVISOR: usize = 4;
 /// Automatic compaction fires once the prompt reaches this fraction of the
 /// usable window (window minus the output reserve). Set high so compaction runs
 /// *right before* the limit and the model's context is used as fully as
-/// possible; the `DEFAULT_OUTPUT_RESERVE_TOKENS` headroom still protects the
-/// response, and the over-budget bail catches the rare turn that overshoots in
-/// one jump.
+/// possible; the capped output headroom still protects the response, and the
+/// over-budget bail catches the rare turn that overshoots in one jump.
 const AUTO_COMPACTION_TRIGGER_PERCENT: usize = 95;
 /// Continuous context GC leaves new stubs — superseded reads and old tool
 /// outputs alike — unapplied until the prompt reaches this fraction of the

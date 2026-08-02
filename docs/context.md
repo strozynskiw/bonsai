@@ -35,7 +35,9 @@ confidence. Over-budget bails only trust high-confidence estimates; image
 payloads are redacted before counting. See
 [Models](models.md#token-counting-and-cost).
 
-Thresholds (percent of usable window = budget − a 16k output reserve):
+Thresholds use the input window left after reserving response headroom. Outside
+SMOL, the reserve is 16k tokens on windows of at least 64k and scales down to
+25% on smaller windows (for example, a 12k window reserves 3k rather than 8k):
 
 | Trigger | Default | Smol |
 | --- | --- | --- |

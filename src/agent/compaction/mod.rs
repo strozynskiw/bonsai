@@ -220,11 +220,10 @@ impl Agent {
                 (request_messages, estimate) = self.reestimate_outgoing(tool_schema, perf).await;
             }
         }
-        // Fire only when over the trigger *and* actually above the target. On
-        // small windows the fixed output reserve can push the trigger below the
-        // target; without the second check, compaction would run (and emit its
-        // status) every turn only to no-op against an already-within-target
-        // prompt.
+        // Fire only when over the trigger *and* actually above the target.
+        // Persona-specific thresholds and extremely small windows can converge;
+        // the second check prevents a status-emitting compaction no-op when the
+        // prompt is already within its target.
         let target_tokens = self.default_compaction_target_tokens();
         if estimate.input_tokens >= self.automatic_compaction_trigger_tokens()
             && estimate.input_tokens > target_tokens
@@ -538,14 +537,21 @@ impl Agent {
     pub(super) fn output_reserve_tokens(&self) -> usize {
         let budget = self.budget.context_budget_tokens;
         if self.smol_applies_to_active_persona() {
-            return budget.checked_div(8).unwrap_or(0).clamp(512, 2_000);
+            return budget
+                .checked_div(8)
+                .unwrap_or(0)
+                .clamp(512, 2_000)
+                .min(budget);
         }
-        // Cap the output reserve so it never exceeds ~67% of the context
-        // window. A fixed 16k reserve is larger than the entire window for
-        // small models (e.g. 10k tokens), causing the budget check to fail
-        // on every turn. For larger windows (≥24k) the cap is above 16k so
-        // the default reserve is kept intact.
-        let max_for_window = ((budget / 3) * 2).max(1024);
-        DEFAULT_OUTPUT_RESERVE_TOKENS.min(max_for_window)
+        // A fixed 16k reserve is larger than an entire small-model window. The
+        // former two-thirds cap avoided a hard budget stall but left only one
+        // third for input, which forced GC and compaction before half of the
+        // advertised context was used. One quarter preserves useful response
+        // headroom while keeping the pressure thresholds in their documented
+        // order: 50% target < 75% GC < 95% compaction.
+        let max_for_window = (budget / SMALL_WINDOW_OUTPUT_RESERVE_DIVISOR).max(1);
+        DEFAULT_OUTPUT_RESERVE_TOKENS
+            .min(max_for_window)
+            .min(budget)
     }
 }
