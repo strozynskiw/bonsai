@@ -64,8 +64,9 @@ pointer (`[reused previous read]`) instead of resending bytes — but an
 explicit re-request after that returns real bytes; reads are annotated, never
 withheld. Guards watch for pathological loops: repeated identical
 inspections, read storms on one target, repeated failed calls, and
-implementation stalls each get escalating nudges and, where warranted, a
-hard stop.
+implementation stalls. Read-only loop guards reject the offending call and
+admit one explicit retry with a fresh budget; they do not terminate an
+otherwise healthy autonomous run.
 
 ## Compaction
 

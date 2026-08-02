@@ -1319,7 +1319,7 @@ async fn failed_bash_output_stays_detailed_for_model_context() {
 }
 
 #[tokio::test]
-async fn repeated_inspection_loop_stops_when_model_ignores_rejection() {
+async fn repeated_inspection_rejection_allows_an_explicit_retry() {
     let fixture = TestFixture::new();
     let git_tool = Arc::new(MockTool::new("git", "no diff"));
     let git_calls = git_tool.calls.clone();
@@ -1370,6 +1370,15 @@ async fn repeated_inspection_loop_stops_when_model_ignores_rejection() {
             usage: None,
             ..StreamedResponse::default()
         }),
+        Ok(StreamedResponse {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::Stop,
+            ),
+            usage: None,
+            ..StreamedResponse::default()
+        }),
     ]));
 
     let mut agent = Agent::new(
@@ -1382,26 +1391,24 @@ async fn repeated_inspection_loop_stops_when_model_ignores_rejection() {
     )
     .unwrap();
 
-    let err = agent
+    let result = agent
         .run(
             "make the change",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )
         .await
-        .expect_err("ignored repeated-inspection correction should stop the run");
+        .unwrap();
 
-    assert!(
-        format!("{err:#}").contains("Agent stopped after repeated inspection loop"),
-        "{err:#}"
-    );
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
     assert_eq!(
         git_calls.lock().await.len(),
-        2,
-        "calls after the repeated-inspection budget should not execute"
+        3,
+        "the rejected call stays blocked, then one explicit retry executes"
     );
     let rejected = tool_message_text(&agent, "git-2");
     assert!(rejected.contains("repeated inspection loop detected"));
+    assert_eq!(tool_message_text(&agent, "git-3"), "no diff");
 }
 
 fn tool_message_text(agent: &Agent, call_id: &str) -> String {

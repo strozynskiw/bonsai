@@ -1188,7 +1188,7 @@ async fn repeated_read_region_after_compact_pointer_returns_real_bytes() {
 }
 
 #[tokio::test]
-async fn ignored_repeated_read_region_stops_after_real_bytes_and_one_rejection() {
+async fn repeated_read_region_rejection_does_not_stop_the_run() {
     let fixture = TestFixture::new();
     fixture.create_file("foo.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
     let mut agent = Agent::new(
@@ -1198,6 +1198,7 @@ async fn ignored_repeated_read_region_stops_after_real_bytes_and_one_rejection()
             read_region_response("call-3", "foo.rs", 2, 3),
             read_region_response("call-4", "foo.rs", 2, 3),
             read_region_response("call-5", "foo.rs", 2, 3),
+            finish_response("done"),
         ])),
         read_registry(&fixture),
         empty_registry(),
@@ -1208,19 +1209,16 @@ async fn ignored_repeated_read_region_stops_after_real_bytes_and_one_rejection()
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
 
-    let error = agent
+    let result = agent
         .run(
             "keep reading the same region",
             CancellationToken::new(),
             Arc::new(RecordingSink::default()),
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        format!("{error:#}").contains("Agent stopped after repeated read storm"),
-        "{error:#}"
-    );
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
     let tools = tool_messages(&agent.messages);
     assert!(
         tools
@@ -1234,11 +1232,14 @@ async fn ignored_repeated_read_region_stops_after_real_bytes_and_one_rejection()
             .find(|(id, _)| id == "call-4")
             .is_some_and(|(_, content)| content.contains("repeated read storm detected"))
     );
-    assert!(tools.iter().all(|(id, _)| id != "call-5"));
+    assert!(
+        tools.iter().any(|(id, _)| id == "call-5"),
+        "one explicit retry after the rejection must remain available"
+    );
 }
 
 #[tokio::test]
-async fn repeated_bash_file_read_returns_real_bytes_then_stops() {
+async fn repeated_bash_file_read_recovers_after_one_rejection() {
     let fixture = TestFixture::new();
     fixture.create_file("foo.rs", "fn from_bash() {}\n");
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1261,6 +1262,7 @@ async fn repeated_bash_file_read_returns_real_bytes_then_stops() {
             bash_read_response("call-3", "foo.rs"),
             bash_read_response("call-4", "foo.rs"),
             bash_read_response("call-5", "foo.rs"),
+            finish_response("done"),
         ])),
         Arc::new(registry),
         empty_registry(),
@@ -1271,23 +1273,20 @@ async fn repeated_bash_file_read_returns_real_bytes_then_stops() {
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
 
-    let error = agent
+    let result = agent
         .run(
             "keep reading the same file through bash",
             CancellationToken::new(),
             Arc::new(RecordingSink::default()),
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        format!("{error:#}").contains("repeated read storm"),
-        "{error:#}"
-    );
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
     assert_eq!(
         calls.lock().await.len(),
-        3,
-        "Bonsai should execute the initial read, pointer-producing reread, and one real refresh"
+        4,
+        "the rejected call stays blocked, then one explicit retry executes"
     );
     let tools = tool_messages(&agent.messages);
     assert_eq!(tools[0].1, "fn from_bash() {}\n");
@@ -1301,7 +1300,7 @@ async fn repeated_bash_file_read_returns_real_bytes_then_stops() {
         "the first retry after a compact pointer must return real bytes"
     );
     assert!(tools[3].1.contains("repeated read storm detected"));
-    assert!(tools.iter().all(|(id, _)| id != "call-5"));
+    assert_eq!(tools[4].1, "fn from_bash() {}\n");
     assert_eq!(
         agent.read_evidence.inspection_events["call-3"].reason,
         InspectionReason::RepeatedFreshReuse

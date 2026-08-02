@@ -186,7 +186,9 @@ impl Agent {
                 }
             }
         }
-        if let Some(advisory) = repair_advisory_for_tool_result(&tool_call, &result, success) {
+        if let Some(advisory) =
+            repair_advisory_for_tool_result(&tool_call, &result, status.is_failure())
+        {
             self.set_repair_advisory(Some(advisory));
         } else if success && tool_clears_repair_advisory(&tool_call.name) {
             self.set_repair_advisory(None);

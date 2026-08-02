@@ -11,7 +11,6 @@ const REPEATED_INSPECTION_TURN_LIMIT: usize = 2;
 /// Structured file reads get one extra turn so the sequence can be: real
 /// bytes, compact pointer, explicit real-byte refresh.
 const STRUCTURED_READ_REPEAT_TURN_LIMIT: usize = 3;
-const REPEATED_INSPECTION_REJECTION_LIMIT: usize = 1;
 /// How many recent inspection-only turn signatures to remember, so an
 /// *alternating* loop (e.g. `read` ↔ `git status` as separate turns) is caught
 /// as re-visiting a small set — not just byte-identical consecutive repeats
@@ -31,7 +30,6 @@ const BATCHING_HINT_LIMIT: usize = 3;
 /// refresh. Counts turns, not calls, so one batched multi-window inspection is
 /// still allowed.
 const READ_STORM_TARGET_TURN_LIMIT: usize = 3;
-const READ_STORM_REJECTION_LIMIT: usize = 1;
 const PLANNING_RESEARCH_REJECTION_LIMIT: usize = 1;
 /// Let a failed call retry once in case the failure was transient. A third
 /// identical request is rejected with corrective guidance; repeating it after
@@ -1097,7 +1095,7 @@ fn bash_command_should_keep_output(command: &str) -> bool {
 fn repair_advisory_for_tool_result(
     tool_call: &ToolCall,
     result: &ToolOutput,
-    success: bool,
+    failed: bool,
 ) -> Option<String> {
     match result {
         ToolOutput::Command {
@@ -1105,11 +1103,11 @@ fn repair_advisory_for_tool_result(
             exit_code,
             timed_out,
             ..
-        } if *timed_out || matches!(exit_code, Some(code) if *code != 0) => Some(
+        } if failed && (*timed_out || matches!(exit_code, Some(code) if *code != 0)) => Some(
             format_command_repair_advisory(tool_call, rendered, *exit_code, *timed_out),
         ),
         ToolOutput::Text(text)
-            if !success && matches!(tool_call.name.as_str(), "edit" | "write" | "bash") =>
+            if failed && matches!(tool_call.name.as_str(), "edit" | "write" | "bash") =>
         {
             Some(format_text_repair_advisory(tool_call, text))
         }
@@ -1691,7 +1689,7 @@ fn repeated_failed_call_stop_message(name: &str) -> String {
 struct RepeatedInspectionGuard {
     last_signature: Option<String>,
     turns: usize,
-    repair_read_only_rejections: usize,
+    rejected_signature: Option<String>,
     /// Recent inspection-only turn signatures (oldest first), capped at
     /// [`INSPECTION_WINDOW`]. Lets an alternating loop trip the counter, not
     /// only byte-identical consecutive repeats.
@@ -1708,7 +1706,7 @@ type ReadStormAction = GuardAction<HashSet<String>>;
 #[derive(Default)]
 struct ReadStormGuard {
     turns_by_target: HashMap<String, usize>,
-    rejections_by_target: HashMap<String, usize>,
+    retry_after_rejection: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1757,7 +1755,7 @@ impl ReadStormGuard {
             .any(|tool_call| is_mutation_tool(&tool_call.name))
         {
             self.turns_by_target.clear();
-            self.rejections_by_target.clear();
+            self.retry_after_rejection.clear();
             return None;
         }
 
@@ -1780,7 +1778,16 @@ impl ReadStormGuard {
                 && !versions.unchanged_targets.contains(&target)
             {
                 self.turns_by_target.insert(target.clone(), 1);
-                self.rejections_by_target.remove(&target);
+                self.retry_after_rejection.remove(&target);
+                continue;
+            }
+            // A rejection is a circuit breaker, not a terminal state. If the
+            // model explicitly retries the target once after seeing the
+            // corrective result, admit that call and restart its budget. This
+            // preserves an escape hatch for a genuinely necessary missing
+            // range or search while still bounding uninterrupted read storms.
+            if self.retry_after_rejection.remove(&target) {
+                self.turns_by_target.insert(target, 1);
                 continue;
             }
             let turns = self
@@ -1797,29 +1804,14 @@ impl ReadStormGuard {
         }
 
         let mut stormed = HashSet::new();
-        let mut stop_target: Option<String> = None;
-        for (target, turns) in over_limit {
-            let rejections = self
-                .rejections_by_target
-                .entry(target.clone())
-                .and_modify(|count| *count = count.saturating_add(1))
-                .or_insert(1);
-            if turns > READ_STORM_TARGET_TURN_LIMIT + READ_STORM_REJECTION_LIMIT
-                || *rejections > READ_STORM_REJECTION_LIMIT
-            {
-                stop_target.get_or_insert_with(|| target.clone());
-            }
-            // A rejected call returned no file evidence, so do not let it push
-            // the target permanently above the admission limit. An immediate
-            // repeat still stops through `rejections_by_target`; a turn spent
-            // following the redirect may decay the target and make a later
-            // focused read admissible again.
+        for (target, _) in over_limit {
+            // A rejected call returned no file evidence, so keep it at the
+            // admission limit and arm one explicit retry. A turn spent
+            // following the redirect decays the target normally.
             self.turns_by_target
                 .insert(target.clone(), READ_STORM_TARGET_TURN_LIMIT);
+            self.retry_after_rejection.insert(target.clone());
             stormed.insert(target);
-        }
-        if let Some(target) = stop_target {
-            return Some(ReadStormAction::Stop(read_storm_stop_message(&target)));
         }
         Some(ReadStormAction::Reject(stormed))
     }
@@ -1833,10 +1825,9 @@ impl ReadStormGuard {
             .collect::<Vec<_>>();
         for target in stale {
             // A different inspection is compliance with the rejection's
-            // redirect, so a later return to this target starts a new strike.
-            // This keeps terminal stops for models that immediately repeat the
-            // rejected call rather than punishing a corrected approach.
-            self.rejections_by_target.remove(&target);
+            // redirect, so a later return to this target starts a new strike
+            // instead of consuming the explicit-retry escape hatch.
+            self.retry_after_rejection.remove(&target);
             if let Some(count) = self.turns_by_target.get_mut(&target) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -1848,7 +1839,7 @@ impl ReadStormGuard {
 
     fn reset(&mut self) {
         self.turns_by_target.clear();
-        self.rejections_by_target.clear();
+        self.retry_after_rejection.clear();
     }
 }
 
@@ -1941,6 +1932,20 @@ impl RepeatedInspectionGuard {
         };
         let turn_limit = repeated_inspection_turn_limit(tool_calls);
 
+        // Like the per-path storm guard, rejection must not dead-end a long
+        // autonomous run. One explicit retry of the exact rejected inspection
+        // is admitted and starts a fresh budget; persistent loops continue to
+        // receive bounded synthetic failures instead of terminating the run.
+        if self.rejected_signature.as_deref() == Some(signature.as_str()) {
+            self.rejected_signature = None;
+            self.last_signature = Some(signature.clone());
+            self.turns = 1;
+            self.recent.clear();
+            self.record_recent(signature);
+            return None;
+        }
+        self.rejected_signature = None;
+
         if repair_advisory_active {
             // A *fresh* inspection while repairing is legitimate recovery — a
             // failed build points at files the model has to read before it can
@@ -1951,21 +1956,14 @@ impl RepeatedInspectionGuard {
             if self.last_signature.as_deref() != Some(signature.as_str()) {
                 self.last_signature = Some(signature);
                 self.turns = 1;
-                self.repair_read_only_rejections = 0;
                 return None;
             }
-            self.repair_read_only_rejections = self.repair_read_only_rejections.saturating_add(1);
-            if self.repair_read_only_rejections > REPEATED_INSPECTION_REJECTION_LIMIT {
-                return Some(RepeatedInspectionAction::Stop(
-                    repair_read_only_stop_message(),
-                ));
-            }
+            self.rejected_signature = Some(signature);
             return Some(RepeatedInspectionAction::Reject(
                 repair_read_only_loop_message(),
             ));
         }
 
-        self.repair_read_only_rejections = 0;
         // A "repeat" is either the same batch as last turn, or a batch the model
         // cycled back to within the recent window — so read↔git alternation
         // counts, not only byte-identical consecutive turns. A
@@ -1979,22 +1977,21 @@ impl RepeatedInspectionGuard {
             self.turns = 1;
         }
         self.last_signature = Some(signature.clone());
-        self.record_recent(signature);
+        self.record_recent(signature.clone());
 
-        if self.turns > turn_limit + REPEATED_INSPECTION_REJECTION_LIMIT {
-            return Some(RepeatedInspectionAction::Stop(
-                repeated_inspection_stop_message(turn_limit),
+        if self.turns > turn_limit {
+            self.rejected_signature = Some(signature);
+            return Some(RepeatedInspectionAction::Reject(
+                repeated_inspection_loop_message(turn_limit),
             ));
         }
-
-        (self.turns > turn_limit)
-            .then(|| RepeatedInspectionAction::Reject(repeated_inspection_loop_message(turn_limit)))
+        None
     }
 
     fn reset(&mut self) {
         self.last_signature = None;
         self.turns = 0;
-        self.repair_read_only_rejections = 0;
+        self.rejected_signature = None;
         self.recent.clear();
     }
 
@@ -2283,34 +2280,17 @@ fn repeated_inspection_tool(name: &str) -> bool {
 
 fn repeated_inspection_loop_message(turn_limit: usize) -> String {
     format!(
-        "Error: repeated inspection loop detected after {turn_limit} identical read-only tool-call turns. The previous results already reported the current state. Stop re-running the same project_info/read/grep/git checks; take a concrete next step now, ask a focused question if blocked, or provide the final answer with assumptions."
+        "Error: repeated inspection loop detected after {turn_limit} identical read-only tool-call turns. The previous results already reported the current state. Stop re-running the same project_info/read/grep/git checks; take a concrete next step now, ask a focused question if blocked, or provide the final answer with assumptions. One explicit retry is allowed if evidence is genuinely missing; it restarts this inspection budget instead of terminating the run."
     )
 }
 
 fn repair_read_only_loop_message() -> String {
-    "Error: this exact inspection already ran while repairing, and the failed tool's output is summarized in the system context. Do not repeat the same read/grep/project_info/git call; act on what you have — use edit/write, run a targeted command that changes or verifies the fix, inspect a different relevant file, ask a focused question if blocked, or provide the final answer with assumptions.".to_string()
-}
-
-fn repeated_inspection_stop_message(turn_limit: usize) -> String {
-    format!(
-        "Agent stopped after repeated inspection loop: the model requested the same read-only tool batch more than {} times and ignored the corrective tool result.",
-        turn_limit + REPEATED_INSPECTION_REJECTION_LIMIT
-    )
-}
-
-fn repair_read_only_stop_message() -> String {
-    "Agent stopped after repair loop: the model kept requesting read-only inspection after a concrete failed-tool repair target was already available.".to_string()
+    "Error: this exact inspection already ran while repairing, and the failed tool's output is summarized in the system context. Do not repeat the same read/grep/project_info/git call; act on what you have — use edit/write, run a targeted command that changes or verifies the fix, inspect a different relevant file, ask a focused question if blocked, or provide the final answer with assumptions. One explicit retry is allowed if evidence is genuinely missing; it restarts this inspection budget instead of terminating the run.".to_string()
 }
 
 fn read_storm_loop_message(target: &str) -> String {
     format!(
-        "Error: repeated read storm detected for {target} after {READ_STORM_TARGET_TURN_LIMIT} prior turns. The current evidence for this target is already in the conversation or restorable through /ctx. Do not immediately request another range from the same file. For a large source file, navigate symbol-first: use `symbol_search` with the file path and a type/function name, then `read_symbol` for that definition; use `grep` once when you need call sites rather than the definition. Example: `symbol_search {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`, then `read_symbol {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`. Otherwise use the existing evidence, inspect a different target, make a concrete change, ask a focused question if blocked, or provide the final answer. A changed approach clears this rejection; immediately repeating the same target stops the run."
-    )
-}
-
-fn read_storm_stop_message(target: &str) -> String {
-    format!(
-        "Agent stopped after repeated read storm for {target}: the model kept requesting the same read target after Bonsai rejected the loop."
+        "Error: repeated read storm detected for {target} after {READ_STORM_TARGET_TURN_LIMIT} prior turns. The current evidence for this target is already in the conversation or restorable through /ctx. Do not immediately request another range from the same file. For a large source file, navigate symbol-first: use `symbol_search` with the file path and a type/function name, then `read_symbol` for that definition; use `grep` once when you need call sites rather than the definition. Example: `symbol_search {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`, then `read_symbol {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`. Otherwise use the existing evidence, inspect a different target, make a concrete change, ask a focused question if blocked, or provide the final answer. One explicit retry is allowed if missing evidence is essential; it restarts this target's budget instead of terminating the run."
     )
 }
 
@@ -2857,6 +2837,27 @@ mod tests {
     }
 
     #[test]
+    fn inspection_guard_allows_one_explicit_retry_after_rejection() {
+        let mut guard = RepeatedInspectionGuard::default();
+        let batch = [call("read", r#"{"path":"a.rs"}"#)];
+        for _ in 0..STRUCTURED_READ_REPEAT_TURN_LIMIT {
+            assert!(guard.action_for(&batch, false).is_none());
+        }
+        assert!(is_reject(guard.action_for(&batch, false)));
+        assert!(
+            guard.action_for(&batch, false).is_none(),
+            "the rejected inspection must have a non-terminal escape hatch"
+        );
+        for _ in 1..STRUCTURED_READ_REPEAT_TURN_LIMIT {
+            assert!(guard.action_for(&batch, false).is_none());
+        }
+        assert!(
+            is_reject(guard.action_for(&batch, false)),
+            "the restarted budget must still bound a persistent loop"
+        );
+    }
+
+    #[test]
     fn changed_file_version_resets_both_reread_guards() {
         let batch = [call("read", r#"{"path":"a.rs"}"#)];
         let unchanged = ReadTargetVersions::assume_unchanged(&batch);
@@ -3149,7 +3150,7 @@ mod tests {
     }
 
     #[test]
-    fn read_storm_guard_stops_an_immediate_repeat_after_rejection() {
+    fn read_storm_guard_allows_one_explicit_retry_after_rejection() {
         let target = call("read", r#"{"path":"src/tool/agent.rs"}"#);
         let mut guard = ReadStormGuard::default();
 
@@ -3159,10 +3160,14 @@ mod tests {
         assert!(is_storm_reject(
             guard.action_for(std::slice::from_ref(&target))
         ));
-        assert!(matches!(
-            guard.action_for(&[target]),
-            Some(ReadStormAction::Stop(_))
-        ));
+        assert!(
+            guard.action_for(std::slice::from_ref(&target)).is_none(),
+            "an explicit retry must restart the target budget instead of stopping the run"
+        );
+        for _ in 1..READ_STORM_TARGET_TURN_LIMIT {
+            assert!(guard.action_for(std::slice::from_ref(&target)).is_none());
+        }
+        assert!(is_storm_reject(guard.action_for(&[target])));
     }
 
     #[test]

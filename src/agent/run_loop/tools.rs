@@ -101,7 +101,11 @@ impl Agent {
             if let Some(message) = tool_rejections.message_for(&tool_call) {
                 break 'call (
                     ToolOutput::Text(message),
-                    crate::output::ToolExecutionStatus::Failed,
+                    // Policy rejected the call before the tool ran. Keep that
+                    // distinct from a real execution failure: failed Bash
+                    // results arm repair mode and repeated-failure tracking,
+                    // while a guard redirect should only steer the next turn.
+                    crate::output::ToolExecutionStatus::Skipped,
                 );
             }
             let Some(tool) = tool_registry.get(&tool_call.name) else {

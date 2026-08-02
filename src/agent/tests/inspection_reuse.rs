@@ -80,7 +80,7 @@ fn git_detail(call_id: &str, op: &str, rendered: &str) -> ToolContextDetail {
 }
 
 #[tokio::test]
-async fn repeated_unchanged_git_diff_stops_after_full_reuse_and_one_rejection() {
+async fn repeated_unchanged_git_diff_recovers_after_one_rejection() {
     let fixture = TestFixture::new();
     let diff = (1..=200)
         .map(|line| format!("+changed line {line}\n"))
@@ -92,9 +92,16 @@ async fn repeated_unchanged_git_diff_stops_after_full_reuse_and_one_rejection() 
     });
     let mut registry = ToolRegistry::new();
     registry.register(git_tool);
-    let responses = (1..=4)
+    let mut responses = (1..=4)
         .map(|index| git_call_response(&format!("call-{index}"), "diff"))
-        .collect();
+        .collect::<Vec<_>>();
+    responses.push(Ok(StreamedResponse {
+        content: "done".to_string(),
+        tool_calls: vec![],
+        terminal: crate::provider::StreamTerminal::Completed(crate::provider::FinishReason::Stop),
+        usage: None,
+        ..StreamedResponse::default()
+    }));
     let mut agent = Agent::new(
         Box::new(MockProvider::new(responses)),
         Arc::new(registry),
@@ -106,21 +113,18 @@ async fn repeated_unchanged_git_diff_stops_after_full_reuse_and_one_rejection() 
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
 
-    let error = agent
+    let result = agent
         .run(
             "inspect the same diff repeatedly",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )
         .await
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("Agent stopped after repeated inspection loop"),
-        "{error:#}"
-    );
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
 
     let tools = tool_messages(&agent.messages);
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 4);
     assert_eq!(tools[0].1, diff);
     assert!(
         tools[1]
@@ -137,7 +141,12 @@ async fn repeated_unchanged_git_diff_stops_after_full_reuse_and_one_rejection() 
         tools[2].0,
         tools[2].1
     );
-    assert_eq!(executed.lock().await.len(), 2);
+    assert!(
+        tools[3].1.contains("repeated unchanged inspection blocked"),
+        "the admitted retry may still be deduplicated after execution: {}",
+        tools[3].1
+    );
+    assert_eq!(executed.lock().await.len(), 3);
     assert_eq!(
         agent.read_evidence.inspection_events["call-1"].outcome,
         InspectionOutcome::Executed

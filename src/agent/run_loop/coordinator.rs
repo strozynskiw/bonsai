@@ -336,12 +336,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 &read_target_versions,
             )
         };
-        let repeated_inspection_rejection = resolve_guard(
-            self.agent,
-            "repeated_inspection",
-            repeated_inspection_action,
-            &response,
-        )?;
         let read_storm_action = if self.agent.persona_planning_budget() {
             None
         } else {
@@ -349,6 +343,25 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 .read_storm
                 .action_for_with_versions(&response.tool_calls, &read_target_versions)
         };
+        // Both guards describe the same read-only behavior at different
+        // granularities. A rejection from either is one shared circuit
+        // breaker: reset the sibling so the model's next explicit retry is not
+        // immediately rejected by a second, stale budget.
+        if matches!(
+            repeated_inspection_action.as_ref(),
+            Some(GuardAction::Reject(_))
+        ) {
+            policies.read_storm.reset();
+        }
+        if matches!(read_storm_action.as_ref(), Some(GuardAction::Reject(_))) {
+            policies.repeated_inspection.reset();
+        }
+        let repeated_inspection_rejection = resolve_guard(
+            self.agent,
+            "repeated_inspection",
+            repeated_inspection_action,
+            &response,
+        )?;
         let read_storm_rejection =
             resolve_guard(self.agent, "read_storm", read_storm_action, &response)?;
         let repeated_failure_action = policies.repeated_failure.action_for(&response.tool_calls);
