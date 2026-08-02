@@ -363,20 +363,51 @@ impl BashTool {
     }
 }
 
+fn bounded_output_base(command: &str) -> Option<&str> {
+    let (left, right) = command.trim().rsplit_once('|')?;
+    if left.trim_end().ends_with('|') {
+        return None;
+    }
+    let filter = right.split_whitespace().collect::<Vec<_>>();
+    let is_bounded_output_filter = match filter.as_slice() {
+        ["head" | "tail"] => true,
+        ["head" | "tail", count] => compact_line_count(count),
+        ["head" | "tail", "-n" | "--lines", count] => line_count(count),
+        _ => false,
+    };
+    is_bounded_output_filter.then(|| left.trim_end())
+}
+
+fn compact_line_count(value: &str) -> bool {
+    value.strip_prefix("--lines=").is_some_and(line_count)
+        || value.strip_prefix(['-', '+']).is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+fn line_count(value: &str) -> bool {
+    let digits = value.strip_prefix(['-', '+']).unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn command_without_stderr_merge(command: &str) -> &str {
+    command
+        .strip_suffix("2>&1")
+        .map(str::trim_end)
+        .unwrap_or(command)
+}
+
+fn has_shell_control_operator(command: &str) -> bool {
+    command.contains(['|', ';', '&', '\n', '\r', '<', '>'])
+}
+
 fn canonical_check_command(command: &str) -> Option<String> {
     let mut base = command.trim();
-    if let Some((left, right)) = base.rsplit_once('|') {
-        let tail = right.split_whitespace().collect::<Vec<_>>();
-        let is_head = matches!(tail.as_slice(), ["head"])
-            || matches!(tail.as_slice(), ["head", _])
-            || matches!(tail.as_slice(), ["head", "-n", _]);
-        if !is_head {
-            return None;
-        }
-        base = left.trim_end();
+    if base.contains('|') {
+        base = bounded_output_base(base)?;
     }
-    base = base.strip_suffix("2>&1").map(str::trim_end).unwrap_or(base);
-    if base.contains("&&") || base.contains(';') || base.contains("||") {
+    base = command_without_stderr_merge(base);
+    if has_shell_control_operator(base) {
         return None;
     }
     let mut tokens = base.split_whitespace().peekable();
@@ -401,6 +432,26 @@ fn canonical_check_command(command: &str) -> Option<String> {
         normalized.push(token.to_string());
     }
     Some(normalized.join(" "))
+}
+
+/// Bonsai already bounds and spools shell output, so a final `head`/`tail`
+/// filter is redundant for verification commands. Running the direct command
+/// also preserves Cargo's exit status instead of reporting the filter's zero.
+fn verification_command_without_output_filter(command: &str) -> Option<String> {
+    let base = command_without_stderr_merge(bounded_output_base(command)?);
+    if has_shell_control_operator(base) {
+        return None;
+    }
+    let mut tokens = base.split_whitespace();
+    if tokens.next() != Some("cargo")
+        || !matches!(
+            tokens.next(),
+            Some("test" | "build" | "bench" | "doc" | "fmt")
+        )
+    {
+        return None;
+    }
+    Some(base.to_string())
 }
 
 fn structured_cargo_command(canonical: &str) -> String {
@@ -579,10 +630,15 @@ impl BashTool {
             .is_none()
             .then(|| canonical_check_command(&requested_command))
             .flatten();
+        let direct_verification = planning_command
+            .is_none()
+            .then(|| verification_command_without_output_filter(&requested_command))
+            .flatten();
         let command = planning_command
             .as_ref()
             .map(|command| command.command().to_string())
             .or_else(|| canonical_check.as_deref().map(structured_cargo_command))
+            .or(direct_verification)
             .unwrap_or_else(|| requested_command.clone());
         let analysis = analyze_command(&command);
 
@@ -1216,6 +1272,10 @@ mod tests {
             Some("cargo check --all-targets")
         );
         assert_eq!(
+            canonical_check_command("cargo check --all-targets 2>&1 | tail -80").as_deref(),
+            Some("cargo check --all-targets")
+        );
+        assert_eq!(
             canonical_check_command(
                 "cargo clippy --all-targets --message-format=json --quiet -- -D warnings | head -n 30"
             )
@@ -1224,6 +1284,46 @@ mod tests {
         );
         assert_eq!(canonical_check_command("cargo test --locked"), None);
         assert_eq!(canonical_check_command("cargo check && echo done"), None);
+    }
+
+    #[test]
+    fn cargo_verification_drops_only_a_final_output_filter() {
+        assert_eq!(
+            verification_command_without_output_filter(
+                "cargo test --locked refresh_ 2>&1 | tail -40"
+            )
+            .as_deref(),
+            Some("cargo test --locked refresh_")
+        );
+        assert_eq!(
+            verification_command_without_output_filter("cargo build --release | head -n 20")
+                .as_deref(),
+            Some("cargo build --release")
+        );
+        assert_eq!(
+            verification_command_without_output_filter("rg refresh src | tail -40"),
+            None
+        );
+        assert_eq!(
+            verification_command_without_output_filter("cargo run | tail -40"),
+            None
+        );
+        assert_eq!(
+            verification_command_without_output_filter("cargo test | tail -f"),
+            None
+        );
+        assert_eq!(
+            verification_command_without_output_filter("cargo test | head diagnostics.log"),
+            None
+        );
+        assert_eq!(
+            verification_command_without_output_filter("cargo test | tee test.log | tail -40"),
+            None
+        );
+        assert_eq!(
+            verification_command_without_output_filter("cargo test && echo done | tail -40"),
+            None
+        );
     }
 
     #[test]
@@ -1770,8 +1870,13 @@ mod tests {
             active_sandbox(&fixture.project_root),
         );
         let command = "echo automatic-safe-retry";
-        tool.confined_failures
-            .record(&fixture.project_root, command);
+        tool.confined_failures.record(
+            &fixture
+                .project_root
+                .canonicalize()
+                .expect("fixture root should canonicalize"),
+            command,
+        );
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -2212,6 +2317,37 @@ mod tests {
             "{invalidated}"
         );
         assert!(invalidated.contains("src/lib.rs:1:"), "{invalidated}");
+    }
+
+    #[tokio::test]
+    async fn piped_cargo_test_preserves_the_cargo_exit_status() {
+        let fixture = TestFixture::new();
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        );
+
+        let output = tool
+            .execute(json!({
+                "command": "cargo test --manifest-path missing/Cargo.toml 2>&1 | tail -40"
+            }))
+            .await
+            .unwrap();
+        let ToolOutput::Command {
+            rendered,
+            exit_code,
+            timed_out,
+            ..
+        } = output
+        else {
+            panic!("expected command output");
+        };
+
+        assert_ne!(exit_code, Some(0), "Cargo's failure must not be masked");
+        assert!(!timed_out);
+        assert!(rendered.contains("missing/Cargo.toml"), "{rendered}");
     }
 
     #[tokio::test]

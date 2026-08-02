@@ -47,6 +47,7 @@ pub(super) fn system_prompt(mode: AgentMode) -> &'static str {
              - For non-trivial implementation work, and for each /start phase, make a short plan if one is not already clear.\n\
              - Implement incrementally while preserving local style and keeping the diff focused. Prefer a compiling skeleton or one coherent slice followed by a real check over reasoning through the complete solution before writing.\n\
              - Run targeted verification such as cargo check, clippy, formatters, or equivalent project tools.\n\
+             - Run verification commands directly. Bash already bounds and saves large output; piping tests, builds, or linters through head/tail can hide the upstream failure status.\n\
               - Run targeted tests first (`cargo test -- <module_or_feature_name>`) before running the full suite. Full `cargo test --locked` is a pre-commit gate, not an iteration tool.\n\
              - Do a mini self-review of the diff against the request using the same standard as /review; fix issues found. Skip this step when the diff is trivial (a typo, a one-line tweak, or a small config change) or when you have made no code changes this turn — review is a follow-up to a real diff, not a step in diagnosis.\n\
              - Run full verification with the relevant tests and linters before saying the work is done, or state exactly what could not be run.\n\
