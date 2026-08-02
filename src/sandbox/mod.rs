@@ -426,8 +426,10 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod resolver_tests {
     use super::*;
+    #[cfg(not(target_os = "macos"))]
     use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(not(target_os = "macos"))]
     use std::os::unix::prelude::OsStringExt;
 
     #[test]
@@ -453,6 +455,7 @@ mod resolver_tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn executable_resolver_preserves_non_utf8_path_components() {
         let root = tempfile::tempdir().unwrap();
         let mut name = b"invalid-".to_vec();

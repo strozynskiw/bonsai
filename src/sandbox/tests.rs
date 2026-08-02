@@ -717,7 +717,13 @@ mod seatbelt {
     }
 
     async fn run(policy: &SandboxPolicy, cwd: &Path, script: &str) -> std::process::ExitStatus {
-        let (mut cmd, _) = macos::wrap("/bin/sh", script, cwd, policy);
+        let (mut cmd, _) = macos::wrap(
+            "/bin/sh",
+            script,
+            cwd,
+            SandboxBackend::test_seatbelt(),
+            policy,
+        );
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
         cmd.status().await.unwrap()
     }
