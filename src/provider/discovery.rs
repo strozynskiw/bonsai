@@ -16,7 +16,7 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use crate::model_catalog::{AvailableModel, DiscoveryKind, LiveModelAvailability, ModelFeature};
-use crate::provider::anthropic::ANTHROPIC_API_VERSION;
+use crate::provider::anthropic::{ANTHROPIC_API_VERSION, parse_anthropic_models_page};
 use crate::provider::openai_catalog::{
     available_model_from_item, available_models_from_response, is_coding_model_id,
 };
@@ -32,6 +32,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// OpenRouter returns the complete public tool-capable catalog in one response,
 /// which is substantially larger than a local native probe.
 const REMOTE_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
+/// A malformed compatible endpoint must not keep an Anthropic cursor cycle
+/// alive indefinitely. Five 1,000-row pages leave ample room for gateways.
+const MODEL_CATALOG_PAGE_CAP: usize = 5;
 const ZAI_OPENAPI_URL: &str = "https://docs.z.ai/openapi.json";
 
 /// Bound on per-model `/api/show` calls for one Ollama listing; beyond this
@@ -91,6 +94,10 @@ pub(crate) async fn fetch_models_with_discovery(
             return fetch_generic_models(protocol, display_label, base_url, api_key, auth_header)
                 .await;
         }
+        DiscoveryKind::Auto => {
+            return fetch_auto_models(protocol, display_label, base_url, api_key, auth_header)
+                .await;
+        }
         // `Static` is resolved from the catalog in `fetch_models_for_metadata`
         // before reaching here; this arm only guards the wizard/local path,
         // which never selects it. No network list to fetch.
@@ -117,6 +124,62 @@ pub(crate) async fn fetch_models_with_discovery(
             fetch_generic_models(protocol, display_label, base_url, api_key, auth_header).await
         }
     }
+}
+
+/// Upgrade loopback compatible endpoints to a richer native catalog when the
+/// server identifies itself as LM Studio or Ollama. Remote endpoints stay on
+/// their protocol-standard listing; operators can select an explicit discovery
+/// kind for a remote native server they control.
+async fn fetch_auto_models(
+    protocol: Protocol,
+    display_label: &str,
+    base_url: &str,
+    api_key: &str,
+    auth_header: Option<&str>,
+) -> Result<LiveModelAvailability> {
+    if !is_loopback_endpoint(base_url) {
+        return fetch_generic_models(protocol, display_label, base_url, api_key, auth_header).await;
+    }
+
+    let native = match detect_server(base_url, api_key).await {
+        DetectedServer::LmStudio => {
+            Some(("LM Studio", fetch_lm_studio_models(base_url, api_key).await))
+        }
+        DetectedServer::Ollama if protocol == Protocol::OpenAiChat => {
+            Some(("Ollama", fetch_ollama_models(base_url).await))
+        }
+        DetectedServer::Ollama
+        | DetectedServer::OpenAiCompatible
+        | DetectedServer::AnthropicCompatible
+        | DetectedServer::Unreachable => None,
+    };
+    match native {
+        Some((_kind, Ok(availability))) => Ok(availability),
+        Some((kind, Err(err))) => {
+            tracing::warn!(
+                provider = %display_label,
+                server = kind,
+                error = %err,
+                "local native model probe failed; falling back to compatible listing"
+            );
+            fetch_generic_models(protocol, display_label, base_url, api_key, auth_header).await
+        }
+        None => fetch_generic_models(protocol, display_label, base_url, api_key, auth_header).await,
+    }
+}
+
+fn is_loopback_endpoint(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 // ---------------------------------------------------------------------------
@@ -285,37 +348,38 @@ async fn fetch_generic_models(
     api_key: &str,
     auth_header: Option<&str>,
 ) -> Result<LiveModelAvailability> {
-    let base = base_url.trim_end_matches('/');
-    let api_key = api_key.trim();
-    let builder = match protocol {
+    match protocol {
         Protocol::OpenAiChat => {
-            let mut builder = crate::provider::http_client()
-                .get(format!("{base}/models"))
-                .header("Accept", "application/json");
-            if !api_key.is_empty() {
-                // A connection override sends the raw key under its own header;
-                // otherwise the OpenAI default `Authorization: Bearer`.
-                builder = match auth_header {
-                    Some(header) => builder.header(header, api_key),
-                    None => builder.header("Authorization", format!("Bearer {api_key}")),
-                };
-            }
-            builder
+            fetch_openai_compatible_models(display_label, base_url, api_key, auth_header).await
         }
         Protocol::AnthropicMessages => {
-            let mut builder = crate::provider::http_client()
-                .get(format!("{base}/v1/models"))
-                .header("Accept", "application/json")
-                .header("anthropic-version", ANTHROPIC_API_VERSION);
-            if !api_key.is_empty() {
-                builder = builder.header(auth_header.unwrap_or("x-api-key"), api_key);
-            }
-            builder
+            fetch_anthropic_compatible_models(display_label, base_url, api_key, auth_header).await
         }
         Protocol::CodexResponses => {
             anyhow::bail!("{display_label} does not support a model catalog endpoint")
         }
-    };
+    }
+}
+
+async fn fetch_openai_compatible_models(
+    display_label: &str,
+    base_url: &str,
+    api_key: &str,
+    auth_header: Option<&str>,
+) -> Result<LiveModelAvailability> {
+    let base = base_url.trim_end_matches('/');
+    let api_key = api_key.trim();
+    let mut builder = crate::provider::http_client()
+        .get(format!("{base}/models"))
+        .header("Accept", "application/json");
+    if !api_key.is_empty() {
+        // A connection override sends the raw key under its own header;
+        // otherwise the OpenAI default `Authorization: Bearer`.
+        builder = match auth_header {
+            Some(header) => builder.header(header, api_key),
+            None => builder.header("Authorization", format!("Bearer {api_key}")),
+        };
+    }
 
     let response = builder
         .send()
@@ -334,6 +398,74 @@ async fn fetch_generic_models(
         models,
         ..LiveModelAvailability::default()
     })
+}
+
+async fn fetch_anthropic_compatible_models(
+    display_label: &str,
+    base_url: &str,
+    api_key: &str,
+    auth_header: Option<&str>,
+) -> Result<LiveModelAvailability> {
+    let endpoint = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let api_key = api_key.trim();
+    let mut after_id: Option<String> = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut models = Vec::new();
+
+    for _page in 0..MODEL_CATALOG_PAGE_CAP {
+        let mut url = reqwest::Url::parse(&endpoint)
+            .with_context(|| format!("Invalid {display_label} model-list endpoint {endpoint}"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("limit", "1000");
+            if let Some(cursor) = after_id.as_deref() {
+                query.append_pair("after_id", cursor);
+            }
+        }
+        let mut builder = crate::provider::http_client()
+            .get(url)
+            .header("Accept", "application/json")
+            .header("anthropic-version", ANTHROPIC_API_VERSION);
+        if !api_key.is_empty() {
+            builder = builder.header(auth_header.unwrap_or("x-api-key"), api_key);
+        }
+        let response = builder
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch {display_label} model list"))?;
+        if !response.status().is_success() {
+            return Err(sse::error_from_response(response).await.into());
+        }
+        let value: Value = response
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse {display_label} model list response"))?;
+        let page = parse_anthropic_models_page(value)
+            .with_context(|| format!("Failed to parse {display_label} model list response"))?;
+        models.extend(page.models);
+
+        if !page.has_more {
+            sort_models(&mut models);
+            models.dedup_by(|left, right| left.remote_model_id == right.remote_model_id);
+            return Ok(LiveModelAvailability {
+                models,
+                ..LiveModelAvailability::default()
+            });
+        }
+
+        let cursor = page
+            .last_id
+            .filter(|cursor| !cursor.trim().is_empty())
+            .with_context(|| {
+                format!("{display_label} model list has `has_more` without a `last_id`")
+            })?;
+        if !seen_cursors.insert(cursor.clone()) {
+            anyhow::bail!("{display_label} model list repeated cursor `{cursor}`");
+        }
+        after_id = Some(cursor);
+    }
+
+    anyhow::bail!("{display_label} model list exceeded {MODEL_CATALOG_PAGE_CAP} pages")
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,11 +1164,18 @@ pub(crate) async fn detect_server(base_url: &str, api_key: &str) -> DetectedServ
     let root = server_root(base_url);
     let base = base_url.trim_end_matches('/');
 
-    let lm_studio = probe_ok(
+    let lm_studio_v1 = probe_ok(with_optional_bearer(
+        crate::provider::http_client()
+            .get(format!("{root}/api/v1/models"))
+            .timeout(DETECT_TIMEOUT),
+        api_key,
+    ));
+    let lm_studio_v0 = probe_ok(with_optional_bearer(
         crate::provider::http_client()
             .get(format!("{root}/api/v0/models"))
             .timeout(DETECT_TIMEOUT),
-    );
+        api_key,
+    ));
     let ollama = probe_ok(
         crate::provider::http_client()
             .get(format!("{root}/api/tags"))
@@ -1064,9 +1203,9 @@ pub(crate) async fn detect_server(base_url: &str, api_key: &str) -> DetectedServ
         probe_ok(builder)
     };
 
-    let (lm_studio, ollama, openai, anthropic) =
-        futures::join!(lm_studio, ollama, openai, anthropic);
-    if lm_studio {
+    let (lm_studio_v1, lm_studio_v0, ollama, openai, anthropic) =
+        futures::join!(lm_studio_v1, lm_studio_v0, ollama, openai, anthropic);
+    if lm_studio_v1 || lm_studio_v0 {
         DetectedServer::LmStudio
     } else if ollama {
         DetectedServer::Ollama
@@ -1076,6 +1215,18 @@ pub(crate) async fn detect_server(base_url: &str, api_key: &str) -> DetectedServ
         DetectedServer::AnthropicCompatible
     } else {
         DetectedServer::Unreachable
+    }
+}
+
+fn with_optional_bearer(
+    builder: reqwest::RequestBuilder,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        builder
+    } else {
+        builder.bearer_auth(api_key)
     }
 }
 
@@ -1170,6 +1321,190 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn anthropic_compatible_discovery_pages_and_reuses_rich_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("x-api-key", "compatible-key"))
+            .and(header("anthropic-version", ANTHROPIC_API_VERSION))
+            .and(query_param("limit", "1000"))
+            .and(query_param_is_missing("after_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "claude-sonnet-5",
+                    "display_name": "Claude Sonnet 5",
+                    "max_input_tokens": 1_000_000,
+                    "max_tokens": 128_000,
+                    "capabilities": {
+                        "effort": {
+                            "supported": true,
+                            "low": {"supported": true},
+                            "high": {"supported": true}
+                        },
+                        "image_input": {"supported": true},
+                        "structured_outputs": {"supported": true},
+                        "thinking": {
+                            "supported": true,
+                            "types": {"adaptive": {"supported": true}}
+                        }
+                    }
+                }],
+                "has_more": true,
+                "last_id": "page-one"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("x-api-key", "compatible-key"))
+            .and(query_param("limit", "1000"))
+            .and(query_param("after_id", "page-one"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "claude-haiku-local"}],
+                "has_more": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::Generic,
+            Protocol::AnthropicMessages,
+            "Anthropic Compatible",
+            &server.uri(),
+            "compatible-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            availability.remote_model_ids(),
+            vec![
+                "claude-haiku-local".to_string(),
+                "claude-sonnet-5".to_string(),
+            ]
+        );
+        let sonnet = availability
+            .models
+            .iter()
+            .find(|model| model.remote_model_id.as_ref() == "claude-sonnet-5")
+            .expect("rich model row");
+        assert_eq!(sonnet.display_name.as_deref(), Some("Claude Sonnet 5"));
+        assert_eq!(sonnet.context_window, Some(1_000_000));
+        assert_eq!(sonnet.output_limit, Some(128_000));
+        assert_eq!(
+            sonnet.features,
+            vec![
+                ModelFeature::ToolCall,
+                ModelFeature::Attachment,
+                ModelFeature::StructuredOutput,
+                ModelFeature::Reasoning,
+            ]
+        );
+        assert_eq!(
+            sonnet.supported_reasoning,
+            vec![
+                ReasoningSelection::Off,
+                ReasoningSelection::Low,
+                ReasoningSelection::High,
+            ]
+        );
+        assert_eq!(sonnet.recommended_reasoning, Some(ReasoningSelection::High));
+        assert_eq!(
+            sonnet.reasoning_codec,
+            Some(ReasoningCodec::AnthropicAdaptive)
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_discovery_rejects_cursor_cycles() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(query_param_is_missing("after_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [],
+                "has_more": true,
+                "last_id": "same-cursor"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(query_param("after_id", "same-cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [],
+                "has_more": true,
+                "last_id": "same-cursor"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = fetch_models_with_discovery(
+            DiscoveryKind::Generic,
+            Protocol::AnthropicMessages,
+            "Anthropic Compatible",
+            &server.uri(),
+            "",
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("repeated cursor `same-cursor`"));
+    }
+
+    #[tokio::test]
+    async fn auto_discovery_uses_lm_studio_native_metadata_on_loopback() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(header("authorization", "Bearer local-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{
+                    "type": "llm",
+                    "key": "qwen3-coder",
+                    "display_name": "Qwen3 Coder",
+                    "max_context_length": 131_072,
+                    "capabilities": ["tool_use"]
+                }]
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let availability = fetch_models_with_discovery(
+            DiscoveryKind::Auto,
+            Protocol::OpenAiChat,
+            "OpenAI Compatible",
+            &format!("{}/v1", server.uri()),
+            "local-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(availability.models.len(), 1);
+        assert_eq!(
+            availability.models[0].remote_model_id.as_ref(),
+            "qwen3-coder"
+        );
+        assert_eq!(
+            availability.models[0].display_name.as_deref(),
+            Some("Qwen3 Coder")
+        );
+        assert_eq!(availability.models[0].context_window, Some(131_072));
+        assert_eq!(
+            availability.models[0].features,
+            vec![ModelFeature::ToolCall]
+        );
+    }
 
     #[tokio::test]
     async fn qwencloud_discovery_filters_non_chat_products() {

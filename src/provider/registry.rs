@@ -347,6 +347,34 @@ mod tests {
         assert!(!ids.contains(&"anthropic-compatible"));
     }
 
+    #[test]
+    fn compatible_connections_refresh_without_unsafe_capability_defaults() {
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin()
+            .expect("builtin catalog should load");
+        let registry = ProviderRegistry::from_catalog(&catalog);
+
+        for (id, protocol) in [
+            ("openai-compatible", Protocol::OpenAiChat),
+            ("anthropic-compatible", Protocol::AnthropicMessages),
+        ] {
+            let factory = registry.get(id).expect("compatible provider");
+            let metadata = factory.metadata();
+            assert_eq!(metadata.protocol, protocol, "{id}");
+            assert_eq!(
+                metadata.discovery,
+                crate::model_catalog::DiscoveryKind::Auto,
+                "{id}"
+            );
+            assert_eq!(
+                metadata.token_counter,
+                Some(crate::provider::TokenCounterKind::Heuristic),
+                "{id}"
+            );
+            assert!(!metadata.capabilities.supports_prompt_cache, "{id}");
+            assert!(metadata.seed_model_list().is_empty(), "{id}");
+        }
+    }
+
     /// Providers resolve through catalog connections (`from_catalog`), whose
     /// capabilities come solely from `models/builtin/connections.toml` — the
     /// builtin Rust metadata is only an auth/model-listing delegate. This

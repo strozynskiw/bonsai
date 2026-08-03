@@ -14,17 +14,22 @@ const fn default_enabled() -> bool {
 }
 
 /// How a connection's live model list is discovered. `Generic` uses the
-/// transport's standard listing endpoint (`/models`); the server-specific
-/// kinds hit richer native APIs (context window, display name, capabilities)
-/// that the OpenAI-compatible surface does not expose. `Static` skips discovery
-/// entirely and offers exactly the connection's catalog models — for a backend
-/// whose `/models` is unusable or returns off-topic entries (e.g. a provider
-/// that lists TTS/ASR voice models alongside chat).
+/// transport's standard listing endpoint (`/models`); `Auto` upgrades known
+/// loopback servers to richer native APIs. The server-specific kinds always
+/// use those native APIs for context windows, display names, and capabilities.
+/// `Static` skips discovery entirely and offers exactly the connection's
+/// catalog models — for a backend whose `/models` is unusable or returns
+/// off-topic entries (e.g. a provider that lists TTS/ASR voice models alongside
+/// chat).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum DiscoveryKind {
     #[default]
     Generic,
+    /// Use the transport's standard listing for remote endpoints. For loopback
+    /// endpoints, first identify a supported local server and use its richer
+    /// native catalog (currently LM Studio or Ollama).
+    Auto,
     Gemini,
     LmStudio,
     Mistral,

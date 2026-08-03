@@ -61,6 +61,7 @@ impl ProviderManagerRow {
             parts.push(format!("{} models", self.model_count));
         }
         match self.discovery {
+            DiscoveryKind::Auto => parts.push("auto discovery".to_string()),
             DiscoveryKind::LmStudio => parts.push("LM Studio".to_string()),
             DiscoveryKind::Ollama => parts.push("Ollama".to_string()),
             DiscoveryKind::Gemini => parts.push("Gemini API".to_string()),

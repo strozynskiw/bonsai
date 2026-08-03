@@ -78,11 +78,16 @@ impl ProviderPreset {
         match (discovery, transport) {
             (DiscoveryKind::LmStudio, _) => Some(Self::LmStudio),
             (DiscoveryKind::Ollama, _) => Some(Self::Ollama),
-            (DiscoveryKind::Generic, TransportProtocol::OpenAiChat) => Some(Self::OpenAiCompatible),
-            (DiscoveryKind::Generic, TransportProtocol::AnthropicMessages) => {
-                Some(Self::AnthropicCompatible)
+            (DiscoveryKind::Generic | DiscoveryKind::Auto, TransportProtocol::OpenAiChat) => {
+                Some(Self::OpenAiCompatible)
             }
-            (DiscoveryKind::Generic, TransportProtocol::CodexResponses) => None,
+            (
+                DiscoveryKind::Generic | DiscoveryKind::Auto,
+                TransportProtocol::AnthropicMessages,
+            ) => Some(Self::AnthropicCompatible),
+            (DiscoveryKind::Generic | DiscoveryKind::Auto, TransportProtocol::CodexResponses) => {
+                None
+            }
             // The local wizard never creates provider-specific or curated
             // discovery connections.
             (
@@ -215,7 +220,10 @@ impl LocalModelWizardModel {
                 .context_window
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
-            output_limit: String::new(),
+            output_limit: model
+                .output_limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
             // An empty features list means the server didn't report
             // capabilities, not that tools are unsupported — keep the
             // optimistic default in that case.
@@ -1103,7 +1111,8 @@ mod tests {
                     Some(131_072),
                     Some("Qwen3 Coder".to_string()),
                     vec![ModelFeature::ToolCall],
-                ),
+                )
+                .with_output_limit(Some(32_768)),
                 crate::model_catalog::AvailableModel::remote("bare-model"),
             ],
             detected: Some(ProviderPreset::Ollama),
@@ -1111,6 +1120,7 @@ mod tests {
 
         assert_eq!(state.preset, ProviderPreset::Ollama);
         assert_eq!(state.models[0].context_window, "131072");
+        assert_eq!(state.models[0].output_limit, "32768");
         assert_eq!(state.models[0].display_name.as_deref(), Some("Qwen3 Coder"));
         assert!(state.models[0].tool_call);
         assert_eq!(state.models[1].context_window, "");

@@ -27,8 +27,8 @@ pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
 const THINKING_BUDGET_HEADROOM_TOKENS: u32 = 1_024;
 const ANTHROPIC_MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
-/// `GET /v1/models` pages at most this many times (100 rows each) so a
-/// misbehaving gateway can't loop the refresh forever.
+/// `GET /v1/models` pages at most this many times (1,000 rows each) so a
+/// misbehaving gateway cannot loop the refresh forever.
 const ANTHROPIC_MODELS_MAX_PAGES: usize = 5;
 
 pub static ANTHROPIC_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
@@ -120,13 +120,14 @@ async fn fetch_anthropic_models(
 
     let mut models = Vec::new();
     let mut after_id: Option<String> = None;
+    let mut seen_cursors = std::collections::HashSet::new();
     for _page in 0..ANTHROPIC_MODELS_MAX_PAGES {
         let mut request = http
             .get(transform::endpoint_url(&base_url, "v1/models"))
             .header("x-api-key", &api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("Accept", "application/json")
-            .query(&[("limit", "100")]);
+            .query(&[("limit", "1000")]);
         if let Some(after_id) = &after_id {
             request = request.query(&[("after_id", after_id.as_str())]);
         }
@@ -138,25 +139,30 @@ async fn fetch_anthropic_models(
         if !response.status().is_success() {
             return Err(sse::error_from_response(response).await.into());
         }
-        let page: AnthropicModelsPage = response
+        let value: Value = response
             .json()
             .await
             .context("Failed to parse Anthropic models")?;
+        let page = parse_anthropic_models_page(value)?;
 
-        models.extend(page.data.into_iter().map(AnthropicModelRow::into_available));
+        models.extend(page.models);
         if !page.has_more {
-            break;
+            return Ok(LiveModelAvailability {
+                models,
+                ..LiveModelAvailability::default()
+            });
         }
-        match page.last_id {
-            Some(last_id) => after_id = Some(last_id),
-            None => break,
+        let last_id = page
+            .last_id
+            .filter(|last_id| !last_id.trim().is_empty())
+            .context("Anthropic models response has `has_more` without a `last_id`")?;
+        if !seen_cursors.insert(last_id.clone()) {
+            anyhow::bail!("Anthropic models response repeated cursor `{last_id}`");
         }
+        after_id = Some(last_id);
     }
 
-    Ok(LiveModelAvailability {
-        models,
-        ..LiveModelAvailability::default()
-    })
+    anyhow::bail!("Anthropic model list exceeded {ANTHROPIC_MODELS_MAX_PAGES} pages")
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -167,6 +173,31 @@ struct AnthropicModelsPage {
     has_more: bool,
     #[serde(default)]
     last_id: Option<String>,
+}
+
+/// Transport-neutral result of parsing one Anthropic Models API page.
+/// Compatible connections reuse this so limits and capabilities cannot drift
+/// from the first-party provider implementation.
+#[derive(Debug)]
+pub(crate) struct ParsedAnthropicModelsPage {
+    pub(crate) models: Vec<AvailableModel>,
+    pub(crate) has_more: bool,
+    pub(crate) last_id: Option<String>,
+}
+
+/// Parse one Anthropic Models API page into catalog metadata.
+pub(crate) fn parse_anthropic_models_page(value: Value) -> Result<ParsedAnthropicModelsPage> {
+    let page: AnthropicModelsPage =
+        serde_json::from_value(value).context("Failed to parse Anthropic models")?;
+    Ok(ParsedAnthropicModelsPage {
+        models: page
+            .data
+            .into_iter()
+            .map(AnthropicModelRow::into_available)
+            .collect(),
+        has_more: page.has_more,
+        last_id: page.last_id,
+    })
 }
 
 #[derive(Debug, serde::Deserialize)]

@@ -56,10 +56,10 @@ model_env = "LOCAL_EXAMPLE_MODEL"
 base_url_env = "LOCAL_EXAMPLE_BASE_URL"
 default_endpoint_path = "chat/completions"
 default_token_counter = "heuristic"
-# Send prompt-cache hints (`prompt_cache_key` on openai-chat,
-# `cache_control` breakpoints on anthropic-messages). Local backends that
-# cache prefixes benefit; others ignore the hint.
-prompt_cache = true
+# Compatibility does not guarantee support for cache extensions. Set this to
+# true only after verifying the endpoint accepts `prompt_cache_key` on
+# openai-chat or `cache_control` breakpoints on anthropic-messages.
+prompt_cache = false
 "#;
 const EXAMPLE_MODEL_TOML: &str = r#"# Example local/private model.
 # Set enabled = true after enabling the matching connector.
@@ -942,7 +942,7 @@ impl ModelCatalog {
     }
 }
 
-const LIVE_MODEL_CACHE_SCHEMA_VERSION: u8 = 4;
+const LIVE_MODEL_CACHE_SCHEMA_VERSION: u8 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct LiveModelAvailability {

@@ -337,7 +337,10 @@ model_env = "OPENAI_COMPATIBLE_MODEL"
 base_url_env = "OPENAI_COMPATIBLE_BASE_URL"
 default_endpoint_path = "chat/completions"
 default_token_counter = "heuristic"
-prompt_cache = true
+# Compatible servers do not share a cache-extension contract. Users can opt in
+# from a connection override after verifying their endpoint accepts the field.
+prompt_cache = false
+discovery = "auto"
 
 [[connections]]
 id = "anthropic-compatible"
@@ -349,8 +352,12 @@ api_key_env = "ANTHROPIC_COMPATIBLE_API_KEY"
 model_env = "ANTHROPIC_COMPATIBLE_MODEL"
 base_url_env = "ANTHROPIC_COMPATIBLE_BASE_URL"
 default_endpoint_path = "v1/messages"
-default_token_counter = "anthropic-count-tokens"
-prompt_cache = true
+# The wire can serve non-Anthropic tokenizers and may not expose count_tokens.
+default_token_counter = "heuristic"
+# cache_control is optional in the compatibility ecosystem and some servers
+# reject it. Keep it opt-in through a connection override.
+prompt_cache = false
+discovery = "auto"
 
 [[connections]]
 id = "deepseek"

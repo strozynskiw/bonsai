@@ -221,10 +221,10 @@ fn prepare_local_catalog_entry(
             default_endpoint_path: default_endpoint_path_for_transport(input.connection.transport)
                 .to_string(),
             default_token_counter: TokenCounterKind::Heuristic,
-            // Local backends either honor the cache hint (`prompt_cache_key` /
-            // `cache_control` breakpoints) or ignore it; opting in by default
-            // keeps their prefix/KV caches warm at no cost.
-            prompt_cache: true,
+            // Compatibility does not imply support for a cache extension.
+            // Unknown request fields and Anthropic cache controls can be
+            // rejected, so wizard-managed endpoints opt in only via TOML.
+            prompt_cache: false,
             discovery: input.connection.discovery,
         }],
     };
@@ -715,8 +715,8 @@ mod tests {
         assert!(provider_content.contains("api_key_env = \"BONSAI_MY_LOCAL_API_KEY\""));
         assert!(provider_content.contains("default_model = \"my-local/org-model-v1\""));
         assert!(
-            provider_content.contains("prompt_cache = true"),
-            "local providers should opt into prompt caching: {provider_content}"
+            provider_content.contains("prompt_cache = false"),
+            "unknown compatible endpoints must not receive cache extensions: {provider_content}"
         );
         assert!(!provider_content.contains("secret"));
         let model_content = fs::read_to_string(&report.model_path).unwrap();

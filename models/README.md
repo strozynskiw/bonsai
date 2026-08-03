@@ -125,9 +125,52 @@ Common optional fields:
 - `default_model`: optional canonical Bonsai model id to select by default.
 - `default_endpoint_path`: request path appended to `default_base_url`.
 - `default_token_counter`: `tiktoken`, `qwen3`, `anthropic-count-tokens`, or `heuristic`.
+- `discovery`: `generic` uses the transport-standard model endpoint; `auto`
+  additionally detects LM Studio or Ollama on loopback. Explicit native kinds include
+  `lm-studio` and `ollama`.
+- `prompt_cache`: sends transport-specific cache extensions. It defaults to `false` for
+  compatible endpoints because unknown request fields can be rejected.
+- `reasoning_content_echo`: replays OpenAI-style `reasoning_content` during tool turns.
+  Enable it only when the endpoint documents that requirement.
+- `auth_header`: sends the raw API key in a non-standard header instead of the transport
+  default.
 
 Use `openai-chat` for OpenAI-compatible APIs such as Ollama, LM Studio, vLLM, and
 OpenRouter-style routers. Use `anthropic-messages` for Anthropic-compatible APIs.
+
+### Compatible endpoints
+
+The built-in `openai-compatible` and `anthropic-compatible` connections deliberately
+have no fixed model lineup. Authorization, startup refresh, and `/refresh` read the
+current lineup from the configured endpoint; the startup result is cached for five
+minutes. OpenAI-compatible discovery calls `GET <base>/models`. Anthropic-compatible
+discovery calls paginated `GET <base>/v1/models` and reuses reported display names,
+input/output limits, capabilities, and reasoning controls.
+
+For loopback URLs, `discovery = "auto"` first identifies supported local runtimes. LM
+Studio uses `/api/v1/models` with `/api/v0/models` as a fallback, while Ollama uses
+`/api/tags` plus bounded `/api/show` metadata probes. If no native runtime is detected,
+Bonsai falls back to the standard compatible endpoint. A server without a model-list
+API remains usable by entering its raw model id during authorization.
+
+Common base URLs are:
+
+- Ollama (OpenAI): `http://localhost:11434/v1`
+- LM Studio (OpenAI): `http://localhost:1234/v1`
+- LM Studio (Anthropic): `http://localhost:1234`
+- vLLM (OpenAI): `http://localhost:8000/v1`
+- llama.cpp (OpenAI): `http://localhost:8080/v1`
+
+Hosted Bedrock or Vertex deployments need a gateway that exposes a standard OpenAI
+Chat Completions or Anthropic Messages surface. Compatibility alone does not guarantee
+prompt-cache controls or reasoning replay, so both stay off unless explicitly enabled:
+
+```toml
+[[connections]]
+id = "openai-compatible"
+prompt_cache = true
+reasoning_content_echo = true
+```
 
 ### Transport coverage and the new-transport rule
 
@@ -182,6 +225,10 @@ Common optional fields:
 - `reasoning_options`: optional Models.dev-shaped reasoning override (`toggle`, `effort`, or `budget_tokens` with optional `min`, `max`, and `default`). Omit it to inherit Models.dev metadata.
 - `features`: explicit feature list, such as `tool-call`, `reasoning`,
   `structured-output`, `temperature`, `attachment`.
+- `pinned`: keeps every catalog metadata value authoritative across refreshes.
+- `pinned_fields`: keeps only selected values authoritative. Valid entries are
+  `display-name`, `context-window`, `output-limit`, `pricing`, `features`, and
+  `reasoning`.
 
 If a field is omitted in a user target that overrides a built-in target, Bonsai keeps
 the built-in value. For local/offline models, define `reasoning_options` directly
@@ -192,6 +239,10 @@ so Bonsai does not need Models.dev to know the model's reasoning controls.
 Bonsai fetches Models.dev metadata into `$BONSAI_HOME/cache/models-dev.json`.
 That metadata supplies context windows, pricing, display names, and capabilities when
 the catalog target does not define them directly.
+
+For unpinned fields, fresh provider metadata wins, then Models.dev, then the TOML value
+as an offline fallback. `pinned = true` or `pinned_fields` deliberately moves the
+selected catalog value ahead of both refreshed sources.
 
 Use `metadata_model` when your Bonsai model id is not the same as the Models.dev id:
 

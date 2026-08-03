@@ -38,6 +38,7 @@ pub(crate) fn available_model_from_item(item: &Value) -> Option<AvailableModel> 
             display_name_from_model_item(item, id),
             features_from_model_item(item),
         )
+        .with_output_limit(output_limit_from_model_item(item))
         .with_token_counter(token_counter_from_model_item(item, id))
         .with_pricing_schedule(pricing, pricing_tiers),
     )
@@ -159,7 +160,52 @@ fn features_from_model_item(item: &Value) -> Vec<ModelFeature> {
     if input_modalities_include_image(item) {
         features.push(ModelFeature::Attachment);
     }
+    if ["tools", "tool_call", "tool_use", "function_calling"]
+        .into_iter()
+        .any(|name| capability_supported(item, name))
+    {
+        push_unique_feature(&mut features, ModelFeature::ToolCall);
+    }
+    if ["reasoning", "thinking", "effort"]
+        .into_iter()
+        .any(|name| capability_supported(item, name))
+    {
+        push_unique_feature(&mut features, ModelFeature::Reasoning);
+    }
+    if ["structured_output", "structured_outputs"]
+        .into_iter()
+        .any(|name| capability_supported(item, name))
+    {
+        push_unique_feature(&mut features, ModelFeature::StructuredOutput);
+    }
+    if ["vision", "image_input"]
+        .into_iter()
+        .any(|name| capability_supported(item, name))
+    {
+        push_unique_feature(&mut features, ModelFeature::Attachment);
+    }
     features
+}
+
+fn capability_supported(item: &Value, name: &str) -> bool {
+    item.get("capabilities")
+        .and_then(|capabilities| capabilities.get(name))
+        .is_some_and(support_value)
+}
+
+fn support_value(value: &Value) -> bool {
+    value.as_bool().unwrap_or_else(|| {
+        value
+            .get("supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    })
+}
+
+fn push_unique_feature(features: &mut Vec<ModelFeature>, feature: ModelFeature) {
+    if !features.contains(&feature) {
+        features.push(feature);
+    }
 }
 
 /// Whether a listing item advertises image input, via OpenRouter's
@@ -274,6 +320,7 @@ fn context_window_from_model_item(item: &Value) -> Option<u32> {
         "context_length",
         "max_context_length",
         "max_context_tokens",
+        "max_input_tokens",
     ]
     .into_iter()
     .find_map(|field| item.get(field).and_then(value_as_positive_u32))
@@ -287,6 +334,22 @@ fn context_window_from_model_item(item: &Value) -> Option<u32> {
             .and_then(|limits| limits.get("context"))
             .and_then(value_as_positive_u32)
     })
+}
+
+fn output_limit_from_model_item(item: &Value) -> Option<u32> {
+    ["output_limit", "max_output_tokens", "max_tokens"]
+        .into_iter()
+        .find_map(|field| item.get(field).and_then(value_as_positive_u32))
+        .or_else(|| {
+            item.get("limit")
+                .and_then(|limit| limit.get("output"))
+                .and_then(value_as_positive_u32)
+        })
+        .or_else(|| {
+            item.get("limits")
+                .and_then(|limits| limits.get("output"))
+                .and_then(value_as_positive_u32)
+        })
 }
 
 fn value_as_positive_u32(value: &Value) -> Option<u32> {
@@ -462,21 +525,53 @@ mod tests {
     }
 
     #[test]
-    fn available_models_parse_context_windows_from_common_fields() {
+    fn available_models_parse_limits_from_common_fields() {
         let models = available_models_from_response(&serde_json::json!({
             "data": [
-                {"id": "ctx-window", "context_window": 32768},
-                {"id": "ctx-length", "context_length": "65536"},
-                {"id": "nested-limit", "limit": {"context": 131072}},
+                {"id": "ctx-window", "context_window": 32768, "output_limit": 4096},
+                {"id": "ctx-length", "context_length": "65536", "max_output_tokens": "8192"},
+                {"id": "nested-limit", "limit": {"context": 131072, "output": 16384}},
+                {"id": "anthropic-shaped", "max_input_tokens": 200000, "max_tokens": 64000},
                 {"id": "none"}
             ]
         }));
 
         assert_eq!(models[0].remote_model_id.as_ref(), "ctx-window");
         assert_eq!(models[0].context_window, Some(32_768));
+        assert_eq!(models[0].output_limit, Some(4_096));
         assert_eq!(models[1].context_window, Some(65_536));
+        assert_eq!(models[1].output_limit, Some(8_192));
         assert_eq!(models[2].context_window, Some(131_072));
-        assert_eq!(models[3].context_window, None);
+        assert_eq!(models[2].output_limit, Some(16_384));
+        assert_eq!(models[3].context_window, Some(200_000));
+        assert_eq!(models[3].output_limit, Some(64_000));
+        assert_eq!(models[4].context_window, None);
+        assert_eq!(models[4].output_limit, None);
+    }
+
+    #[test]
+    fn available_models_reuse_explicit_compatible_capabilities() {
+        let models = available_models_from_response(&serde_json::json!({
+            "data": [{
+                "id": "rich-compatible-model",
+                "capabilities": {
+                    "function_calling": {"supported": true},
+                    "thinking": {"supported": true},
+                    "structured_outputs": {"supported": true},
+                    "image_input": {"supported": true}
+                }
+            }]
+        }));
+
+        assert_eq!(
+            models[0].features,
+            vec![
+                ModelFeature::ToolCall,
+                ModelFeature::Reasoning,
+                ModelFeature::StructuredOutput,
+                ModelFeature::Attachment,
+            ]
+        );
     }
 
     #[test]
