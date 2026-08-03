@@ -5,6 +5,13 @@
 //! configuration. This module accepts a deliberately small, parsed command
 //! language and rebuilds it with a fixed trusted executable path before it is
 //! handed to the shell sandbox.
+//!
+//! Local inspection tools resolve only from the root-owned system directories.
+//! The collaboration clients (`gh`/`glab`) additionally resolve from fixed
+//! package-manager binary directories; those candidates must stay inside the
+//! matching installation prefix, be owned by root or the current user, have no
+//! group/other-writable component in their directory chain, and never resolve
+//! inside the project root. `PATH` is never consulted.
 
 use std::path::{Path, PathBuf};
 
@@ -52,7 +59,14 @@ impl PlanningCommand {
 /// open files or invoke editors. The returned string uses a fixed executable
 /// path plus shell-escaped argument tokens, so the shell cannot resolve a
 /// project-controlled program through `PATH`.
-pub(super) fn classify_planning_command(input: &str) -> Result<PlanningCommand> {
+///
+/// Rejects collaboration clients whose canonical binary resolves inside
+/// `project_root` (a project-controlled executable must never run with network
+/// access). Pass `None` when no project root is known.
+pub(super) fn classify_planning_command_in(
+    input: &str,
+    project_root: Option<&Path>,
+) -> Result<PlanningCommand> {
     let input = input.trim();
     if input.is_empty() {
         bail!("planning Bash command is required");
@@ -66,8 +80,11 @@ pub(super) fn classify_planning_command(input: &str) -> Result<PlanningCommand> 
     if program.contains('/') || program == "." || program == "source" || program.contains('=') {
         bail!("planning Bash only permits named trusted executables");
     }
-    let executable = trusted_executable(program)
-        .ok_or_else(|| anyhow::anyhow!("{program} is not an available planning-mode executable"))?;
+    let executable = match program.as_str() {
+        "gh" | "glab" => trusted_collaboration_executable(program, project_root),
+        _ => trusted_executable(program),
+    }
+    .ok_or_else(|| anyhow::anyhow!("{program} is not an available planning-mode executable"))?;
 
     let kind = match program.as_str() {
         "pwd" if args.is_empty() => PlanningCommandKind::LocalRead,
@@ -87,6 +104,11 @@ pub(super) fn classify_planning_command(input: &str) -> Result<PlanningCommand> 
             .ok_or_else(|| anyhow::anyhow!("command is outside the planning Bash allowlist"))?,
         _ => bail!("command is outside the planning Bash allowlist"),
     };
+    if kind == PlanningCommandKind::LocalRead
+        && !local_command_paths_stay_in_project(program, args, project_root)
+    {
+        bail!("planning Bash local paths must resolve inside the project root");
+    }
 
     let execution_args = if program == "grep" {
         let (options, remaining) = split_grep_options(args)
@@ -116,18 +138,17 @@ pub(super) fn classify_planning_command(input: &str) -> Result<PlanningCommand> 
             "core.fsmonitor=false",
             "-c",
             "core.pager=cat",
-            "-c",
         ] {
             command.push(' ');
             command.push_str(&shell_quote(arg));
         }
     }
-    if program == "git" && matches!(args.first().map(String::as_str), Some("diff" | "show")) {
-        command.push_str(" '--no-ext-diff'");
-    }
-    for arg in &execution_args {
+    for (index, arg) in execution_args.iter().enumerate() {
         command.push(' ');
         command.push_str(&shell_quote(arg));
+        if program == "git" && index == 0 && matches!(arg.as_str(), "diff" | "show") {
+            command.push_str(" '--no-ext-diff' '--no-textconv'");
+        }
     }
     Ok(PlanningCommand { command, kind })
 }
@@ -144,11 +165,126 @@ fn reject_shell_syntax(input: &str) -> Result<()> {
     Ok(())
 }
 
+/// Root-owned system binary directories trusted for every planning executable.
+const SYSTEM_BIN_DIRS: &[&str] = &["/usr/bin", "/bin"];
+
+/// Fixed package-manager binary directories, trusted only for the
+/// collaboration clients. Entries are `prefix/bin` pairs; the canonical target
+/// of a candidate must stay inside the matching prefix.
+const COLLABORATION_BIN_DIRS: &[&str] = &[
+    "/opt/homebrew/bin",              // Apple Silicon Homebrew
+    "/usr/local/bin",                 // Intel Homebrew / admin installs
+    "/opt/local/bin",                 // MacPorts
+    "/home/linuxbrew/.linuxbrew/bin", // Linuxbrew
+];
+
 fn trusted_executable(program: &str) -> Option<PathBuf> {
-    ["/usr/bin", "/bin"]
-        .into_iter()
-        .filter_map(|directory| Path::new(directory).join(program).canonicalize().ok())
-        .find(|path| executable_file(path))
+    resolve_system_executable(program, SYSTEM_BIN_DIRS)
+}
+
+/// Resolve a collaboration client from the fixed system directories first,
+/// then from the fixed package-manager directories.
+fn trusted_collaboration_executable(program: &str, project_root: Option<&Path>) -> Option<PathBuf> {
+    resolve_system_executable(program, SYSTEM_BIN_DIRS)
+        .or_else(|| resolve_package_executable(program, COLLABORATION_BIN_DIRS, project_root))
+}
+
+fn resolve_system_executable(program: &str, dirs: &[&str]) -> Option<PathBuf> {
+    dirs.iter()
+        .filter_map(|directory| {
+            let candidate = Path::new(directory).join(program);
+            let canonical = candidate.canonicalize().ok()?;
+            executable_file(&canonical).then_some(canonical)
+        })
+        .next()
+}
+
+/// Resolve `program` from a fixed package-manager `prefix/bin` directory.
+///
+/// The candidate must be a regular executable file owned by root or the
+/// current user, have no group/other-writable bits, live inside `prefix`
+/// (canonicalized, so symlinks into a Cellar are accepted but escapes are
+/// not), have no writable component between `prefix` and the file, and never
+/// resolve inside the project root.
+fn resolve_package_executable<S: AsRef<str>>(
+    program: &str,
+    dirs: &[S],
+    project_root: Option<&Path>,
+) -> Option<PathBuf> {
+    for directory in dirs {
+        let directory = directory.as_ref();
+        let prefix = Path::new(directory).parent()?;
+        let Ok(prefix) = prefix.canonicalize() else {
+            continue;
+        };
+        let candidate = Path::new(directory).join(program);
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if package_executable_file(&canonical, &prefix, project_root) {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn package_executable_file(path: &Path, prefix: &Path, project_root: Option<&Path>) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    let mode = metadata.permissions().mode();
+    if !metadata.is_file() || mode & 0o111 == 0 || mode & 0o022 != 0 {
+        return false;
+    }
+    let current_uid = nix::unistd::geteuid().as_raw();
+    if metadata.uid() != 0 && metadata.uid() != current_uid {
+        return false;
+    }
+    if let Some(root) = project_root {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if path.starts_with(&canonical_root) {
+            return false;
+        }
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    protected_dir_chain(parent, prefix)
+}
+
+#[cfg(not(unix))]
+fn package_executable_file(_path: &Path, _prefix: &Path, _project_root: Option<&Path>) -> bool {
+    // The collaboration prefixes are unix paths; no candidate can exist on
+    // other platforms, so fail closed rather than trusting any file.
+    false
+}
+
+/// Require every directory from `start` up to and including `prefix` to be a
+/// directory that is not group- or other-writable. Walking up to `prefix` also
+/// enforces that the canonical target stays inside the prefix.
+#[cfg(unix)]
+fn protected_dir_chain(start: &Path, prefix: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut current = start;
+    loop {
+        let Ok(metadata) = current.metadata() else {
+            return false;
+        };
+        if !metadata.is_dir() || metadata.permissions().mode() & 0o022 != 0 {
+            return false;
+        }
+        if current == prefix {
+            return true;
+        }
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        current = parent;
+    }
 }
 
 #[cfg(unix)]
@@ -190,6 +326,55 @@ fn is_safe_local_option(value: &str) -> bool {
         && value != "-"
         && !value.starts_with("--color=")
         && !matches!(value, "--help" | "--version")
+}
+
+fn local_command_paths_stay_in_project(
+    program: &str,
+    args: &[String],
+    project_root: Option<&Path>,
+) -> bool {
+    let Some(project_root) = project_root else {
+        return true;
+    };
+    let paths = match program {
+        "pwd" | "git" => return true,
+        "ls" => args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        "cat" => args.iter().map(String::as_str).collect(),
+        "head" | "tail" => head_tail_paths(args),
+        "grep" => split_grep_options(args)
+            .and_then(|(_, remaining)| remaining.get(1..))
+            .map(|paths| paths.iter().map(String::as_str).collect())
+            .unwrap_or_default(),
+        _ => return false,
+    };
+    let Ok(canonical_root) = project_root.canonicalize() else {
+        return false;
+    };
+    paths.into_iter().all(|path| {
+        canonical_root
+            .join(path)
+            .canonicalize()
+            .is_ok_and(|resolved| resolved.starts_with(&canonical_root))
+    })
+}
+
+fn head_tail_paths(args: &[String]) -> Vec<&str> {
+    let mut paths = Vec::new();
+    let mut expects_count = false;
+    for arg in args {
+        if expects_count {
+            expects_count = false;
+        } else if matches!(arg.as_str(), "-n" | "-c" | "--lines" | "--bytes") {
+            expects_count = true;
+        } else if !arg.starts_with("--lines=") && !arg.starts_with("--bytes=") {
+            paths.push(arg.as_str());
+        }
+    }
+    paths
 }
 
 fn valid_head_tail_args(args: &[String]) -> bool {
@@ -482,9 +667,41 @@ fn valid_collaboration_arguments(args: &[String], grammar: CollaborationGrammar)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn present(program: &str) -> bool {
-        trusted_executable(program).is_some()
+        trusted_executable(program)
+            .or_else(|| trusted_collaboration_executable(program, None))
+            .is_some()
+    }
+
+    #[cfg(unix)]
+    fn temp_prefix(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "bonsai-planning-{tag}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn package_dir(prefix: &Path) -> String {
+        prefix.join("bin").to_str().unwrap().to_string()
     }
 
     #[test]
@@ -511,13 +728,17 @@ mod tests {
             "gh issue view 1 --body attacker",
             "glab mr list --description attacker",
         ] {
-            assert!(classify_planning_command(command).is_err(), "{command}");
+            assert!(
+                classify_planning_command_in(command, None).is_err(),
+                "{command}"
+            );
         }
     }
 
     #[test]
     fn rebuilds_grep_with_an_end_of_options_marker() {
-        let Some(command) = classify_planning_command("grep -n needle src/main.rs").ok() else {
+        let Some(command) = classify_planning_command_in("grep -n needle src/main.rs", None).ok()
+        else {
             return;
         };
         assert!(command.command().contains("'-n' '--' 'needle'"));
@@ -532,7 +753,7 @@ mod tests {
             "head -n 5 src/main.rs",
             "grep Agent src/main.rs",
         ] {
-            let result = classify_planning_command(command);
+            let result = classify_planning_command_in(command, None);
             if present(command.split_whitespace().next().unwrap()) {
                 assert_eq!(
                     result.unwrap().kind(),
@@ -540,6 +761,66 @@ mod tests {
                     "{command}"
                 );
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_read_paths_cannot_escape_through_symlinks() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("inside.txt"), "inside").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            project.path().join("outside.txt"),
+        )
+        .unwrap();
+
+        assert!(classify_planning_command_in("cat inside.txt", Some(project.path())).is_ok());
+        for command in [
+            "cat outside.txt",
+            "head -n 1 outside.txt",
+            "grep secret outside.txt",
+            "ls -L outside.txt",
+        ] {
+            assert!(
+                classify_planning_command_in(command, Some(project.path())).is_err(),
+                "{command}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_git_query_has_complete_config_arguments_and_executes() {
+        let Some(status_command) = classify_planning_command_in("git status --short", None).ok()
+        else {
+            return;
+        };
+        let diff_command = classify_planning_command_in("git diff --stat", None).unwrap();
+        let git = trusted_executable("git").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let initialized = std::process::Command::new(git)
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+
+        for command in [status_command, diff_command] {
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", command.command()])
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+
+            assert!(
+                output.status.success(),
+                "{}: {}",
+                command.command(),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
@@ -554,7 +835,7 @@ mod tests {
             let program = command.split_whitespace().next().unwrap();
             if present(program) {
                 assert!(matches!(
-                    classify_planning_command(command).unwrap().kind(),
+                    classify_planning_command_in(command, None).unwrap().kind(),
                     PlanningCommandKind::CollaborationRead
                         | PlanningCommandKind::CollaborationWrite
                 ));
@@ -572,26 +853,113 @@ mod tests {
             "gh pr create --editor",
             "glab issue create --description-file secret",
         ] {
-            assert!(classify_planning_command(command).is_err(), "{command}");
+            assert!(
+                classify_planning_command_in(command, None).is_err(),
+                "{command}"
+            );
         }
     }
 
     #[test]
     fn distinguishes_remote_reads_from_mutations() {
-        let Some(_) = trusted_executable("gh") else {
+        let Some(_) = trusted_collaboration_executable("gh", None) else {
             return;
         };
         assert_eq!(
-            classify_planning_command("gh issue list --state open")
+            classify_planning_command_in("gh issue list --state open", None)
                 .unwrap()
                 .kind(),
             PlanningCommandKind::CollaborationRead
         );
         assert_eq!(
-            classify_planning_command("gh issue close 42 --comment done")
+            classify_planning_command_in("gh issue close 42 --comment done", None)
                 .unwrap()
                 .kind(),
             PlanningCommandKind::CollaborationWrite
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_executable_accepts_installed_binary() {
+        let prefix = temp_prefix("accept");
+        let bin = prefix.join("bin/gh");
+        write_executable(&bin, 0o755);
+        let dir = package_dir(&prefix);
+        let dirs = [dir.as_str()];
+        let resolved = resolve_package_executable("gh", &dirs, None);
+        let expected = bin.canonicalize().unwrap();
+        assert_eq!(resolved.as_deref(), Some(expected.as_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_executable_accepts_cellar_symlink() {
+        let prefix = temp_prefix("cellar");
+        let cellar_bin = prefix.join("Cellar/gh/2.0/bin");
+        std::fs::create_dir_all(&cellar_bin).unwrap();
+        let target = cellar_bin.join("gh");
+        write_executable(&target, 0o755);
+        std::os::unix::fs::symlink(&target, prefix.join("bin/gh")).unwrap();
+        let dir = package_dir(&prefix);
+        let dirs = [dir.as_str()];
+        let resolved = resolve_package_executable("gh", &dirs, None);
+        let expected = target.canonicalize().unwrap();
+        assert_eq!(resolved.as_deref(), Some(expected.as_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_executable_rejects_escaping_symlink_and_project_binaries() {
+        let prefix = temp_prefix("escape");
+        let project = temp_prefix("project");
+        let fake = project.join("bin/gh");
+        write_executable(&fake, 0o755);
+        std::os::unix::fs::symlink(&fake, prefix.join("bin/gh")).unwrap();
+        let dir = package_dir(&prefix);
+        let dirs = [dir.as_str()];
+        assert!(resolve_package_executable("gh", &dirs, None).is_none());
+        assert!(resolve_package_executable("gh", &dirs, Some(&project)).is_none());
+
+        // A real (non-symlink) binary under the prefix passes every check
+        // except the project-root guard, isolating that branch.
+        let isolated = temp_prefix("isolated");
+        write_executable(&isolated.join("bin/gh"), 0o755);
+        let isolated_dir = package_dir(&isolated);
+        let isolated_dirs = [isolated_dir.as_str()];
+        assert!(resolve_package_executable("gh", &isolated_dirs, None).is_some());
+        assert!(resolve_package_executable("gh", &isolated_dirs, Some(&isolated)).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_executable_rejects_writable_binary_or_directory() {
+        let writable_bin = temp_prefix("writable");
+        let bin = writable_bin.join("bin/gh");
+        write_executable(&bin, 0o777);
+        let dir = package_dir(&writable_bin);
+        let dirs = [dir.as_str()];
+        assert!(resolve_package_executable("gh", &dirs, None).is_none());
+
+        let writable_dir = temp_prefix("writable-dir");
+        write_executable(&writable_dir.join("bin/gh"), 0o755);
+        std::fs::set_permissions(
+            writable_dir.join("bin"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        let dir = package_dir(&writable_dir);
+        let dirs = [dir.as_str()];
+        assert!(resolve_package_executable("gh", &dirs, None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_tools_never_resolve_from_package_directories() {
+        let fake = temp_prefix("scope");
+        write_executable(&fake.join("bin/ls"), 0o755);
+        let command = classify_planning_command_in("ls src", None).unwrap();
+        assert!(!command.command().contains(fake.to_str().unwrap()));
+        assert!(command.command().contains("/usr/bin/ls") || command.command().contains("/bin/ls"));
     }
 }

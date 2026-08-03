@@ -29,7 +29,7 @@ pub(in crate::tool) mod command;
 use command::{CommandAnalysis, analyze_command, extract_read_paths};
 
 mod planning;
-use planning::classify_planning_command;
+use planning::classify_planning_command_in;
 
 mod output;
 pub(crate) use output::BashOutputBudget;
@@ -514,7 +514,7 @@ impl Tool for BashTool {
                  supports bounded foreground, background task, PTY, parallel, and approved sandbox-escape modes."
             }
             BashCapability::Planning => {
-                "Run a restricted planning command: safe local inspection or approved gh/glab issue and pull/merge-request collaboration. Foreground only; shell syntax, redirects, project mutation, and sandbox escape are unavailable."
+                "Run a restricted planning command: safe local inspection or approved gh/glab issue and pull/merge-request collaboration. gh/glab resolve from system and package-manager bin directories (PATH is not consulted). Foreground only; shell syntax, redirects, project mutation, and sandbox escape are unavailable."
             }
         }
     }
@@ -617,7 +617,9 @@ impl BashTool {
             .normalize_redundant_leading_cd(&args.command, &cwd)
             .await;
         let planning_command = (self.capability == BashCapability::Planning)
-            .then(|| classify_planning_command(&requested_command))
+            .then(|| {
+                classify_planning_command_in(&requested_command, Some(&self.canonical_project_root))
+            })
             .transpose()?;
         if planning_command.is_some()
             && (run_in_background || interactive || parallel || escape_sandbox)
