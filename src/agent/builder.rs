@@ -176,6 +176,7 @@ impl Agent {
             },
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            background_wakes: None,
             peer_bus: None,
             pending_peer_delivery_receipts: BTreeMap::new(),
             mode,

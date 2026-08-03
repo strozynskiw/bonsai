@@ -519,6 +519,8 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
             plan_store,
             background_tasks: background_tasks.clone(),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            background_wakes: None,
+            background_wakes_parkable: false,
             yolo_mode: yolo_mode.clone(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
             workspace_locks,

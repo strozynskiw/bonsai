@@ -1077,6 +1077,7 @@ mod tests {
     fn background_task(id: &str, status: BackgroundTaskStatus) -> BackgroundTaskSnapshot {
         BackgroundTaskSnapshot {
             id: id.to_string(),
+            incarnation: "test-task".to_string(),
             command: "cargo test".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             status,
@@ -1088,6 +1089,7 @@ mod tests {
             tail: String::new(),
             tail_truncated: false,
             total_output_chars: 0,
+            version: 1,
             tool_call_id: None,
         }
     }

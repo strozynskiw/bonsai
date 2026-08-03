@@ -342,6 +342,7 @@ pub struct Agent {
     registries: ToolRegistrySet,
     background_tasks: Arc<BackgroundTaskRegistry>,
     terminals: Arc<TerminalRegistry>,
+    background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
     /// Inter-agent communication bus (peers P2); `None` outside interactive/
     /// headless runs, so evals never observe peer traffic.
     peer_bus: Option<Arc<crate::peer::PeerBus>>,

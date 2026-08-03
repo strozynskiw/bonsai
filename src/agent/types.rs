@@ -78,6 +78,8 @@ pub enum WaitReason {
     Subagents(Vec<String>),
     /// Waiting for another live session to finish its current run.
     Peer(PeerWait),
+    /// Waiting for one versioned process-local background task or PTY update.
+    BackgroundWork(crate::background_wake::BackgroundWorkWait),
     /// The coding agent confirmed a fresh planning continuation. Before
     /// switching persona, the TUI protects any non-empty canvas in the saved
     /// plan library and clears the working canvas. Failure leaves the coding

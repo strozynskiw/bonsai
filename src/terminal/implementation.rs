@@ -94,6 +94,8 @@ impl TerminalStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TerminalSnapshot {
     pub(crate) id: String,
+    /// Unique lifetime token for this PTY record; IDs may be reused after a restart.
+    pub(crate) incarnation: String,
     pub(crate) command: String,
     pub(crate) cwd: PathBuf,
     pub(crate) status: TerminalStatus,
@@ -104,6 +106,8 @@ pub(crate) struct TerminalSnapshot {
     pub(crate) tail: String,
     pub(crate) tail_truncated: bool,
     pub(crate) total_output_chars: usize,
+    /// Monotonically increases whenever externally observable terminal state changes.
+    pub(crate) version: u64,
     pub(crate) confined: bool,
     pub(crate) tool_call_id: Option<String>,
     pub(crate) rows: u16,
@@ -115,8 +119,9 @@ pub(crate) struct TerminalSnapshot {
 impl TerminalSnapshot {
     pub(crate) fn summary_line(&self) -> String {
         format!(
-            "{:<6} | {:<9} | {:>10} | {:>11} | {}",
+            "{:<6} | {:>7} | {:<9} | {:>10} | {:>11} | {}",
             self.id,
+            self.version,
             self.status.label(),
             self.exit_label(),
             format!("{} chars", self.total_output_chars),
@@ -126,8 +131,9 @@ impl TerminalSnapshot {
 
     pub(crate) fn detail(&self) -> String {
         let mut detail = format!(
-            "ID: {}\nStatus: {}\nPrompt: {}\nSize: {}x{}\nExit/timeout: {}\nCommand: {}\nCwd: {}\nTimeout: {}s\nSandboxed: {}\nOutput: {} chars\n",
+            "ID: {}\nVersion: {}\nStatus: {}\nPrompt: {}\nSize: {}x{}\nExit/timeout: {}\nCommand: {}\nCwd: {}\nTimeout: {}s\nSandboxed: {}\nOutput: {} chars\n",
             self.id,
+            self.version,
             self.status.label(),
             self.prompt_state.label(),
             self.cols,
@@ -213,11 +219,17 @@ pub(crate) enum TerminalEvent {
         terminal_id: String,
         tool_call_id: Option<String>,
         output: String,
+        version: u64,
     },
     WaitingForInput {
         terminal_id: String,
         tool_call_id: Option<String>,
         summary: String,
+        version: u64,
+    },
+    Resized {
+        terminal_id: String,
+        version: u64,
     },
     Finished {
         terminal_id: String,
@@ -225,6 +237,7 @@ pub(crate) enum TerminalEvent {
         status: TerminalStatus,
         summary: String,
         success: bool,
+        version: u64,
     },
     Removed {
         terminal_id: String,
@@ -237,8 +250,19 @@ impl TerminalEvent {
             Self::Started { terminal_id }
             | Self::Output { terminal_id, .. }
             | Self::WaitingForInput { terminal_id, .. }
+            | Self::Resized { terminal_id, .. }
             | Self::Finished { terminal_id, .. }
             | Self::Removed { terminal_id } => terminal_id,
+        }
+    }
+
+    pub(crate) const fn version(&self) -> Option<u64> {
+        match self {
+            Self::Output { version, .. }
+            | Self::WaitingForInput { version, .. }
+            | Self::Resized { version, .. }
+            | Self::Finished { version, .. } => Some(*version),
+            Self::Started { .. } | Self::Removed { .. } => None,
         }
     }
 }
@@ -366,6 +390,7 @@ impl TerminalRegistry {
         let (stop_sender, stop_receiver) = oneshot::channel();
         let snapshot = TerminalSnapshot {
             id: id.clone(),
+            incarnation: uuid::Uuid::now_v7().to_string(),
             command: command.to_string(),
             cwd: cwd.to_path_buf(),
             status: TerminalStatus::Running,
@@ -376,6 +401,7 @@ impl TerminalRegistry {
             tail: String::new(),
             tail_truncated: false,
             total_output_chars: 0,
+            version: 1,
             confined: decision.confined,
             tool_call_id,
             rows: DEFAULT_ROWS,
@@ -498,6 +524,19 @@ impl TerminalRegistry {
             .collect()
     }
 
+    /// Marks the current prompt or completion as delivered through an exact wake.
+    pub(crate) async fn acknowledge_exact_wake(&self, id: &str, incarnation: &str) {
+        if let Some(record) = self.inner.lock().await.terminals.get_mut(id)
+            && record.snapshot.incarnation == incarnation
+        {
+            if record.snapshot.status.is_finished() {
+                record.completion_reported_to_agent = true;
+            } else if record.snapshot.prompt_state == TerminalPromptState::WaitingForInput {
+                record.prompt_reported_to_agent = true;
+            }
+        }
+    }
+
     pub(crate) async fn pending_ready_for_agent(&self) -> Vec<TerminalSnapshot> {
         self.inner
             .lock()
@@ -603,10 +642,17 @@ impl TerminalRegistry {
             .with_context(|| format!("Unknown interactive terminal: {id}"))?;
         record.snapshot.rows = rows;
         record.snapshot.cols = cols;
+        record.snapshot.version = record.snapshot.version.saturating_add(1);
         record.parser.screen_mut().set_size(rows, cols);
         record.snapshot.screen = record.parser.screen().contents();
         crate::redact::redact_in_place(&mut record.snapshot.screen);
-        Ok(record.snapshot.clone())
+        let snapshot = record.snapshot.clone();
+        drop(inner);
+        let _ = self.events.send(TerminalEvent::Resized {
+            terminal_id: snapshot.id.clone(),
+            version: snapshot.version,
+        });
+        Ok(snapshot)
     }
 
     /// Deliver Ctrl-C through the PTY without requiring authorization.
@@ -734,6 +780,7 @@ impl TerminalRegistry {
                 match events.recv().await {
                     Ok(TerminalEvent::Output { .. })
                     | Ok(TerminalEvent::WaitingForInput { .. })
+                    | Ok(TerminalEvent::Resized { .. })
                     | Ok(TerminalEvent::Finished { .. })
                     | Ok(TerminalEvent::Removed { .. }) => break,
                     Ok(TerminalEvent::Started { .. }) => {}
@@ -763,6 +810,7 @@ impl TerminalRegistry {
                 .snapshot
                 .total_output_chars
                 .saturating_add(chunk.chars().count());
+            record.snapshot.version = record.snapshot.version.saturating_add(1);
             record.snapshot.tail.push_str(chunk);
             record.parser.process(chunk.as_bytes());
             record.snapshot.screen = record.parser.screen().contents();
@@ -780,6 +828,7 @@ impl TerminalRegistry {
                 terminal_id: record.snapshot.id.clone(),
                 tool_call_id: record.snapshot.tool_call_id.clone(),
                 output: record.snapshot.live_output(),
+                version: record.snapshot.version,
             };
             let waiting = (previous_prompt != TerminalPromptState::WaitingForInput
                 && record.snapshot.prompt_state == TerminalPromptState::WaitingForInput)
@@ -787,6 +836,7 @@ impl TerminalRegistry {
                     terminal_id: record.snapshot.id.clone(),
                     tool_call_id: record.snapshot.tool_call_id.clone(),
                     summary: record.snapshot.detail(),
+                    version: record.snapshot.version,
                 });
             (output, waiting)
         };
@@ -815,6 +865,7 @@ impl TerminalRegistry {
                 return;
             };
             record.snapshot.status = status;
+            record.snapshot.version = record.snapshot.version.saturating_add(1);
             record.snapshot.exit_code = exit_code;
             record.snapshot.finished_at = Some(SystemTime::now());
             record.stop_sender = None;
@@ -827,6 +878,7 @@ impl TerminalRegistry {
                 status,
                 summary: record.snapshot.detail(),
                 success: matches!(status, TerminalStatus::Succeeded),
+                version: record.snapshot.version,
             }
         };
         let _ = self.events.send(event);
@@ -1088,7 +1140,7 @@ pub(crate) fn format_terminal_list(terminals: &[TerminalSnapshot]) -> String {
         return "No interactive terminals.".to_string();
     }
     let mut output = String::from(
-        "ID     | STATUS    | EXIT/TIMEOUT |      OUTPUT | COMMAND\n-------+-----------+--------------+-------------+--------",
+        "ID     | VERSION | STATUS    | EXIT/TIMEOUT |      OUTPUT | COMMAND\n-------+---------+-----------+--------------+-------------+--------",
     );
     for terminal in terminals {
         output.push('\n');

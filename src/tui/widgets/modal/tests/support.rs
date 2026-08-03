@@ -676,6 +676,7 @@ pub(super) fn task_snapshot(
 ) -> BackgroundTaskSnapshot {
     BackgroundTaskSnapshot {
         id: id.to_string(),
+        incarnation: "test-task".to_string(),
         command: command.to_string(),
         cwd: PathBuf::from("/tmp/project"),
         status,
@@ -687,6 +688,7 @@ pub(super) fn task_snapshot(
         tail: "first line\nlast line".to_string(),
         tail_truncated: false,
         total_output_chars: 20,
+        version: 1,
         tool_call_id: None,
     }
 }

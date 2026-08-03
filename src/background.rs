@@ -55,6 +55,8 @@ impl BackgroundTaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundTaskSnapshot {
     pub id: String,
+    /// Unique lifetime token for this process record; IDs may be reused after a restart.
+    pub incarnation: String,
     pub command: String,
     pub cwd: PathBuf,
     pub status: BackgroundTaskStatus,
@@ -66,14 +68,17 @@ pub struct BackgroundTaskSnapshot {
     pub tail: String,
     pub tail_truncated: bool,
     pub total_output_chars: usize,
+    /// Monotonically increases whenever externally observable task state changes.
+    pub version: u64,
     pub tool_call_id: Option<String>,
 }
 
 impl BackgroundTaskSnapshot {
     pub fn summary_line(&self) -> String {
         format!(
-            "{:<6} | {:<9} | {:>8} | {:<12} | {:>11} | {}",
+            "{:<6} | {:>7} | {:<9} | {:>8} | {:<12} | {:>11} | {}",
             self.id,
+            self.version,
             self.status.label(),
             self.duration_label(),
             self.exit_or_timeout_label(),
@@ -85,6 +90,7 @@ impl BackgroundTaskSnapshot {
     pub fn detail(&self) -> String {
         let mut detail = String::new();
         detail.push_str(&format!("ID: {}\n", self.id));
+        detail.push_str(&format!("Version: {}\n", self.version));
         detail.push_str(&format!("Status: {}\n", self.status.label()));
         detail.push_str(&format!("Exit/timeout: {}\n", self.exit_or_timeout_label()));
         detail.push_str(&format!(
@@ -153,6 +159,7 @@ pub enum BackgroundTaskEvent {
         task_id: String,
         tool_call_id: Option<String>,
         tail: String,
+        version: u64,
     },
     Finished {
         task_id: String,
@@ -160,6 +167,7 @@ pub enum BackgroundTaskEvent {
         status: BackgroundTaskStatus,
         summary: String,
         success: bool,
+        version: u64,
     },
     Removed {
         task_id: String,
@@ -175,11 +183,20 @@ impl BackgroundTaskEvent {
             | Self::Removed { task_id } => task_id,
         }
     }
+
+    /// Version of the observation that emitted the event, when it has one.
+    pub const fn version(&self) -> Option<u64> {
+        match self {
+            Self::Output { version, .. } | Self::Finished { version, .. } => Some(*version),
+            Self::Started { .. } | Self::Removed { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug)]
 struct BackgroundTaskRecord {
     id: String,
+    incarnation: String,
     command: String,
     cwd: PathBuf,
     status: BackgroundTaskStatus,
@@ -191,6 +208,7 @@ struct BackgroundTaskRecord {
     tail: String,
     tail_truncated: bool,
     total_output_chars: usize,
+    version: u64,
     tool_call_id: Option<String>,
     stop_sender: Option<oneshot::Sender<()>>,
     reported_to_agent: bool,
@@ -200,6 +218,7 @@ impl BackgroundTaskRecord {
     fn snapshot(&self) -> BackgroundTaskSnapshot {
         BackgroundTaskSnapshot {
             id: self.id.clone(),
+            incarnation: self.incarnation.clone(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             status: self.status,
@@ -211,6 +230,7 @@ impl BackgroundTaskRecord {
             tail: self.tail.clone(),
             tail_truncated: self.tail_truncated,
             total_output_chars: self.total_output_chars,
+            version: self.version,
             tool_call_id: self.tool_call_id.clone(),
         }
     }
@@ -299,6 +319,7 @@ impl BackgroundTaskRegistry {
             let mut inner = self.inner.lock().await;
             let record = BackgroundTaskRecord {
                 id: task_id.clone(),
+                incarnation: uuid::Uuid::now_v7().to_string(),
                 command: command.to_string(),
                 cwd: cwd.to_path_buf(),
                 status: BackgroundTaskStatus::Running,
@@ -310,6 +331,7 @@ impl BackgroundTaskRegistry {
                 tail: String::new(),
                 tail_truncated: false,
                 total_output_chars: 0,
+                version: 1,
                 tool_call_id: None,
                 stop_sender: Some(stop_sender),
                 reported_to_agent: false,
@@ -363,6 +385,7 @@ impl BackgroundTaskRegistry {
                 task_id: snapshot.id.clone(),
                 tool_call_id: Some(tool_call_id.clone()),
                 tail: snapshot.tail.clone(),
+                version: snapshot.version,
             });
         }
         if snapshot.status.is_finished() {
@@ -372,6 +395,7 @@ impl BackgroundTaskRegistry {
                 status: snapshot.status,
                 summary: snapshot.detail(),
                 success: snapshot.status.is_success(),
+                version: snapshot.version,
             });
         }
         Some(snapshot)
@@ -648,6 +672,16 @@ impl BackgroundTaskRegistry {
             .collect()
     }
 
+    /// Marks one completed task as delivered through an exact wake subscription.
+    pub async fn acknowledge_exact_wake(&self, task_id: &str, incarnation: &str) {
+        if let Some(record) = self.inner.lock().await.tasks.get_mut(task_id)
+            && record.incarnation == incarnation
+            && record.status.is_finished()
+        {
+            record.reported_to_agent = true;
+        }
+    }
+
     pub async fn pending_completed_for_agent(&self) -> Vec<BackgroundTaskSnapshot> {
         let inner = self.inner.lock().await;
         inner
@@ -670,12 +704,14 @@ impl BackgroundTaskRegistry {
             record.total_output_chars = record
                 .total_output_chars
                 .saturating_add(chunk.chars().count());
+            record.version = record.version.saturating_add(1);
             record.tail.push_str(chunk);
             trim_tail(&mut record.tail, &mut record.tail_truncated);
             BackgroundTaskEvent::Output {
                 task_id: record.id.clone(),
                 tool_call_id: record.tool_call_id.clone(),
                 tail: record.tail.clone(),
+                version: record.version,
             }
         };
         let _ = self.events.send(event);
@@ -694,6 +730,7 @@ impl BackgroundTaskRegistry {
                 return;
             };
             record.status = status;
+            record.version = record.version.saturating_add(1);
             record.exit_code = exit_code;
             record.timed_out = timed_out;
             record.finished_at = Some(SystemTime::now());
@@ -705,6 +742,7 @@ impl BackgroundTaskRegistry {
                 status: snapshot.status,
                 summary: snapshot.detail(),
                 success: snapshot.status.is_success(),
+                version: snapshot.version,
             }
         };
         let _ = self.events.send(event);
@@ -966,8 +1004,8 @@ pub fn format_task_list(tasks: &[BackgroundTaskSnapshot]) -> String {
     }
     let mut lines = Vec::with_capacity(tasks.len() + 1);
     lines.push(format!(
-        "{:<6} | {:<9} | {:>8} | {:<12} | {:>11} | {}",
-        "ID", "State", "Duration", "Exit/timeout", "Output", "Command"
+        "{:<6} | {:>7} | {:<9} | {:>8} | {:<12} | {:>11} | {}",
+        "ID", "Version", "State", "Duration", "Exit/timeout", "Output", "Command"
     ));
     lines.extend(tasks.iter().map(BackgroundTaskSnapshot::summary_line));
     lines.join("\n")
@@ -1028,6 +1066,50 @@ mod tests {
         assert_eq!(task.status, BackgroundTaskStatus::Succeeded);
         assert_eq!(task.exit_code, Some(0));
         assert!(task.tail.contains("hello"), "tail: {}", task.tail);
+        assert!(
+            task.version > 1,
+            "completion must advance the observation version"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_and_completion_events_advance_versions() {
+        let registry = Arc::new(BackgroundTaskRegistry::new());
+        let mut events = registry.subscribe();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let task = registry
+            .start(
+                &shell(),
+                "printf first; sleep 0.05; printf second",
+                temp_dir.path(),
+                5,
+            )
+            .await
+            .unwrap();
+        let start_version = task.version;
+        let (output_version, finished_version) =
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let mut output_version = None;
+                loop {
+                    match events.recv().await.unwrap() {
+                        BackgroundTaskEvent::Output {
+                            task_id, version, ..
+                        } if task_id == task.id => {
+                            output_version = Some(version);
+                        }
+                        BackgroundTaskEvent::Finished {
+                            task_id, version, ..
+                        } if task_id == task.id => {
+                            break (output_version.unwrap(), version);
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert!(output_version > start_version);
+        assert!(finished_version > output_version);
     }
 
     #[tokio::test]

@@ -91,7 +91,7 @@ pub(super) fn apply_terminal_event(
         wake_candidate: false,
     };
     match event {
-        TerminalEvent::Started { .. } => {}
+        TerminalEvent::Started { .. } | TerminalEvent::Resized { .. } => {}
         TerminalEvent::Output {
             tool_call_id: Some(id),
             output,
@@ -260,6 +260,70 @@ pub(super) fn apply_terminal_snapshot(
     effect
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn drain_background_work_wakes(
+    wakes: &mut tokio::sync::broadcast::Receiver<crate::background_wake::BackgroundWorkWake>,
+    pending_wakes: &mut Vec<crate::background_wake::BackgroundWorkWake>,
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    agent: Arc<Mutex<Agent>>,
+    sink: SharedSink,
+    pending_background_wake: &mut Option<Instant>,
+    background_tasks: &Arc<BackgroundTaskRegistry>,
+    terminals: &Arc<TerminalRegistry>,
+) -> bool {
+    while let Ok(wake) = wakes.try_recv() {
+        pending_wakes.push(wake);
+    }
+    if app.task_state.is_busy() || tasks.is_busy() {
+        return false;
+    }
+    let Some(wake_index) = pending_wakes.iter().position(|wake| {
+        app.waiting_for_background_work
+            .as_ref()
+            .is_some_and(|waiting| {
+                waiting.subscription_id == wake.wait.subscription_id
+                    && waiting.requester_generation == wake.wait.requester_generation
+                    && waiting.target_kind == wake.wait.target_kind
+                    && waiting.target_id == wake.wait.target_id
+                    && waiting.target_incarnation == wake.wait.target_incarnation
+            })
+    }) else {
+        return false;
+    };
+    let wake = pending_wakes.remove(wake_index);
+    app.waiting_for_background_work = None;
+    *pending_background_wake = None;
+    match wake.wait.target_kind {
+        crate::storage::BackgroundWakeTargetKind::BackgroundTask => {
+            background_tasks
+                .acknowledge_exact_wake(&wake.wait.target_id, &wake.wait.target_incarnation)
+                .await;
+        }
+        crate::storage::BackgroundWakeTargetKind::Terminal => {
+            terminals
+                .acknowledge_exact_wake(&wake.wait.target_id, &wake.wait.target_incarnation)
+                .await;
+        }
+    }
+    agent.lock().await.push_background_work_wake(&wake);
+    app.reduce(AppAction::SetTaskState(TaskState::Running));
+    app.mark_run_started(Instant::now());
+    let truncation = if wake.output_truncated {
+        "\n(Output delta was truncated.)"
+    } else {
+        ""
+    };
+    app.reduce(AppAction::Agent(UiEvent::Thinking(format!(
+        "{} woke at version {} ({}){}",
+        wake.wait.target_id, wake.wake_version, wake.reason, truncation
+    ))));
+    if let Err(error) = tasks.start_agent_resume(agent.clone(), sink.clone(), app.active_mode()) {
+        app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(error)));
+    }
+    true
+}
+
 pub(super) fn apply_completed_subagent_tool_calls(
     app: &mut AppState,
     subagents: &crate::subagent::SubagentRegistry,
@@ -313,6 +377,9 @@ pub(super) async fn maybe_start_background_wake(
     let Some(deadline) = *pending_background_wake else {
         return false;
     };
+    if app.waiting_for_background_work.is_some() {
+        return false;
+    }
     if Instant::now() < deadline {
         return false;
     }
@@ -435,6 +502,7 @@ fn terminal_as_background_snapshot(terminal: &TerminalSnapshot) -> BackgroundTas
     };
     BackgroundTaskSnapshot {
         id: terminal.id.clone(),
+        incarnation: terminal.incarnation.clone(),
         command: terminal.command.clone(),
         cwd: terminal.cwd.clone(),
         status,
@@ -446,6 +514,7 @@ fn terminal_as_background_snapshot(terminal: &TerminalSnapshot) -> BackgroundTas
         tail: terminal.live_output(),
         tail_truncated: terminal.tail_truncated,
         total_output_chars: terminal.total_output_chars,
+        version: terminal.version,
         tool_call_id: terminal.tool_call_id.clone(),
     }
 }

@@ -315,6 +315,31 @@ impl Agent {
         true
     }
 
+    pub(crate) fn push_background_work_wake(
+        &mut self,
+        wake: &crate::background_wake::BackgroundWorkWake,
+    ) {
+        let truncation = if wake.output_truncated {
+            "\nOutput delta was truncated."
+        } else {
+            ""
+        };
+        let body = format!(
+            "Target: {}\nReason: {}\nObserved version: {}\nWake version: {}{}\n\n{}",
+            wake.wait.target_id,
+            wake.reason,
+            wake.wait.observed_version,
+            wake.wake_version,
+            truncation,
+            wake.output,
+        );
+        self.push_untrusted_runtime_note(
+            MessageProvenance::Background,
+            "background work wake",
+            &body,
+        );
+    }
+
     pub(super) async fn drain_terminal_updates(&mut self, sink: &SharedSink) -> bool {
         let updates = self.terminals.drain_ready_for_agent().await;
         if updates.is_empty() {

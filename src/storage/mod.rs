@@ -37,6 +37,7 @@ macro_rules! storage_op {
 }
 
 mod authorization;
+mod background_wakes;
 mod builtin_subagents;
 mod context;
 mod episodes;
@@ -62,7 +63,9 @@ mod verification;
 mod workspace_locks;
 
 pub(crate) use authorization::{AuthorizationDecisionRecord, NewAuthorizationDecision};
-#[cfg(test)]
+pub(crate) use background_wakes::{
+    BackgroundWakeRegistration, BackgroundWakeTargetKind, BackgroundWakeTrigger,
+};
 pub(crate) use peers::PEER_LIVENESS_THRESHOLD_MS;
 pub(crate) use peers::{
     CommittedPeerSend, CommittedPeerWake, PeerSendOperation, PeerWakeOperation,

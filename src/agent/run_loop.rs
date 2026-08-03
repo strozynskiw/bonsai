@@ -572,6 +572,7 @@ impl Agent {
                 interrupted_tool_results(batch)
             } else {
                 Self::run_tool_batch(
+                    self.background_wakes.clone(),
                     batch,
                     tool_registry,
                     &tool_rejections,
@@ -2380,6 +2381,7 @@ mod tests {
         let started = std::time::Instant::now();
 
         let (_, output, status) = Agent::execute_single_tool_call(
+            None,
             call("slow", "{}"),
             Arc::new(registry),
             ToolRejections::default(),
@@ -2409,6 +2411,7 @@ mod tests {
         registry.register(Arc::new(ReadyTool));
 
         let (_, output, status) = Agent::execute_single_tool_call(
+            None,
             call("ready", "{}"),
             Arc::new(registry),
             ToolRejections::default(),

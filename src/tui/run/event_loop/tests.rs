@@ -263,6 +263,7 @@ fn background_task_snapshot(
 ) -> BackgroundTaskSnapshot {
     BackgroundTaskSnapshot {
         id: id.to_string(),
+        incarnation: "test-task".to_string(),
         command: "sleep 30".to_string(),
         cwd: std::path::PathBuf::from("/tmp/project"),
         status,
@@ -274,6 +275,7 @@ fn background_task_snapshot(
         tail: tail.to_string(),
         tail_truncated: false,
         total_output_chars: tail.chars().count(),
+        version: 1,
         tool_call_id: tool_call_id.map(str::to_string),
     }
 }
@@ -4044,6 +4046,7 @@ fn background_task_finished_event_updates_attached_tool_and_refreshes_tasks() {
             status: BackgroundTaskStatus::Succeeded,
             summary: "done".to_string(),
             success: true,
+            version: 2,
         },
     );
 
@@ -4072,6 +4075,7 @@ fn stopped_background_task_finish_does_not_request_wake() {
             status: BackgroundTaskStatus::Stopped,
             summary: "stopped".to_string(),
             success: false,
+            version: 2,
         },
     );
 
@@ -4100,6 +4104,7 @@ fn terminal_wait_and_finish_update_attached_bash_tool() {
             terminal_id: "pty-1".to_string(),
             tool_call_id: Some("call-pty".to_string()),
             summary: "waiting for input".to_string(),
+            version: 2,
         },
     );
     assert!(waiting.wake_candidate);
@@ -4117,6 +4122,7 @@ fn terminal_wait_and_finish_update_attached_bash_tool() {
             status: TerminalStatus::Succeeded,
             summary: "terminal complete".to_string(),
             success: true,
+            version: 2,
         },
     );
     assert!(finished.wake_candidate);

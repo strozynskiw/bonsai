@@ -11,8 +11,11 @@ use crate::tool::schema::{
     string_property,
 };
 use crate::tool::{
-    ActionEffect, ActionPlan, ActionPolicy, ParallelPolicy, RiskTier, Tool, ToolOutput,
+    ActionEffect, ActionPlan, ActionPolicy, ParallelPolicy, RiskTier, Tool, ToolExecutionContext,
+    ToolOutput,
 };
+
+const MAX_WAIT_SECONDS: u64 = 60;
 
 #[derive(Debug, Deserialize)]
 struct TerminalArgs {
@@ -27,6 +30,12 @@ struct TerminalArgs {
     rows: Option<u16>,
     #[serde(default)]
     cols: Option<u16>,
+    #[serde(default)]
+    observed_version: Option<u64>,
+    #[serde(default)]
+    output_threshold: Option<usize>,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,12 +47,15 @@ enum TerminalAction {
     Resize,
     Interrupt,
     Stop,
+    Wait,
 }
 
 /// Inspect or stop process-local interactive PTY sessions.
 pub struct TerminalTool {
     registry: Arc<TerminalRegistry>,
     action_policy: ActionPolicy,
+    background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
+    can_park: bool,
 }
 
 impl std::fmt::Debug for TerminalTool {
@@ -56,10 +68,17 @@ impl std::fmt::Debug for TerminalTool {
 }
 
 impl TerminalTool {
-    pub(crate) fn new(registry: Arc<TerminalRegistry>, action_policy: ActionPolicy) -> Self {
+    pub(crate) fn new(
+        registry: Arc<TerminalRegistry>,
+        action_policy: ActionPolicy,
+        background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
+        can_park: bool,
+    ) -> Self {
         Self {
             registry,
             action_policy,
+            background_wakes,
+            can_park,
         }
     }
 }
@@ -85,7 +104,15 @@ impl Tool for TerminalTool {
                     "action",
                     string_enum_property(
                         "Interactive terminal operation to perform",
-                        &["list", "read", "send", "resize", "interrupt", "stop"],
+                        &[
+                            "list",
+                            "read",
+                            "send",
+                            "resize",
+                            "interrupt",
+                            "stop",
+                            "wait",
+                        ],
                     ),
                 ),
                 (
@@ -122,6 +149,30 @@ impl Tool for TerminalTool {
                         "Interactive terminal ID such as pty-1; required for read and stop",
                     ),
                 ),
+                (
+                    "observed_version",
+                    bounded_integer_property(
+                        "Version from a preceding terminal list or read for a wakeable wait",
+                        Some(1),
+                        None,
+                    ),
+                ),
+                (
+                    "output_threshold",
+                    bounded_integer_property(
+                        "Wake once total output reaches this character count; it must exceed the observed total",
+                        Some(0),
+                        None,
+                    ),
+                ),
+                (
+                    "wait_seconds",
+                    bounded_integer_property(
+                        "Optional deadline in seconds for a wakeable wait (max: 60)",
+                        Some(0),
+                        Some(60),
+                    ),
+                ),
             ],
             &["action"],
         )
@@ -132,6 +183,24 @@ impl Tool for TerminalTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        self.execute_inner(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        args: serde_json::Value,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput> {
+        self.execute_inner(args, Some(context)).await
+    }
+}
+
+impl TerminalTool {
+    async fn execute_inner(
+        &self,
+        args: serde_json::Value,
+        context: Option<ToolExecutionContext>,
+    ) -> Result<ToolOutput> {
         let args: TerminalArgs = parse_args("terminal tool", args)?;
         match args.action {
             TerminalAction::List => Ok(ToolOutput::Text(format_terminal_list(
@@ -202,8 +271,72 @@ impl Tool for TerminalTool {
                     &snapshot.detail(),
                 ))
             }
+            TerminalAction::Wait => {
+                let wait_seconds = normalize_wait_seconds(args.wait_seconds)?;
+                let id = required_terminal_id(args.terminal_id.as_deref(), "wait")?;
+                let snapshot = self
+                    .registry
+                    .snapshot(id)
+                    .await
+                    .with_context(|| format!("Unknown interactive terminal: {id}"))?;
+                let Some(observed_version) = args.observed_version else {
+                    return Ok(ToolOutput::untrusted_context(
+                        format!("terminal:{id}"),
+                        &self
+                            .registry
+                            .wait_for_terminal(
+                                id,
+                                std::time::Duration::from_secs(wait_seconds.unwrap_or(1)),
+                            )
+                            .await?
+                            .detail(),
+                    ));
+                };
+                if !self.can_park {
+                    bail!(
+                        "Wakeable waits require the interactive TUI; use wait_seconds in headless mode"
+                    );
+                }
+                if args
+                    .output_threshold
+                    .is_some_and(|threshold| threshold <= snapshot.total_output_chars)
+                {
+                    bail!(
+                        "Interactive terminal {id} already has {} output characters; output_threshold must be greater than the observed total",
+                        snapshot.total_output_chars
+                    );
+                }
+                let coordinator = context
+                    .as_ref()
+                    .and_then(ToolExecutionContext::background_wakes)
+                    .or(self.background_wakes.as_ref())
+                    .context("Wakeable waits are unavailable on this surface")?;
+                let operation_key = context
+                    .as_ref()
+                    .map_or("terminal-wait", ToolExecutionContext::tool_call_id);
+                let wait = coordinator
+                    .register_terminal(
+                        snapshot,
+                        operation_key,
+                        observed_version,
+                        args.output_threshold,
+                        wait_seconds,
+                    )
+                    .await?;
+                Ok(ToolOutput::WaitStarted {
+                    reason: crate::agent::WaitReason::BackgroundWork(wait),
+                    message: format!("Waiting for {id} after version {observed_version}."),
+                })
+            }
         }
     }
+}
+
+fn normalize_wait_seconds(wait_seconds: Option<u64>) -> Result<Option<u64>> {
+    if wait_seconds.is_some_and(|seconds| seconds > MAX_WAIT_SECONDS) {
+        bail!("wait_seconds must be at most {MAX_WAIT_SECONDS}");
+    }
+    Ok(wait_seconds)
 }
 
 fn validate_input(input: &str, append_enter: bool) -> Result<()> {
@@ -243,7 +376,12 @@ mod tests {
 
     #[tokio::test]
     async fn empty_registry_lists_a_clear_state() {
-        let tool = TerminalTool::new(Arc::new(TerminalRegistry::new()), ActionPolicy::testing());
+        let tool = TerminalTool::new(
+            Arc::new(TerminalRegistry::new()),
+            ActionPolicy::testing(),
+            None,
+            false,
+        );
 
         let output = tool
             .execute(json!({"action": "list"}))
@@ -255,7 +393,12 @@ mod tests {
 
     #[tokio::test]
     async fn read_requires_a_terminal_id() {
-        let tool = TerminalTool::new(Arc::new(TerminalRegistry::new()), ActionPolicy::testing());
+        let tool = TerminalTool::new(
+            Arc::new(TerminalRegistry::new()),
+            ActionPolicy::testing(),
+            None,
+            false,
+        );
 
         let error = tool
             .execute(json!({"action": "read"}))
@@ -276,6 +419,12 @@ mod tests {
         assert!(validate_input("ordinary answer", false).is_ok());
     }
 
+    #[test]
+    fn terminal_wait_seconds_are_bounded() {
+        assert_eq!(normalize_wait_seconds(Some(60)).unwrap(), Some(60));
+        assert!(normalize_wait_seconds(Some(61)).is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn send_permission_prompt_records_only_id_and_byte_count() {
@@ -291,7 +440,7 @@ mod tests {
             interaction.clone(),
             crate::yolo::YoloMode::with_level(crate::tool::ApprovalLevel::Ask),
         );
-        let tool = TerminalTool::new(registry.clone(), policy);
+        let tool = TerminalTool::new(registry.clone(), policy, None, false);
         let terminal_id = terminal.id.clone();
         let execution = tokio::spawn(async move {
             tool.execute(json!({

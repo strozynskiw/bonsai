@@ -878,6 +878,7 @@ fn forward_terminal_event(sink: &HeadlessSink, event: crate::terminal::TerminalE
         crate::terminal::TerminalEvent::Started { .. }
         | crate::terminal::TerminalEvent::Output { .. }
         | crate::terminal::TerminalEvent::WaitingForInput { .. }
+        | crate::terminal::TerminalEvent::Resized { .. }
         | crate::terminal::TerminalEvent::Finished { .. }
         | crate::terminal::TerminalEvent::Removed { .. } => {}
     }

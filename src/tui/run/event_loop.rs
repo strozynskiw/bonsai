@@ -722,6 +722,15 @@ async fn submit_and_start_run(
         }
         app.waiting_for_peer = None;
     }
+    if let Some(wait) = app.waiting_for_background_work.take()
+        && let Some(session_id) = *deps.active_session_id.lock().await
+        && let Err(err) = deps
+            .storage
+            .cancel_background_wakes(session_id, wait.requester_generation)
+            .await
+    {
+        tracing::warn!(%err, "failed to cancel background-work wait before a new turn");
+    }
     if input.starts_with('/') {
         app.reduce(AppAction::ScrollBottom);
         app.reduce(AppAction::SubmitCommandInput(input.to_string()));
@@ -2326,6 +2335,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         active_session_id,
         background_tasks,
         terminals,
+        background_wakes,
         subagents,
         subagent_model_overrides,
         permissions,
@@ -2662,6 +2672,8 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     TtyHangupWatch::spawn_watchdog_thread();
     let mut background_events = background_tasks.subscribe();
     let mut terminal_events = terminals.subscribe();
+    let mut background_wake_events = background_wakes.subscribe();
+    let mut pending_background_work_wakes = Vec::new();
     let mut subagent_events = subagents.subscribe();
     let mut pending_background_wake: Option<Instant> = None;
     // Peer auto-wake: armed when inbound peer messages arrive while
@@ -2893,6 +2905,18 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             &background_tasks,
             &terminals,
             &mut pending_background_wake,
+        )
+        .await;
+        frame_needs_redraw |= drain_background_work_wakes(
+            &mut background_wake_events,
+            &mut pending_background_work_wakes,
+            &mut app,
+            &mut tasks,
+            agent.clone(),
+            sink.clone(),
+            &mut pending_background_wake,
+            &background_tasks,
+            &terminals,
         )
         .await;
 

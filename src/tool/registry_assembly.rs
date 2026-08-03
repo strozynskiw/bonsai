@@ -59,6 +59,8 @@ pub(crate) struct ToolRegistryDeps {
     pub(crate) plan_store: crate::plan::SharedPlanStore,
     pub(crate) background_tasks: Arc<BackgroundTaskRegistry>,
     pub(crate) terminals: Arc<crate::terminal::TerminalRegistry>,
+    pub(crate) background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
+    pub(crate) background_wakes_parkable: bool,
     pub(crate) yolo_mode: crate::yolo::YoloMode,
     pub(crate) sandbox: crate::sandbox::CommandSandbox,
     pub(crate) workspace_locks: crate::tool::WorkspaceLockContext,
@@ -342,6 +344,8 @@ pub(crate) fn build_tool_registries(
         plan_store,
         background_tasks,
         terminals,
+        background_wakes,
+        background_wakes_parkable,
         yolo_mode,
         sandbox,
         workspace_locks,
@@ -393,7 +397,12 @@ pub(crate) fn build_tool_registries(
         yolo_mode.clone(),
         authorization_ledger.clone(),
     );
-    let terminal_tool = Arc::new(TerminalTool::new(terminals.clone(), action_policy.clone()));
+    let terminal_tool = Arc::new(TerminalTool::new(
+        terminals.clone(),
+        action_policy.clone(),
+        background_wakes.clone(),
+        background_wakes_parkable,
+    ));
     // WebFetch: one shared instance across the coding/planning/subagent
     // registries so the per-domain allowlist is consistent wherever it's granted.
     let webfetch_tool = Arc::new(crate::tool::WebFetchTool::new(
@@ -639,6 +648,8 @@ pub(crate) fn build_tool_registries(
             background_tasks.clone(),
             subagents.clone(),
             terminals.clone(),
+            background_wakes,
+            background_wakes_parkable,
         )),
     );
     // Inter-agent messaging (peers P2): coding only — planning/review are
@@ -968,6 +979,8 @@ mod tests {
             plan_store: Arc::new(Mutex::new(PlanDoc::default())),
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            background_wakes: None,
+            background_wakes_parkable: false,
             yolo_mode: crate::yolo::YoloMode::new(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
             workspace_locks: crate::tool::WorkspaceLockContext::disabled(
@@ -1232,6 +1245,8 @@ mod tests {
             plan_store: Arc::new(Mutex::new(PlanDoc::default())),
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            background_wakes: None,
+            background_wakes_parkable: false,
             yolo_mode: crate::yolo::YoloMode::new(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
             workspace_locks: crate::tool::WorkspaceLockContext::disabled(
@@ -1292,6 +1307,8 @@ mod tests {
             plan_store: Arc::new(Mutex::new(PlanDoc::default())),
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            background_wakes: None,
+            background_wakes_parkable: false,
             yolo_mode: crate::yolo::YoloMode::new(),
             sandbox: crate::sandbox::CommandSandbox::disabled(),
             workspace_locks: crate::tool::WorkspaceLockContext::disabled(
@@ -1356,6 +1373,8 @@ mod tests {
                 plan_store: Arc::new(Mutex::new(PlanDoc::default())),
                 background_tasks: Arc::new(BackgroundTaskRegistry::new()),
                 terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+                background_wakes: None,
+                background_wakes_parkable: false,
                 yolo_mode: crate::yolo::YoloMode::new(),
                 sandbox: crate::sandbox::CommandSandbox::disabled(),
                 workspace_locks: crate::tool::WorkspaceLockContext::disabled(

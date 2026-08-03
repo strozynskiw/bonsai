@@ -11,9 +11,8 @@ use crate::terminal::{TerminalRegistry, TerminalSnapshot, format_terminal_list};
 use crate::tool::schema::{
     bounded_integer_property, object, parse_args, string_enum_property, string_property,
 };
-use crate::tool::{ParallelPolicy, Tool, ToolOutput};
+use crate::tool::{ParallelPolicy, Tool, ToolExecutionContext, ToolOutput};
 
-const DEFAULT_WAIT_SECONDS: u64 = 1;
 const MAX_WAIT_SECONDS: u64 = 60;
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +22,10 @@ struct TasksArgs {
     task_id: Option<String>,
     #[serde(default)]
     wait_seconds: Option<u64>,
+    #[serde(default)]
+    observed_version: Option<u64>,
+    #[serde(default)]
+    output_threshold: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +42,8 @@ pub struct TasksTool {
     registry: Arc<BackgroundTaskRegistry>,
     subagents: Option<Arc<SubagentRegistry>>,
     terminals: Option<Arc<TerminalRegistry>>,
+    background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
+    can_park: bool,
 }
 
 impl TasksTool {
@@ -47,6 +52,8 @@ impl TasksTool {
             registry,
             subagents: None,
             terminals: None,
+            background_wakes: None,
+            can_park: false,
         }
     }
 
@@ -63,9 +70,13 @@ impl TasksTool {
         registry: Arc<BackgroundTaskRegistry>,
         subagents: Arc<SubagentRegistry>,
         terminals: Arc<TerminalRegistry>,
+        background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
+        can_park: bool,
     ) -> Self {
         let mut tool = Self::with_subagents(registry, subagents);
         tool.terminals = Some(terminals);
+        tool.background_wakes = background_wakes;
+        tool.can_park = can_park;
         tool
     }
 }
@@ -103,9 +114,25 @@ impl Tool for TasksTool {
                 (
                     "wait_seconds",
                     bounded_integer_property(
-                        "Seconds to wait for output or completion when action is wait (default: 1, max: 60)",
-                        Some(1),
+                        "Optional deadline in seconds for a parked concrete wait (max: 60); it wakes without stopping the process",
+                        Some(0),
                         Some(MAX_WAIT_SECONDS as i64),
+                    ),
+                ),
+                (
+                    "observed_version",
+                    bounded_integer_property(
+                        "Required version from a preceding list or tail for a wakeable bg-N or pty-N wait",
+                        Some(1),
+                        None,
+                    ),
+                ),
+                (
+                    "output_threshold",
+                    bounded_integer_property(
+                        "Wake once total output reaches this character count; it must exceed the observed total",
+                        Some(0),
+                        None,
                     ),
                 ),
             ],
@@ -118,16 +145,32 @@ impl Tool for TasksTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        self.execute_inner(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        args: serde_json::Value,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput> {
+        self.execute_inner(args, Some(context)).await
+    }
+}
+
+impl TasksTool {
+    async fn execute_inner(
+        &self,
+        args: serde_json::Value,
+        context: Option<ToolExecutionContext>,
+    ) -> Result<ToolOutput> {
         let args: TasksArgs = parse_args("tasks tool", args)?;
 
         let output = match args.action {
-            TaskAction::List => self.list_all().await,
+            TaskAction::List => ToolOutput::Text(self.list_all().await),
             TaskAction::Wait => {
-                let wait = Duration::from_secs(
-                    args.wait_seconds
-                        .unwrap_or(DEFAULT_WAIT_SECONDS)
-                        .min(MAX_WAIT_SECONDS),
-                );
+                let wait_seconds = args
+                    .wait_seconds
+                    .map(|seconds| seconds.min(MAX_WAIT_SECONDS));
                 // Treat an empty/whitespace task_id the same as an omitted one
                 // (wait for any) rather than forwarding "" to the registry,
                 // matching how `tail`/`stop` normalize via `required_task_id`.
@@ -138,19 +181,30 @@ impl Tool for TasksTool {
                 {
                     let task_id = task_id.trim();
                     if is_subagent_id(task_id) {
-                        self.wait_for_subagent(task_id, wait).await?
+                        ToolOutput::Text(
+                            self.wait_for_subagent(
+                                task_id,
+                                Duration::from_secs(wait_seconds.unwrap_or(1)),
+                            )
+                            .await?,
+                        )
                     } else if is_terminal_id(task_id) {
-                        self.wait_for_terminal(task_id, wait).await?
+                        self.wait_for_terminal_wakeable(task_id, &args, context.as_ref())
+                            .await?
                     } else {
-                        self.registry.wait_for_task(task_id, wait).await?.detail()
+                        self.wait_for_background_wakeable(task_id, &args, context.as_ref())
+                            .await?
                     }
                 } else {
-                    self.wait_for_any(wait).await
+                    ToolOutput::Text(
+                        self.wait_for_any(Duration::from_secs(wait_seconds.unwrap_or(1)))
+                            .await,
+                    )
                 }
             }
             TaskAction::Tail => {
                 let task_id = required_task_id(args.task_id.as_deref(), "tail")?;
-                if is_subagent_id(task_id) {
+                let output = if is_subagent_id(task_id) {
                     self.tail_subagent(task_id)?
                 } else if is_terminal_id(task_id) {
                     self.tail_terminal(task_id).await?
@@ -160,11 +214,12 @@ impl Tool for TasksTool {
                         .await
                         .with_context(|| format!("Unknown background task: {task_id}"))?
                         .detail()
-                }
+                };
+                ToolOutput::Text(output)
             }
             TaskAction::Stop => {
                 let task_id = required_task_id(args.task_id.as_deref(), "stop")?;
-                if is_subagent_id(task_id) {
+                let output = if is_subagent_id(task_id) {
                     bail!(
                         "tasks stop only supports background Bash tasks; subagent {task_id} can be inspected with tasks tail or /subagents and is cancelled when the parent run is interrupted."
                     );
@@ -175,15 +230,13 @@ impl Tool for TasksTool {
                     terminals.stop(task_id).await?.detail()
                 } else {
                     self.registry.stop(task_id).await?.detail()
-                }
+                };
+                ToolOutput::Text(output)
             }
         };
 
-        Ok(ToolOutput::Text(output))
+        Ok(output)
     }
-}
-
-impl TasksTool {
     async fn list_all(&self) -> String {
         let bash_tasks = self.registry.list().await;
         let bash = format_task_list(&bash_tasks);
@@ -252,6 +305,122 @@ impl TasksTool {
             bail!("Unknown interactive terminal: {task_id}");
         };
         Ok(terminals.wait_for_terminal(task_id, wait).await?.detail())
+    }
+
+    async fn wait_for_background_wakeable(
+        &self,
+        task_id: &str,
+        args: &TasksArgs,
+        context: Option<&ToolExecutionContext>,
+    ) -> Result<ToolOutput> {
+        let snapshot = self
+            .registry
+            .snapshot(task_id)
+            .await
+            .with_context(|| format!("Unknown background task: {task_id}"))?;
+        let Some(observed_version) = args.observed_version else {
+            return Ok(ToolOutput::Text(
+                self.registry
+                    .wait_for_task(task_id, Duration::from_secs(args.wait_seconds.unwrap_or(1)))
+                    .await?
+                    .detail(),
+            ));
+        };
+        if !self.can_park {
+            bail!("Wakeable waits require the interactive TUI; use wait_seconds in headless mode");
+        }
+        if observed_version != snapshot.version {
+            bail!(
+                "Background task {task_id} is at version {}; tail it before waiting",
+                snapshot.version
+            );
+        }
+        if args
+            .output_threshold
+            .is_some_and(|threshold| threshold <= snapshot.total_output_chars)
+        {
+            bail!(
+                "Background task {task_id} already has {} output characters; output_threshold must be greater than the observed total",
+                snapshot.total_output_chars
+            );
+        }
+        let coordinator = context
+            .and_then(ToolExecutionContext::background_wakes)
+            .or(self.background_wakes.as_ref())
+            .context("Wakeable waits are unavailable on this surface")?;
+        let operation_key =
+            context.map_or("tasks-background-wait", ToolExecutionContext::tool_call_id);
+        let wait = coordinator
+            .register_background_task(
+                snapshot,
+                operation_key,
+                observed_version,
+                args.output_threshold,
+                args.wait_seconds
+                    .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),
+            )
+            .await?;
+        Ok(ToolOutput::WaitStarted {
+            reason: crate::agent::WaitReason::BackgroundWork(wait),
+            message: format!("Waiting for {task_id} after version {observed_version}."),
+        })
+    }
+
+    async fn wait_for_terminal_wakeable(
+        &self,
+        task_id: &str,
+        args: &TasksArgs,
+        context: Option<&ToolExecutionContext>,
+    ) -> Result<ToolOutput> {
+        let terminals = self
+            .terminals
+            .as_ref()
+            .context("Interactive terminals are unavailable")?;
+        let snapshot = terminals
+            .snapshot(task_id)
+            .await
+            .with_context(|| format!("Unknown interactive terminal: {task_id}"))?;
+        let Some(observed_version) = args.observed_version else {
+            return Ok(ToolOutput::Text(
+                self.wait_for_terminal(
+                    task_id,
+                    Duration::from_secs(args.wait_seconds.unwrap_or(1)),
+                )
+                .await?,
+            ));
+        };
+        if !self.can_park {
+            bail!("Wakeable waits require the interactive TUI; use wait_seconds in headless mode");
+        }
+        if args
+            .output_threshold
+            .is_some_and(|threshold| threshold <= snapshot.total_output_chars)
+        {
+            bail!(
+                "Interactive terminal {task_id} already has {} output characters; output_threshold must be greater than the observed total",
+                snapshot.total_output_chars
+            );
+        }
+        let coordinator = context
+            .and_then(ToolExecutionContext::background_wakes)
+            .or(self.background_wakes.as_ref())
+            .context("Wakeable waits are unavailable on this surface")?;
+        let operation_key =
+            context.map_or("tasks-terminal-wait", ToolExecutionContext::tool_call_id);
+        let wait = coordinator
+            .register_terminal(
+                snapshot,
+                operation_key,
+                observed_version,
+                args.output_threshold,
+                args.wait_seconds
+                    .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),
+            )
+            .await?;
+        Ok(ToolOutput::WaitStarted {
+            reason: crate::agent::WaitReason::BackgroundWork(wait),
+            message: format!("Waiting for {task_id} after version {observed_version}."),
+        })
     }
 
     async fn tail_terminal(&self, task_id: &str) -> Result<String> {
@@ -468,6 +637,8 @@ mod tests {
             Arc::new(BackgroundTaskRegistry::new()),
             Arc::new(SubagentRegistry::new()),
             terminals,
+            None,
+            false,
         );
 
         tokio::time::sleep(Duration::from_millis(20)).await;

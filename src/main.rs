@@ -1,5 +1,6 @@
 mod agent;
 mod background;
+mod background_wake;
 mod bootstrap;
 mod cli;
 mod commands;

@@ -266,6 +266,13 @@ impl Agent {
         self.last_terminal_status_report = None;
     }
 
+    pub(crate) fn set_background_wakes(
+        &mut self,
+        background_wakes: Arc<crate::background_wake::BackgroundWakeCoordinator>,
+    ) {
+        self.background_wakes = Some(background_wakes);
+    }
+
     /// Wire the inter-agent communication bus (peers P2). `None` (the default)
     /// disables peer-message injection — evals and tests never see it.
     pub fn set_peer_bus(&mut self, peer_bus: Arc<crate::peer::PeerBus>) {

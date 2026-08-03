@@ -988,6 +988,7 @@ pub struct ToolExecutionContext {
     /// that spawn nested work (e.g. `agent`) forward it so a parent cancel
     /// reaches the child's own cooperative checks, not only via future-drop.
     cancellation_token: Option<CancellationToken>,
+    background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
 }
 
 impl ToolExecutionContext {
@@ -998,6 +999,7 @@ impl ToolExecutionContext {
             sink,
             origin: None,
             cancellation_token: None,
+            background_wakes: None,
         }
     }
 
@@ -1010,6 +1012,15 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
         self.origin = Some(origin.into());
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_background_wakes(
+        mut self,
+        background_wakes: Arc<crate::background_wake::BackgroundWakeCoordinator>,
+    ) -> Self {
+        self.background_wakes = Some(background_wakes);
         self
     }
 
@@ -1031,6 +1042,13 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn cancellation_token(&self) -> Option<CancellationToken> {
         self.cancellation_token.clone()
+    }
+
+    #[must_use]
+    pub(crate) fn background_wakes(
+        &self,
+    ) -> Option<&Arc<crate::background_wake::BackgroundWakeCoordinator>> {
+        self.background_wakes.as_ref()
     }
 }
 

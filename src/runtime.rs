@@ -146,6 +146,7 @@ pub(crate) struct RuntimeCore {
     pub(crate) active_session_id: SharedActiveSessionId,
     pub(crate) background_tasks: Arc<BackgroundTaskRegistry>,
     pub(crate) terminals: Arc<crate::terminal::TerminalRegistry>,
+    pub(crate) background_wakes: Arc<crate::background_wake::BackgroundWakeCoordinator>,
     pub(crate) subagents: Arc<crate::subagent::SubagentRegistry>,
     pub(crate) subagent_model_overrides: crate::subagent::SubagentModelOverrides,
     pub(crate) permissions: PermissionManager,
@@ -235,6 +236,15 @@ impl RuntimeBuilder {
         let terminals = Arc::new(crate::terminal::TerminalRegistry::with_sandbox(
             sandbox.clone(),
         ));
+        let background_wakes = Arc::new(crate::background_wake::BackgroundWakeCoordinator::new(
+            storage.clone(),
+            active_session_id.clone(),
+            background_tasks.clone(),
+            terminals.clone(),
+        ));
+        if let Err(error) = storage.cancel_stale_background_wakes().await {
+            tracing::warn!(%error, "failed to invalidate stale process-local background waits");
+        }
         let subagents = Arc::new(crate::subagent::SubagentRegistry::new());
         let subagent_model_overrides = Arc::new(StdMutex::new(HashMap::new()));
         let builtin_subagent_settings = crate::subagent::SharedBuiltinSubagentSettings::new(
@@ -344,6 +354,8 @@ impl RuntimeBuilder {
             plan_store: plan_store.clone(),
             background_tasks: background_tasks.clone(),
             terminals: terminals.clone(),
+            background_wakes: Some(background_wakes.clone()),
+            background_wakes_parkable: capabilities.peer_wait == PeerWaitMode::Parkable,
             yolo_mode: yolo_mode.clone(),
             sandbox: sandbox.clone(),
             workspace_locks: crate::tool::WorkspaceLockContext::new(
@@ -448,6 +460,7 @@ impl RuntimeBuilder {
         agent.set_todo_store(todo_store.clone());
         agent.set_background_tasks(background_tasks.clone());
         agent.set_terminals(terminals.clone());
+        agent.set_background_wakes(background_wakes.clone());
         agent.set_peer_bus(peer_bus.clone());
         agent.set_refresh_volatile(
             capabilities.volatile_context == VolatileContextMode::RefreshEachTurn,
@@ -467,6 +480,7 @@ impl RuntimeBuilder {
             active_session_id,
             background_tasks,
             terminals,
+            background_wakes,
             subagents,
             subagent_model_overrides,
             permissions,

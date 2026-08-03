@@ -445,6 +445,8 @@ pub struct AppState {
     /// park is still pending. Structured state for the wake sweep and tests —
     /// the "Waiting for peer #N" phase string is display only.
     pub(crate) waiting_for_peer: Option<crate::agent::PeerWait>,
+    /// Exact process-local wait whose claimed version may resume this run.
+    pub(crate) waiting_for_background_work: Option<crate::background_wake::BackgroundWorkWait>,
     pub(crate) deferred_commands: Vec<DeferredCommand>,
     pub(crate) next_queued_input_id: u64,
     pub(crate) next_deferred_command_id: u64,
@@ -639,6 +641,7 @@ impl AppState {
             pending_peer_inbox: 0,
             pending_peer_delivery_receipts: BTreeMap::new(),
             waiting_for_peer: None,
+            waiting_for_background_work: None,
             deferred_commands: Vec::new(),
             next_queued_input_id: 1,
             next_deferred_command_id: 1,
@@ -1167,6 +1170,7 @@ impl AppState {
                 self.current_session_status = SessionStatus::Active;
                 self.current_terminal_reason = None;
                 self.waiting_for_peer = None;
+                self.waiting_for_background_work = None;
             }
             // Completion reports remain available to headless and persistence
             // consumers, but are not interactive transcript cards.
@@ -1180,12 +1184,21 @@ impl AppState {
                     Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::Subagents(_))) => {
                         Some("Waiting for subagents".to_string())
                     }
+                    Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::BackgroundWork(
+                        wait,
+                    ))) => Some(format!("Waiting for {}", wait.target_id)),
                     _ => None,
                 };
                 self.waiting_for_peer = match &result {
                     Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::Peer(wait))) => {
                         Some(*wait)
                     }
+                    _ => None,
+                };
+                self.waiting_for_background_work = match &result {
+                    Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::BackgroundWork(
+                        wait,
+                    ))) => Some(wait.clone()),
                     _ => None,
                 };
                 let waiting = waiting_phase.is_some();
@@ -1844,6 +1857,7 @@ mod tests {
     fn background_task(id: &str, status: BackgroundTaskStatus) -> BackgroundTaskSnapshot {
         BackgroundTaskSnapshot {
             id: id.to_string(),
+            incarnation: "test-task".to_string(),
             command: format!("printf {id}"),
             cwd: PathBuf::from("/tmp/project"),
             status,
@@ -1855,6 +1869,7 @@ mod tests {
             tail: String::new(),
             tail_truncated: false,
             total_output_chars: 0,
+            version: 1,
             tool_call_id: None,
         }
     }

@@ -10,6 +10,7 @@ impl Agent {
     /// path so the caller stops issuing further batches this turn.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_tool_batch(
+        background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
         batch: Vec<ToolCall>,
         tool_registry: &Arc<ToolRegistry>,
         tool_rejections: &ToolRejections,
@@ -41,6 +42,7 @@ impl Agent {
             crate::tool::with_authorization_call_context(
                 authorization_context,
                 Self::execute_single_tool_call(
+                    background_wakes.clone(),
                     tool_call,
                     tool_registry.clone(),
                     tool_rejections.clone(),
@@ -68,6 +70,7 @@ impl Agent {
     /// than a further nesting level.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_single_tool_call(
+        background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
         tool_call: ToolCall,
         tool_registry: Arc<ToolRegistry>,
         tool_rejections: ToolRejections,
@@ -196,6 +199,9 @@ impl Agent {
             let mut context =
                 crate::tool::ToolExecutionContext::new(tool_call.id.clone(), sink.clone())
                     .with_cancellation_token(tool_cancellation.clone());
+            if let Some(background_wakes) = background_wakes {
+                context = context.with_background_wakes(background_wakes);
+            }
             if let Some(origin) = tool_origin {
                 context = context.with_origin(origin);
             }
