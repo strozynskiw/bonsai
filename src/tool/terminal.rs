@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use crate::background_wake::TerminalWaitRegistration;
 use crate::terminal::{MAX_TERMINAL_DIMENSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_DIMENSION};
 use crate::terminal::{TerminalRegistry, format_terminal_list};
 use crate::tool::schema::{
@@ -152,7 +153,7 @@ impl Tool for TerminalTool {
                 (
                     "observed_version",
                     bounded_integer_property(
-                        "Version from a preceding terminal list or read for a wakeable wait",
+                        "Optional semantic version from a preceding terminal list or read; a wakeable wait otherwise starts atomically from the current screen",
                         Some(1),
                         None,
                     ),
@@ -274,12 +275,7 @@ impl TerminalTool {
             TerminalAction::Wait => {
                 let wait_seconds = normalize_wait_seconds(args.wait_seconds)?;
                 let id = required_terminal_id(args.terminal_id.as_deref(), "wait")?;
-                let snapshot = self
-                    .registry
-                    .snapshot(id)
-                    .await
-                    .with_context(|| format!("Unknown interactive terminal: {id}"))?;
-                let Some(observed_version) = args.observed_version else {
+                if !self.can_park {
                     return Ok(ToolOutput::untrusted_context(
                         format!("terminal:{id}"),
                         &self
@@ -291,20 +287,6 @@ impl TerminalTool {
                             .await?
                             .detail(),
                     ));
-                };
-                if !self.can_park {
-                    bail!(
-                        "Wakeable waits require the interactive TUI; use wait_seconds in headless mode"
-                    );
-                }
-                if args
-                    .output_threshold
-                    .is_some_and(|threshold| threshold <= snapshot.total_output_chars)
-                {
-                    bail!(
-                        "Interactive terminal {id} already has {} output characters; output_threshold must be greater than the observed total",
-                        snapshot.total_output_chars
-                    );
                 }
                 let coordinator = context
                     .as_ref()
@@ -314,19 +296,28 @@ impl TerminalTool {
                 let operation_key = context
                     .as_ref()
                     .map_or("terminal-wait", ToolExecutionContext::tool_call_id);
-                let wait = coordinator
-                    .register_terminal(
-                        snapshot,
+                match coordinator
+                    .register_terminal_current(
+                        id,
                         operation_key,
-                        observed_version,
+                        args.observed_version,
                         args.output_threshold,
                         wait_seconds,
                     )
-                    .await?;
-                Ok(ToolOutput::WaitStarted {
-                    reason: crate::agent::WaitReason::BackgroundWork(wait),
-                    message: format!("Waiting for {id} after version {observed_version}."),
-                })
+                    .await?
+                {
+                    TerminalWaitRegistration::Ready(snapshot) => Ok(ToolOutput::untrusted_context(
+                        format!("terminal:{id}"),
+                        &snapshot.detail(),
+                    )),
+                    TerminalWaitRegistration::Parked(wait) => Ok(ToolOutput::WaitStarted {
+                        message: format!(
+                            "Waiting for {id} from semantic version {}.",
+                            wait.observed_version
+                        ),
+                        reason: crate::agent::WaitReason::BackgroundWork(wait),
+                    }),
+                }
             }
         }
     }

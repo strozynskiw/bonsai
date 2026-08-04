@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -106,7 +106,8 @@ pub(crate) struct TerminalSnapshot {
     pub(crate) tail: String,
     pub(crate) tail_truncated: bool,
     pub(crate) total_output_chars: usize,
-    /// Monotonically increases whenever externally observable terminal state changes.
+    /// Monotonically increases when the normalized screen, prompt, size, or status changes.
+    /// Raw PTY activity remains available through `total_output_chars`.
     pub(crate) version: u64,
     pub(crate) confined: bool,
     pub(crate) tool_call_id: Option<String>,
@@ -208,6 +209,29 @@ impl TerminalSnapshot {
             screen
         )
     }
+
+    pub(crate) fn wake_output(&self) -> (String, bool) {
+        let screen_chars = self.screen.chars().count();
+        let screen_truncated = screen_chars > TERMINAL_DETAIL_TAIL_CHARS;
+        let screen = if self.screen.is_empty() {
+            "(empty)".to_string()
+        } else {
+            limit_tail(&self.screen, TERMINAL_DETAIL_TAIL_CHARS)
+        };
+        (
+            format!(
+                "ID: {}\nStatus: {}\nPrompt: {}\nSize: {}x{}\nOutput: {} chars\nNormalized screen:\n{}",
+                self.id,
+                self.status.label(),
+                self.prompt_state.label(),
+                self.cols,
+                self.rows,
+                self.total_output_chars,
+                screen
+            ),
+            screen_truncated,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +244,7 @@ pub(crate) enum TerminalEvent {
         tool_call_id: Option<String>,
         output: String,
         version: u64,
+        semantic_changed: bool,
     },
     WaitingForInput {
         terminal_id: String,
@@ -265,6 +290,16 @@ impl TerminalEvent {
             Self::Started { .. } | Self::Removed { .. } => None,
         }
     }
+
+    pub(crate) const fn is_semantic_change(&self) -> bool {
+        !matches!(
+            self,
+            Self::Output {
+                semantic_changed: false,
+                ..
+            }
+        )
+    }
 }
 
 type SharedKiller = Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>;
@@ -273,6 +308,7 @@ type SharedWriter = Arc<StdMutex<Box<dyn Write + Send>>>;
 
 struct TerminalRecord {
     snapshot: TerminalSnapshot,
+    semantic_screen_digest: blake3::Hash,
     stop_sender: Option<oneshot::Sender<()>>,
     killer: Option<SharedKiller>,
     master: Option<SharedMaster>,
@@ -287,6 +323,7 @@ impl std::fmt::Debug for TerminalRecord {
         formatter
             .debug_struct("TerminalRecord")
             .field("snapshot", &self.snapshot)
+            .field("semantic_screen_digest", &self.semantic_screen_digest)
             .field("has_stop_sender", &self.stop_sender.is_some())
             .field("has_killer", &self.killer.is_some())
             .field("has_master", &self.master.is_some())
@@ -416,6 +453,7 @@ impl TerminalRegistry {
                 id.clone(),
                 TerminalRecord {
                     snapshot: snapshot.clone(),
+                    semantic_screen_digest: semantic_screen_digest(&snapshot.screen),
                     stop_sender: Some(stop_sender),
                     killer: Some(killer.clone()),
                     master: Some(master.clone()),
@@ -646,6 +684,7 @@ impl TerminalRegistry {
         record.parser.screen_mut().set_size(rows, cols);
         record.snapshot.screen = record.parser.screen().contents();
         crate::redact::redact_in_place(&mut record.snapshot.screen);
+        record.semantic_screen_digest = semantic_screen_digest(&record.snapshot.screen);
         let snapshot = record.snapshot.clone();
         drop(inner);
         let _ = self.events.send(TerminalEvent::Resized {
@@ -778,12 +817,19 @@ impl TerminalRegistry {
         let _ = tokio::time::timeout(max_wait, async {
             loop {
                 match events.recv().await {
-                    Ok(TerminalEvent::Output { .. })
+                    Ok(TerminalEvent::Output {
+                        semantic_changed: true,
+                        ..
+                    })
                     | Ok(TerminalEvent::WaitingForInput { .. })
                     | Ok(TerminalEvent::Resized { .. })
                     | Ok(TerminalEvent::Finished { .. })
                     | Ok(TerminalEvent::Removed { .. }) => break,
-                    Ok(TerminalEvent::Started { .. }) => {}
+                    Ok(TerminalEvent::Started { .. })
+                    | Ok(TerminalEvent::Output {
+                        semantic_changed: false,
+                        ..
+                    }) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => break,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -810,13 +856,19 @@ impl TerminalRegistry {
                 .snapshot
                 .total_output_chars
                 .saturating_add(chunk.chars().count());
-            record.snapshot.version = record.snapshot.version.saturating_add(1);
             record.snapshot.tail.push_str(chunk);
             record.parser.process(chunk.as_bytes());
             record.snapshot.screen = record.parser.screen().contents();
             crate::redact::redact_in_place(&mut record.snapshot.screen);
             crate::redact::redact_in_place(&mut record.snapshot.tail);
             record.snapshot.prompt_state = detect_prompt_state(&record.snapshot.tail);
+            let screen_digest = semantic_screen_digest(&record.snapshot.screen);
+            let semantic_changed = screen_digest != record.semantic_screen_digest
+                || record.snapshot.prompt_state != previous_prompt;
+            record.semantic_screen_digest = screen_digest;
+            if semantic_changed {
+                record.snapshot.version = record.snapshot.version.saturating_add(1);
+            }
             if record.snapshot.prompt_state != TerminalPromptState::WaitingForInput {
                 record.prompt_reported_to_agent = false;
             }
@@ -829,6 +881,7 @@ impl TerminalRegistry {
                 tool_call_id: record.snapshot.tool_call_id.clone(),
                 output: record.snapshot.live_output(),
                 version: record.snapshot.version,
+                semantic_changed,
             };
             let waiting = (previous_prompt != TerminalPromptState::WaitingForInput
                 && record.snapshot.prompt_state == TerminalPromptState::WaitingForInput)
@@ -844,6 +897,11 @@ impl TerminalRegistry {
         if let Some(event) = waiting_event {
             let _ = self.events.send(event);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn append_test_output(&self, id: &str, chunk: &str) {
+        self.append_output(id, chunk).await;
     }
 
     async fn release_io(&self, id: &str) {
@@ -1180,6 +1238,70 @@ fn compact_command(command: &str, max_chars: usize) -> String {
     shortened
 }
 
+static ELAPSED_DURATION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\b(?:\d+h\s+)?(?:\d+m\s+)?\d+(?:\.\d+)?(?:ms|s)\b")
+        .expect("elapsed-duration regex should compile")
+});
+
+/// Hash the stable information on a normalized terminal screen.
+///
+/// Ratatui applications commonly redraw an otherwise identical frame only to
+/// advance a spinner or elapsed-time label. Those presentation-only changes
+/// must not advance the version used by wakeable terminal waits.
+fn semantic_screen_digest(screen: &str) -> blake3::Hash {
+    let mut semantic = String::with_capacity(screen.len());
+    for (index, line) in screen.split('\n').enumerate() {
+        if index > 0 {
+            semantic.push('\n');
+        }
+        let has_spinner = line.chars().any(is_spinner_frame);
+        let mut normalized = line
+            .chars()
+            .map(|character| {
+                if is_spinner_frame(character) {
+                    '⠿'
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        if has_spinner {
+            normalized = ELAPSED_DURATION
+                .replace_all(&normalized, "<elapsed>")
+                .into_owned();
+        }
+        if let Some(clock_start) = normalized.find('⏱') {
+            normalized.truncate(clock_start + '⏱'.len_utf8());
+            normalized.push_str(" <elapsed>");
+        }
+        semantic.push_str(&normalized);
+    }
+    blake3::hash(semantic.as_bytes())
+}
+
+const fn is_spinner_frame(character: char) -> bool {
+    matches!(
+        character,
+        '⠋' | '⠙'
+            | '⠹'
+            | '⠸'
+            | '⠼'
+            | '⠴'
+            | '⠦'
+            | '⠧'
+            | '⠇'
+            | '⠏'
+            | '⣾'
+            | '⣽'
+            | '⣻'
+            | '⢿'
+            | '⡿'
+            | '⣟'
+            | '⣯'
+            | '⣷'
+    )
+}
+
 fn detect_prompt_state(output: &str) -> TerminalPromptState {
     if output.ends_with('\n') || output.ends_with('\r') {
         return TerminalPromptState::Unknown;
@@ -1261,6 +1383,76 @@ mod tests {
             detect_prompt_state("ordinary streaming output"),
             TerminalPromptState::Unknown
         );
+    }
+
+    #[test]
+    fn semantic_screen_digest_ignores_spinner_and_elapsed_redraws() {
+        let first = "⠋ bonsai\n⣾ read · 100ms\n⌂ bonsai   ⏱ 9s";
+        let redraw = "⠙ bonsai\n⣽ read · 8.4s\n⌂ bonsai   ⏱ 1m 5s";
+        let changed = "⠙ bonsai\n⣽ write · 8.4s\n⌂ bonsai   ⏱ 1m 5s";
+
+        assert_eq!(
+            semantic_screen_digest(first),
+            semantic_screen_digest(redraw)
+        );
+        assert_ne!(
+            semantic_screen_digest(redraw),
+            semantic_screen_digest(changed)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cosmetic_redraw_keeps_semantic_version_but_counts_raw_output() {
+        let registry = Arc::new(TerminalRegistry::new());
+        let started = registry
+            .start("/bin/sh", "sleep 30", Path::new("/"), 60, None)
+            .await
+            .expect("PTY fixture should start");
+        registry
+            .append_test_output(
+                &started.id,
+                "\u{1b}[2J\u{1b}[H⠋ bonsai\r\n⣾ read · 100ms\r\n⌂ bonsai   ⏱ 9s",
+            )
+            .await;
+        let first = registry
+            .snapshot(&started.id)
+            .await
+            .expect("PTY fixture should remain registered");
+
+        registry
+            .append_test_output(
+                &started.id,
+                "\u{1b}[2J\u{1b}[H⠙ bonsai\r\n⣽ read · 8.4s\r\n⌂ bonsai   ⏱ 1m 5s",
+            )
+            .await;
+        let redraw = registry
+            .snapshot(&started.id)
+            .await
+            .expect("PTY fixture should remain registered");
+        assert_eq!(
+            redraw.version, first.version,
+            "first screen: {:?}\nredraw screen: {:?}",
+            first.screen, redraw.screen
+        );
+        assert!(redraw.total_output_chars > first.total_output_chars);
+
+        registry
+            .append_test_output(
+                &started.id,
+                "\u{1b}[2J\u{1b}[H⠙ bonsai\r\n⣽ write · 8.4s\r\n⌂ bonsai   ⏱ 1m 5s",
+            )
+            .await;
+        let changed = registry
+            .snapshot(&started.id)
+            .await
+            .expect("PTY fixture should remain registered");
+        assert!(changed.version > redraw.version);
+
+        registry
+            .stop(&started.id)
+            .await
+            .expect("PTY fixture should stop");
     }
 
     #[cfg(unix)]

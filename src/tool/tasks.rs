@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::background::{BackgroundTaskRegistry, format_task_list};
+use crate::background_wake::TerminalWaitRegistration;
 use crate::subagent::{SubagentRegistry, SubagentSnapshot, format_subagent_list};
 use crate::terminal::{TerminalRegistry, TerminalSnapshot, format_terminal_list};
 use crate::tool::schema::{
@@ -122,7 +123,7 @@ impl Tool for TasksTool {
                 (
                     "observed_version",
                     bounded_integer_property(
-                        "Required version from a preceding list or tail for a wakeable bg-N or pty-N wait",
+                        "Version from a preceding list or tail; required for bg-N and optional for atomic pty-N waits",
                         Some(1),
                         None,
                     ),
@@ -372,15 +373,10 @@ impl TasksTool {
         args: &TasksArgs,
         context: Option<&ToolExecutionContext>,
     ) -> Result<ToolOutput> {
-        let terminals = self
-            .terminals
+        self.terminals
             .as_ref()
             .context("Interactive terminals are unavailable")?;
-        let snapshot = terminals
-            .snapshot(task_id)
-            .await
-            .with_context(|| format!("Unknown interactive terminal: {task_id}"))?;
-        let Some(observed_version) = args.observed_version else {
+        if !self.can_park {
             return Ok(ToolOutput::Text(
                 self.wait_for_terminal(
                     task_id,
@@ -388,18 +384,6 @@ impl TasksTool {
                 )
                 .await?,
             ));
-        };
-        if !self.can_park {
-            bail!("Wakeable waits require the interactive TUI; use wait_seconds in headless mode");
-        }
-        if args
-            .output_threshold
-            .is_some_and(|threshold| threshold <= snapshot.total_output_chars)
-        {
-            bail!(
-                "Interactive terminal {task_id} already has {} output characters; output_threshold must be greater than the observed total",
-                snapshot.total_output_chars
-            );
         }
         let coordinator = context
             .and_then(ToolExecutionContext::background_wakes)
@@ -407,20 +391,29 @@ impl TasksTool {
             .context("Wakeable waits are unavailable on this surface")?;
         let operation_key =
             context.map_or("tasks-terminal-wait", ToolExecutionContext::tool_call_id);
-        let wait = coordinator
-            .register_terminal(
-                snapshot,
+        match coordinator
+            .register_terminal_current(
+                task_id,
                 operation_key,
-                observed_version,
+                args.observed_version,
                 args.output_threshold,
                 args.wait_seconds
                     .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),
             )
-            .await?;
-        Ok(ToolOutput::WaitStarted {
-            reason: crate::agent::WaitReason::BackgroundWork(wait),
-            message: format!("Waiting for {task_id} after version {observed_version}."),
-        })
+            .await?
+        {
+            TerminalWaitRegistration::Ready(snapshot) => Ok(ToolOutput::untrusted_context(
+                format!("terminal:{task_id}"),
+                &snapshot.detail(),
+            )),
+            TerminalWaitRegistration::Parked(wait) => Ok(ToolOutput::WaitStarted {
+                message: format!(
+                    "Waiting for {task_id} from semantic version {}.",
+                    wait.observed_version
+                ),
+                reason: crate::agent::WaitReason::BackgroundWork(wait),
+            }),
+        }
     }
 
     async fn tail_terminal(&self, task_id: &str) -> Result<String> {

@@ -30,6 +30,15 @@ pub(crate) struct BackgroundWorkWait {
     pub(crate) observed_version: u64,
 }
 
+/// Result of atomically establishing a wait from the terminal's current state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminalWaitRegistration {
+    /// The requested observation is already stale or the terminal is ready.
+    Ready(TerminalSnapshot),
+    /// A durable one-shot wait was established from the current semantic version.
+    Parked(BackgroundWorkWait),
+}
+
 /// The one-shot wake delivered once a qualifying registry observation changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackgroundWorkWake {
@@ -142,45 +151,42 @@ impl BackgroundWakeCoordinator {
         .await
     }
 
-    pub(crate) async fn register_terminal(
+    pub(crate) async fn register_terminal_current(
         self: &Arc<Self>,
-        snapshot: TerminalSnapshot,
+        terminal_id: &str,
         operation_key: &str,
-        observed_version: u64,
+        observed_version: Option<u64>,
         output_threshold: Option<usize>,
         wait_seconds: Option<u64>,
-    ) -> Result<BackgroundWorkWait> {
-        if snapshot.version != observed_version {
-            bail!(
-                "Interactive terminal {} advanced from observed version {} to {}; read it and choose a new wait",
-                snapshot.id,
-                observed_version,
-                snapshot.version
-            );
+    ) -> Result<TerminalWaitRegistration> {
+        let snapshot = self
+            .terminals
+            .snapshot(terminal_id)
+            .await
+            .with_context(|| format!("Unknown interactive terminal: {terminal_id}"))?;
+        let observation_advanced =
+            observed_version.is_some_and(|version| version != snapshot.version);
+        let threshold_reached =
+            output_threshold.is_some_and(|threshold| snapshot.total_output_chars >= threshold);
+        if snapshot.status.is_finished()
+            || snapshot.prompt_state == TerminalPromptState::WaitingForInput
+            || observation_advanced
+            || threshold_reached
+        {
+            return Ok(TerminalWaitRegistration::Ready(snapshot));
         }
-        if snapshot.status.is_finished() {
-            bail!(
-                "Interactive terminal {} is already {}",
-                snapshot.id,
-                snapshot.status.label()
-            );
-        }
-        validate_output_threshold(
-            "Interactive terminal",
-            &snapshot.id,
-            output_threshold,
-            snapshot.total_output_chars,
-        )?;
-        self.register(WorkWaitRegistration {
-            target_kind: BackgroundWakeTargetKind::Terminal,
-            target_id: &snapshot.id,
-            target_incarnation: &snapshot.incarnation,
-            observed_version,
-            output_threshold,
-            wait_seconds,
-            operation_key,
-        })
-        .await
+        let wait = self
+            .register(WorkWaitRegistration {
+                target_kind: BackgroundWakeTargetKind::Terminal,
+                target_id: &snapshot.id,
+                target_incarnation: &snapshot.incarnation,
+                observed_version: snapshot.version,
+                output_threshold,
+                wait_seconds,
+                operation_key,
+            })
+            .await?;
+        Ok(TerminalWaitRegistration::Parked(wait))
     }
 
     async fn register(
@@ -248,54 +254,88 @@ impl BackgroundWakeCoordinator {
         output_threshold: Option<usize>,
         deadline_at_ms: Option<i64>,
     ) -> Result<()> {
+        match wait.target_kind {
+            BackgroundWakeTargetKind::BackgroundTask => {
+                self.watch_background_task(wait, output_threshold, deadline_at_ms)
+                    .await
+            }
+            BackgroundWakeTargetKind::Terminal => {
+                self.watch_terminal(wait, output_threshold, deadline_at_ms)
+                    .await
+            }
+        }
+    }
+
+    async fn watch_background_task(
+        &self,
+        wait: BackgroundWorkWait,
+        output_threshold: Option<usize>,
+        deadline_at_ms: Option<i64>,
+    ) -> Result<()> {
+        let mut events = self.background_tasks.subscribe();
+        if self.try_fire(&wait, output_threshold).await? {
+            return Ok(());
+        }
         loop {
-            let deadline = deadline_at_ms.map(|timestamp| {
-                Duration::from_millis(
-                    u64::try_from(timestamp.saturating_sub(now_ms())).unwrap_or(0),
-                )
-            });
-            match wait.target_kind {
-                BackgroundWakeTargetKind::BackgroundTask => {
-                    let mut events = self.background_tasks.subscribe();
-                    if self.try_fire(&wait, output_threshold).await? {
-                        return Ok(());
-                    }
-                    tokio::select! {
-                        result = events.recv() => {
-                            match result {
-                                Ok(event) if event.task_id() == wait.target_id => {
-                                    let _ = event.version();
-                                }
-                                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(broadcast::error::RecvError::Closed) => return Ok(()),
-                            }
-                        }
-                        () = async { if let Some(duration) = deadline { tokio::time::sleep(duration).await; } }, if deadline.is_some() => {
-                            self.fire_due().await?;
+            let deadline = remaining_deadline(deadline_at_ms);
+            tokio::select! {
+                result = events.recv() => match result {
+                    Ok(event) if event.task_id() == wait.target_id => {
+                        let _ = event.version();
+                        if self.try_fire(&wait, output_threshold).await? {
                             return Ok(());
                         }
                     }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if self.try_fire(&wait, output_threshold).await? {
+                            return Ok(());
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                },
+                () = sleep_until_deadline(deadline), if deadline.is_some() => {
+                    self.fire_due().await?;
+                    return Ok(());
                 }
-                BackgroundWakeTargetKind::Terminal => {
-                    let mut events = self.terminals.subscribe();
-                    if self.try_fire(&wait, output_threshold).await? {
-                        return Ok(());
-                    }
-                    tokio::select! {
-                        result = events.recv() => {
-                            match result {
-                                Ok(event) if event.terminal_id() == wait.target_id => {
-                                    let _ = event.version();
-                                }
-                                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(broadcast::error::RecvError::Closed) => return Ok(()),
-                            }
-                        }
-                        () = async { if let Some(duration) = deadline { tokio::time::sleep(duration).await; } }, if deadline.is_some() => {
-                            self.fire_due().await?;
+            }
+        }
+    }
+
+    async fn watch_terminal(
+        &self,
+        wait: BackgroundWorkWait,
+        output_threshold: Option<usize>,
+        deadline_at_ms: Option<i64>,
+    ) -> Result<()> {
+        let mut events = self.terminals.subscribe();
+        if self.try_fire(&wait, output_threshold).await? {
+            return Ok(());
+        }
+        loop {
+            let deadline = remaining_deadline(deadline_at_ms);
+            tokio::select! {
+                result = events.recv() => match result {
+                    Ok(event)
+                        if event.terminal_id() == wait.target_id
+                            && terminal_event_requires_check(&event, output_threshold) =>
+                    {
+                        let _ = event.version();
+                        if self.try_fire(&wait, output_threshold).await? {
                             return Ok(());
                         }
                     }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if self.try_fire(&wait, output_threshold).await? {
+                            return Ok(());
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                },
+                () = sleep_until_deadline(deadline), if deadline.is_some() => {
+                    self.fire_due().await?;
+                    return Ok(());
                 }
             }
         }
@@ -351,14 +391,15 @@ impl BackgroundWakeCoordinator {
             .await?;
             return Ok(true);
         }
-        if observation.version <= wait.observed_version {
+        let threshold_reached =
+            output_threshold.is_some_and(|threshold| observation.total_output_chars >= threshold);
+        if observation.version <= wait.observed_version && !threshold_reached {
             return Ok(false);
         }
         let is_relevant = observation.finished
             || observation.input_required
             || output_threshold.is_none()
-            || output_threshold
-                .is_some_and(|threshold| observation.total_output_chars >= threshold);
+            || threshold_reached;
         if !is_relevant {
             return Ok(false);
         }
@@ -366,7 +407,14 @@ impl BackgroundWakeCoordinator {
             target_kind: wait.target_kind,
             target_id: &wait.target_id,
             target_incarnation: &wait.target_incarnation,
-            wake_reason: observation.reason,
+            wake_reason: if threshold_reached
+                && !observation.finished
+                && !observation.input_required
+            {
+                "output_threshold"
+            } else {
+                observation.reason
+            },
             wake_version: observation.version,
             total_output_chars: observation.total_output_chars,
             output: &observation.output,
@@ -425,6 +473,34 @@ impl BackgroundWakeCoordinator {
     }
 }
 
+fn remaining_deadline(deadline_at_ms: Option<i64>) -> Option<Duration> {
+    deadline_at_ms.map(|timestamp| {
+        Duration::from_millis(u64::try_from(timestamp.saturating_sub(now_ms())).unwrap_or_default())
+    })
+}
+
+async fn sleep_until_deadline(deadline: Option<Duration>) {
+    if let Some(duration) = deadline {
+        tokio::time::sleep(duration).await;
+    }
+}
+
+fn terminal_event_requires_check(
+    event: &crate::terminal::TerminalEvent,
+    output_threshold: Option<usize>,
+) -> bool {
+    match event {
+        crate::terminal::TerminalEvent::Output {
+            semantic_changed, ..
+        } => *semantic_changed || output_threshold.is_some(),
+        crate::terminal::TerminalEvent::Started { .. } => false,
+        crate::terminal::TerminalEvent::WaitingForInput { .. }
+        | crate::terminal::TerminalEvent::Resized { .. }
+        | crate::terminal::TerminalEvent::Finished { .. }
+        | crate::terminal::TerminalEvent::Removed { .. } => true,
+    }
+}
+
 fn validate_output_threshold(
     target_kind: &str,
     target_id: &str,
@@ -475,19 +551,372 @@ fn terminal_observation(snapshot: TerminalSnapshot) -> WorkObservation {
         {
             "input_required"
         }
-        TerminalStatus::Running => "output_threshold",
+        TerminalStatus::Running => "screen_changed",
         TerminalStatus::Succeeded => "succeeded",
         TerminalStatus::Failed => "failed",
         TerminalStatus::TimedOut => "task_timeout",
         TerminalStatus::Stopped => "cancelled",
     };
+    let (output, output_truncated) = snapshot.wake_output();
     WorkObservation {
         version: snapshot.version,
         total_output_chars: snapshot.total_output_chars,
         finished: snapshot.status.is_finished(),
         input_required: snapshot.prompt_state == TerminalPromptState::WaitingForInput,
         reason,
-        output: snapshot.tail,
-        output_truncated: snapshot.tail_truncated,
+        output,
+        output_truncated,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::Mutex;
+
+    use super::{BackgroundWakeCoordinator, TerminalWaitRegistration};
+    use crate::background::BackgroundTaskRegistry;
+    use crate::storage::test_utils::TestStorage;
+    use crate::terminal::{TerminalRegistry, TerminalSnapshot};
+
+    const INITIAL_FRAME: &str = "\u{1b}[2J\u{1b}[H⠋ bonsai\r\n⣾ read · 100ms\r\n⌂ bonsai   ⏱ 9s";
+    const COSMETIC_FRAME: &str = "\u{1b}[2J\u{1b}[H⠙ bonsai\r\n⣽ read · 8.4s\r\n⌂ bonsai   ⏱ 1m 5s";
+
+    struct WakeFixture {
+        storage: TestStorage,
+        terminals: Arc<TerminalRegistry>,
+        coordinator: Arc<BackgroundWakeCoordinator>,
+    }
+
+    impl WakeFixture {
+        async fn new() -> Self {
+            let storage = TestStorage::new().await;
+            let session_id = storage.start_session().await;
+            let active_session_id = Arc::new(Mutex::new(None));
+            crate::storage::activate_session_heartbeat(
+                &storage.storage,
+                &active_session_id,
+                session_id,
+            )
+            .await
+            .expect("test session should become live");
+            let terminals = Arc::new(TerminalRegistry::new());
+            let coordinator = Arc::new(BackgroundWakeCoordinator::new(
+                storage.storage.clone(),
+                active_session_id,
+                Arc::new(BackgroundTaskRegistry::new()),
+                terminals.clone(),
+            ));
+            Self {
+                storage,
+                terminals,
+                coordinator,
+            }
+        }
+
+        async fn start_terminal(&self, command: &str) -> TerminalSnapshot {
+            self.terminals
+                .start("/bin/sh", command, self.storage.project_path(), 60, None)
+                .await
+                .expect("PTY fixture should start")
+        }
+
+        async fn start_sleep(&self) -> TerminalSnapshot {
+            self.start_terminal("sleep 30").await
+        }
+    }
+
+    fn parked(registration: TerminalWaitRegistration) -> super::BackgroundWorkWait {
+        match registration {
+            TerminalWaitRegistration::Parked(wait) => wait,
+            TerminalWaitRegistration::Ready(snapshot) => {
+                panic!("terminal unexpectedly ready: {snapshot:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_observation_returns_current_screen_without_a_retry_error() {
+        let fixture = WakeFixture::new().await;
+        let started = fixture.start_sleep().await;
+        fixture
+            .terminals
+            .append_test_output(&started.id, "real output")
+            .await;
+
+        let registration = fixture
+            .coordinator
+            .register_terminal_current(
+                &started.id,
+                "stale-observation",
+                Some(started.version),
+                None,
+                None,
+            )
+            .await
+            .expect("stale observation should return the current screen");
+        let TerminalWaitRegistration::Ready(current) = registration else {
+            panic!("stale observation must not park")
+        };
+        assert!(current.version > started.version);
+        assert!(current.screen.contains("real output"), "{}", current.screen);
+
+        fixture
+            .terminals
+            .stop(&started.id)
+            .await
+            .expect("PTY fixture should stop");
+    }
+
+    #[tokio::test]
+    async fn current_input_prompt_returns_ready_instead_of_parking_forever() {
+        let fixture = WakeFixture::new().await;
+        let started = fixture.start_terminal("printf 'Name: '; read answer").await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let current = fixture
+                .terminals
+                .snapshot(&started.id)
+                .await
+                .expect("PTY fixture should remain registered");
+            if current.prompt_state == crate::terminal::TerminalPromptState::WaitingForInput {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let registration = fixture
+            .coordinator
+            .register_terminal_current(&started.id, "current-prompt", None, None, None)
+            .await
+            .expect("current prompt should be returned");
+        assert!(matches!(registration, TerminalWaitRegistration::Ready(_)));
+
+        fixture
+            .terminals
+            .stop(&started.id)
+            .await
+            .expect("PTY fixture should stop");
+    }
+
+    #[tokio::test]
+    async fn cosmetic_redraws_stay_parked_until_terminal_cancellation() {
+        let fixture = WakeFixture::new().await;
+        let started = fixture.start_sleep().await;
+        fixture
+            .terminals
+            .append_test_output(&started.id, INITIAL_FRAME)
+            .await;
+        let baseline = fixture
+            .terminals
+            .snapshot(&started.id)
+            .await
+            .expect("PTY fixture should remain registered");
+        let mut wakes = fixture.coordinator.subscribe();
+        let wait = parked(
+            fixture
+                .coordinator
+                .register_terminal_current(&started.id, "cosmetic-redraws", None, None, None)
+                .await
+                .expect("wait should register from the current screen"),
+        );
+
+        for _ in 0..20 {
+            fixture
+                .terminals
+                .append_test_output(&started.id, COSMETIC_FRAME)
+                .await;
+        }
+        let after_redraws = fixture
+            .terminals
+            .snapshot(&started.id)
+            .await
+            .expect("PTY fixture should remain registered");
+        assert_eq!(after_redraws.version, wait.observed_version);
+        assert_eq!(after_redraws.version, baseline.version);
+        assert!(after_redraws.total_output_chars > baseline.total_output_chars);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), wakes.recv())
+                .await
+                .is_err(),
+            "cosmetic redraws must not wake the agent"
+        );
+
+        fixture
+            .terminals
+            .stop(&started.id)
+            .await
+            .expect("PTY fixture should stop");
+        let wake = tokio::time::timeout(Duration::from_secs(2), wakes.recv())
+            .await
+            .expect("cancellation should wake immediately")
+            .expect("wake channel should remain open");
+        assert_eq!(wake.reason, "cancelled");
+        assert!(wake.wake_version > wake.wait.observed_version);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), wakes.recv())
+                .await
+                .is_err(),
+            "a terminal wait must wake only once"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_change_after_registration_is_not_lost() {
+        let fixture = WakeFixture::new().await;
+        let started = fixture.start_sleep().await;
+        fixture
+            .terminals
+            .append_test_output(&started.id, "phase one")
+            .await;
+        let baseline = fixture
+            .terminals
+            .snapshot(&started.id)
+            .await
+            .expect("PTY fixture should remain registered");
+        let mut wakes = fixture.coordinator.subscribe();
+        let wait = parked(
+            fixture
+                .coordinator
+                .register_terminal_current(
+                    &started.id,
+                    "semantic-change",
+                    Some(baseline.version),
+                    None,
+                    None,
+                )
+                .await
+                .expect("wait should register"),
+        );
+
+        // Deliberately emit before the spawned watcher is guaranteed to have
+        // subscribed. Its initial snapshot recheck must close this race.
+        fixture
+            .terminals
+            .append_test_output(&started.id, "\rphase two")
+            .await;
+        let wake = tokio::time::timeout(Duration::from_secs(2), wakes.recv())
+            .await
+            .expect("semantic output should wake")
+            .expect("wake channel should remain open");
+        assert_eq!(wake.reason, "screen_changed");
+        assert_eq!(wake.wait.subscription_id, wait.subscription_id);
+        assert!(wake.wake_version > baseline.version);
+        assert!(wake.output.contains("phase two"), "{}", wake.output);
+
+        fixture
+            .terminals
+            .stop(&started.id)
+            .await
+            .expect("PTY fixture should stop");
+    }
+
+    #[tokio::test]
+    async fn raw_output_threshold_survives_cosmetic_coalescing() {
+        let fixture = WakeFixture::new().await;
+        let started = fixture.start_sleep().await;
+        fixture
+            .terminals
+            .append_test_output(&started.id, INITIAL_FRAME)
+            .await;
+        let baseline = fixture
+            .terminals
+            .snapshot(&started.id)
+            .await
+            .expect("PTY fixture should remain registered");
+        let mut wakes = fixture.coordinator.subscribe();
+        parked(
+            fixture
+                .coordinator
+                .register_terminal_current(
+                    &started.id,
+                    "raw-threshold",
+                    Some(baseline.version),
+                    Some(baseline.total_output_chars + 1),
+                    None,
+                )
+                .await
+                .expect("threshold wait should register"),
+        );
+
+        fixture
+            .terminals
+            .append_test_output(&started.id, COSMETIC_FRAME)
+            .await;
+        let wake = tokio::time::timeout(Duration::from_secs(2), wakes.recv())
+            .await
+            .expect("raw threshold should wake")
+            .expect("wake channel should remain open");
+        assert_eq!(wake.reason, "output_threshold");
+        assert_eq!(wake.wake_version, baseline.version);
+
+        fixture
+            .terminals
+            .stop(&started.id)
+            .await
+            .expect("PTY fixture should stop");
+    }
+
+    #[tokio::test]
+    async fn cosmetic_activity_does_not_extend_the_wait_deadline() {
+        let fixture = WakeFixture::new().await;
+        let started = fixture.start_sleep().await;
+        fixture
+            .terminals
+            .append_test_output(&started.id, INITIAL_FRAME)
+            .await;
+        let mut wakes = fixture.coordinator.subscribe();
+        parked(
+            fixture
+                .coordinator
+                .register_terminal_current(&started.id, "fixed-deadline", None, None, Some(1))
+                .await
+                .expect("deadline wait should register"),
+        );
+        let registered_at = Instant::now();
+
+        for _ in 0..8 {
+            fixture
+                .terminals
+                .append_test_output(&started.id, COSMETIC_FRAME)
+                .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let wake = tokio::time::timeout(Duration::from_secs(1), wakes.recv())
+            .await
+            .expect("deadline should survive cosmetic activity")
+            .expect("wake channel should remain open");
+        assert_eq!(wake.reason, "deadline");
+        assert!(registered_at.elapsed() < Duration::from_millis(1_500));
+
+        fixture
+            .terminals
+            .stop(&started.id)
+            .await
+            .expect("PTY fixture should stop");
+    }
+
+    #[tokio::test]
+    async fn process_exit_wakes_a_parked_terminal_immediately() {
+        let fixture = WakeFixture::new().await;
+        let started = fixture.start_terminal("sleep 0.2").await;
+        let mut wakes = fixture.coordinator.subscribe();
+        parked(
+            fixture
+                .coordinator
+                .register_terminal_current(&started.id, "process-exit", None, None, None)
+                .await
+                .expect("wait should register"),
+        );
+
+        let wake = tokio::time::timeout(Duration::from_secs(2), wakes.recv())
+            .await
+            .expect("process exit should wake immediately")
+            .expect("wake channel should remain open");
+        assert_eq!(wake.reason, "succeeded");
+        assert!(wake.wake_version > wake.wait.observed_version);
     }
 }

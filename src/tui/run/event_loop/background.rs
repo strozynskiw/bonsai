@@ -99,7 +99,7 @@ pub(super) fn apply_terminal_event(
 ) -> BackgroundTaskUiEffect {
     let _terminal_id = event.terminal_id();
     let mut effect = BackgroundTaskUiEffect {
-        refresh_task_list: true,
+        refresh_task_list: event.is_semantic_change(),
         wake_candidate: false,
     };
     match event {
@@ -107,6 +107,7 @@ pub(super) fn apply_terminal_event(
         TerminalEvent::Output {
             tool_call_id: Some(id),
             output,
+            semantic_changed: true,
             ..
         } => app.reduce(AppAction::Agent(UiEvent::ToolOutput {
             id,
@@ -177,7 +178,7 @@ pub(super) async fn drain_background_and_terminal_channels(
         wake_candidate |= effect.wake_candidate;
     }
     while let Ok(event) = terminal_events.try_recv() {
-        changed = true;
+        changed |= event.is_semantic_change();
         let effect = apply_terminal_event(app, event);
         refresh_task_list |= effect.refresh_task_list;
         wake_candidate |= effect.wake_candidate;

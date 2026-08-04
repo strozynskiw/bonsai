@@ -213,7 +213,7 @@ impl Storage {
             WHERE owner_runtime_id = ?
               AND target_kind = ? AND target_id = ? AND target_incarnation = ?
               AND fired_at_ms IS NULL
-              AND (observed_version < ? OR ? = 'removed')
+              AND (observed_version < ? OR ? IN ('removed', 'output_threshold'))
               AND (? != 'output_threshold' OR output_threshold IS NULL OR ? >= output_threshold)
             RETURNING id, requester_generation, target_id, target_incarnation,
                       observed_version, wake_version, wake_output_truncated,
@@ -448,6 +448,33 @@ mod tests {
             .await
             .expect("duplicate claim should succeed");
         assert!(duplicate.is_empty());
+    }
+
+    #[tokio::test]
+    async fn output_threshold_can_fire_without_a_semantic_version_change() {
+        let fixture = TestStorage::new().await;
+        let requester = fixture.start_session().await;
+        fixture
+            .storage
+            .register_background_wake(registration(
+                requester,
+                "test-runtime",
+                "raw-output-threshold",
+                5,
+                Some(100),
+            ))
+            .await
+            .expect("subscription should register");
+
+        let deliveries = fixture
+            .storage
+            .fire_background_wakes("test-runtime", trigger("output_threshold", 5, 100))
+            .await
+            .expect("raw output threshold should fire");
+
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].wake_version, 5);
+        assert_eq!(deliveries[0].wake_reason, "output_threshold");
     }
 
     #[tokio::test]

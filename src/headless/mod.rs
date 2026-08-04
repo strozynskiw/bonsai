@@ -1073,6 +1073,7 @@ fn forward_terminal_event(sink: &HeadlessSink, event: crate::terminal::TerminalE
         crate::terminal::TerminalEvent::Output {
             tool_call_id: Some(id),
             output,
+            semantic_changed: true,
             ..
         } => sink.tool_output(&id, &output),
         crate::terminal::TerminalEvent::WaitingForInput {
