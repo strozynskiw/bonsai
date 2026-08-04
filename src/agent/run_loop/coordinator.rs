@@ -44,6 +44,7 @@ impl TurnState {
 #[derive(Default)]
 struct TurnPolicies {
     planning_research: PlanningResearchGuard,
+    delegated_read: DelegatedReadGuard,
     repeated_inspection: RepeatedInspectionGuard,
     read_storm: ReadStormGuard,
     repeated_failure: RepeatedFailureGuard,
@@ -56,6 +57,7 @@ struct TurnPolicies {
 impl TurnPolicies {
     fn reset_for_user_steering(&mut self) {
         self.planning_research.reset();
+        self.delegated_read.reset();
         self.repeated_inspection.reset();
         self.read_storm.reset();
         self.repeated_failure.reset();
@@ -77,6 +79,7 @@ impl TurnPolicies {
         }
         if execution.reset_loop_guards {
             self.planning_research.reset();
+            self.delegated_read.reset();
             self.repeated_inspection.reset();
             self.read_storm.reset();
             self.single_call_streak = SingleCallStreakGuard::default();
@@ -326,8 +329,22 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             planning_research_action,
             &response,
         )?;
+        // A hook, peer, or editor can change a file after request preflight
+        // while the model is responding. Refresh before both delegated-overlap
+        // admission and compact-reuse decisions so stale child evidence cannot
+        // reject a necessary parent read.
+        self.agent.refresh_read_evidence_freshness().await;
+        let delegated_read_action = self
+            .agent
+            .delegated_read_action(&response.tool_calls, &mut policies.delegated_read);
+        let delegated_read_rejection = resolve_guard(
+            self.agent,
+            "delegated_read",
+            delegated_read_action,
+            &response,
+        )?;
         let read_target_versions = self.agent.read_target_versions(&response.tool_calls).await;
-        let repeated_inspection_action = if self.agent.persona_planning_budget() {
+        let mut repeated_inspection_action = if self.agent.persona_planning_budget() {
             None
         } else {
             policies.repeated_inspection.action_for_with_versions(
@@ -344,17 +361,14 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 .action_for_with_versions(&response.tool_calls, &read_target_versions)
         };
         // Both guards describe the same read-only behavior at different
-        // granularities. A rejection from either is one shared circuit
-        // breaker: reset the sibling so the model's next explicit retry is not
-        // immediately rejected by a second, stale budget.
-        if matches!(
-            repeated_inspection_action.as_ref(),
-            Some(GuardAction::Reject(_))
-        ) {
-            policies.read_storm.reset();
-        }
-        if matches!(read_storm_action.as_ref(), Some(GuardAction::Reject(_))) {
+        // granularities. Prefer the path-specific storm verdict when both fire
+        // on one turn, and reset only its generic sibling. Resetting both lost
+        // the recovery strike and let a true loop alternate forever.
+        if read_storm_action.is_some() {
             policies.repeated_inspection.reset();
+            repeated_inspection_action = None;
+        } else if repeated_inspection_action.is_some() {
+            policies.read_storm.reset();
         }
         let repeated_inspection_rejection = resolve_guard(
             self.agent,
@@ -379,11 +393,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     &response.tool_calls,
                     &self.tool_registry,
                 ));
-        // A hook, peer, or editor can change a file after request preflight
-        // while the model is responding. Probe again at the reuse decision.
-        self.agent.refresh_read_evidence_freshness().await;
-        self.agent
-            .observe_delegated_read_overlap(&response.tool_calls);
         let precomputed_read = self.agent.preexecution_read_reuses(&response.tool_calls);
         let precomputed_read_delta = self.agent.preexecution_read_deltas(&response.tool_calls);
         let auto_background = self
@@ -404,6 +413,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     precomputed_read_delta,
                     auto_background,
                     planning_research: planning_research_rejection,
+                    delegated_read: delegated_read_rejection.unwrap_or_default(),
                     repeated_inspection: repeated_inspection_rejection,
                     read_storm: read_storm_rejection,
                     repeated_failure: repeated_failure_rejection.unwrap_or_default(),

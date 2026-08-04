@@ -3140,5 +3140,31 @@
       "event_kind": "subagent_result",
       "content_digest": "5cce523295cd8644aa68041d4700649392e23f0d7dff3ca5661c3e9ddd0354ee"
     }
+  ],
+  "guard_replays": [
+    {
+      "scenario": "read_storm",
+      "tool_finish_reason": "tool_calls",
+      "empty_stop_after_rejection": false,
+      "guard_reason": "read_storm",
+      "recovery_action": "read_symbol",
+      "progress_followed": true
+    },
+    {
+      "scenario": "delegated_parent_reread",
+      "tool_finish_reason": "tool_calls",
+      "empty_stop_after_rejection": false,
+      "guard_reason": "delegated_read",
+      "recovery_action": "explicit_reason",
+      "progress_followed": true
+    },
+    {
+      "scenario": "stale_edit_evidence",
+      "tool_finish_reason": "tool_calls",
+      "empty_stop_after_rejection": false,
+      "guard_reason": "mtime_stale",
+      "recovery_action": "reread",
+      "progress_followed": true
+    }
   ]
 }

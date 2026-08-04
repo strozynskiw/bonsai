@@ -30,6 +30,10 @@ const BATCHING_HINT_LIMIT: usize = 3;
 /// refresh. Counts turns, not calls, so one batched multi-window inspection is
 /// still allowed.
 const READ_STORM_TARGET_TURN_LIMIT: usize = 3;
+/// A guard rejection opens one fresh inspection budget. Crossing the same
+/// boundary again without redirecting, mutating, or observing changed bytes is
+/// a proven non-progress loop and becomes a typed blocker.
+const READ_GUARD_RECOVERY_LIMIT: usize = 1;
 const PLANNING_RESEARCH_REJECTION_LIMIT: usize = 1;
 /// Let a failed call retry once in case the failure was transient. A third
 /// identical request is rejected with corrective guidance; repeating it after
@@ -1244,6 +1248,27 @@ enum GuardAction<T> {
     Stop(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadGuardBlockerReason {
+    ReadStorm,
+    RepeatedInspection,
+    DelegatedReread,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct ReadGuardBlocker {
+    reason: ReadGuardBlockerReason,
+    message: String,
+}
+
+impl ReadGuardBlocker {
+    #[cfg(test)]
+    pub(crate) fn reason(&self) -> ReadGuardBlockerReason {
+        self.reason
+    }
+}
+
 /// Resolve one guard's action. A `Reject` warns and hands its payload back for
 /// the caller to answer the offending calls; a `Stop` warns, logs the discarded
 /// response, and bails the run; `None` passes through. Centralized so no guard
@@ -1262,6 +1287,15 @@ fn resolve_guard<T>(
         Some(GuardAction::Stop(message)) => {
             tracing::warn!(target: "bonsai::guard", guard = name, action = "stop", "guard stopped run");
             agent.log_response(response, false);
+            let reason = match name {
+                "read_storm" => Some(ReadGuardBlockerReason::ReadStorm),
+                "repeated_inspection" => Some(ReadGuardBlockerReason::RepeatedInspection),
+                "delegated_read" => Some(ReadGuardBlockerReason::DelegatedReread),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                return Err(anyhow::Error::new(ReadGuardBlocker { reason, message }));
+            }
             bail!("{message}")
         }
         None => Ok(None),
@@ -1280,6 +1314,9 @@ struct ToolRejections {
     /// Known slow ad-hoc verification calls promoted off the foreground lane.
     auto_background: HashSet<String>,
     planning_research: Option<String>,
+    /// Broad parent reads that duplicate current full-file delegated evidence
+    /// without explaining why parent-local bytes are still essential.
+    delegated_read: HashMap<String, String>,
     repeated_inspection: Option<String>,
     /// Read targets that stormed this turn. A call is rejected only when its own
     /// target is in the set, so sibling reads of other files pass through.
@@ -1297,6 +1334,10 @@ impl ToolRejections {
             return Some(message.to_string());
         }
 
+        if let Some(message) = self.delegated_read.get(&tool_call.id) {
+            return Some(message.clone());
+        }
+
         if let Some(stormed) = self.read_storm.as_ref()
             && let Some(target) = read_storm_target(tool_call)
             && stormed.contains(&target)
@@ -1310,6 +1351,28 @@ impl ToolRejections {
 
         self.repeated_inspection.as_deref().map(str::to_string)
     }
+}
+
+type DelegatedReadAction = GuardAction<HashMap<String, String>>;
+
+#[derive(Debug, Default)]
+struct DelegatedReadGuard {
+    rejected_paths: HashSet<PathBuf>,
+}
+
+impl DelegatedReadGuard {
+    fn reset(&mut self) {
+        self.rejected_paths.clear();
+    }
+}
+
+#[derive(Debug)]
+struct DelegatedReadOverlap {
+    call_id: String,
+    canonical_path: PathBuf,
+    display_path: String,
+    subtasks: Vec<String>,
+    concrete_reason: bool,
 }
 
 impl Agent {
@@ -1328,7 +1391,55 @@ impl Agent {
             .collect()
     }
 
-    pub(in crate::agent) fn observe_delegated_read_overlap(&mut self, tool_calls: &[ToolCall]) {
+    fn delegated_read_action(
+        &mut self,
+        tool_calls: &[ToolCall],
+        guard: &mut DelegatedReadGuard,
+    ) -> Option<DelegatedReadAction> {
+        for tool_call in tool_calls {
+            if let Some(path) = delegated_read_recovery_path(tool_call, &self.project_root) {
+                guard.rejected_paths.remove(&path);
+            }
+        }
+
+        let overlaps = self.delegated_read_overlaps(tool_calls);
+        self.record_delegated_read_overlaps(&overlaps);
+        let rejected_before_turn = guard.rejected_paths.clone();
+        let mut rejections = HashMap::new();
+        for overlap in overlaps {
+            if overlap.concrete_reason {
+                guard.rejected_paths.remove(&overlap.canonical_path);
+                tracing::info!(
+                    target: "bonsai::guard",
+                    guard = "delegated_read",
+                    action = "recover",
+                    recovery_action = "explicit_reason",
+                    path = %overlap.display_path,
+                    "guard admitted justified parent reread",
+                );
+                continue;
+            }
+            if rejected_before_turn.contains(&overlap.canonical_path) {
+                return Some(DelegatedReadAction::Stop(format!(
+                    "Agent stopped after a delegated-reread loop for {}: the model repeated a broad parent read without the concrete reason requested by the prior guard result.",
+                    overlap.display_path
+                )));
+            }
+            guard.rejected_paths.insert(overlap.canonical_path);
+            rejections.insert(
+                overlap.call_id,
+                format!(
+                    "Error: broad parent reread deferred for {}: completed delegation {} already observed the full file. Use the child report, read a narrow cited/risky range with read_region/read_symbol, or retry once with a concrete `reason` explaining why complete parent-local bytes are essential (for example, edit authorization or missing uncited evidence).",
+                    overlap.display_path,
+                    overlap.subtasks.join(", ")
+                ),
+            );
+        }
+        (!rejections.is_empty()).then_some(DelegatedReadAction::Reject(rejections))
+    }
+
+    fn delegated_read_overlaps(&self, tool_calls: &[ToolCall]) -> Vec<DelegatedReadOverlap> {
+        let mut overlaps = Vec::new();
         for tool_call in tool_calls {
             let Some((canonical_path, display_path)) =
                 broad_read_target(tool_call, &self.project_root)
@@ -1352,7 +1463,24 @@ impl Agent {
             }
             subtasks.sort_unstable();
             subtasks.dedup();
-            let advice_key = format!("{}:{}", canonical_path.display(), subtasks.join(","));
+            overlaps.push(DelegatedReadOverlap {
+                call_id: tool_call.id.clone(),
+                canonical_path,
+                display_path,
+                subtasks: subtasks.into_iter().map(str::to_string).collect(),
+                concrete_reason: delegated_read_reason_is_concrete(tool_call),
+            });
+        }
+        overlaps
+    }
+
+    fn record_delegated_read_overlaps(&mut self, overlaps: &[DelegatedReadOverlap]) {
+        for overlap in overlaps {
+            let advice_key = format!(
+                "{}:{}",
+                overlap.canonical_path.display(),
+                overlap.subtasks.join(",")
+            );
             if !self
                 .read_evidence
                 .delegated_overlap_advised
@@ -1364,11 +1492,17 @@ impl Agent {
                 .record_delegated_parent_overlap(&self.execution_lane);
             tracing::info!(
                 target: "bonsai::delegation",
-                path = %display_path,
-                subtasks = ?subtasks,
+                path = %overlap.display_path,
+                subtasks = ?overlap.subtasks,
                 "broad parent reread overlaps delegated full-file coverage",
             );
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::agent) fn observe_delegated_read_overlap(&mut self, tool_calls: &[ToolCall]) {
+        let overlaps = self.delegated_read_overlaps(tool_calls);
+        self.record_delegated_read_overlaps(&overlaps);
     }
 
     pub(in crate::agent) fn read_follows_compact_reuse(&self, tool_call: &ToolCall) -> bool {
@@ -1548,6 +1682,39 @@ fn broad_read_target(tool_call: &ToolCall, project_root: &Path) -> Option<(PathB
     Some((resolved.canonical_path().to_path_buf(), path.to_string()))
 }
 
+fn delegated_read_recovery_path(tool_call: &ToolCall, project_root: &Path) -> Option<PathBuf> {
+    if broad_read_target(tool_call, project_root).is_some()
+        || !matches!(
+            tool_call.name.as_str(),
+            "read" | "read_region" | "read_symbol" | "symbol_search" | "grep"
+        )
+    {
+        return None;
+    }
+    let path = tool_argument_string(&tool_call.arguments, "path")?;
+    let resolved = crate::tool::ProjectPathResolver::new(project_root)
+        .action("read")
+        .resolve_existing(&path)
+        .ok()?;
+    resolved
+        .canonical_path()
+        .is_file()
+        .then(|| resolved.canonical_path().to_path_buf())
+}
+
+fn delegated_read_reason_is_concrete(tool_call: &ToolCall) -> bool {
+    let Some(reason) = tool_argument_string(&tool_call.arguments, "reason") else {
+        return false;
+    };
+    let reason = reason.trim();
+    reason.chars().count() >= 12
+        && reason
+            .split_whitespace()
+            .filter(|word| word.chars().any(char::is_alphanumeric))
+            .count()
+            >= 3
+}
+
 #[derive(Debug, Default)]
 struct RepeatedFailureGuard {
     turn: usize,
@@ -1698,6 +1865,7 @@ struct RepeatedInspectionGuard {
     last_signature: Option<String>,
     turns: usize,
     rejected_signature: Option<String>,
+    rejections_by_signature: HashMap<String, usize>,
     /// Recent inspection-only turn signatures (oldest first), capped at
     /// [`INSPECTION_WINDOW`]. Lets an alternating loop trip the counter, not
     /// only byte-identical consecutive repeats.
@@ -1715,6 +1883,7 @@ type ReadStormAction = GuardAction<HashSet<String>>;
 struct ReadStormGuard {
     turns_by_target: HashMap<String, usize>,
     retry_after_rejection: HashSet<String>,
+    rejections_by_target: HashMap<String, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -1764,6 +1933,7 @@ impl ReadStormGuard {
         {
             self.turns_by_target.clear();
             self.retry_after_rejection.clear();
+            self.rejections_by_target.clear();
             return None;
         }
 
@@ -1787,6 +1957,7 @@ impl ReadStormGuard {
             {
                 self.turns_by_target.insert(target.clone(), 1);
                 self.retry_after_rejection.remove(&target);
+                self.rejections_by_target.remove(&target);
                 continue;
             }
             // A rejection is a circuit breaker, not a terminal state. If the
@@ -1795,6 +1966,14 @@ impl ReadStormGuard {
             // preserves an escape hatch for a genuinely necessary missing
             // range or search while still bounding uninterrupted read storms.
             if self.retry_after_rejection.remove(&target) {
+                tracing::info!(
+                    target: "bonsai::guard",
+                    guard = "read_storm",
+                    action = "recover",
+                    recovery_action = "explicit_retry",
+                    read_target = %target,
+                    "guard admitted read-storm recovery",
+                );
                 self.turns_by_target.insert(target, 1);
                 continue;
             }
@@ -1812,7 +1991,16 @@ impl ReadStormGuard {
         }
 
         let mut stormed = HashSet::new();
+        let mut stop_target = None;
         for (target, _) in over_limit {
+            let rejections = self
+                .rejections_by_target
+                .entry(target.clone())
+                .and_modify(|count| *count = count.saturating_add(1))
+                .or_insert(1);
+            if *rejections > READ_GUARD_RECOVERY_LIMIT {
+                stop_target.get_or_insert_with(|| target.clone());
+            }
             // A rejected call returned no file evidence, so keep it at the
             // admission limit and arm one explicit retry. A turn spent
             // following the redirect decays the target normally.
@@ -1820,6 +2008,9 @@ impl ReadStormGuard {
                 .insert(target.clone(), READ_STORM_TARGET_TURN_LIMIT);
             self.retry_after_rejection.insert(target.clone());
             stormed.insert(target);
+        }
+        if let Some(target) = stop_target {
+            return Some(ReadStormAction::Stop(read_storm_stop_message(&target)));
         }
         Some(ReadStormAction::Reject(stormed))
     }
@@ -1836,6 +2027,7 @@ impl ReadStormGuard {
             // redirect, so a later return to this target starts a new strike
             // instead of consuming the explicit-retry escape hatch.
             self.retry_after_rejection.remove(&target);
+            self.rejections_by_target.remove(&target);
             if let Some(count) = self.turns_by_target.get_mut(&target) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -1848,6 +2040,7 @@ impl ReadStormGuard {
     fn reset(&mut self) {
         self.turns_by_target.clear();
         self.retry_after_rejection.clear();
+        self.rejections_by_target.clear();
     }
 }
 
@@ -1940,11 +2133,18 @@ impl RepeatedInspectionGuard {
         };
         let turn_limit = repeated_inspection_turn_limit(tool_calls);
 
-        // Like the per-path storm guard, rejection must not dead-end a long
-        // autonomous run. One explicit retry of the exact rejected inspection
-        // is admitted and starts a fresh budget; persistent loops continue to
-        // receive bounded synthetic failures instead of terminating the run.
+        // Like the per-path storm guard, one explicit retry of the exact
+        // rejected inspection starts a fresh budget. Crossing the same
+        // unchanged boundary again proves non-progress and stops with a typed
+        // blocker instead of spending the rest of an autonomous run on reads.
         if self.rejected_signature.as_deref() == Some(signature.as_str()) {
+            tracing::info!(
+                target: "bonsai::guard",
+                guard = "repeated_inspection",
+                action = "recover",
+                recovery_action = "explicit_retry",
+                "guard admitted repeated-inspection recovery",
+            );
             self.rejected_signature = None;
             self.last_signature = Some(signature.clone());
             self.turns = 1;
@@ -1966,9 +2166,10 @@ impl RepeatedInspectionGuard {
                 self.turns = 1;
                 return None;
             }
-            self.rejected_signature = Some(signature);
-            return Some(RepeatedInspectionAction::Reject(
+            return Some(self.reject_or_stop(
+                signature,
                 repair_read_only_loop_message(),
+                repair_read_only_stop_message(),
             ));
         }
 
@@ -1983,23 +2184,44 @@ impl RepeatedInspectionGuard {
             self.turns = self.turns.saturating_add(1);
         } else {
             self.turns = 1;
+            self.rejections_by_signature.clear();
         }
         self.last_signature = Some(signature.clone());
         self.record_recent(signature.clone());
 
         if self.turns > turn_limit {
-            self.rejected_signature = Some(signature);
-            return Some(RepeatedInspectionAction::Reject(
+            return Some(self.reject_or_stop(
+                signature,
                 repeated_inspection_loop_message(turn_limit),
+                repeated_inspection_stop_message(turn_limit),
             ));
         }
         None
+    }
+
+    fn reject_or_stop(
+        &mut self,
+        signature: String,
+        rejection_message: String,
+        stop_message: String,
+    ) -> RepeatedInspectionAction {
+        let rejections = self
+            .rejections_by_signature
+            .entry(signature.clone())
+            .or_default();
+        if *rejections >= READ_GUARD_RECOVERY_LIMIT {
+            return RepeatedInspectionAction::Stop(stop_message);
+        }
+        *rejections = rejections.saturating_add(1);
+        self.rejected_signature = Some(signature);
+        RepeatedInspectionAction::Reject(rejection_message)
     }
 
     fn reset(&mut self) {
         self.last_signature = None;
         self.turns = 0;
         self.rejected_signature = None;
+        self.rejections_by_signature.clear();
         self.recent.clear();
     }
 
@@ -2296,9 +2518,25 @@ fn repair_read_only_loop_message() -> String {
     "Error: this exact inspection already ran while repairing, and the failed tool's output is summarized in the system context. Do not repeat the same read/grep/project_info/git call; act on what you have — use edit/write, run a targeted command that changes or verifies the fix, inspect a different relevant file, ask a focused question if blocked, or provide the final answer with assumptions. One explicit retry is allowed if evidence is genuinely missing; it restarts this inspection budget instead of terminating the run.".to_string()
 }
 
+fn repeated_inspection_stop_message(turn_limit: usize) -> String {
+    format!(
+        "Agent stopped after a repeated inspection loop: one recovery budget was admitted after the first rejection, but the model requested the same unchanged read-only batch more than {turn_limit} additional times without making progress."
+    )
+}
+
+fn repair_read_only_stop_message() -> String {
+    "Agent stopped after a repair inspection loop: one recovery retry was admitted, but the model repeated the same unchanged inspection again without acting on the available failure evidence.".to_string()
+}
+
 fn read_storm_loop_message(target: &str) -> String {
     format!(
         "Error: repeated read storm detected for {target} after {READ_STORM_TARGET_TURN_LIMIT} prior turns. The current evidence for this target is already in the conversation or restorable through /ctx. Do not immediately request another range from the same file. For a large source file, navigate symbol-first: use `symbol_search` with the file path and a type/function name, then `read_symbol` for that definition; use `grep` once when you need call sites rather than the definition. Example: `symbol_search {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`, then `read_symbol {{\"path\":\"src/tui/run/event_loop.rs\",\"query\":\"RuntimeEventDrainDeps\"}}`. Otherwise use the existing evidence, inspect a different target, make a concrete change, ask a focused question if blocked, or provide the final answer. One explicit retry is allowed if missing evidence is essential; it restarts this target's budget instead of terminating the run."
+    )
+}
+
+fn read_storm_stop_message(target: &str) -> String {
+    format!(
+        "Agent stopped after a repeated read storm for {target}: one recovery budget was admitted after the first rejection, but the model crossed the unchanged-target boundary again without redirecting or making progress."
     )
 }
 
@@ -2847,7 +3085,7 @@ mod tests {
     }
 
     #[test]
-    fn inspection_guard_allows_one_explicit_retry_after_rejection() {
+    fn inspection_guard_allows_one_retry_then_stops_a_second_loop() {
         let mut guard = RepeatedInspectionGuard::default();
         let batch = [call("read", r#"{"path":"a.rs"}"#)];
         for _ in 0..STRUCTURED_READ_REPEAT_TURN_LIMIT {
@@ -2861,10 +3099,10 @@ mod tests {
         for _ in 1..STRUCTURED_READ_REPEAT_TURN_LIMIT {
             assert!(guard.action_for(&batch, false).is_none());
         }
-        assert!(
-            is_reject(guard.action_for(&batch, false)),
-            "the restarted budget must still bound a persistent loop"
-        );
+        assert!(matches!(
+            guard.action_for(&batch, false),
+            Some(RepeatedInspectionAction::Stop(_))
+        ));
     }
 
     #[test]
@@ -3160,7 +3398,7 @@ mod tests {
     }
 
     #[test]
-    fn read_storm_guard_allows_one_explicit_retry_after_rejection() {
+    fn read_storm_guard_allows_one_retry_then_stops_a_second_loop() {
         let target = call("read", r#"{"path":"src/tool/agent.rs"}"#);
         let mut guard = ReadStormGuard::default();
 
@@ -3177,7 +3415,10 @@ mod tests {
         for _ in 1..READ_STORM_TARGET_TURN_LIMIT {
             assert!(guard.action_for(std::slice::from_ref(&target)).is_none());
         }
-        assert!(is_storm_reject(guard.action_for(&[target])));
+        assert!(matches!(
+            guard.action_for(&[target]),
+            Some(ReadStormAction::Stop(_))
+        ));
     }
 
     #[test]

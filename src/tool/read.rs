@@ -11,7 +11,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use crate::tool::arg_repair::{RepairAction, RepairNote};
 use crate::tool::output::{LARGE_LINE_CHARS, truncate_line};
 use crate::tool::read_evidence::digest_content;
-use crate::tool::schema::{bounded_integer_property, closed_object, parse_args, path_property};
+use crate::tool::schema::{
+    bounded_integer_property, closed_object, parse_args, path_property, string_property,
+};
 use crate::tool::{
     FileOrDirectoryKind, ProjectPathResolver, ReadCoverage, ReadEvidence, ReadTracker, ReadWindow,
     Tool, ToolOutput, file_or_directory_kind, output, search,
@@ -163,6 +165,12 @@ impl Tool for ReadTool {
                         "Optional directory-tree depth (1-6)",
                         Some(1),
                         Some(MAX_TREE_DEPTH as i64),
+                    ),
+                ),
+                (
+                    "reason",
+                    string_property(
+                        "Concrete reason a broad parent reread is essential after delegated full-file coverage; omit for ordinary reads",
                     ),
                 ),
             ],

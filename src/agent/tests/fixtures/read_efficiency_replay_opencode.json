@@ -1931,5 +1931,31 @@
       "chars": 9596
     }
   ],
-  "background_context_events": []
+  "background_context_events": [],
+  "guard_replays": [
+    {
+      "scenario": "read_storm",
+      "tool_finish_reason": "stop",
+      "empty_stop_after_rejection": true,
+      "guard_reason": "read_storm",
+      "recovery_action": "read_symbol",
+      "progress_followed": true
+    },
+    {
+      "scenario": "delegated_parent_reread",
+      "tool_finish_reason": "stop",
+      "empty_stop_after_rejection": false,
+      "guard_reason": "delegated_read",
+      "recovery_action": "explicit_reason",
+      "progress_followed": true
+    },
+    {
+      "scenario": "stale_edit_evidence",
+      "tool_finish_reason": "stop",
+      "empty_stop_after_rejection": false,
+      "guard_reason": "mtime_stale",
+      "recovery_action": "reread",
+      "progress_followed": true
+    }
+  ]
 }

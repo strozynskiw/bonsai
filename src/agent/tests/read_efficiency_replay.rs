@@ -1,6 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::Deserialize;
+
+use super::*;
+use crate::tool::read_evidence::DelegatedReadEvidence;
+use crate::tool::{EditTool, ReadRegionTool, ReadSymbolTool, ReadTool};
 
 #[derive(Debug, Deserialize)]
 struct ReplayFixture {
@@ -15,6 +20,18 @@ struct ReplayFixture {
     background_context_events: Vec<BackgroundContextEvent>,
     #[serde(default)]
     delegated_scopes: Vec<DelegatedScope>,
+    #[serde(default)]
+    guard_replays: Vec<GuardReplay>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuardReplay {
+    scenario: String,
+    tool_finish_reason: String,
+    empty_stop_after_rejection: bool,
+    guard_reason: String,
+    recovery_action: String,
+    progress_followed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,5 +500,704 @@ fn codex_replay_preserves_diff_delegation_and_cache_baseline() {
     assert_eq!(
         prefix_groups.get("2028388618d706ac"),
         Some(&(32, 843_902, 248_320, 843_902))
+    );
+}
+
+fn guard_replay<'a>(fixture: &'a ReplayFixture, scenario: &str) -> &'a GuardReplay {
+    fixture
+        .guard_replays
+        .iter()
+        .find(|replay| replay.scenario == scenario)
+        .unwrap_or_else(|| panic!("fixture should contain {scenario} guard replay"))
+}
+
+fn replay_tool_response(
+    replay: &GuardReplay,
+    id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> crate::provider::ProviderResult<StreamedResponse> {
+    let finish_reason = match replay.tool_finish_reason.as_str() {
+        "stop" => crate::provider::FinishReason::Stop,
+        "tool_calls" => crate::provider::FinishReason::ToolCalls,
+        other => panic!("unsupported replay finish reason: {other}"),
+    };
+    Ok(StreamedResponse {
+        tool_calls: vec![test_tool_call(id, name, &arguments.to_string())],
+        terminal: crate::provider::StreamTerminal::Completed(finish_reason),
+        ..StreamedResponse::default()
+    })
+}
+
+fn replay_empty_stop() -> crate::provider::ProviderResult<StreamedResponse> {
+    Ok(StreamedResponse {
+        terminal: crate::provider::StreamTerminal::Completed(crate::provider::FinishReason::Stop),
+        ..StreamedResponse::default()
+    })
+}
+
+fn replay_finish(content: &str) -> crate::provider::ProviderResult<StreamedResponse> {
+    Ok(StreamedResponse {
+        content: content.to_string(),
+        terminal: crate::provider::StreamTerminal::Completed(crate::provider::FinishReason::Stop),
+        ..StreamedResponse::default()
+    })
+}
+
+fn replay_registry(fixture: &TestFixture) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    registry.register(Arc::new(ReadRegionTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    registry.register(Arc::new(ReadSymbolTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    registry.register(Arc::new(EditTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    Arc::new(registry)
+}
+
+fn replay_tool_messages(messages: &[ChatCompletionRequestMessage]) -> Vec<(String, String)> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let value = serde_json::to_value(message).ok()?;
+            (value.get("role").and_then(serde_json::Value::as_str) == Some("tool")).then_some((
+                value.get("tool_call_id")?.as_str()?.to_string(),
+                value.get("content")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+struct StaleReplayProvider {
+    responses: tokio::sync::Mutex<Vec<crate::provider::ProviderResult<StreamedResponse>>>,
+    calls: std::sync::atomic::AtomicUsize,
+    path: std::path::PathBuf,
+}
+
+struct CancellationReplayProvider {
+    responses: tokio::sync::Mutex<Vec<crate::provider::ProviderResult<StreamedResponse>>>,
+    calls: std::sync::atomic::AtomicUsize,
+    cancel_on_call: usize,
+    cancellation: CancellationToken,
+}
+
+#[async_trait]
+impl Provider for StaleReplayProvider {
+    async fn chat_stream(
+        &self,
+        _messages: &[ChatCompletionRequestMessage],
+        _tools: &[ChatCompletionTool],
+        _cancellation_token: CancellationToken,
+        _sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 1 {
+            tokio::fs::write(&self.path, "fn target() -> i32 {\n    9\n}\n")
+                .await
+                .expect("replay should apply the concurrent edit");
+        }
+        Ok(self
+            .responses
+            .lock()
+            .await
+            .remove(0)
+            .expect("replay response should be successful"))
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl Provider for CancellationReplayProvider {
+    async fn chat_stream(
+        &self,
+        _messages: &[ChatCompletionRequestMessage],
+        _tools: &[ChatCompletionTool],
+        _cancellation_token: CancellationToken,
+        _sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == self.cancel_on_call {
+            self.cancellation.cancel();
+        }
+        self.responses.lock().await.remove(0)
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
+async fn run_read_storm_replay(fixture: &ReplayFixture) {
+    let replay = guard_replay(fixture, "read_storm");
+    let project = TestFixture::new();
+    project.create_file(
+        "replay.rs",
+        "fn target() -> i32 {\n    1\n}\n\nfn sibling() -> i32 {\n    9\n}\n",
+    );
+    let mut responses = vec![
+        replay_tool_response(
+            replay,
+            "read-1",
+            "read",
+            serde_json::json!({"path": "replay.rs", "offset": 1, "limit": 1}),
+        ),
+        replay_tool_response(
+            replay,
+            "read-2",
+            "read_region",
+            serde_json::json!({"path": "replay.rs", "start_line": 1, "end_line": 2}),
+        ),
+        replay_tool_response(
+            replay,
+            "read-3",
+            "read_region",
+            serde_json::json!({"path": "replay.rs", "start_line": 2, "end_line": 3}),
+        ),
+        replay_tool_response(
+            replay,
+            "read-rejected",
+            "read_region",
+            serde_json::json!({"path": "replay.rs", "start_line": 1, "end_line": 3}),
+        ),
+    ];
+    if replay.empty_stop_after_rejection {
+        responses.push(replay_empty_stop());
+    }
+    responses.extend([
+        replay_tool_response(
+            replay,
+            "read-recovery",
+            "read_symbol",
+            serde_json::json!({"path": "replay.rs", "query": "target", "kind": "function"}),
+        ),
+        replay_tool_response(
+            replay,
+            "edit-progress",
+            "edit",
+            serde_json::json!({
+                "path": "replay.rs",
+                "old_string": "    1",
+                "new_string": "    2"
+            }),
+        ),
+        replay_finish("recovered"),
+    ]);
+    let provider = MockProvider::new(responses);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        replay_registry(&project),
+        empty_registry(),
+        project.read_tracker.clone(),
+        String::new(),
+        project.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    agent.budget.max_iterations = 12;
+
+    let result = agent
+        .run(
+            "replay the read recovery",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Completed("recovered".to_string()));
+    let tools = replay_tool_messages(&agent.messages);
+    let rejected = tools
+        .iter()
+        .find(|(id, _)| id == "read-rejected")
+        .expect("stormed read should produce a synthetic result");
+    let recovered = tools
+        .iter()
+        .find(|(id, _)| id == "read-recovery")
+        .expect("narrow recovery should execute");
+    let content = std::fs::read_to_string(project.project_root.join("replay.rs")).unwrap();
+    let observed_guard_reason = rejected
+        .1
+        .contains("repeated read storm")
+        .then_some("read_storm");
+    let observed_recovery_action =
+        (!recovered.1.contains("repeated read storm")).then_some("read_symbol");
+    assert_eq!(
+        observed_guard_reason,
+        Some(replay.guard_reason.as_str()),
+        "unexpected guard result: {}",
+        rejected.1
+    );
+    assert_eq!(
+        observed_recovery_action,
+        Some(replay.recovery_action.as_str())
+    );
+    assert_eq!(content.contains("    2"), replay.progress_followed);
+    let requests = requests.lock().await;
+    let saw_empty_turn_nudge = requests
+        .iter()
+        .any(|request| format!("{request:?}").contains("no tool calls and no answer text"));
+    assert_eq!(saw_empty_turn_nudge, replay.empty_stop_after_rejection);
+}
+
+fn delegated_evidence(project: &TestFixture) -> DelegatedReadEvidence {
+    let path = project.project_root.join("delegated.rs");
+    let canonical = std::fs::canonicalize(&path).unwrap();
+    let body = std::fs::read(&canonical).unwrap();
+    let metadata = std::fs::metadata(&canonical).unwrap();
+    DelegatedReadEvidence {
+        subtask_id: "child-1".to_string(),
+        launch_group_id: Some("group-1".to_string()),
+        source_id: "tool:child-read".to_string(),
+        cited_in_result: true,
+        evidence: ReadEvidence::new(
+            "delegated.rs",
+            canonical,
+            ReadWindow {
+                requested_offset: 1,
+                requested_limit: 2000,
+                start_line: 1,
+                end_line: Some(3),
+                total_lines: Some(3),
+            },
+            ReadCoverage::Full,
+            "1: fn target() -> i32 {\n2:     1\n3: }\n",
+            metadata.modified().ok(),
+            metadata.len(),
+            Some(crate::tool::digest_content(&body)),
+        ),
+    }
+}
+
+async fn run_delegated_reread_replay(fixture: &ReplayFixture) {
+    let replay = guard_replay(fixture, "delegated_parent_reread");
+    let project = TestFixture::new();
+    project.create_file("delegated.rs", "fn target() -> i32 {\n    1\n}\n");
+    let mut responses = vec![replay_tool_response(
+        replay,
+        "delegated-rejected",
+        "read",
+        serde_json::json!({"path": "delegated.rs"}),
+    )];
+    if replay.empty_stop_after_rejection {
+        responses.push(replay_empty_stop());
+    }
+    responses.extend([
+        replay_tool_response(
+            replay,
+            "edit-before-read",
+            "edit",
+            serde_json::json!({
+                "path": "delegated.rs",
+                "old_string": "    1",
+                "new_string": "    2"
+            }),
+        ),
+        replay_tool_response(
+            replay,
+            "delegated-recovery",
+            "read",
+            serde_json::json!({
+                "path": "delegated.rs",
+                "reason": "need complete source to authorize the parent edit"
+            }),
+        ),
+        replay_tool_response(
+            replay,
+            "edit-after-read",
+            "edit",
+            serde_json::json!({
+                "path": "delegated.rs",
+                "old_string": "    1",
+                "new_string": "    2"
+            }),
+        ),
+        replay_finish("delegated recovery complete"),
+    ]);
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        replay_registry(&project),
+        empty_registry(),
+        project.read_tracker.clone(),
+        String::new(),
+        project.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    agent.import_delegated_read_evidence(&[delegated_evidence(&project)]);
+    agent.budget.max_iterations = 12;
+
+    let result = agent
+        .run(
+            "replay delegated recovery",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("delegated recovery complete".to_string())
+    );
+    let tools = replay_tool_messages(&agent.messages);
+    let rejected = tools
+        .iter()
+        .find(|(id, _)| id == "delegated-rejected")
+        .expect("unjustified parent read should be rejected");
+    let unauthorized_edit = tools
+        .iter()
+        .find(|(id, _)| id == "edit-before-read")
+        .expect("pre-read edit should return a guard error");
+    let recovery = tools
+        .iter()
+        .find(|(id, _)| id == "delegated-recovery")
+        .expect("reasoned parent read should execute");
+    let content = std::fs::read_to_string(project.project_root.join("delegated.rs")).unwrap();
+    assert_eq!(
+        rejected
+            .1
+            .contains("broad parent reread deferred")
+            .then_some("delegated_read"),
+        Some(replay.guard_reason.as_str())
+    );
+    assert!(
+        unauthorized_edit.1.to_ascii_lowercase().contains("read"),
+        "delegated/untrusted evidence must not authorize edits: {}",
+        unauthorized_edit.1
+    );
+    assert_eq!(
+        recovery
+            .1
+            .contains("fn target")
+            .then_some("explicit_reason"),
+        Some(replay.recovery_action.as_str())
+    );
+    assert_eq!(content.contains("    2"), replay.progress_followed);
+    assert_eq!(agent.usage_turns()[0].delegated_parent_overlap, 1);
+}
+
+async fn run_stale_edit_replay(fixture: &ReplayFixture) {
+    let replay = guard_replay(fixture, "stale_edit_evidence");
+    let project = TestFixture::new();
+    project.create_file("stale.rs", "fn target() -> i32 {\n    1\n}\n");
+    let path = project.project_root.join("stale.rs");
+    let responses = vec![
+        replay_tool_response(
+            replay,
+            "stale-read-1",
+            "read",
+            serde_json::json!({"path": "stale.rs"}),
+        ),
+        replay_tool_response(
+            replay,
+            "stale-edit-rejected",
+            "edit",
+            serde_json::json!({
+                "path": "stale.rs",
+                "old_string": "    1",
+                "new_string": "    2"
+            }),
+        ),
+        replay_tool_response(
+            replay,
+            "stale-reread",
+            "read",
+            serde_json::json!({"path": "stale.rs"}),
+        ),
+        replay_tool_response(
+            replay,
+            "stale-edit-progress",
+            "edit",
+            serde_json::json!({
+                "path": "stale.rs",
+                "old_string": "    9",
+                "new_string": "    2"
+            }),
+        ),
+        replay_finish("stale recovery complete"),
+    ];
+    let provider = StaleReplayProvider {
+        responses: tokio::sync::Mutex::new(responses),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        path: path.clone(),
+    };
+    let mut agent = Agent::new(
+        Box::new(provider),
+        replay_registry(&project),
+        empty_registry(),
+        project.read_tracker.clone(),
+        String::new(),
+        project.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+
+    let result = agent
+        .run(
+            "replay stale edit recovery",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("stale recovery complete".to_string())
+    );
+    let tools = replay_tool_messages(&agent.messages);
+    let rejected = tools
+        .iter()
+        .find(|(id, _)| id == "stale-edit-rejected")
+        .expect("stale edit should be rejected");
+    let reread = tools
+        .iter()
+        .find(|(id, _)| id == "stale-reread")
+        .expect("stale file should be reread");
+    let content = std::fs::read_to_string(path).unwrap();
+    let rejection = rejected.1.to_ascii_lowercase();
+    assert_eq!(
+        (rejection.contains("changed") || rejection.contains("stale")).then_some("mtime_stale"),
+        Some(replay.guard_reason.as_str()),
+        "unexpected stale-edit result: {}",
+        rejected.1
+    );
+    assert_eq!(
+        reread.1.contains("    9").then_some("reread"),
+        Some(replay.recovery_action.as_str())
+    );
+    assert_eq!(content.contains("    2"), replay.progress_followed);
+}
+
+#[tokio::test]
+async fn read_guard_replays_recover_under_codex_and_opencode_stop_shapes() {
+    for fixture in [fixture_codex(), fixture_opencode()] {
+        run_read_storm_replay(&fixture).await;
+        run_delegated_reread_replay(&fixture).await;
+        run_stale_edit_replay(&fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn repeated_unjustified_delegated_reread_returns_typed_blocker() {
+    let fixture = fixture_codex();
+    let replay = guard_replay(&fixture, "delegated_parent_reread");
+    let project = TestFixture::new();
+    project.create_file("delegated.rs", "fn target() -> i32 {\n    1\n}\n");
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![
+            replay_tool_response(
+                replay,
+                "delegated-1",
+                "read",
+                serde_json::json!({"path": "delegated.rs"}),
+            ),
+            replay_tool_response(
+                replay,
+                "delegated-2",
+                "read",
+                serde_json::json!({"path": "delegated.rs"}),
+            ),
+        ])),
+        replay_registry(&project),
+        empty_registry(),
+        project.read_tracker.clone(),
+        String::new(),
+        project.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    agent.import_delegated_read_evidence(&[delegated_evidence(&project)]);
+
+    let error = agent
+        .run(
+            "repeat an unjustified reread",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap_err();
+    let blocker = error
+        .downcast_ref::<crate::agent::run_loop::ReadGuardBlocker>()
+        .expect("delegated loop should return a typed read blocker");
+    assert_eq!(
+        blocker.reason(),
+        crate::agent::run_loop::ReadGuardBlockerReason::DelegatedReread
+    );
+}
+
+#[tokio::test]
+async fn persistent_read_storm_returns_typed_blocker_after_one_recovery_budget() {
+    let fixture = fixture_codex();
+    let replay = guard_replay(&fixture, "read_storm");
+    let project = TestFixture::new();
+    project.create_file("loop.rs", "fn target() {}\n");
+    let responses = (1..=8)
+        .map(|turn| {
+            replay_tool_response(
+                replay,
+                &format!("loop-{turn}"),
+                "read_region",
+                serde_json::json!({"path": "loop.rs", "start_line": 1, "end_line": 1}),
+            )
+        })
+        .collect();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        replay_registry(&project),
+        empty_registry(),
+        project.read_tracker.clone(),
+        String::new(),
+        project.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    agent.budget.max_iterations = 10;
+
+    let error = agent
+        .run(
+            "keep reading without progress",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap_err();
+    let blocker = error
+        .downcast_ref::<crate::agent::run_loop::ReadGuardBlocker>()
+        .expect("persistent storm should return a typed read blocker");
+    assert_eq!(
+        blocker.reason(),
+        crate::agent::run_loop::ReadGuardBlockerReason::ReadStorm
+    );
+}
+
+#[tokio::test]
+async fn cancellation_after_read_storm_rejection_never_forms_an_empty_turn_loop() {
+    let fixture = fixture_codex();
+    let replay = guard_replay(&fixture, "read_storm");
+    let project = TestFixture::new();
+    project.create_file("cancel.rs", "fn target() {}\n");
+    let cancellation = CancellationToken::new();
+    let mut responses = (1..=4)
+        .map(|turn| {
+            replay_tool_response(
+                replay,
+                &format!("cancel-read-{turn}"),
+                "read_region",
+                serde_json::json!({"path": "cancel.rs", "start_line": 1, "end_line": 1}),
+            )
+        })
+        .collect::<Vec<_>>();
+    responses.push(replay_empty_stop());
+    let provider = CancellationReplayProvider {
+        responses: tokio::sync::Mutex::new(responses),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        cancel_on_call: 4,
+        cancellation: cancellation.clone(),
+    };
+    let mut agent = Agent::new(
+        Box::new(provider),
+        replay_registry(&project),
+        empty_registry(),
+        project.read_tracker.clone(),
+        String::new(),
+        project.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+
+    let result = agent
+        .run(
+            "cancel after the storm redirect",
+            cancellation,
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Interrupted(String::new()));
+    let tools = replay_tool_messages(&agent.messages);
+    assert!(
+        tools.iter().any(|(id, content)| {
+            id == "cancel-read-4" && content.contains("repeated read storm")
+        }),
+        "the actionable rejection must land before cancellation"
+    );
+    assert!(
+        !agent
+            .messages
+            .iter()
+            .any(|message| { format!("{message:?}").contains("no tool calls and no answer text") }),
+        "the cancellation race must not append an empty-response nudge"
+    );
+}
+
+#[tokio::test]
+async fn broad_reread_reason_never_bypasses_project_scope() {
+    let fixture = fixture_codex();
+    let replay = guard_replay(&fixture, "delegated_parent_reread");
+    let project = TestFixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_path = outside.path().join("outside.rs");
+    std::fs::write(&outside_path, "fn secret() {}\n").unwrap();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![
+            replay_tool_response(
+                replay,
+                "outside-read",
+                "read",
+                serde_json::json!({
+                    "path": outside_path,
+                    "reason": "need complete source to authorize the parent edit"
+                }),
+            ),
+            replay_finish("scope preserved"),
+        ])),
+        replay_registry(&project),
+        empty_registry(),
+        project.read_tracker.clone(),
+        String::new(),
+        project.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+
+    let result = agent
+        .run(
+            "try an out-of-scope reasoned read",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("scope preserved".to_string())
+    );
+    let tools = replay_tool_messages(&agent.messages);
+    let rejected = tools
+        .iter()
+        .find(|(id, _)| id == "outside-read")
+        .expect("out-of-scope read should return an error");
+    let message = rejected.1.to_ascii_lowercase();
+    assert!(
+        message.contains("outside") && message.contains("project"),
+        "reason must not widen read scope: {}",
+        rejected.1
     );
 }

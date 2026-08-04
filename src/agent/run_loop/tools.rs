@@ -91,16 +91,10 @@ impl Agent {
         let mut executed_hook_name: Option<String> = None;
 
         let (mut result, status) = 'call: {
-            if let Some(reuse) = tool_rejections.precomputed_read.get(&tool_call.id) {
-                break 'call (
-                    ToolOutput::ReadReuse {
-                        text: reuse.pointer.clone(),
-                        target_call_ids: reuse.target_call_ids.clone(),
-                        requested_chars: reuse.requested_chars,
-                    },
-                    crate::output::ToolExecutionStatus::Succeeded,
-                );
-            }
+            // Loop/policy guards reject the model turn, not filesystem I/O.
+            // Resolve them before compact read reuse; otherwise an already
+            // covered read silently becomes another successful pointer and the
+            // model can keep spending turns past the storm boundary forever.
             if let Some(message) = tool_rejections.message_for(&tool_call) {
                 break 'call (
                     ToolOutput::Text(message),
@@ -109,6 +103,16 @@ impl Agent {
                     // results arm repair mode and repeated-failure tracking,
                     // while a guard redirect should only steer the next turn.
                     crate::output::ToolExecutionStatus::Skipped,
+                );
+            }
+            if let Some(reuse) = tool_rejections.precomputed_read.get(&tool_call.id) {
+                break 'call (
+                    ToolOutput::ReadReuse {
+                        text: reuse.pointer.clone(),
+                        target_call_ids: reuse.target_call_ids.clone(),
+                        requested_chars: reuse.requested_chars,
+                    },
+                    crate::output::ToolExecutionStatus::Succeeded,
                 );
             }
             let Some(tool) = tool_registry.get(&tool_call.name) else {

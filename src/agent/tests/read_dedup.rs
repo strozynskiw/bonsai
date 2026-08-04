@@ -338,7 +338,7 @@ fn reused_pointer(agent: &Agent, call_id: &str, rendered: &str) -> Option<String
 }
 
 #[tokio::test]
-async fn delegated_full_read_observes_broad_parent_overlap_without_blocking_execution() {
+async fn delegated_full_read_rejects_unjustified_then_allows_reasoned_parent_read() {
     let fixture = TestFixture::new();
     let path = fixture.project_root.join("delegated.rs");
     let body = b"fn delegated() {}\n";
@@ -364,6 +364,17 @@ async fn delegated_full_read_observes_broad_parent_overlap_without_blocking_exec
     let mut agent = Agent::builder(
         Box::new(MockProvider::new(vec![
             read_call_response("call-broad", "delegated.rs"),
+            Ok(StreamedResponse {
+                tool_calls: vec![test_tool_call(
+                    "call-reasoned",
+                    "read",
+                    r#"{"path":"delegated.rs","reason":"need complete source to authorize the parent edit"}"#,
+                )],
+                terminal: crate::provider::StreamTerminal::Completed(
+                    crate::provider::FinishReason::ToolCalls,
+                ),
+                ..StreamedResponse::default()
+            }),
             finish_response("done"),
         ])),
         read_registry(&fixture),
@@ -430,12 +441,17 @@ async fn delegated_full_read_observes_broad_parent_overlap_without_blocking_exec
         .unwrap();
     assert_eq!(result, AgentRunResult::Completed("done".to_string()));
     assert!(fixture.read_tracker.is_read(&canonical).await);
-    assert_eq!(
-        tool_messages(&agent.messages)
+    let tools = tool_messages(&agent.messages);
+    assert!(
+        tools
             .iter()
-            .find(|(id, _)| id == "call-broad"),
+            .find(|(id, _)| id == "call-broad")
+            .is_some_and(|(_, content)| content.contains("broad parent reread deferred"))
+    );
+    assert_eq!(
+        tools.iter().find(|(id, _)| id == "call-reasoned"),
         Some(&(
-            "call-broad".to_string(),
+            "call-reasoned".to_string(),
             "1: fn delegated() {}\n".to_string()
         ))
     );
