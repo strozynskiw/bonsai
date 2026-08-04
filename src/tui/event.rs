@@ -1095,7 +1095,15 @@ pub enum AppAction {
     ClearInput,
     SubmitInput(String),
     SubmitCommandInput(String),
-    QueueInput {
+    SteerInput {
+        id: u64,
+        /// Placeholder text shown in the transcript's queued row.
+        text: String,
+        /// Composer snapshot (buffer + chip payloads) for withdraw-restore.
+        content: crate::tui::app::ComposerContent,
+        mode: crate::agent::AgentMode,
+    },
+    QueueNextInput {
         id: u64,
         /// Placeholder text shown in the transcript's queued row.
         text: String,

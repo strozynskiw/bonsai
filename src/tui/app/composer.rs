@@ -1724,7 +1724,7 @@ mod tests {
         let mut queued = Composer::default();
         queued.insert_text_chip("queued payload");
         let content = queued.content();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 7,
             text: "[Text 1]".to_string(),
             content,

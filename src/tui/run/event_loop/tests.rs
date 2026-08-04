@@ -1163,6 +1163,15 @@ fn ctrl_c_cancelling_arms_exit() {
 }
 
 #[test]
+fn ctrl_c_cancelling_after_escape_stops_remaining_subagents() {
+    let now = Instant::now();
+    assert_eq!(
+        next_ctrl_c_action(TaskState::Cancelling, true, None, now),
+        CtrlCAction::CancelSubagentsAndArm
+    );
+}
+
+#[test]
 fn ctrl_c_idle_with_running_subagents_cancels_them() {
     let now = Instant::now();
     assert_eq!(
@@ -1566,15 +1575,16 @@ async fn running_tasks() -> (TaskController, mpsc::UnboundedReceiver<RuntimeEven
 }
 
 #[tokio::test]
-async fn running_submit_queues_normal_text() {
+async fn running_enter_steers_normal_text() {
     let (mut tasks, _runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
     app.composer.set_text("follow up".to_string());
-    queue_running_submit(
+    submit_running_follow_up(
         &mut app,
         &tasks,
         KeyIntent::Submit,
+        FollowUpDelivery::Steer,
         &crate::provider::ProviderRegistry::default_registry(),
         None,
     );
@@ -1587,6 +1597,7 @@ async fn running_submit_queues_normal_text() {
             id: 1,
             text,
             mode: AgentMode::Coding,
+            delivery: FollowUpDelivery::Steer,
             ..
         }] if text == "follow up"
     ));
@@ -1598,15 +1609,42 @@ async fn running_submit_queues_normal_text() {
 }
 
 #[tokio::test]
-async fn running_submit_does_not_queue_slash_commands() {
+async fn running_tab_queues_normal_text_for_next_turn() {
+    let (mut tasks, _runtime_rx) = running_tasks().await;
+    let mut app = app();
+    app.task_state = TaskState::Running;
+    app.composer.set_text("follow up later".to_string());
+    submit_running_follow_up(
+        &mut app,
+        &tasks,
+        KeyIntent::Queue,
+        FollowUpDelivery::Queue,
+        &crate::provider::ProviderRegistry::default_registry(),
+        None,
+    );
+
+    assert!(matches!(
+        app.queued_inputs.as_slice(),
+        [QueuedInput {
+            text,
+            delivery: FollowUpDelivery::Queue,
+            ..
+        }] if text == "follow up later"
+    ));
+    tasks.abort();
+}
+
+#[tokio::test]
+async fn running_follow_up_does_not_accept_slash_commands() {
     let (mut tasks, _runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
     app.composer.set_text("/clear".to_string());
-    queue_running_submit(
+    submit_running_follow_up(
         &mut app,
         &tasks,
         KeyIntent::Submit,
+        FollowUpDelivery::Steer,
         &crate::provider::ProviderRegistry::default_registry(),
         None,
     );
@@ -4895,7 +4933,7 @@ async fn cancel_queued_action_removes_message_from_active_task_queue() {
                 input: crate::agent::UserInput::from_text(text),
             })
             .expect("queued message should send to active task");
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id,
             text: text.to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -4955,7 +4993,7 @@ async fn withdraw_queued_action_cancels_and_restores_most_recent_message() {
                 input: crate::agent::UserInput::from_text(text),
             })
             .expect("queued message should send to active task");
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id,
             text: text.to_string(),
             content: crate::tui::app::ComposerContent {
@@ -4998,7 +5036,7 @@ async fn pending_queued_input_dispatches_when_idle() {
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
-    app.reduce(AppAction::QueueInput {
+    app.reduce(AppAction::QueueNextInput {
         id: 3,
         text: "run me next".to_string(),
         content: crate::tui::app::ComposerContent::default(),
@@ -5046,7 +5084,7 @@ async fn pending_queued_run_does_not_resend_primary_message() {
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
     for (id, text) in [(1, "primary"), (2, "follow-up")] {
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id,
             text: text.to_string(),
             content: crate::tui::app::ComposerContent {
@@ -5111,7 +5149,7 @@ async fn pending_queued_image_is_rechecked_before_idle_run() {
     let mut app = app();
     app.provider = "nonvision".to_string();
     app.model = "text-only".to_string();
-    app.reduce(AppAction::QueueInput {
+    app.reduce(AppAction::SteerInput {
         id: 9,
         text: display_text,
         content,
@@ -5410,7 +5448,7 @@ async fn deferred_command_drains_before_queued_user_message() {
         input: "/model codex:openai/gpt-5.5".to_string(),
         label: "/model codex:openai/gpt-5.5".to_string(),
     });
-    app.reduce(AppAction::QueueInput {
+    app.reduce(AppAction::SteerInput {
         id: 7,
         text: "queued user prompt".to_string(),
         content: crate::tui::app::ComposerContent::default(),

@@ -21,6 +21,8 @@ pub enum KeyIntent {
     Action(AppAction),
     Submit,
     SubmitReplacement(String),
+    Queue,
+    InterruptAgent,
     CancelOrQuit,
     Quit,
     Insert(char),
@@ -514,6 +516,15 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         } if matches!(app.focus, Focus::Input) && completion_open(app) => {
             KeyIntent::Action(AppAction::CompletionDismiss)
         }
+        KeyEvent {
+            code: KeyCode::Esc, ..
+        } if matches!(
+            app.task_state,
+            crate::tui::event::TaskState::Running | crate::tui::event::TaskState::Cancelling
+        ) =>
+        {
+            KeyIntent::InterruptAgent
+        }
         // Esc progressively clears: selection first, then the draft.
         KeyEvent {
             code: KeyCode::Esc, ..
@@ -631,6 +642,14 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
                 return KeyIntent::Action(AppAction::CompleteInputTo(replacement));
             }
             KeyIntent::Noop
+        }
+        KeyEvent {
+            code: KeyCode::Tab, ..
+        } if matches!(app.focus, Focus::Input)
+            && matches!(app.task_state, crate::tui::event::TaskState::Running)
+            && !app.input().trim().is_empty() =>
+        {
+            KeyIntent::Queue
         }
         KeyEvent {
             code: KeyCode::Tab, ..
@@ -1563,6 +1582,7 @@ mod tests {
             text: "queued edit".to_string(),
             content: crate::tui::app::ComposerContent::default(),
             mode: crate::agent::AgentMode::Coding,
+            delivery: crate::tui::app::FollowUpDelivery::Queue,
         });
 
         let intent = map_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &app);
@@ -3088,6 +3108,26 @@ mod tests {
         let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
 
         assert!(matches!(intent, KeyIntent::Action(AppAction::ClearInput)));
+    }
+
+    #[test]
+    fn esc_interrupts_running_agent_without_clearing_draft() {
+        let mut app = input_app_with_text("keep this draft");
+        app.task_state = crate::tui::event::TaskState::Running;
+
+        let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
+
+        assert!(matches!(intent, KeyIntent::InterruptAgent));
+    }
+
+    #[test]
+    fn tab_queues_non_empty_draft_while_agent_runs() {
+        let mut app = input_app_with_text("follow up later");
+        app.task_state = crate::tui::event::TaskState::Running;
+
+        let intent = map_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &app);
+
+        assert!(matches!(intent, KeyIntent::Queue));
     }
 
     #[test]

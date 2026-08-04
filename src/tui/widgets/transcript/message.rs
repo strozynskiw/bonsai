@@ -26,8 +26,8 @@ pub(super) fn render_transcript_item(
             options.selected,
             options.focused,
         ),
-        TranscriptItem::QueuedUserMessage { text, .. } => {
-            render_queued_user_message(text, width, options.selected, options.focused)
+        TranscriptItem::QueuedUserMessage { text, delivery, .. } => {
+            render_queued_user_message(text, *delivery, width, options.selected, options.focused)
         }
         TranscriptItem::AssistantMessage { text } => render_block(
             "● bonsai",
@@ -200,9 +200,15 @@ fn render_linear_transcript_item(
 ) -> Vec<Line<'static>> {
     match item {
         TranscriptItem::UserMessage { text } => linear_block("You", text, width, options),
-        TranscriptItem::QueuedUserMessage { text, .. } => {
-            linear_block("Queued message", text, width, options)
-        }
+        TranscriptItem::QueuedUserMessage { text, delivery, .. } => linear_block(
+            match delivery {
+                crate::tui::app::FollowUpDelivery::Steer => "Steering message",
+                crate::tui::app::FollowUpDelivery::Queue => "Queued message",
+            },
+            text,
+            width,
+            options,
+        ),
         TranscriptItem::AssistantMessage { text } => linear_block("Bonsai", text, width, options),
         TranscriptItem::ReasoningSummary { text } => linear_block(
             "Thinking summary",
@@ -511,6 +517,7 @@ pub(super) fn render_block(
 
 pub(super) fn render_queued_user_message(
     body: &str,
+    delivery: crate::tui::app::FollowUpDelivery,
     width: usize,
     selected: ItemSelection,
     focused: bool,
@@ -543,7 +550,7 @@ pub(super) fn render_queued_user_message(
         theme::block(accent, block_bg).add_modifier(Modifier::DIM)
     };
 
-    let title = queued_title_line(inner_width);
+    let title = queued_title_line(delivery, inner_width);
     let mut lines = vec![
         Line::from(""),
         card_line(&title, inner_width, title_style, body_bg, accent, focused),
@@ -557,8 +564,14 @@ pub(super) fn render_queued_user_message(
     lines
 }
 
-pub(super) fn queued_title_line(width: usize) -> Line<'static> {
-    let label = "❯ queued";
+pub(super) fn queued_title_line(
+    delivery: crate::tui::app::FollowUpDelivery,
+    width: usize,
+) -> Line<'static> {
+    let label = match delivery {
+        crate::tui::app::FollowUpDelivery::Steer => "❯ steer",
+        crate::tui::app::FollowUpDelivery::Queue => "❯ queued",
+    };
     let label_width = label.width();
     let cancel_width = QUEUED_CANCEL_LABEL.width();
     let gap = width.saturating_sub(label_width + cancel_width);

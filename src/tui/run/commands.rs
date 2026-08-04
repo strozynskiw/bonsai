@@ -1323,10 +1323,11 @@ fn submit_running_command(app: &mut AppState, input: &str) {
     app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
 }
 
-pub(in crate::tui::run) fn queue_running_submit(
+pub(in crate::tui::run) fn submit_running_follow_up(
     app: &mut AppState,
     tasks: &TaskController,
     intent: KeyIntent,
+    delivery: FollowUpDelivery,
     registry: &crate::provider::ProviderRegistry,
     catalog: Option<&crate::model_catalog::ModelCatalog>,
 ) {
@@ -1340,7 +1341,7 @@ pub(in crate::tui::run) fn queue_running_submit(
         push_command_message(
             app,
             CommandOutputKind::Error,
-            "Slash commands cannot be queued while the agent is running.",
+            "Slash commands cannot be sent as a busy-state follow-up.",
         );
         return;
     }
@@ -1351,7 +1352,7 @@ pub(in crate::tui::run) fn queue_running_submit(
         push_command_message(
             app,
             CommandOutputKind::Error,
-            "Slash commands cannot be queued while the agent is running.",
+            "Slash commands cannot be sent as a busy-state follow-up.",
         );
         return;
     }
@@ -1384,15 +1385,27 @@ pub(in crate::tui::run) fn queue_running_submit(
         transcript_text: submission.transcript_text.trim().to_string(),
         input: submission.input,
     };
-    match tasks.queue_agent_message(message) {
-        Ok(()) => app.reduce(AppAction::QueueInput {
+    let action = match delivery {
+        FollowUpDelivery::Steer => match tasks.queue_agent_message(message) {
+            Ok(()) => AppAction::SteerInput {
+                id,
+                text: display,
+                content,
+                mode,
+            },
+            Err(err) => {
+                app.reduce(AppAction::Agent(UiEvent::Error(err)));
+                return;
+            }
+        },
+        FollowUpDelivery::Queue => AppAction::QueueNextInput {
             id,
             text: display,
             content,
             mode,
-        }),
-        Err(err) => app.reduce(AppAction::Agent(UiEvent::Error(err))),
-    }
+        },
+    };
+    app.reduce(action);
 }
 
 pub(in crate::tui) fn push_command_message(
@@ -2518,6 +2531,7 @@ mod tests {
             text: "draft a plan".to_string(),
             content: crate::tui::app::ComposerContent::default(),
             mode: AgentMode::Planning,
+            delivery: FollowUpDelivery::Queue,
         });
         assert_eq!(
             context_preview_target_mode(&app),

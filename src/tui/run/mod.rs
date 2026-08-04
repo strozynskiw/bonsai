@@ -46,8 +46,8 @@ use crate::terminal::{TerminalEvent, TerminalRegistry, TerminalSnapshot, Termina
 use crate::todo::SharedTodoStore;
 use crate::tool::SharedActiveSessionId;
 use crate::tui::app::{
-    AppState, PhaseAdvance, PlanExecution, ToolActivity, ToolStatus, TranscriptItem,
-    TranscriptModel, clamped_scroll,
+    AppState, FollowUpDelivery, PhaseAdvance, PlanExecution, ToolActivity, ToolStatus,
+    TranscriptItem, TranscriptModel, clamped_scroll,
 };
 use crate::tui::event::{
     AppAction, CommandOutcomeEvent, CommandOutputEvent, CommandOutputKind, Focus, ModalKind,

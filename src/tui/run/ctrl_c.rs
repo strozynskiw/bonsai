@@ -49,7 +49,9 @@ pub(super) fn next_ctrl_c_action(
     match task_state {
         TaskState::Running => CtrlCAction::CancelRunAndArm,
         TaskState::Command => CtrlCAction::CancelCommandAndArm,
-        TaskState::Idle if has_running_subagents => CtrlCAction::CancelSubagentsAndArm,
+        TaskState::Idle | TaskState::Cancelling if has_running_subagents => {
+            CtrlCAction::CancelSubagentsAndArm
+        }
         TaskState::Idle | TaskState::Cancelling => CtrlCAction::ArmExit,
         TaskState::Exiting => CtrlCAction::ConfirmExit,
     }

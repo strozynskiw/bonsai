@@ -474,11 +474,15 @@ async fn insert_tool_call(
 fn transcript_block_record(item: &TranscriptItem) -> Result<TranscriptBlockRecord> {
     match item {
         TranscriptItem::UserMessage { text } => Ok(block("user", "", text, Some("user"))),
-        TranscriptItem::QueuedUserMessage { id, text } => Ok(TranscriptBlockRecord {
+        TranscriptItem::QueuedUserMessage { id, text, delivery } => Ok(TranscriptBlockRecord {
             kind: "queued_user",
             title: String::new(),
             body: text.clone(),
-            metadata_json: json!({ "id": id }).to_string(),
+            metadata_json: json!({
+                "id": id,
+                "delivery": delivery.pending_label(),
+            })
+            .to_string(),
             message_role: None,
         }),
         TranscriptItem::AssistantMessage { text } => {

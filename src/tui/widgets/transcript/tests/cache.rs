@@ -199,6 +199,7 @@ fn middle_insert_salvages_unchanged_items() {
     app.transcript.push(TranscriptItem::QueuedUserMessage {
         id: 7,
         text: "queued".to_string(),
+        delivery: crate::tui::app::FollowUpDelivery::Queue,
     });
     fill(&app, 80);
 

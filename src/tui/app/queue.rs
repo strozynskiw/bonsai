@@ -3,6 +3,25 @@ use crate::agent::AgentMode;
 use crate::storage::SessionId;
 use crate::tui::pickers::ModelSelection;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a busy-state composer message joins the active turn or waits for
+/// the next foreground run.
+pub enum FollowUpDelivery {
+    /// Inject the message into the active turn at its next safe boundary.
+    Steer,
+    /// Hold the message until the active foreground run finishes.
+    Queue,
+}
+
+impl FollowUpDelivery {
+    pub(crate) fn pending_label(self) -> &'static str {
+        match self {
+            Self::Steer => "steer",
+            Self::Queue => "queued",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
     pub id: u64,
@@ -12,6 +31,7 @@ pub struct QueuedInput {
     /// restore the exact draft, chips included.
     pub content: ComposerContent,
     pub mode: AgentMode,
+    pub delivery: FollowUpDelivery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +144,30 @@ impl AppState {
         self.completion = CompletionState::default();
     }
 
+    pub(super) fn enqueue_follow_up(
+        &mut self,
+        id: u64,
+        text: String,
+        content: ComposerContent,
+        mode: AgentMode,
+        delivery: FollowUpDelivery,
+    ) {
+        self.composer.push_history(text.clone());
+        self.composer.clear_content();
+        self.composer.reset_navigation();
+        self.reset_composer_scroll();
+        self.completion = CompletionState::default();
+        self.queued_inputs.push(QueuedInput {
+            id,
+            text: text.clone(),
+            content,
+            mode,
+            delivery,
+        });
+        self.push_transcript_item(TranscriptItem::QueuedUserMessage { id, text, delivery });
+        self.maybe_scroll_to_bottom_current();
+    }
+
     pub fn focused_queued_input_id(&self) -> Option<u64> {
         let index = self.transcript_focus?;
         match self.transcript.get(index) {
@@ -196,7 +240,7 @@ mod tests {
     fn queue_input_clears_composer_and_adds_pending_block() {
         let mut app = app();
         app.composer.set_text("queued text".to_string());
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 42,
             text: "queued text".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -212,19 +256,20 @@ mod tests {
                 text: "queued text".to_string(),
                 content: crate::tui::app::ComposerContent::default(),
                 mode: AgentMode::Coding,
+                delivery: FollowUpDelivery::Steer,
             }]
         );
         assert_eq!(app.composer.history, vec!["queued text".to_string()]);
         assert!(matches!(
             app.transcript.last(),
-            Some(TranscriptItem::QueuedUserMessage { id: 42, text }) if text == "queued text"
+            Some(TranscriptItem::QueuedUserMessage { id: 42, text, .. }) if text == "queued text"
         ));
     }
 
     #[test]
     fn queued_delivery_converts_pending_block_to_user_message() {
         let mut app = app();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "queued text".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -246,14 +291,14 @@ mod tests {
     #[test]
     fn queued_inputs_append_fifo_and_clear_composer() {
         let mut app = app();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "first".to_string(),
             content: crate::tui::app::ComposerContent::default(),
             mode: AgentMode::Coding,
         });
         app.composer.set_text("second".to_string());
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 2,
             text: "second".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -270,12 +315,14 @@ mod tests {
                     text: "first".to_string(),
                     content: crate::tui::app::ComposerContent::default(),
                     mode: AgentMode::Coding,
+                    delivery: FollowUpDelivery::Steer,
                 },
                 QueuedInput {
                     id: 2,
                     text: "second".to_string(),
                     content: crate::tui::app::ComposerContent::default(),
                     mode: AgentMode::Planning,
+                    delivery: FollowUpDelivery::Steer,
                 }
             ]
         );
@@ -291,7 +338,7 @@ mod tests {
     #[test]
     fn queued_inputs_stay_at_bottom_when_output_arrives() {
         let mut app = app();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "queued".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -306,7 +353,8 @@ mod tests {
                 TranscriptItem::CommandOutput { text, .. },
                 TranscriptItem::QueuedUserMessage {
                     id: 1,
-                    text: queued
+                    text: queued,
+                    ..
                 }
             ] if text == "working" && queued == "queued"
         ));
@@ -348,13 +396,13 @@ mod tests {
     #[test]
     fn cancel_queued_input_removes_only_matching_pending_block() {
         let mut app = app();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "first".to_string(),
             content: crate::tui::app::ComposerContent::default(),
             mode: AgentMode::Coding,
         });
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 2,
             text: "second".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -372,11 +420,12 @@ mod tests {
                 text: "second".to_string(),
                 content: crate::tui::app::ComposerContent::default(),
                 mode: AgentMode::Planning,
+                delivery: FollowUpDelivery::Steer,
             }]
         );
         assert!(matches!(
             app.transcript.as_slice(),
-            [TranscriptItem::QueuedUserMessage { id: 2, text }] if text == "second"
+            [TranscriptItem::QueuedUserMessage { id: 2, text, .. }] if text == "second"
         ));
         assert_eq!(app.transcript_focus, Some(0));
     }
@@ -384,13 +433,13 @@ mod tests {
     #[test]
     fn cancel_focused_queued_input_deletes_focused_queue_item() {
         let mut app = app();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "first".to_string(),
             content: crate::tui::app::ComposerContent::default(),
             mode: AgentMode::Coding,
         });
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 2,
             text: "second".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -408,11 +457,12 @@ mod tests {
                 text: "first".to_string(),
                 content: crate::tui::app::ComposerContent::default(),
                 mode: AgentMode::Coding,
+                delivery: FollowUpDelivery::Steer,
             }]
         );
         assert!(matches!(
             app.transcript.as_slice(),
-            [TranscriptItem::QueuedUserMessage { id: 1, text }] if text == "first"
+            [TranscriptItem::QueuedUserMessage { id: 1, text, .. }] if text == "first"
         ));
     }
 
@@ -420,13 +470,13 @@ mod tests {
     fn withdraw_queued_input_restores_most_recent_message_to_composer() {
         let mut app = app();
         app.focus = Focus::Input;
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "first".to_string(),
             content: crate::tui::app::ComposerContent::default(),
             mode: AgentMode::Coding,
         });
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 2,
             text: "second".to_string(),
             content: crate::tui::app::ComposerContent {
@@ -447,18 +497,19 @@ mod tests {
                 text: "first".to_string(),
                 content: crate::tui::app::ComposerContent::default(),
                 mode: AgentMode::Coding,
+                delivery: FollowUpDelivery::Steer,
             }]
         );
         assert!(matches!(
             app.transcript.as_slice(),
-            [TranscriptItem::QueuedUserMessage { id: 1, text }] if text == "first"
+            [TranscriptItem::QueuedUserMessage { id: 1, text, .. }] if text == "first"
         ));
     }
 
     #[test]
     fn drop_queued_input_removes_pending_block() {
         let mut app = app();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "queued text".to_string(),
             content: crate::tui::app::ComposerContent::default(),

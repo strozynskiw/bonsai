@@ -132,7 +132,9 @@ pub fn clean_transcript_item(item: &TranscriptItem) -> Cow<'_, str> {
         TranscriptItem::UserMessage { text } | TranscriptItem::AssistantMessage { text } => {
             Cow::Borrowed(text.as_str())
         }
-        TranscriptItem::QueuedUserMessage { text, .. } => Cow::Owned(format!("queued: {text}")),
+        TranscriptItem::QueuedUserMessage { text, delivery, .. } => {
+            Cow::Owned(format!("{}: {text}", delivery.pending_label()))
+        }
         TranscriptItem::ReasoningSummary { text } => Cow::Owned(format!("reasoning: {text}")),
         TranscriptItem::Edit { text } => Cow::Owned(format!("edit: {text}")),
         TranscriptItem::TodoUpdate { text } => Cow::Owned(format!("todo: {text}")),

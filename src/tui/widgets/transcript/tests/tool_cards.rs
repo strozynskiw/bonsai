@@ -20,6 +20,7 @@ fn queued_message_title_renders_cancel_label() {
     app.transcript.push(TranscriptItem::QueuedUserMessage {
         id: 1,
         text: "queued text".to_string(),
+        delivery: crate::tui::app::FollowUpDelivery::Queue,
     });
 
     let rendered = rendered_text(transcript_lines(&app, 80));

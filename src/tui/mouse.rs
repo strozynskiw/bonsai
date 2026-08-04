@@ -1041,6 +1041,7 @@ mod tests {
         app.transcript.push(TranscriptItem::QueuedUserMessage {
             id: 9,
             text: "queued".to_string(),
+            delivery: crate::tui::app::FollowUpDelivery::Queue,
         });
         let area = Rect::new(0, 0, 80, 24);
         let regions = crate::tui::layout::split(area, app.surface());

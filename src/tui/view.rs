@@ -1710,12 +1710,12 @@ mod tests {
     }
 
     #[test]
-    fn queued_message_renders_in_transcript_and_composer_footer() {
+    fn steering_message_renders_in_transcript_and_composer_footer() {
         let backend = TestBackend::new(130, 40);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut app = AppState::new("codex", "gpt-5.5".to_string(), "bonsai".to_string(), None);
         app.task_state = crate::tui::event::TaskState::Running;
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "follow-up instruction".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -1733,12 +1733,12 @@ mod tests {
         }
 
         assert!(
-            combined.contains("queued"),
-            "pending transcript block should be labeled queued"
+            combined.contains("steer"),
+            "pending transcript block should be labeled steer"
         );
         assert!(
-            combined.contains("queued: follow-up instruction"),
-            "composer footer should show queued summary"
+            combined.contains("steer: follow-up instruction"),
+            "composer footer should show steering summary"
         );
     }
 

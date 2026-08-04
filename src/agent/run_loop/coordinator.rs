@@ -3,11 +3,11 @@ use super::*;
 
 pub(super) async fn run(
     agent: &mut Agent,
-    cancellation_token: CancellationToken,
+    cancellation: RunCancellation,
     sink: SharedSink,
     queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
 ) -> Result<AgentRunResult> {
-    TurnCoordinator::new(agent, cancellation_token, sink, queued_messages)
+    TurnCoordinator::new(agent, cancellation, sink, queued_messages)
         .run()
         .await
 }
@@ -20,6 +20,7 @@ pub(super) async fn run(
 struct TurnCoordinator<'agent, 'receiver> {
     agent: &'agent mut Agent,
     cancellation_token: CancellationToken,
+    detached_subagent_cancellation: CancellationToken,
     sink: SharedSink,
     queued_messages: Option<&'receiver mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
     pending_queued_messages: VecDeque<QueuedUserMessage>,
@@ -98,7 +99,7 @@ enum TurnOutcome {
 impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
     fn new(
         agent: &'agent mut Agent,
-        cancellation_token: CancellationToken,
+        cancellation: RunCancellation,
         sink: SharedSink,
         queued_messages: Option<&'receiver mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
     ) -> Self {
@@ -106,7 +107,8 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         let tool_registry = agent.tool_registry.clone();
         Self {
             agent,
-            cancellation_token,
+            cancellation_token: cancellation.foreground_token(),
+            detached_subagent_cancellation: cancellation.detached_subagents_token(),
             sink,
             queued_messages,
             pending_queued_messages: VecDeque::new(),
@@ -121,7 +123,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         self.snapshot_run_start_dirty_paths().await;
         let _subagent_cancel_watcher = SubagentCancelWatcher::spawn(
             self.agent.subagent_runner.clone(),
-            self.cancellation_token.clone(),
+            self.detached_subagent_cancellation.clone(),
         );
         let max_iterations = self.agent.budget.max_iterations;
 
@@ -158,7 +160,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 
     async fn advance_turn(&mut self) -> Result<TurnOutcome> {
         if self.cancellation_token.is_cancelled() {
-            self.agent.cancel_running_subagents();
+            if self.detached_subagent_cancellation.is_cancelled() {
+                self.agent.cancel_running_subagents();
+            }
             return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
                 String::new(),
             )));
@@ -513,7 +517,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         );
 
         if tool_execution.interrupted_mid_tools {
-            self.agent.cancel_running_subagents();
+            if self.detached_subagent_cancellation.is_cancelled() {
+                self.agent.cancel_running_subagents();
+            }
             return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
                 String::new(),
             )));

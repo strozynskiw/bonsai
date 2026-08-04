@@ -43,7 +43,7 @@ pub(crate) use model_picker::reconcile_viewport;
 pub use model_picker::{ModelPickerPane, ModelPickerState, ModelPickerTarget};
 pub use mouse::{LastMouseClick, MouseArea, next_mouse_click};
 pub use provider_auth::{ProviderAuthField, ProviderAuthForm};
-pub use queue::{DeferredCommand, DeferredCommandPayload, QueuedInput};
+pub use queue::{DeferredCommand, DeferredCommandPayload, FollowUpDelivery, QueuedInput};
 pub(crate) use reducer::scroll::clamped_scroll;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2922,7 +2922,7 @@ mod tests {
     #[test]
     fn assistant_stream_appends_above_trailing_queue() {
         let mut app = app();
-        app.reduce(AppAction::QueueInput {
+        app.reduce(AppAction::SteerInput {
             id: 1,
             text: "queued".to_string(),
             content: crate::tui::app::ComposerContent::default(),
@@ -3621,6 +3621,7 @@ mod tests {
         app.push_transcript_item(TranscriptItem::QueuedUserMessage {
             id: 7,
             text: "steer".to_string(),
+            delivery: crate::tui::app::FollowUpDelivery::Steer,
         });
         app.transcript_focus = Some(2);
 

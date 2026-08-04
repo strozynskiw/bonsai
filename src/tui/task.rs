@@ -5,10 +5,12 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+#[cfg(test)]
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    Agent, AgentMode, AgentRunResult, QueuedUserMessage, QueuedUserMessageCommand, UserInput,
+    Agent, AgentMode, AgentRunResult, QueuedUserMessage, QueuedUserMessageCommand, RunCancellation,
+    UserInput,
 };
 use crate::commands::{
     CommandMessageKind, CommandModalRequest, MemoryCommandRequest, handle_command_with_catalog,
@@ -55,7 +57,7 @@ enum TaskRunIntent {
 struct ActiveTask {
     kind: TaskKind,
     handle: JoinHandle<()>,
-    cancellation: Option<CancellationToken>,
+    cancellation: Option<RunCancellation>,
     queued_messages: Option<mpsc::UnboundedSender<QueuedUserMessageCommand>>,
     agent_persona: Option<crate::agent::ActivePersona>,
     task_run_id: Option<Arc<tokio::sync::Mutex<Option<TaskRunId>>>>,
@@ -309,7 +311,7 @@ impl TaskController {
         run: F,
     ) -> Result<(), UiError>
     where
-        F: FnOnce(CancellationToken, mpsc::UnboundedReceiver<QueuedUserMessageCommand>) -> Fut
+        F: FnOnce(RunCancellation, mpsc::UnboundedReceiver<QueuedUserMessageCommand>) -> Fut
             + Send
             + 'static,
         Fut: std::future::Future<Output = anyhow::Result<AgentRunResult>> + Send + 'static,
@@ -321,8 +323,8 @@ impl TaskController {
             ));
         }
 
-        let cancellation = CancellationToken::new();
-        let run_token = cancellation.clone();
+        let cancellation = RunCancellation::split();
+        let run_cancellation = cancellation.clone();
         let (queue_sender, queue_receiver) = mpsc::unbounded_channel();
         for message in queued_messages {
             queue_sender
@@ -413,18 +415,18 @@ impl TaskController {
             let timeout_task = selected_timeout
                 .filter(|(duration, _)| !duration.is_zero())
                 .map(|(duration, _)| {
-                    let timeout_token = run_token.clone();
+                    let timeout_cancellation = run_cancellation.clone();
                     let run_time_exhausted = run_time_exhausted.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(duration).await;
                         run_time_exhausted.store(true, Ordering::Release);
-                        timeout_token.cancel();
+                        timeout_cancellation.cancel_all();
                     })
                 });
             let result = if preflight_exhaustion.is_some() {
                 None
             } else {
-                Some(run(run_token, queue_receiver).await)
+                Some(run(run_cancellation, queue_receiver).await)
             };
             if let Some(timeout_task) = timeout_task {
                 timeout_task.abort();
@@ -632,7 +634,7 @@ impl TaskController {
                     .await;
                 sink.context_updated(guard.context_report());
                 guard
-                    .run_current_context_with_queue(run_token, sink, queue_receiver)
+                    .run_current_context_with_queue_control(run_token, sink, queue_receiver)
                     .await
             },
         )
@@ -661,7 +663,7 @@ impl TaskController {
                     .await;
                 sink.context_updated(guard.context_report());
                 guard
-                    .run_current_context_with_queue(run_token, sink, queue_receiver)
+                    .run_current_context_with_queue_control(run_token, sink, queue_receiver)
                     .await
             },
         )
@@ -691,7 +693,7 @@ impl TaskController {
                 guard.begin_retry_last_turn().await?;
                 sink.context_updated(guard.context_report());
                 guard
-                    .run_current_context_with_queue(run_token, sink, queue_receiver)
+                    .run_current_context_with_queue_control(run_token, sink, queue_receiver)
                     .await
             },
         )
@@ -734,7 +736,7 @@ impl TaskController {
                 guard.set_persona(persona_for_task);
                 sink.context_updated(guard.context_report());
                 guard
-                    .run_current_context_with_queue(run_token, sink, queue_receiver)
+                    .run_current_context_with_queue_control(run_token, sink, queue_receiver)
                     .await
             },
         )
@@ -768,7 +770,7 @@ impl TaskController {
                 guard.set_persona(persona_for_task);
                 sink.context_updated(guard.context_report());
                 guard
-                    .run_with_queue(input, run_token, sink, queue_receiver)
+                    .run_with_queue_control(input, run_token, sink, queue_receiver)
                     .await
             },
         )
@@ -833,7 +835,7 @@ impl TaskController {
                 sink.context_updated(guard.context_report());
                 if has_plan {
                     guard
-                        .run_current_context_with_queue(run_token, sink, queue_receiver)
+                        .run_current_context_with_queue_control(run_token, sink, queue_receiver)
                         .await
                 } else {
                     Ok(AgentRunResult::Completed(String::new()))
@@ -909,7 +911,7 @@ impl TaskController {
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
                 guard
-                    .run_current_context_with_queue(run_token, sink, queue_receiver)
+                    .run_current_context_with_queue_control(run_token, sink, queue_receiver)
                     .await
             },
         )?;
@@ -936,7 +938,7 @@ impl TaskController {
                 guard.set_mode(mode);
                 sink.context_updated(guard.context_report());
                 guard
-                    .run_current_context_with_queue(run_token, sink, queue_receiver)
+                    .run_current_context_with_queue_control(run_token, sink, queue_receiver)
                     .await
             },
         )
@@ -1262,16 +1264,24 @@ impl TaskController {
 
     pub fn cancel(&self) {
         if let Some(active) = &self.active
-            && let Some(token) = &active.cancellation
+            && let Some(cancellation) = &active.cancellation
         {
-            token.cancel();
+            cancellation.cancel_all();
+        }
+    }
+
+    pub fn interrupt_foreground(&self) {
+        if let Some(active) = &self.active
+            && let Some(cancellation) = &active.cancellation
+        {
+            cancellation.interrupt_foreground();
         }
     }
 
     pub fn abort(&mut self) {
         if let Some(active) = self.active.take() {
-            if let Some(token) = &active.cancellation {
-                token.cancel();
+            if let Some(cancellation) = &active.cancellation {
+                cancellation.cancel_all();
             }
             active.handle.abort();
         }
@@ -2015,6 +2025,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreground_interrupt_keeps_detached_cancellation_channel_live() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(sender);
+        let (foreground_seen_tx, foreground_seen_rx) = tokio::sync::oneshot::channel();
+        let (full_cancel_seen_tx, full_cancel_seen_rx) = tokio::sync::oneshot::channel();
+        tasks
+            .spawn_agent_task(
+                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+                Vec::new(),
+                TaskRunIntent::ContinueActive,
+                None,
+                |cancellation, _queue| async move {
+                    cancellation.foreground_token().cancelled().await;
+                    let detached_was_cancelled =
+                        cancellation.detached_subagents_token().is_cancelled();
+                    let _ = foreground_seen_tx.send(detached_was_cancelled);
+                    cancellation.detached_subagents_token().cancelled().await;
+                    let _ = full_cancel_seen_tx.send(());
+                    Ok(AgentRunResult::Interrupted(String::new()))
+                },
+            )
+            .unwrap();
+
+        let started = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap();
+        assert!(matches!(started, Some(RuntimeEvent::AgentStarted)));
+        tasks.interrupt_foreground();
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(1), foreground_seen_rx)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+
+        tasks.cancel();
+        tokio::time::timeout(Duration::from_secs(1), full_cancel_seen_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let finished = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap();
+        assert!(matches!(
+            finished,
+            Some(RuntimeEvent::AgentFinished(Ok(
+                crate::tui::event::AgentRunOutcome::Interrupted
+            )))
+        ));
+    }
+
+    #[tokio::test]
     async fn run_budget_cancels_a_foreground_task() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut tasks = TaskController::new(sender);
@@ -2027,7 +2089,7 @@ mod tests {
                 TaskRunIntent::ContinueActive,
                 Some(completion),
                 |token, _queue| async move {
-                    token.cancelled().await;
+                    token.foreground_token().cancelled().await;
                     Ok(AgentRunResult::Interrupted(String::new()))
                 },
             )

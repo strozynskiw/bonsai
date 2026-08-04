@@ -218,16 +218,28 @@ impl Agent {
         self.run_current_context(cancellation_token, sink).await
     }
 
+    #[cfg(test)]
     pub async fn run_with_queue(
         &mut self,
         input: UserInput,
         cancellation_token: CancellationToken,
         sink: SharedSink,
+        queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
+    ) -> Result<AgentRunResult> {
+        self.run_with_queue_control(input, cancellation_token.into(), sink, queued_messages)
+            .await
+    }
+
+    pub(crate) async fn run_with_queue_control(
+        &mut self,
+        input: UserInput,
+        cancellation: RunCancellation,
+        sink: SharedSink,
         mut queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
     ) -> Result<AgentRunResult> {
         self.begin_run(&input, &sink).await?;
         let result = self
-            .run_current_context_inner(cancellation_token, sink, Some(&mut queued_messages))
+            .run_current_context_inner(cancellation, sink, Some(&mut queued_messages))
             .await;
         self.finish_verification_run(&result).await;
         result
@@ -239,20 +251,20 @@ impl Agent {
         sink: SharedSink,
     ) -> Result<AgentRunResult> {
         let result = self
-            .run_current_context_inner(cancellation_token, sink, None)
+            .run_current_context_inner(cancellation_token.into(), sink, None)
             .await;
         self.finish_verification_run(&result).await;
         result
     }
 
-    pub async fn run_current_context_with_queue(
+    pub(crate) async fn run_current_context_with_queue_control(
         &mut self,
-        cancellation_token: CancellationToken,
+        cancellation: RunCancellation,
         sink: SharedSink,
         mut queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
     ) -> Result<AgentRunResult> {
         let result = self
-            .run_current_context_inner(cancellation_token, sink, Some(&mut queued_messages))
+            .run_current_context_inner(cancellation, sink, Some(&mut queued_messages))
             .await;
         self.finish_verification_run(&result).await;
         result
@@ -260,11 +272,11 @@ impl Agent {
 
     pub(super) async fn run_current_context_inner(
         &mut self,
-        cancellation_token: CancellationToken,
+        cancellation: RunCancellation,
         sink: SharedSink,
         queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
     ) -> Result<AgentRunResult> {
-        let result = coordinator::run(self, cancellation_token, sink, queued_messages).await;
+        let result = coordinator::run(self, cancellation, sink, queued_messages).await;
         // Every run variant funnels through here, so this is the one terminal
         // outcome line the support lifecycle log needs.
         let outcome = match &result {
@@ -3701,14 +3713,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_watcher_drop_without_cancellation_leaves_subagents_running() {
-        // A run that finishes without being cancelled must NOT kill running
-        // subagents — detached ones are designed to outlive the turn and
-        // report through the background wake path.
+    async fn foreground_interrupt_leaves_detached_subagents_running() {
         let (runner, subagents, subtask_id) = parked_subagent_run().await;
 
-        let token = CancellationToken::new();
-        let watcher = SubagentCancelWatcher::spawn(Some(runner), token.clone());
+        let cancellation = RunCancellation::split();
+        let watcher = SubagentCancelWatcher::spawn(
+            Some(runner.clone()),
+            cancellation.detached_subagents_token(),
+        );
+        cancellation.interrupt_foreground();
         drop(watcher);
 
         assert_eq!(
@@ -3717,7 +3730,23 @@ mod tests {
                 .expect("run should be registered")
                 .status,
             crate::subagent::SubagentStatus::Running,
-            "an uncancelled run exit must not stop running subagents"
+            "a foreground-only interrupt must not stop detached subagents"
+        );
+        runner.cancel_all_running();
+    }
+
+    #[test]
+    fn split_cancellation_interrupts_only_foreground_channel() {
+        let cancellation = RunCancellation::split();
+
+        cancellation.interrupt_foreground();
+
+        assert_eq!(
+            (
+                cancellation.foreground_token().is_cancelled(),
+                cancellation.detached_subagents_token().is_cancelled(),
+            ),
+            (true, false)
         );
     }
 

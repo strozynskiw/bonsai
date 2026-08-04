@@ -652,10 +652,11 @@ pub(crate) fn transcript_signature(transcript: &[TranscriptItem]) -> u64 {
                 "user".hash(&mut hasher);
                 text.hash(&mut hasher);
             }
-            TranscriptItem::QueuedUserMessage { id, text } => {
+            TranscriptItem::QueuedUserMessage { id, text, delivery } => {
                 "queued_user".hash(&mut hasher);
                 id.hash(&mut hasher);
                 text.hash(&mut hasher);
+                delivery.pending_label().hash(&mut hasher);
             }
             TranscriptItem::AssistantMessage { text } => {
                 "assistant".hash(&mut hasher);

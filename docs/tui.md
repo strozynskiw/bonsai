@@ -95,10 +95,12 @@ high-contrast theming are covered in [Theming](theming.md).
   argument completion covers providers, models, themes, sessions, autonomy
   levels, and more. `Tab` accepts; `Enter` on a fully-typed command submits
   as typed.
-- **While the agent runs** — typed text queues as the next user message
-  (withdraw with `Up` on an empty composer; cancel a focused queued item
-  with `Delete`). Busy-incompatible slash commands open the busy-command
-  modal ([details](slash-commands.md#behavior-while-the-agent-is-running)).
+- **While the agent runs** — `Enter` steers the active turn, while `Tab` queues
+  the draft for the next turn. `Esc` stops only the foreground agent and leaves
+  detached/background subagents running; `Ctrl+C` cancels the whole run tree.
+  Withdraw a pending message with `Up` on an empty composer, or cancel a focused
+  pending item with `Delete`. Busy-incompatible slash commands open the
+  busy-command modal ([details](slash-commands.md#behavior-while-the-agent-is-running)).
 
 ## Keybindings
 
@@ -106,9 +108,11 @@ Keybindings are fixed (no user keymap file). The essentials:
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+C` | staged: cancel run → arm exit → confirm exit |
+| `Ctrl+C` | staged: cancel the run tree → arm exit → confirm exit |
 | `Ctrl+Q` | quit |
-| `Tab` | cycle focus: composer → transcript → sidebar/plan |
+| `Enter` while running | steer the active turn |
+| `Tab` while running with a draft | queue it for the next turn |
+| `Tab` otherwise | cycle focus: composer → transcript → sidebar/plan |
 | `Shift+Tab` | cycle persona (coding → plan → enabled custom agents); each mode brings [its own model](models.md#per-mode-models), and switching never cancels a running turn |
 | `1` / `2` (outside composer) | agent / plan view |
 | `Alt+M` | cycle autonomy (never lands on yolo) |
@@ -117,7 +121,8 @@ Keybindings are fixed (no user keymap file). The essentials:
 | `Ctrl+G` (or `/select`) | copy mode: release mouse capture for native terminal text selection (toggle; a `⊙ select` marker shows while it's on) |
 | `Ctrl+T` | cycle focus pane |
 | `Ctrl+End` | jump transcript to latest |
-| `Esc` | progressive: dismiss popup → clear selection → clear draft → close modal |
+| `Esc` while running | stop the foreground agent; keep background subagents running |
+| `Esc` otherwise | progressive: dismiss popup → clear selection → clear draft → close modal |
 
 Full editing/selection/scroll tables are in `/keys` inside the app.
 

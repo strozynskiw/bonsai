@@ -84,6 +84,7 @@ pub enum TranscriptItem {
     QueuedUserMessage {
         id: u64,
         text: String,
+        delivery: crate::tui::app::FollowUpDelivery,
     },
     AssistantMessage {
         text: String,

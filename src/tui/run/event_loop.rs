@@ -677,6 +677,7 @@ async fn handle_ctrl_c(
             set_ctrl_c_prompt(app, ctrl_c_prompt, CtrlCExitPromptKind::Cancelling, now);
         }
         CtrlCAction::CancelSubagentsAndArm => {
+            tasks.cancel();
             agent.lock().await.cancel_running_subagents();
             tracing::info!("ctrl+c: cancelling background subagents; exit armed");
             set_ctrl_c_prompt(app, ctrl_c_prompt, CtrlCExitPromptKind::Cancelling, now);
@@ -998,10 +999,16 @@ async fn handle_toplevel_submit_command(
         {
             return true;
         }
-        queue_running_submit(
+        let delivery = if matches!(intent, KeyIntent::Queue) {
+            FollowUpDelivery::Queue
+        } else {
+            FollowUpDelivery::Steer
+        };
+        submit_running_follow_up(
             app,
             &*tasks,
             intent,
+            delivery,
             &deps.registry,
             Some(&deps.model_catalog),
         );
@@ -3342,7 +3349,19 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                     break 'run Ok(());
                                 }
                             }
-                            intent @ (KeyIntent::Submit | KeyIntent::SubmitReplacement(_)) => {
+                            KeyIntent::InterruptAgent => {
+                                if matches!(app.task_state, TaskState::Running) {
+                                    tasks.interrupt_foreground();
+                                    app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
+                                    push_transient_notice(
+                                        &mut app,
+                                        "Stopping foreground agent; background subagents continue",
+                                    );
+                                }
+                            }
+                            intent @ (KeyIntent::Submit
+                            | KeyIntent::SubmitReplacement(_)
+                            | KeyIntent::Queue) => {
                                 if let KeyIntent::SubmitReplacement(replacement) = &intent {
                                     app.reduce(AppAction::CompleteInputTo(replacement.clone()));
                                 }

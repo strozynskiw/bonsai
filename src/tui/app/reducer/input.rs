@@ -1,8 +1,8 @@
 use crate::tui::event::{AppAction, Focus};
 
 use super::super::{
-    AppState, CompletionState, CopyNoticeKind, DeferredCommand, DeferredCommandPayload, MouseArea,
-    QueuedInput, TranscriptItem, next_mouse_click,
+    AppState, CompletionState, CopyNoticeKind, DeferredCommand, DeferredCommandPayload,
+    FollowUpDelivery, MouseArea, TranscriptItem, next_mouse_click,
 };
 use super::ActionResult;
 
@@ -294,26 +294,18 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.push_transcript_item(TranscriptItem::UserMessage { text });
         }
         AppAction::SubmitCommandInput(text) => app.finish_input_submission(text),
-        AppAction::QueueInput {
+        AppAction::SteerInput {
             id,
             text,
             content,
             mode,
-        } => {
-            app.composer.push_history(text.clone());
-            app.composer.clear_content();
-            app.composer.reset_navigation();
-            app.reset_composer_scroll();
-            app.completion = CompletionState::default();
-            app.queued_inputs.push(QueuedInput {
-                id,
-                text: text.clone(),
-                content,
-                mode,
-            });
-            app.push_transcript_item(TranscriptItem::QueuedUserMessage { id, text });
-            app.maybe_scroll_to_bottom_current();
-        }
+        } => app.enqueue_follow_up(id, text, content, mode, FollowUpDelivery::Steer),
+        AppAction::QueueNextInput {
+            id,
+            text,
+            content,
+            mode,
+        } => app.enqueue_follow_up(id, text, content, mode, FollowUpDelivery::Queue),
         AppAction::QueueDeferredCommand { input, label } => {
             let id = app.next_deferred_command_id();
             app.deferred_commands.push(DeferredCommand {

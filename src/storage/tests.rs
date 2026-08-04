@@ -1495,6 +1495,7 @@ async fn queued_user_blocks_are_dropped_on_restore() {
                 TranscriptItem::QueuedUserMessage {
                     id: 7,
                     text: "still pending".to_string(),
+                    delivery: crate::tui::app::FollowUpDelivery::Queue,
                 },
             ],
         )

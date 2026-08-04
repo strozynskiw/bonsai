@@ -93,6 +93,52 @@ pub enum PlanContextMode {
     Keep,
 }
 
+/// Cancellation channels for one foreground run and its detached subagents.
+///
+/// Most non-interactive callers couple both channels through [`From`]. The TUI
+/// keeps them separate so `Esc` can stop the foreground turn without discarding
+/// useful background research, while `Ctrl+C` still cancels the whole run tree.
+#[derive(Debug, Clone)]
+pub(crate) struct RunCancellation {
+    foreground: CancellationToken,
+    detached_subagents: CancellationToken,
+}
+
+impl RunCancellation {
+    pub(crate) fn split() -> Self {
+        Self {
+            foreground: CancellationToken::new(),
+            detached_subagents: CancellationToken::new(),
+        }
+    }
+
+    pub(crate) fn foreground_token(&self) -> CancellationToken {
+        self.foreground.clone()
+    }
+
+    pub(crate) fn detached_subagents_token(&self) -> CancellationToken {
+        self.detached_subagents.clone()
+    }
+
+    pub(crate) fn interrupt_foreground(&self) {
+        self.foreground.cancel();
+    }
+
+    pub(crate) fn cancel_all(&self) {
+        self.foreground.cancel();
+        self.detached_subagents.cancel();
+    }
+}
+
+impl From<CancellationToken> for RunCancellation {
+    fn from(token: CancellationToken) -> Self {
+        Self {
+            foreground: token.clone(),
+            detached_subagents: token,
+        }
+    }
+}
+
 const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 16_000;
 /// Small context windows cannot afford the full default reserve. Keeping the
 /// reserve at or below one quarter of the window leaves the 50% compaction

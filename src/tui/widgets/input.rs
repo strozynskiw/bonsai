@@ -599,7 +599,8 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
         };
         left.push(Span::styled(
             format!(
-                "queued: {}{}",
+                "{}: {}{}",
+                queued.delivery.pending_label(),
                 view::truncate_phase(&queued.text, 40),
                 suffix
             ),
@@ -627,6 +628,8 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Tab", " accept  "),
             ("Esc", " dismiss"),
         ]
+    } else if matches!(app.task_state, crate::tui::event::TaskState::Running) {
+        vec![("Enter", " steer  "), ("Tab", " queue  "), ("Esc", " stop")]
     } else {
         // Trailing version tag keeps the running build visible at a glance; a
         // self-update notice takes its place for the rest of the session.
@@ -1066,6 +1069,24 @@ mod tests {
         assert!(text.contains("/copy row"));
         assert!(text.contains("Esc clear"));
         assert!(!text.contains("Enter send"));
+    }
+
+    #[test]
+    fn meta_line_explains_busy_follow_up_controls() {
+        let mut app = AppState::new(
+            "codex",
+            "test-model".to_string(),
+            "workspace".to_string(),
+            None,
+        );
+        app.task_state = crate::tui::event::TaskState::Running;
+
+        let text = line_text(&meta_line(&app, 120, false));
+
+        assert!(
+            text.contains("Enter steer") && text.contains("Tab queue") && text.contains("Esc stop"),
+            "{text}"
+        );
     }
 
     #[test]

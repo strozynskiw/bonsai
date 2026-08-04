@@ -91,13 +91,13 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
         Line::from(""),
         Line::from(vec![
             Span::styled("Enter", theme::body(theme::palette().text)),
-            Span::styled("    send  ", theme::dim()),
+            Span::styled("    send / steer while running  ", theme::dim()),
             Span::styled("Ctrl+P/N", theme::body(theme::palette().text)),
             Span::styled("  history", theme::dim()),
         ]),
         Line::from(vec![
             Span::styled("Tab", theme::body(theme::palette().text)),
-            Span::styled(" cycle focus  ", theme::dim()),
+            Span::styled(" queue while running / cycle focus  ", theme::dim()),
             Span::styled("Alt+Enter", theme::body(theme::palette().text)),
             Span::styled(" newline", theme::dim()),
         ]),
@@ -121,9 +121,13 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
         ]),
         Line::from(vec![
             Span::styled("Esc", theme::body(theme::palette().text)),
-            Span::styled("       exit or cancel  ", theme::dim()),
+            Span::styled("       stop foreground agent  ", theme::dim()),
+            Span::styled("Ctrl+C", theme::body(theme::palette().text)),
+            Span::styled(" cancel all / exit", theme::dim()),
+        ]),
+        Line::from(vec![
             Span::styled("↑/↓", theme::body(theme::palette().text)),
-            Span::styled(" move or scroll where available", theme::dim()),
+            Span::styled("      move or scroll where available", theme::dim()),
         ]),
         Line::from(vec![
             Span::styled("PgUp/PgDn", theme::body(theme::palette().text)),

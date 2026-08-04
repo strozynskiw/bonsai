@@ -185,7 +185,10 @@ pub(super) fn plan_finding_detail_lines(
 pub(super) fn block_detail_title(item: &TranscriptItem) -> String {
     match item {
         TranscriptItem::UserMessage { .. } => "User Message".to_string(),
-        TranscriptItem::QueuedUserMessage { .. } => "Queued Message".to_string(),
+        TranscriptItem::QueuedUserMessage { delivery, .. } => match delivery {
+            crate::tui::app::FollowUpDelivery::Steer => "Steering Message".to_string(),
+            crate::tui::app::FollowUpDelivery::Queue => "Queued Message".to_string(),
+        },
         TranscriptItem::AssistantMessage { .. } => "Assistant Message".to_string(),
         TranscriptItem::ReasoningSummary { .. } => "Thinking".to_string(),
         TranscriptItem::ToolActivity(activity) => format!("Tool: {}", activity.name),
