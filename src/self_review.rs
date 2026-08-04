@@ -82,6 +82,51 @@ impl SelfReviewDisposition {
     }
 }
 
+/// Lifecycle outcome of the reviewer lane itself. This is separate from
+/// [`SelfReviewDisposition`], which records what the parent did with a critique.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SelfReviewRunStatus {
+    Running,
+    /// Compatible default for records serialized before lifecycle status was
+    /// persisted; those records represented completed review passes.
+    #[default]
+    Succeeded,
+    Failed,
+    TimedOut,
+    Cancelled,
+    ParentInterrupted,
+}
+
+impl SelfReviewRunStatus {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::ParentInterrupted => "parent_interrupted",
+        }
+    }
+
+    pub(crate) fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(Self::Running),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "timed_out" => Some(Self::TimedOut),
+            "cancelled" => Some(Self::Cancelled),
+            "parent_interrupted" => Some(Self::ParentInterrupted),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
 /// Structured severity counts extracted from one reviewer conclusion.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SelfReviewFindingCounts {
@@ -134,6 +179,10 @@ impl SelfReviewFindingCounts {
 /// Durable evidence for one completion-blocking self-review pass.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SelfReviewRunRecord {
+    /// Synthetic `agent` tool call used by the parent transcript. Legacy and
+    /// in-conversation fallback records have no call id.
+    #[serde(default)]
+    pub(crate) tool_call_id: Option<String>,
     pub(crate) started_at_ms: i64,
     pub(crate) mode: SelfReviewMode,
     pub(crate) scope: SelfReviewScope,
@@ -142,8 +191,70 @@ pub(crate) struct SelfReviewRunRecord {
     pub(crate) reviewer_prompt_tokens: u64,
     pub(crate) reviewer_completion_tokens: u64,
     pub(crate) reviewer_cost_micros: Option<u64>,
+    #[serde(default)]
+    pub(crate) status: SelfReviewRunStatus,
+    /// Bounded terminal reviewer payload, identical to the synthetic tool
+    /// result when [`Self::tool_call_id`] is present.
+    #[serde(default)]
+    pub(crate) result: Option<String>,
     pub(crate) findings: SelfReviewFindingCounts,
     pub(crate) disposition: Option<SelfReviewDisposition>,
+}
+
+/// Terminalize lifecycle rows that were snapshotted while a process stopped.
+/// A resumed session cannot still own the reviewer future, so retaining
+/// `running` would permanently block completion and render an immortal spinner.
+pub(crate) fn reconcile_abandoned_runs(runs: &mut [SelfReviewRunRecord]) {
+    for run in runs {
+        if run.status != SelfReviewRunStatus::Running {
+            continue;
+        }
+        run.status = SelfReviewRunStatus::ParentInterrupted;
+        run.result = Some(
+            "Reviewer subagent interrupted before its terminal outcome was persisted.".to_string(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn resume_terminalizes_only_abandoned_reviewer_runs() {
+        let mut running = sample_run(SelfReviewRunStatus::Running, None);
+        let succeeded = sample_run(
+            SelfReviewRunStatus::Succeeded,
+            Some("No findings.".to_string()),
+        );
+        let mut runs = vec![running.clone(), succeeded.clone()];
+
+        reconcile_abandoned_runs(&mut runs);
+
+        running.status = SelfReviewRunStatus::ParentInterrupted;
+        running.result = Some(
+            "Reviewer subagent interrupted before its terminal outcome was persisted.".to_string(),
+        );
+        assert_eq!(runs, vec![running, succeeded]);
+    }
+
+    fn sample_run(status: SelfReviewRunStatus, result: Option<String>) -> SelfReviewRunRecord {
+        SelfReviewRunRecord {
+            tool_call_id: Some("self-review-test".to_string()),
+            started_at_ms: 1,
+            mode: SelfReviewMode::On,
+            scope: SelfReviewScope::Scoped,
+            diff_line_count: 1,
+            reviewer_duration_ms: 0,
+            reviewer_prompt_tokens: 0,
+            reviewer_completion_tokens: 0,
+            reviewer_cost_micros: Some(0),
+            status,
+            result,
+            findings: SelfReviewFindingCounts::default(),
+            disposition: None,
+        }
+    }
 }
 
 /// Lifetime self-review effectiveness rollup shown by `/perf`.

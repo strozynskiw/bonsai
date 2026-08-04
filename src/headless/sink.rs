@@ -337,8 +337,7 @@ impl OutputSink for HeadlessSink {
     }
 
     fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
-        let success = status.is_success();
-        self.recorder.tool_finished(id, result, success, None);
+        self.recorder.tool_finished(id, result, status, None);
         self.completion_evidence
             .record_tool_result(id, result, status, None);
         let state = status.label();
@@ -359,9 +358,8 @@ impl OutputSink for HeadlessSink {
         status: crate::output::ToolExecutionStatus,
         diff: crate::diff::FileDiff,
     ) {
-        let success = status.is_success();
         self.recorder
-            .tool_finished(id, result, success, Some(diff.clone()));
+            .tool_finished(id, result, status, Some(diff.clone()));
         self.completion_evidence
             .record_tool_result(id, result, status, Some(&diff));
         let state = status.label();

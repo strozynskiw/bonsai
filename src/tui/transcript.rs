@@ -252,7 +252,9 @@ impl ExecutionGroup {
             .fold((0, 0, 0, 0), |acc, activity| match activity.status {
                 ToolStatus::Running => (acc.0, acc.1, acc.2 + 1, acc.3 + 1),
                 ToolStatus::Succeeded => (acc.0 + 1, acc.1, acc.2, acc.3 + 1),
-                ToolStatus::Failed => (acc.0, acc.1 + 1, acc.2, acc.3 + 1),
+                ToolStatus::Failed | ToolStatus::Interrupted => {
+                    (acc.0, acc.1 + 1, acc.2, acc.3 + 1)
+                }
             })
     }
 
@@ -318,12 +320,14 @@ pub enum ToolStatus {
     Running,
     Succeeded,
     Failed,
+    Interrupted,
 }
 
 crate::impl_db_enum!(ToolStatus {
     Running => "running",
     Succeeded => "succeeded",
     Failed => "failed",
+    Interrupted => "interrupted",
 } else Running);
 
 impl ToolStatus {
@@ -332,6 +336,17 @@ impl ToolStatus {
             Self::Running => "running",
             Self::Succeeded => "done",
             Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    pub(crate) const fn from_execution_status(status: crate::output::ToolExecutionStatus) -> Self {
+        match status {
+            crate::output::ToolExecutionStatus::Succeeded => Self::Succeeded,
+            crate::output::ToolExecutionStatus::Interrupted => Self::Interrupted,
+            crate::output::ToolExecutionStatus::Started => Self::Running,
+            crate::output::ToolExecutionStatus::Failed
+            | crate::output::ToolExecutionStatus::Skipped => Self::Failed,
         }
     }
 }
@@ -854,6 +869,7 @@ mod tool_status_tests {
             (ToolStatus::Running, "running", "running"),
             (ToolStatus::Succeeded, "succeeded", "done"),
             (ToolStatus::Failed, "failed", "failed"),
+            (ToolStatus::Interrupted, "interrupted", "interrupted"),
         ] {
             assert_eq!(status.as_db_str(), db);
             assert_eq!(ToolStatus::from_db_str(db), status);

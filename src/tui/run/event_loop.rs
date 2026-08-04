@@ -4078,7 +4078,7 @@ fn apply_ui_events_for_frame(
     // so live peers can see what this session touched.
     let collect_changed_file = |event: &UiEvent, changed_files: &mut Vec<String>| match event {
         UiEvent::ToolFinishedWithDiff {
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             diff,
             ..
         } => changed_files.extend(diff.files().map(|file| file.path.clone())),

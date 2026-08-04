@@ -85,7 +85,7 @@ pub(super) struct CaptureSink {
     pub(super) reports: StdMutex<Vec<ContextReport>>,
     pub(super) statuses: StdMutex<Vec<String>>,
     tool_starts: StdMutex<Vec<(String, String, String)>>,
-    tool_finishes: StdMutex<Vec<(String, String, bool)>>,
+    tool_finishes: StdMutex<Vec<(String, String, crate::output::ToolExecutionStatus)>>,
     workspace_changes: StdMutex<Vec<(Vec<String>, String)>>,
 }
 
@@ -111,7 +111,9 @@ impl CaptureSink {
             .clone()
     }
 
-    pub(super) fn tool_finishes(&self) -> Vec<(String, String, bool)> {
+    pub(super) fn tool_finishes(
+        &self,
+    ) -> Vec<(String, String, crate::output::ToolExecutionStatus)> {
         self.tool_finishes
             .lock()
             .expect("capture sink mutex should not be poisoned")
@@ -208,7 +210,7 @@ impl OutputSink for CaptureSink {
         self.tool_finishes
             .lock()
             .expect("capture sink mutex should not be poisoned")
-            .push((id.to_string(), result.to_string(), status.is_success()));
+            .push((id.to_string(), result.to_string(), status));
     }
 
     fn workspace_changed(&self, paths: &[String], intent: &str) {

@@ -1064,6 +1064,7 @@ pub(in crate::tui) async fn resume_session(
         .filter(|item| !item.is_suppressed())
         .cloned()
         .collect::<Vec<_>>();
+    reconcile_self_review_tool_calls(&mut transcript_items, &snapshot.self_review_runs);
     let lost_terminal_ids = normalize_lost_interactive_terminals(&mut transcript_items);
     let prepared = PreparedResume {
         conversation_cache_key: deps.storage.conversation_cache_key(session_id).await?,
@@ -1218,6 +1219,55 @@ pub(in crate::tui) async fn resume_session(
     refresh_session_completion_choices(app, deps.storage, deps.project_root, session_id).await;
     state.signatures.reset();
     Ok(())
+}
+
+pub(super) fn reconcile_self_review_tool_calls(
+    items: &mut [TranscriptItem],
+    runs: &[crate::self_review::SelfReviewRunRecord],
+) {
+    let runs = runs
+        .iter()
+        .filter_map(|run| Some((run.tool_call_id.as_deref()?, run)))
+        .collect::<std::collections::HashMap<_, _>>();
+    if runs.is_empty() {
+        return;
+    }
+    for item in items {
+        let tools = match &mut *item {
+            TranscriptItem::ToolActivity(activity) => std::slice::from_mut(activity),
+            TranscriptItem::ExecutionGroup(group) => group.tools.as_mut_slice(),
+            _ => continue,
+        };
+        for activity in tools.iter_mut() {
+            let Some(run) = runs.get(activity.id.as_str()) else {
+                continue;
+            };
+            activity.status = match run.status {
+                crate::self_review::SelfReviewRunStatus::Running => ToolStatus::Running,
+                crate::self_review::SelfReviewRunStatus::Succeeded => ToolStatus::Succeeded,
+                crate::self_review::SelfReviewRunStatus::Failed
+                | crate::self_review::SelfReviewRunStatus::TimedOut => ToolStatus::Failed,
+                crate::self_review::SelfReviewRunStatus::Cancelled
+                | crate::self_review::SelfReviewRunStatus::ParentInterrupted => {
+                    ToolStatus::Interrupted
+                }
+            };
+            if let Some(result) = &run.result {
+                activity.result = Some(result.clone());
+            }
+            if run.status.is_terminal() {
+                activity.finished_at.get_or_insert_with(Instant::now);
+            }
+        }
+        if let TranscriptItem::ExecutionGroup(group) = &mut *item
+            && group
+                .tools
+                .iter()
+                .all(|activity| !matches!(activity.status, ToolStatus::Running))
+        {
+            group.finished_at.get_or_insert_with(Instant::now);
+        }
+    }
 }
 
 pub(super) fn normalize_lost_interactive_terminals(items: &mut [TranscriptItem]) -> Vec<String> {
@@ -1464,5 +1514,92 @@ mod tests {
         catalog.replace_models_dev_metadata(Default::default());
 
         assert_ne!(cached_model_signature(&session, &catalog), before);
+    }
+
+    #[test]
+    fn resumed_self_review_card_uses_durable_terminal_outcome() {
+        let now = Instant::now();
+        let mut group = crate::tui::app::ExecutionGroup::new(1, now);
+        group.tools.push(ToolActivity::new(
+            "self-review-42".to_string(),
+            "agent".to_string(),
+            r#"{"agent":"self-review"}"#.to_string(),
+            now,
+        ));
+        let mut items = vec![TranscriptItem::ExecutionGroup(group)];
+        let runs = vec![crate::self_review::SelfReviewRunRecord {
+            tool_call_id: Some("self-review-42".to_string()),
+            started_at_ms: 42,
+            mode: crate::self_review::SelfReviewMode::On,
+            scope: crate::self_review::SelfReviewScope::Scoped,
+            diff_line_count: 12,
+            reviewer_duration_ms: 7,
+            reviewer_prompt_tokens: 100,
+            reviewer_completion_tokens: 20,
+            reviewer_cost_micros: Some(3),
+            status: crate::self_review::SelfReviewRunStatus::Succeeded,
+            result: Some("Major: persisted finding".to_string()),
+            findings: crate::self_review::SelfReviewFindingCounts {
+                major: 1,
+                ..Default::default()
+            },
+            disposition: Some(crate::self_review::SelfReviewDisposition::Fixed),
+        }];
+
+        reconcile_self_review_tool_calls(&mut items, &runs);
+
+        let TranscriptItem::ExecutionGroup(group) = &items[0] else {
+            panic!("execution group should remain grouped");
+        };
+        assert!(group.finished_at.is_some());
+        assert_eq!(group.tools[0].status, ToolStatus::Succeeded);
+        assert_eq!(
+            group.tools[0].result.as_deref(),
+            Some("Major: persisted finding")
+        );
+        assert!(group.tools[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn resumed_abandoned_self_review_card_is_interrupted_not_failed_null() {
+        let now = Instant::now();
+        let mut items = vec![TranscriptItem::ToolActivity(ToolActivity::new(
+            "self-review-43".to_string(),
+            "agent".to_string(),
+            r#"{"agent":"self-review"}"#.to_string(),
+            now,
+        ))];
+        let mut runs = vec![crate::self_review::SelfReviewRunRecord {
+            tool_call_id: Some("self-review-43".to_string()),
+            started_at_ms: 43,
+            mode: crate::self_review::SelfReviewMode::Auto,
+            scope: crate::self_review::SelfReviewScope::Scoped,
+            diff_line_count: 4,
+            reviewer_duration_ms: 0,
+            reviewer_prompt_tokens: 0,
+            reviewer_completion_tokens: 0,
+            reviewer_cost_micros: Some(0),
+            status: crate::self_review::SelfReviewRunStatus::Running,
+            result: None,
+            findings: Default::default(),
+            disposition: None,
+        }];
+        crate::self_review::reconcile_abandoned_runs(&mut runs);
+
+        reconcile_self_review_tool_calls(&mut items, &runs);
+
+        let TranscriptItem::ToolActivity(activity) = &items[0] else {
+            panic!("self-review card should remain a tool activity");
+        };
+        assert_eq!(activity.status, ToolStatus::Interrupted);
+        assert_eq!(
+            activity.result.as_deref(),
+            Some("Reviewer subagent interrupted before its terminal outcome was persisted.")
+        );
+        assert!(activity.finished_at.is_some());
+        assert_eq!(
+            runs[0].status,
+            crate::self_review::SelfReviewRunStatus::ParentInterrupted
+        );
     }
 }

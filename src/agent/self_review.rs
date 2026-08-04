@@ -8,6 +8,7 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SELF_REVIEW_TOOL_ID: AtomicU64 = AtomicU64::new(1);
+const SELF_REVIEW_RESULT_MAX_CHARS: usize = 8_000;
 
 /// Self-review policy plus the per-turn arming state it gates: whether a pass
 /// may still fire this turn, the pre-task git baseline to diff against, and
@@ -400,14 +401,8 @@ impl Agent {
         let Some(runner) = self.subagent_runner.clone() else {
             // No subagent runner (eval / headless without a factory): fall back to
             // the original in-conversation self-review pass.
-            self.record_self_review_run(
-                diff,
-                attribution,
-                started_at_ms,
-                started.elapsed(),
-                UsageTotals::default(),
-                "",
-            );
+            let run_index = self.begin_self_review_run(diff, attribution, started_at_ms, None);
+            self.self_review.begin_disposition_tracking(run_index);
             return self.fall_back_to_in_conversation_self_review(diff, request, attribution);
         };
 
@@ -423,6 +418,8 @@ impl Agent {
         // its task and must not run its own `git diff` over unrelated work.
         let registry = runner.review_registry();
         let tool_id = next_self_review_tool_id();
+        let run_index =
+            self.begin_self_review_run(diff, attribution, started_at_ms, Some(&tool_id));
         sink.tool_started(
             &tool_id,
             "agent",
@@ -446,13 +443,14 @@ impl Agent {
             .map(|settings| crate::tool::builtin_settings_model_chain(&settings))
             .and_then(|chain| chain.primary);
         let run = Box::pin(runner.run_self_review(
+            &tool_id,
             SELF_REVIEW_SUBAGENT_INSTRUCTIONS,
             &task,
             registry,
             cancellation_token.clone(),
             model_override,
         ));
-        let (result, usage, mut usage_turns, delegated_read_evidence) = run.await;
+        let (result, usage, mut usage_turns, delegated_read_evidence, child_status) = run.await;
         // Fold the reviewer's token usage into the parent's totals on every path
         // — even an errored/timed-out reviewer really spent those tokens.
         self.absorb_usage_totals(usage);
@@ -462,14 +460,19 @@ impl Agent {
         self.absorb_usage_turns(&usage_turns);
         self.import_delegated_read_evidence(&delegated_read_evidence);
         self.refresh_stale_read_advisory();
+        let lifecycle_status = self_review_run_status(
+            child_status,
+            cancellation_token.is_cancelled(),
+            result.is_ok(),
+        );
         match result {
-            Ok(critique) => {
-                self.record_self_review_run(
-                    diff,
-                    attribution,
-                    started_at_ms,
+            Ok(critique) if lifecycle_status == SelfReviewRunStatus::Succeeded => {
+                let critique = bounded_self_review_result(&critique);
+                self.finish_self_review_run(
+                    run_index,
                     started.elapsed(),
                     usage,
+                    lifecycle_status,
                     &critique,
                 );
                 // Show the reviewer's actual critique on the tool card — a generic
@@ -481,63 +484,74 @@ impl Agent {
                     &critique,
                     crate::output::ToolExecutionStatus::Succeeded,
                 );
+                await_output_delivery(sink, &tool_id).await;
+                self.self_review.begin_disposition_tracking(run_index);
                 self.push_harness_note(&format!(
                     "A reviewer examined your changes against the request and reported:\n\n{critique}\n\nFix anything that is genuinely wrong, then confirm. If the review found nothing that needs changing, reply with a one-line confirmation and stop."
                 ));
                 true
             }
-            // The parent was cancelled mid-review: don't inject anything; the run
-            // is being torn down.
-            Err(_) if cancellation_token.is_cancelled() => {
-                sink.tool_finished(
-                    &tool_id,
-                    "Reviewer subagent cancelled.",
-                    crate::output::ToolExecutionStatus::Interrupted,
-                );
-                false
-            }
-            Err(err) => {
-                self.record_self_review_run(
-                    diff,
-                    attribution,
-                    started_at_ms,
+            outcome => {
+                let detail = match outcome {
+                    Ok(critique) => format!(
+                        "Reviewer ended as {} despite returning a conclusion: {critique}",
+                        lifecycle_status.label()
+                    ),
+                    Err(err) => format!("{err:#}"),
+                };
+                let parent_interrupted = lifecycle_status == SelfReviewRunStatus::ParentInterrupted;
+                let payload = if parent_interrupted {
+                    "Reviewer subagent interrupted by parent cancellation.".to_string()
+                } else {
+                    bounded_self_review_result(&format!(
+                        "Reviewer subagent ended as {} ({detail}); injected in-conversation self-review fallback.",
+                        lifecycle_status.label()
+                    ))
+                };
+                self.finish_self_review_run(
+                    run_index,
                     started.elapsed(),
                     usage,
-                    "",
+                    lifecycle_status,
+                    &payload,
                 );
-                // Surface the reason in the visible tool result — a bare
-                // "failed" with the cause only on stderr made repeated reviewer
-                // failures undiagnosable from the TUI. The
-                // workflow itself still succeeds when the fallback critique
-                // turn is injected, so mark the card successful but degraded.
                 sink.tool_finished(
                     &tool_id,
-                    &format!(
-                        "Reviewer subagent unavailable ({:.160}); injected in-conversation self-review fallback.",
-                        format!("{err:#}")
-                    ),
-                    crate::output::ToolExecutionStatus::Succeeded,
+                    &payload,
+                    if matches!(
+                        lifecycle_status,
+                        SelfReviewRunStatus::Cancelled | SelfReviewRunStatus::ParentInterrupted
+                    ) {
+                        crate::output::ToolExecutionStatus::Interrupted
+                    } else {
+                        crate::output::ToolExecutionStatus::Failed
+                    },
                 );
+                await_output_delivery(sink, &tool_id).await;
+                if parent_interrupted {
+                    return false;
+                }
                 tracing::warn!(
-                    error = %format!("{err:#}"),
+                    status = lifecycle_status.label(),
+                    error = %detail,
                     "self-review subagent failed; falling back to in-conversation pass"
                 );
+                self.self_review.begin_disposition_tracking(run_index);
                 self.fall_back_to_in_conversation_self_review(diff, request, attribution)
             }
         }
     }
 
-    fn record_self_review_run(
+    fn begin_self_review_run(
         &mut self,
         diff: &CapturedDiff,
         attribution: &SelfReviewAttribution,
         started_at_ms: i64,
-        duration: std::time::Duration,
-        usage: UsageTotals,
-        critique: &str,
-    ) {
+        tool_call_id: Option<&str>,
+    ) -> usize {
         let run_index = self.self_review_runs.len();
         self.self_review_runs.push(SelfReviewRunRecord {
+            tool_call_id: tool_call_id.map(str::to_string),
             started_at_ms,
             mode: self.self_review.mode(),
             scope: if attribution.has_unscoped_mutation() {
@@ -546,14 +560,40 @@ impl Agent {
                 SelfReviewScope::Scoped
             },
             diff_line_count: u32::try_from(diff.changed_line_count()).unwrap_or(u32::MAX),
-            reviewer_duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
-            reviewer_prompt_tokens: usage.prompt_tokens,
-            reviewer_completion_tokens: usage.completion_tokens,
-            reviewer_cost_micros: usage.cost_micros,
-            findings: SelfReviewFindingCounts::parse(critique),
+            reviewer_duration_ms: 0,
+            reviewer_prompt_tokens: 0,
+            reviewer_completion_tokens: 0,
+            reviewer_cost_micros: Some(0),
+            status: SelfReviewRunStatus::Running,
+            result: None,
+            findings: SelfReviewFindingCounts::default(),
             disposition: None,
         });
-        self.self_review.begin_disposition_tracking(run_index);
+        run_index
+    }
+
+    fn finish_self_review_run(
+        &mut self,
+        run_index: usize,
+        duration: std::time::Duration,
+        usage: UsageTotals,
+        status: SelfReviewRunStatus,
+        result: &str,
+    ) {
+        let Some(run) = self.self_review_runs.get_mut(run_index) else {
+            return;
+        };
+        run.reviewer_duration_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
+        run.reviewer_prompt_tokens = usage.prompt_tokens;
+        run.reviewer_completion_tokens = usage.completion_tokens;
+        run.reviewer_cost_micros = usage.cost_micros;
+        run.status = status;
+        run.result = Some(result.to_string());
+        run.findings = if status == SelfReviewRunStatus::Succeeded {
+            SelfReviewFindingCounts::parse(result)
+        } else {
+            SelfReviewFindingCounts::default()
+        };
     }
 
     pub(super) fn finalize_pending_self_review(&mut self, response: &str) {
@@ -563,6 +603,11 @@ impl Agent {
         let Some(run) = self.self_review_runs.get_mut(run_index) else {
             return;
         };
+        if run.status == SelfReviewRunStatus::Running {
+            let response = bounded_self_review_result(response);
+            run.status = SelfReviewRunStatus::Succeeded;
+            run.result = Some(response);
+        }
         if run.findings.total() == 0 && !mutated {
             run.findings = SelfReviewFindingCounts::parse(response);
         }
@@ -573,8 +618,9 @@ impl Agent {
         &self.self_review_runs
     }
 
-    pub(crate) fn restore_self_review_runs(&mut self, runs: Vec<SelfReviewRunRecord>) {
+    pub(crate) fn restore_self_review_runs(&mut self, mut runs: Vec<SelfReviewRunRecord>) {
         self.self_review.reset_for_new_session();
+        crate::self_review::reconcile_abandoned_runs(&mut runs);
         self.self_review_runs = runs;
     }
 
@@ -638,6 +684,50 @@ impl Agent {
             Ok(InteractionOutcome::Question(Some(InteractionAnswer::Choices(choices))))
                 if choices.first() == Some(&0)
         )
+    }
+}
+
+fn self_review_run_status(
+    child_status: crate::subagent::SubagentStatus,
+    parent_cancelled: bool,
+    returned_conclusion: bool,
+) -> SelfReviewRunStatus {
+    if parent_cancelled {
+        return SelfReviewRunStatus::ParentInterrupted;
+    }
+    match child_status {
+        crate::subagent::SubagentStatus::Running => SelfReviewRunStatus::Failed,
+        crate::subagent::SubagentStatus::Succeeded if returned_conclusion => {
+            SelfReviewRunStatus::Succeeded
+        }
+        crate::subagent::SubagentStatus::Succeeded | crate::subagent::SubagentStatus::Failed => {
+            SelfReviewRunStatus::Failed
+        }
+        crate::subagent::SubagentStatus::TimedOut => SelfReviewRunStatus::TimedOut,
+        crate::subagent::SubagentStatus::Cancelled => SelfReviewRunStatus::Cancelled,
+    }
+}
+
+fn bounded_self_review_result(result: &str) -> String {
+    if result.chars().count() <= SELF_REVIEW_RESULT_MAX_CHARS {
+        return result.to_string();
+    }
+    let head = result
+        .chars()
+        .take(SELF_REVIEW_RESULT_MAX_CHARS.saturating_sub(1))
+        .collect::<String>();
+    format!("{head}…")
+}
+
+async fn await_output_delivery(sink: &SharedSink, tool_id: &str) {
+    let Some(barrier) = sink.delivery_barrier() else {
+        return;
+    };
+    if !barrier.wait().await {
+        tracing::debug!(
+            tool_call_id = tool_id,
+            "self-review output receiver closed before its terminal marker was applied"
+        );
     }
 }
 
@@ -823,5 +913,45 @@ mod tests {
             ),
             SelfReviewDisposition::Rebutted
         );
+    }
+
+    #[test]
+    fn reviewer_lifecycle_mapping_preserves_every_terminal_reason() {
+        use crate::subagent::SubagentStatus;
+
+        assert_eq!(
+            self_review_run_status(SubagentStatus::Succeeded, false, true),
+            SelfReviewRunStatus::Succeeded
+        );
+        assert_eq!(
+            self_review_run_status(SubagentStatus::Succeeded, false, false),
+            SelfReviewRunStatus::Failed
+        );
+        assert_eq!(
+            self_review_run_status(SubagentStatus::Failed, false, false),
+            SelfReviewRunStatus::Failed
+        );
+        assert_eq!(
+            self_review_run_status(SubagentStatus::TimedOut, false, false),
+            SelfReviewRunStatus::TimedOut
+        );
+        assert_eq!(
+            self_review_run_status(SubagentStatus::Cancelled, false, false),
+            SelfReviewRunStatus::Cancelled
+        );
+        assert_eq!(
+            self_review_run_status(SubagentStatus::Cancelled, true, false),
+            SelfReviewRunStatus::ParentInterrupted
+        );
+    }
+
+    #[test]
+    fn reviewer_result_is_bounded_without_splitting_characters() {
+        let oversized = "ą".repeat(SELF_REVIEW_RESULT_MAX_CHARS + 10);
+
+        let bounded = bounded_self_review_result(&oversized);
+
+        assert_eq!(bounded.chars().count(), SELF_REVIEW_RESULT_MAX_CHARS);
+        assert!(bounded.ends_with('…'));
     }
 }

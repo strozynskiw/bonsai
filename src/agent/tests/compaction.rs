@@ -260,6 +260,52 @@ async fn compaction_records_history_event() {
 }
 
 #[tokio::test]
+async fn compaction_preserves_typed_self_review_outcome() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![Ok(StreamedResponse {
+            content: "# Compacted Context Summary\n\n## Current goal\n- preserve review evidence"
+                .to_string(),
+            ..StreamedResponse::default()
+        })])),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let review = crate::self_review::SelfReviewRunRecord {
+        tool_call_id: Some("self-review-compaction".to_string()),
+        started_at_ms: 100,
+        mode: crate::self_review::SelfReviewMode::On,
+        scope: crate::self_review::SelfReviewScope::Scoped,
+        diff_line_count: 9,
+        reviewer_duration_ms: 500,
+        reviewer_prompt_tokens: 100,
+        reviewer_completion_tokens: 0,
+        reviewer_cost_micros: Some(1),
+        status: crate::self_review::SelfReviewRunStatus::TimedOut,
+        result: Some("Reviewer timed out; fallback applied.".to_string()),
+        findings: Default::default(),
+        disposition: Some(crate::self_review::SelfReviewDisposition::NoneNeeded),
+    };
+    agent.restore_self_review_runs(vec![review.clone()]);
+    for index in 0..25 {
+        agent.push_user_message_raw(&format!("old message {index}"));
+    }
+
+    agent
+        .compact_context(
+            CompactionRequest::manual(false, CancellationToken::new()).with_target_tokens(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(agent.self_review_runs(), std::slice::from_ref(&review));
+}
+
+#[tokio::test]
 async fn compaction_preview_does_not_record_history_event() {
     let fixture = TestFixture::new();
     let mut agent = Agent::new(

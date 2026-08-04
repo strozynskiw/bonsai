@@ -9,7 +9,7 @@ use crate::agent::UsageTotals;
 use crate::diff::{DiffStatus, FileDiff};
 use crate::output::ToolExecutionStatus;
 use crate::run_budget::RunBudgetExhaustion;
-use crate::self_review::{SelfReviewDisposition, SelfReviewRunRecord};
+use crate::self_review::{SelfReviewDisposition, SelfReviewRunRecord, SelfReviewRunStatus};
 use crate::storage::AuthorizationDecisionRecord;
 use crate::verification::{VerificationRunRecord, VerificationRunStatus};
 
@@ -227,14 +227,21 @@ impl CompletionReport {
             )),
             _ => {}
         }
-        if let Some(review) = session.review.as_ref()
-            && review.findings.total() > 0
-            && review.disposition != Some(SelfReviewDisposition::Fixed)
-        {
-            caveats.push(format!(
-                "Self-review left {} finding(s) without a fixed disposition.",
-                review.findings.total()
-            ));
+        if let Some(review) = session.review.as_ref() {
+            if review.status != SelfReviewRunStatus::Succeeded {
+                caveats.push(format!(
+                    "Self-review reviewer ended as {}.",
+                    review.status.label()
+                ));
+            }
+            if review.findings.total() > 0
+                && review.disposition != Some(SelfReviewDisposition::Fixed)
+            {
+                caveats.push(format!(
+                    "Self-review left {} finding(s) without a fixed disposition.",
+                    review.findings.total()
+                ));
+            }
         }
         if authorization.denied > 0 {
             caveats.push(format!(
@@ -348,11 +355,12 @@ impl CompletionReport {
         if let Some(review) = self.review.as_ref() {
             let findings = review.findings.total();
             if findings == 0 {
-                lines.push("Review · no findings".to_string());
+                lines.push(format!("Review · {} · no findings", review.status.label()));
             } else {
                 let noun = if findings == 1 { "finding" } else { "findings" };
                 lines.push(format!(
-                    "Review · {findings} {noun} · {}",
+                    "Review · {} · {findings} {noun} · {}",
+                    review.status.label(),
                     review
                         .disposition
                         .map_or("no disposition", SelfReviewDisposition::label)
@@ -1010,6 +1018,50 @@ mod tests {
             report
                 .render_compact()
                 .contains("Completed · 1 file changed · +1 -0")
+        );
+    }
+
+    #[test]
+    fn report_exposes_typed_reviewer_lifecycle() {
+        let review = SelfReviewRunRecord {
+            tool_call_id: Some("self-review-9".to_string()),
+            started_at_ms: 9,
+            mode: crate::self_review::SelfReviewMode::On,
+            scope: crate::self_review::SelfReviewScope::Scoped,
+            diff_line_count: 10,
+            reviewer_duration_ms: 500,
+            reviewer_prompt_tokens: 100,
+            reviewer_completion_tokens: 0,
+            reviewer_cost_micros: Some(1),
+            status: SelfReviewRunStatus::TimedOut,
+            result: Some("Reviewer timed out; fallback applied.".to_string()),
+            findings: Default::default(),
+            disposition: Some(SelfReviewDisposition::NoneNeeded),
+        };
+        let report = CompletionReport::from_evidence(
+            CompletionStatus::Completed,
+            CompletionEvidenceSnapshot::default(),
+            CompletionSessionEvidence {
+                completion_guard: None,
+                verification: None,
+                review: Some(review),
+                authorization_decisions: &[],
+                usage: UsageTotals::default(),
+                session_budget: crate::run_budget::SessionBudgetUsage::default(),
+                budget_exhaustion: None,
+            },
+        );
+
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|value| value == "Self-review reviewer ended as timed_out.")
+        );
+        assert!(
+            report
+                .render_compact()
+                .contains("Review · timed_out · no findings")
         );
     }
 

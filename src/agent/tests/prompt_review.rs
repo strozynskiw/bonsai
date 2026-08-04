@@ -1073,6 +1073,7 @@ fn sample_verification_run(started_at_ms: i64) -> crate::verification::Verificat
 
 fn sample_self_review_run(started_at_ms: i64) -> crate::self_review::SelfReviewRunRecord {
     crate::self_review::SelfReviewRunRecord {
+        tool_call_id: Some(format!("self-review-{started_at_ms}")),
         started_at_ms,
         mode: crate::self_review::SelfReviewMode::Auto,
         scope: crate::self_review::SelfReviewScope::Scoped,
@@ -1081,6 +1082,8 @@ fn sample_self_review_run(started_at_ms: i64) -> crate::self_review::SelfReviewR
         reviewer_prompt_tokens: 100,
         reviewer_completion_tokens: 20,
         reviewer_cost_micros: Some(5),
+        status: crate::self_review::SelfReviewRunStatus::Succeeded,
+        result: Some("No findings.".to_string()),
         findings: crate::self_review::SelfReviewFindingCounts::default(),
         disposition: Some(crate::self_review::SelfReviewDisposition::NoneNeeded),
     }

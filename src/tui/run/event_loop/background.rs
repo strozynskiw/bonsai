@@ -36,7 +36,13 @@ pub(super) fn apply_background_task_event(
             app.reduce(AppAction::Agent(UiEvent::ToolFinished {
                 id,
                 result: summary,
-                success,
+                status: if matches!(status, BackgroundTaskStatus::Stopped) {
+                    crate::output::ToolExecutionStatus::Interrupted
+                } else if success {
+                    crate::output::ToolExecutionStatus::Succeeded
+                } else {
+                    crate::output::ToolExecutionStatus::Failed
+                },
                 finished_at: Instant::now(),
             }));
         }
@@ -73,7 +79,13 @@ pub(super) fn apply_background_task_snapshot(
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: tool_call_id.clone(),
             result: task.detail(),
-            success: task.status.is_success(),
+            status: if matches!(task.status, BackgroundTaskStatus::Stopped) {
+                crate::output::ToolExecutionStatus::Interrupted
+            } else if task.status.is_success() {
+                crate::output::ToolExecutionStatus::Succeeded
+            } else {
+                crate::output::ToolExecutionStatus::Failed
+            },
             finished_at: Instant::now(),
         }));
     }
@@ -124,7 +136,13 @@ pub(super) fn apply_terminal_event(
             app.reduce(AppAction::Agent(UiEvent::ToolFinished {
                 id,
                 result: summary,
-                success,
+                status: if matches!(status, TerminalStatus::Stopped) {
+                    crate::output::ToolExecutionStatus::Interrupted
+                } else if success {
+                    crate::output::ToolExecutionStatus::Succeeded
+                } else {
+                    crate::output::ToolExecutionStatus::Failed
+                },
                 finished_at: Instant::now(),
             }));
         }
@@ -253,7 +271,13 @@ pub(super) fn apply_terminal_snapshot(
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: tool_call_id.clone(),
             result: terminal.detail(),
-            success: terminal.status.is_success(),
+            status: if matches!(terminal.status, TerminalStatus::Stopped) {
+                crate::output::ToolExecutionStatus::Interrupted
+            } else if terminal.status.is_success() {
+                crate::output::ToolExecutionStatus::Succeeded
+            } else {
+                crate::output::ToolExecutionStatus::Failed
+            },
             finished_at: Instant::now(),
         }));
     }
@@ -341,10 +365,19 @@ pub(super) fn apply_completed_subagent_tool_calls(
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: completion.tool_call_id,
             result: completed_subagent_tool_result(&completion.snapshot),
-            success: matches!(
-                completion.snapshot.status,
-                crate::subagent::SubagentStatus::Succeeded
-            ),
+            status: match completion.snapshot.status {
+                crate::subagent::SubagentStatus::Succeeded => {
+                    crate::output::ToolExecutionStatus::Succeeded
+                }
+                crate::subagent::SubagentStatus::Cancelled => {
+                    crate::output::ToolExecutionStatus::Interrupted
+                }
+                crate::subagent::SubagentStatus::Running
+                | crate::subagent::SubagentStatus::Failed
+                | crate::subagent::SubagentStatus::TimedOut => {
+                    crate::output::ToolExecutionStatus::Failed
+                }
+            },
             finished_at: Instant::now(),
         }));
         changed = true;

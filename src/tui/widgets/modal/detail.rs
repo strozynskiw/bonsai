@@ -1101,7 +1101,7 @@ pub(super) fn tool_status_color(status: ToolStatus) -> ratatui::style::Color {
     match status {
         ToolStatus::Running => theme::palette().todo,
         ToolStatus::Succeeded => theme::palette().success,
-        ToolStatus::Failed => theme::palette().error,
+        ToolStatus::Failed | ToolStatus::Interrupted => theme::palette().error,
     }
 }
 

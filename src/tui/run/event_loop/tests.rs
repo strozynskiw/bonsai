@@ -426,6 +426,7 @@ fn sample_self_review_run(
     diff_line_count: u32,
 ) -> crate::self_review::SelfReviewRunRecord {
     crate::self_review::SelfReviewRunRecord {
+        tool_call_id: Some(format!("self-review-{started_at_ms}")),
         started_at_ms,
         mode: crate::self_review::SelfReviewMode::Auto,
         scope: crate::self_review::SelfReviewScope::Scoped,
@@ -434,6 +435,8 @@ fn sample_self_review_run(
         reviewer_prompt_tokens: 100,
         reviewer_completion_tokens: 20,
         reviewer_cost_micros: Some(5),
+        status: crate::self_review::SelfReviewRunStatus::Succeeded,
+        result: Some("No findings.".to_string()),
         findings: crate::self_review::SelfReviewFindingCounts::default(),
         disposition: Some(crate::self_review::SelfReviewDisposition::NoneNeeded),
     }
@@ -4242,7 +4245,7 @@ fn shutdown_background_task_snapshot_finishes_attached_tool_before_persistence()
         }
     );
     let activity = app.tool_activity("call-1").expect("tool remains visible");
-    assert_eq!(activity.status, ToolStatus::Failed);
+    assert_eq!(activity.status, ToolStatus::Interrupted);
     let result = activity.result.as_deref().unwrap_or_default();
     assert!(result.contains("stopped"), "result: {result}");
     assert!(result.contains("partial output"), "result: {result}");
@@ -7365,7 +7368,7 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
     tx.send(UiEvent::ToolFinished {
         id: "call-1".to_string(),
         result: "ok".to_string(),
-        success: true,
+        status: crate::output::ToolExecutionStatus::Succeeded,
         finished_at: now,
     })
     .expect("tool finish should enqueue");
@@ -7395,6 +7398,74 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
         first.status,
         crate::tui::app::ToolStatus::Succeeded
     ));
+}
+
+#[tokio::test]
+async fn self_review_delivery_barrier_precedes_parent_finalization() {
+    let mut app = app();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let now = Instant::now();
+    let (barrier, marker) = crate::output::OutputDeliveryBarrier::pair();
+    tx.send(UiEvent::ToolStarted {
+        id: "self-review-race".to_string(),
+        name: "agent".to_string(),
+        arguments: r#"{"agent":"self-review"}"#.to_string(),
+        started_at: now,
+    })
+    .expect("self-review start should enqueue");
+    tx.send(UiEvent::ToolFinished {
+        id: "self-review-race".to_string(),
+        result: "Major: deterministic finding".to_string(),
+        status: crate::output::ToolExecutionStatus::Succeeded,
+        finished_at: now + Duration::from_millis(1),
+    })
+    .expect("self-review finish should enqueue");
+    tx.send(UiEvent::OutputDeliveryBarrier(marker))
+        .expect("delivery marker should enqueue");
+
+    let wait = barrier.wait();
+    tokio::pin!(wait);
+    let mut deferred = None;
+    apply_ui_events_for_frame(&mut app, &mut rx, &mut deferred, &mut Vec::new());
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut wait)
+            .await
+            .is_err(),
+        "the parent fence must stay closed while the finish event is deferred"
+    );
+    let activity = app
+        .tool_activity("self-review-race")
+        .expect("self-review card should exist");
+    assert_eq!(activity.status, ToolStatus::Running);
+    assert!(activity.result.is_none());
+
+    apply_ui_events_for_frame(&mut app, &mut rx, &mut deferred, &mut Vec::new());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut wait)
+            .await
+            .expect("delivery barrier should be acknowledged")
+    );
+    let activity = app
+        .tool_activity("self-review-race")
+        .expect("self-review card should remain attached");
+    assert_eq!(activity.status, ToolStatus::Succeeded);
+    assert_eq!(
+        activity.result.as_deref(),
+        Some("Major: deterministic finding")
+    );
+
+    app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
+        crate::tui::event::AgentRunOutcome::Completed,
+    ))));
+    let activity = app
+        .tool_activity("self-review-race")
+        .expect("finalization must not orphan the self-review card");
+    assert_eq!(activity.status, ToolStatus::Succeeded);
+    assert_eq!(
+        activity.result.as_deref(),
+        Some("Major: deterministic finding")
+    );
 }
 
 /// A minimal tool whose only job is to occupy a registry slot so

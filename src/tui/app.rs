@@ -1075,7 +1075,7 @@ impl AppState {
             UiEvent::ToolFinished {
                 id,
                 result,
-                success,
+                status,
                 finished_at,
             } => {
                 let finished_background_bash =
@@ -1091,7 +1091,7 @@ impl AppState {
                     // keep the TUI header in lockstep with the plan rename.
                     self.current_session_summary = title;
                 }
-                self.finish_tool(&id, result, success, finished_at);
+                self.finish_tool(&id, result, status, finished_at);
                 self.recompute_active_tools();
                 if matches!(self.task_state, TaskState::Idle | TaskState::Exiting)
                     && finished_background_bash
@@ -1104,15 +1104,16 @@ impl AppState {
             UiEvent::ToolFinishedWithDiff {
                 id,
                 result,
-                success,
+                status,
                 diff,
                 finished_at,
             } => {
-                self.finish_tool_with_diff(&id, result, success, *diff, finished_at);
+                self.finish_tool_with_diff(&id, result, status, *diff, finished_at);
                 self.recompute_active_tools();
                 self.current_phase = Some(self.active_phase_text());
                 self.maybe_scroll_to_bottom_current();
             }
+            UiEvent::OutputDeliveryBarrier(barrier) => barrier.acknowledge(),
             UiEvent::WorkspaceChanged { .. } => {}
             UiEvent::QueuedUserMessageSent { id, text } => {
                 self.mark_queued_user_message_sent(id, text);
@@ -3520,7 +3521,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(12),
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDelta("hi".to_string())));
@@ -3692,7 +3693,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-bg".to_string(),
             result: "bg-1 succeeded".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(10),
         }));
 
@@ -3746,7 +3747,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-title".to_string(),
             result: "Session title set to: Polish resume picker".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(12),
         }));
 
@@ -3770,7 +3771,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-plan-title".to_string(),
             result: "Plan title set to: Refactor editor".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(12),
         }));
 
@@ -3797,7 +3798,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: Instant::now(),
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDone));
@@ -4456,7 +4457,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinishedWithDiff {
             id: "call-1".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             diff: Box::new(crate::diff::FileDiff {
                 path: "src/main.rs".to_string(),
                 status: crate::diff::DiffStatus::Modified,
@@ -4611,7 +4612,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(5),
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDelta(
@@ -4661,7 +4662,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(5),
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDelta(String::new())));
@@ -4736,13 +4737,13 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-2".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: start + Duration::from_millis(5),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "fail".to_string(),
-            success: false,
+            status: crate::output::ToolExecutionStatus::Failed,
             finished_at: start + Duration::from_millis(10),
         }));
 
@@ -4812,19 +4813,19 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-2".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: Instant::now(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-3".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: Instant::now(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "fail".to_string(),
-            success: false,
+            status: crate::output::ToolExecutionStatus::Failed,
             finished_at: Instant::now(),
         }));
 
@@ -4915,7 +4916,7 @@ mod tests {
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
-            success: true,
+            status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at,
         }));
 

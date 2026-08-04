@@ -218,15 +218,11 @@ impl AppState {
         &mut self,
         id: &str,
         result: String,
-        success: bool,
+        status: crate::output::ToolExecutionStatus,
         finished_at: Instant,
     ) {
         if let Some(activity) = self.tool_activity_mut(id) {
-            activity.status = if success {
-                ToolStatus::Succeeded
-            } else {
-                ToolStatus::Failed
-            };
+            activity.status = ToolStatus::from_execution_status(status);
             activity.result = Some(merge_authorization_output(
                 activity.result.as_deref(),
                 &result,
@@ -262,16 +258,12 @@ impl AppState {
         &mut self,
         id: &str,
         result: String,
-        success: bool,
+        status: crate::output::ToolExecutionStatus,
         diff: crate::diff::FileDiff,
         finished_at: Instant,
     ) {
         if let Some(activity) = self.tool_activity_mut(id) {
-            activity.status = if success {
-                ToolStatus::Succeeded
-            } else {
-                ToolStatus::Failed
-            };
+            activity.status = ToolStatus::from_execution_status(status);
             activity.result = Some(merge_authorization_output(
                 activity.result.as_deref(),
                 &result,

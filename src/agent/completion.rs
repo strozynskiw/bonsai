@@ -724,10 +724,12 @@ impl Agent {
                 self.self_review.mode().describe(self.approval_level())
             ));
         };
-        if review.disposition.is_some() {
-            CompletionCheckEvidence::Satisfied
-        } else {
-            CompletionCheckEvidence::Missing
+        match (review.status, review.disposition) {
+            (_, Some(_)) => CompletionCheckEvidence::Satisfied,
+            (SelfReviewRunStatus::Running | SelfReviewRunStatus::Succeeded, None) => {
+                CompletionCheckEvidence::Missing
+            }
+            (status, None) => CompletionCheckEvidence::Blocked(status.label().to_string()),
         }
     }
 }

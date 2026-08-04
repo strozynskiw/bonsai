@@ -215,13 +215,14 @@ async fn verification_terminal_reason_kinds_all_roundtrip() {
 async fn self_review_runs_roundtrip_and_roll_up_effectiveness() {
     use crate::self_review::{
         SelfReviewDisposition, SelfReviewFindingCounts, SelfReviewMode, SelfReviewRunRecord,
-        SelfReviewScope,
+        SelfReviewRunStatus, SelfReviewScope,
     };
 
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;
     let runs = vec![
         SelfReviewRunRecord {
+            tool_call_id: Some("self-review-1".to_string()),
             started_at_ms: 1_700_000_000_000,
             mode: SelfReviewMode::Auto,
             scope: SelfReviewScope::Scoped,
@@ -230,6 +231,8 @@ async fn self_review_runs_roundtrip_and_roll_up_effectiveness() {
             reviewer_prompt_tokens: 1_000,
             reviewer_completion_tokens: 200,
             reviewer_cost_micros: Some(321),
+            status: SelfReviewRunStatus::Succeeded,
+            result: Some("Major: fix the parser\nMinor: tighten the test".to_string()),
             findings: SelfReviewFindingCounts {
                 blocker: 0,
                 major: 1,
@@ -239,6 +242,7 @@ async fn self_review_runs_roundtrip_and_roll_up_effectiveness() {
             disposition: Some(SelfReviewDisposition::Fixed),
         },
         SelfReviewRunRecord {
+            tool_call_id: Some("self-review-2".to_string()),
             started_at_ms: 1_700_000_001_000,
             mode: SelfReviewMode::On,
             scope: SelfReviewScope::Unscoped,
@@ -247,6 +251,8 @@ async fn self_review_runs_roundtrip_and_roll_up_effectiveness() {
             reviewer_prompt_tokens: 500,
             reviewer_completion_tokens: 50,
             reviewer_cost_micros: Some(79),
+            status: SelfReviewRunStatus::Succeeded,
+            result: Some("No findings.".to_string()),
             findings: SelfReviewFindingCounts::default(),
             disposition: Some(SelfReviewDisposition::NoneNeeded),
         },
@@ -273,6 +279,56 @@ async fn self_review_runs_roundtrip_and_roll_up_effectiveness() {
     assert_eq!(stats.findings, 2);
     assert_eq!(stats.reviewer_duration_ms, 2_000);
     assert_eq!(stats.reviewer_cost_micros, 400);
+}
+
+#[tokio::test]
+async fn self_review_terminal_failure_states_roundtrip_exactly() {
+    use crate::self_review::{
+        SelfReviewFindingCounts, SelfReviewMode, SelfReviewRunRecord, SelfReviewRunStatus,
+        SelfReviewScope,
+    };
+
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let statuses = [
+        SelfReviewRunStatus::Failed,
+        SelfReviewRunStatus::TimedOut,
+        SelfReviewRunStatus::Cancelled,
+        SelfReviewRunStatus::ParentInterrupted,
+    ];
+    let runs = statuses
+        .into_iter()
+        .enumerate()
+        .map(|(index, status)| SelfReviewRunRecord {
+            tool_call_id: Some(format!("self-review-terminal-{index}")),
+            started_at_ms: 1_700_000_010_000 + i64::try_from(index).unwrap_or_default(),
+            mode: SelfReviewMode::On,
+            scope: SelfReviewScope::Scoped,
+            diff_line_count: 5,
+            reviewer_duration_ms: 10,
+            reviewer_prompt_tokens: 20,
+            reviewer_completion_tokens: 0,
+            reviewer_cost_micros: Some(1),
+            status,
+            result: Some(format!("reviewer ended as {}", status.label())),
+            findings: SelfReviewFindingCounts::default(),
+            disposition: None,
+        })
+        .collect::<Vec<_>>();
+
+    fixture
+        .storage
+        .replace_self_review_runs_snapshot(session_id, &runs)
+        .await
+        .unwrap();
+    let snapshot = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(snapshot.self_review_runs, runs);
 }
 
 #[tokio::test]
@@ -392,6 +448,7 @@ fn sample_self_review_evidence(
     diff_line_count: u32,
 ) -> crate::self_review::SelfReviewRunRecord {
     crate::self_review::SelfReviewRunRecord {
+        tool_call_id: Some(format!("self-review-{started_at_ms}")),
         started_at_ms,
         mode: crate::self_review::SelfReviewMode::Auto,
         scope: crate::self_review::SelfReviewScope::Scoped,
@@ -400,6 +457,8 @@ fn sample_self_review_evidence(
         reviewer_prompt_tokens: 1_000,
         reviewer_completion_tokens: 200,
         reviewer_cost_micros: Some(321),
+        status: crate::self_review::SelfReviewRunStatus::Succeeded,
+        result: Some("Major: sample finding".to_string()),
         findings: crate::self_review::SelfReviewFindingCounts {
             blocker: 0,
             major: 1,
@@ -2100,7 +2159,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 4);
+    assert_eq!(migration_count, 5);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \
@@ -2571,7 +2630,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
             .unwrap();
     }
 
-    // Tool calls on s1: two bash (one failed), one read.
+    // Tool calls on s1: three bash (one failed, one interrupted), one read.
     let started_at = Instant::now();
     let tool = |id: &str, name: &str, status: ToolStatus| ToolActivity {
         id: id.to_string(),
@@ -2592,6 +2651,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
                 tools: vec![
                     tool("call-1", "bash", ToolStatus::Succeeded),
                     tool("call-2", "bash", ToolStatus::Failed),
+                    tool("call-4", "bash", ToolStatus::Interrupted),
                     tool("call-3", "read", ToolStatus::Succeeded),
                 ],
             })],
@@ -2749,7 +2809,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
             dashboard.tools[0].calls,
             dashboard.tools[0].failed
         ),
-        ("bash", 2, 1)
+        ("bash", 3, 2)
     );
     assert_eq!(
         (

@@ -1374,6 +1374,7 @@ async fn seed_quality_evidence(agent: &mut Agent) {
         )
         .await;
     agent.restore_self_review_runs(vec![crate::self_review::SelfReviewRunRecord {
+        tool_call_id: Some("self-review-1".to_string()),
         started_at_ms: 1_700_000_000_000,
         mode: crate::self_review::SelfReviewMode::Auto,
         scope: crate::self_review::SelfReviewScope::Scoped,
@@ -1382,6 +1383,8 @@ async fn seed_quality_evidence(agent: &mut Agent) {
         reviewer_prompt_tokens: 100,
         reviewer_completion_tokens: 20,
         reviewer_cost_micros: Some(5),
+        status: crate::self_review::SelfReviewRunStatus::Succeeded,
+        result: Some("No findings.".to_string()),
         findings: crate::self_review::SelfReviewFindingCounts::default(),
         disposition: Some(crate::self_review::SelfReviewDisposition::NoneNeeded),
     }]);

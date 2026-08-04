@@ -2,6 +2,8 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use tokio::sync::watch;
+
 use crate::agent::ContextReport;
 use crate::diff::FileDiff;
 
@@ -45,6 +47,74 @@ pub struct ToolCallStart {
     pub id: String,
     pub name: String,
     pub arguments: String,
+}
+
+/// A one-shot fence proving that every output event queued before it reached
+/// the display reducer. Most sinks are synchronous and do not need one; the TUI
+/// uses this to keep terminal tool state ordered before a parent run can wake or
+/// finalize on a separate runtime channel.
+#[derive(Debug)]
+pub struct OutputDeliveryBarrier {
+    delivered: watch::Receiver<bool>,
+}
+
+impl OutputDeliveryBarrier {
+    /// Create the waiting side and the ordered marker a reducer must apply.
+    pub fn pair() -> (Self, OutputDeliveryMarker) {
+        let (delivered, receiver) = watch::channel(false);
+        (
+            Self {
+                delivered: receiver,
+            },
+            OutputDeliveryMarker { delivered },
+        )
+    }
+
+    /// Wait until the marker is applied. Returns `false` only when the display
+    /// receiver disappeared, in which case no visible state remains to order.
+    pub async fn wait(mut self) -> bool {
+        if *self.delivered.borrow() {
+            return true;
+        }
+        self.delivered.changed().await.is_ok() && *self.delivered.borrow()
+    }
+}
+
+/// Ordered reducer marker paired with [`OutputDeliveryBarrier`]. Dropping the
+/// marker closes the wait instead of stranding the producer during shutdown.
+#[derive(Debug, Clone)]
+pub struct OutputDeliveryMarker {
+    delivered: watch::Sender<bool>,
+}
+
+impl OutputDeliveryMarker {
+    /// Mark every preceding output event as applied by the reducer.
+    pub fn acknowledge(&self) {
+        let _ = self.delivered.send(true);
+    }
+}
+
+#[cfg(test)]
+mod delivery_barrier_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn marker_acknowledgement_releases_barrier() {
+        let (barrier, marker) = OutputDeliveryBarrier::pair();
+
+        marker.acknowledge();
+
+        assert!(barrier.wait().await);
+    }
+
+    #[tokio::test]
+    async fn dropped_marker_releases_barrier_as_undeliverable() {
+        let (barrier, marker) = OutputDeliveryBarrier::pair();
+
+        drop(marker);
+
+        assert!(!barrier.wait().await);
+    }
 }
 
 impl ToolCallStart {
@@ -102,6 +172,11 @@ pub trait OutputSink: Send + Sync {
         _diff: FileDiff,
     ) {
         let _ = _diff;
+    }
+    /// Queue a delivery fence after all preceding output. Returning `None`
+    /// means callbacks are already synchronous or the sink has no reducer.
+    fn delivery_barrier(&self) -> Option<OutputDeliveryBarrier> {
+        None
     }
     /// Files Bonsai observed changing outside a structured edit result, such
     /// as mutations made by a successful shell command.

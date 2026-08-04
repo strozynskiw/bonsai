@@ -496,7 +496,7 @@ impl OutputSink for TuiSink {
         let _ = self.sender.send(UiEvent::ToolFinished {
             id: id.to_string(),
             result: result.to_string(),
-            success: status.is_success(),
+            status,
             finished_at: Instant::now(),
         });
     }
@@ -513,10 +513,18 @@ impl OutputSink for TuiSink {
         let _ = self.sender.send(UiEvent::ToolFinishedWithDiff {
             id: id.to_string(),
             result: result.to_string(),
-            success: status.is_success(),
+            status,
             diff: Box::new(diff),
             finished_at: Instant::now(),
         });
+    }
+
+    fn delivery_barrier(&self) -> Option<crate::output::OutputDeliveryBarrier> {
+        let (barrier, marker) = crate::output::OutputDeliveryBarrier::pair();
+        self.sender
+            .send(UiEvent::OutputDeliveryBarrier(marker))
+            .ok()
+            .map(|()| barrier)
     }
 
     fn workspace_changed(&self, paths: &[String], intent: &str) {
@@ -718,7 +726,10 @@ mod tests {
         ));
         assert!(matches!(
             receiver.try_recv(),
-            Ok(UiEvent::ToolFinished { success: false, .. })
+            Ok(UiEvent::ToolFinished {
+                status: ToolExecutionStatus::Failed,
+                ..
+            })
         ));
         assert!(tui.completion_evidence().unwrap().unresolved_tool_failure);
     }

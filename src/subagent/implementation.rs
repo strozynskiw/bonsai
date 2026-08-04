@@ -737,7 +737,14 @@ impl SubagentRegistry {
         inner
             .subagents
             .values()
-            .filter(|record| record.detached && record.status.is_finished())
+            // Detached runs normally own their tool-card reconciliation. The
+            // internal self-review lane is foreground but also emits a
+            // synthetic `agent` card outside normal tool dispatch, so retain
+            // the registry as its terminal-state backstop too.
+            .filter(|record| {
+                (record.detached || record.agent.as_ref() == "self-review")
+                    && record.status.is_finished()
+            })
             .filter_map(|record| {
                 record
                     .tool_call_id

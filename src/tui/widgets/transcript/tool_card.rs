@@ -322,6 +322,7 @@ pub(super) fn tool_activity_summary_spans(
         ToolStatus::Running => theme::spinner_frame(tick),
         ToolStatus::Succeeded => "✓",
         ToolStatus::Failed => "✗",
+        ToolStatus::Interrupted => "■",
     };
 
     let display_name = tool_activity_display_name(activity);
@@ -376,7 +377,7 @@ pub(super) fn tool_activity_summary_spans(
         ));
     }
 
-    let bash_summary = (activity.status != ToolStatus::Failed)
+    let bash_summary = matches!(activity.status, ToolStatus::Running | ToolStatus::Succeeded)
         .then(|| bash_output_summary(activity))
         .flatten();
     let suppress_duration = bash_summary
@@ -599,7 +600,7 @@ fn bash_output_summary(activity: &ToolActivity) -> Option<BashOutputSummary> {
                 })
             }
         }
-        ToolStatus::Failed => None,
+        ToolStatus::Failed | ToolStatus::Interrupted => None,
     }
 }
 
@@ -1145,7 +1146,7 @@ pub(super) fn tool_status_style(status: ToolStatus) -> (Color, Color) {
     let accent = match status {
         ToolStatus::Running => theme::palette().todo,
         ToolStatus::Succeeded => theme::palette().success,
-        ToolStatus::Failed => theme::palette().error,
+        ToolStatus::Failed | ToolStatus::Interrupted => theme::palette().error,
     };
     (accent, theme::palette().tool_block)
 }

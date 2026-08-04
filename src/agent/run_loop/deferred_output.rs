@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::{
     agent::ContextReport,
     diff::FileDiff,
-    output::{OutputSink, SharedSink, ToolCallStart, ToolExecutionStatus},
+    output::{OutputDeliveryBarrier, OutputSink, SharedSink, ToolCallStart, ToolExecutionStatus},
 };
 
 #[derive(Default)]
@@ -107,6 +107,10 @@ impl OutputSink for DeferredAssistantSink {
         diff: FileDiff,
     ) {
         self.inner.tool_finished_with_diff(id, result, status, diff);
+    }
+
+    fn delivery_barrier(&self) -> Option<OutputDeliveryBarrier> {
+        self.inner.delivery_barrier()
     }
 
     fn workspace_changed(&self, paths: &[String], intent: &str) {

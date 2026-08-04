@@ -1838,7 +1838,11 @@ async fn self_review_subagent_injects_reviewer_critique() {
     let finishes = capture.tool_finishes();
     assert_eq!(finishes.len(), 1);
     assert_eq!(finishes[0].0, starts[0].0);
-    assert!(finishes[0].2, "self-review tool card should finish ok");
+    assert_eq!(
+        finishes[0].2,
+        crate::output::ToolExecutionStatus::Succeeded,
+        "self-review tool card should finish successfully"
+    );
 
     let messages = format!("{:?}", agent.messages);
     assert!(messages.contains("reviewer examined"), "{messages}");
@@ -1858,8 +1862,15 @@ async fn self_review_subagent_injects_reviewer_critique() {
         "directly armed reviewer evidence must be a harness message, not user authority"
     );
     assert_eq!(agent.self_review_runs().len(), 1);
-    assert_eq!(agent.self_review_runs()[0].findings.major, 1);
-    assert!(agent.self_review_runs()[0].disposition.is_none());
+    let review = &agent.self_review_runs()[0];
+    assert_eq!(review.tool_call_id.as_deref(), Some(starts[0].0.as_str()));
+    assert_eq!(
+        review.status,
+        crate::self_review::SelfReviewRunStatus::Succeeded
+    );
+    assert_eq!(review.result.as_deref(), Some(finishes[0].1.as_str()));
+    assert_eq!(review.findings.major, 1);
+    assert!(review.disposition.is_none());
     agent
         .self_review
         .note_typed_mutation(vec!["lib.rs".to_string()]);
@@ -1965,7 +1976,7 @@ async fn subagent_usage_lands_in_session_totals_at_the_subagent_models_pricing()
 }
 
 #[tokio::test]
-async fn self_review_subagent_failure_is_successful_degraded_fallback() {
+async fn self_review_subagent_failure_is_typed_before_degraded_fallback() {
     let fixture = TestFixture::new();
     let root = &fixture.project_root;
     init_repo(root);
@@ -1998,9 +2009,10 @@ async fn self_review_subagent_failure_is_successful_degraded_fallback() {
     assert!(injected, "fallback should inject an in-conversation review");
     let finishes = capture.tool_finishes();
     assert_eq!(finishes.len(), 1);
-    assert!(
+    assert_eq!(
         finishes[0].2,
-        "fallback means the self-review workflow completed"
+        crate::output::ToolExecutionStatus::Failed,
+        "the reviewer tool must retain its failed outcome even when the parent falls back"
     );
     assert!(
         finishes[0]
@@ -2013,6 +2025,76 @@ async fn self_review_subagent_failure_is_successful_degraded_fallback() {
         messages.contains("Self-review before finishing"),
         "fallback prompt should be injected: {messages}"
     );
+    let review = agent
+        .self_review_runs()
+        .last()
+        .expect("failed reviewer run should be recorded");
+    assert_eq!(
+        review.status,
+        crate::self_review::SelfReviewRunStatus::Failed
+    );
+    assert_eq!(review.tool_call_id.as_deref(), Some(finishes[0].0.as_str()));
+    assert_eq!(review.result.as_deref(), Some(finishes[0].1.as_str()));
+    assert_eq!(review.findings.total(), 0);
+    assert!(review.disposition.is_none());
+}
+
+#[tokio::test]
+async fn self_review_parent_cancellation_reconciles_interrupted_terminal_state() {
+    let fixture = TestFixture::new();
+    let root = &fixture.project_root;
+    init_repo(root);
+    commit_file(root, "lib.rs", "fn old() {}\n", "baseline");
+
+    let runner = self_review_runner(&fixture, "This conclusion must not be delivered.");
+    let mut agent = Agent::builder(
+        Box::new(MockProvider::new(Vec::new())),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .subagent_runner(Some(runner))
+    .build()
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+    agent.arm_self_review_for_coding_task("change lib").await;
+    std::fs::write(root.join("lib.rs"), REVIEWABLE_RUST_CHANGE).unwrap();
+    agent
+        .self_review
+        .note_typed_mutation(vec!["lib.rs".to_string()]);
+
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let capture = Arc::new(CaptureSink::default());
+    let sink: SharedSink = capture.clone();
+    let injected = agent.maybe_self_review(&sink, cancellation).await;
+
+    assert!(
+        !injected,
+        "parent cancellation must not inject a fallback turn"
+    );
+    let starts = capture.tool_starts();
+    let finishes = capture.tool_finishes();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(finishes.len(), 1);
+    assert_eq!(finishes[0].0, starts[0].0);
+    assert_eq!(
+        finishes[0].2,
+        crate::output::ToolExecutionStatus::Interrupted
+    );
+    let review = agent
+        .self_review_runs()
+        .last()
+        .expect("interrupted reviewer run should be recorded");
+    assert_eq!(
+        review.status,
+        crate::self_review::SelfReviewRunStatus::ParentInterrupted
+    );
+    assert_eq!(review.tool_call_id.as_deref(), Some(starts[0].0.as_str()));
+    assert_eq!(review.result.as_deref(), Some(finishes[0].1.as_str()));
+    assert_eq!(review.findings.total(), 0);
+    assert!(review.disposition.is_none());
 }
 
 #[tokio::test]
@@ -2186,9 +2268,9 @@ async fn queued_steering_skips_not_yet_started_batches() {
     assert!(
         sink.tool_finishes()
             .iter()
-            .any(|(id, result, success)| id == "action-1"
+            .any(|(id, result, status)| id == "action-1"
                 && result.contains("queued user message")
-                && !success)
+                && !status.is_success())
     );
 }
 

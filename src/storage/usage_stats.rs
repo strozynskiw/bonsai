@@ -497,7 +497,7 @@ impl Storage {
     async fn load_tool_usage(&self) -> Result<Vec<ToolUsage>> {
         let rows = sqlx::query(
             "SELECT name, COUNT(*) AS calls, \
-             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed, \
+             SUM(CASE WHEN status IN ('failed', 'interrupted') THEN 1 ELSE 0 END) AS failed, \
              CAST(COALESCE(AVG(duration_ms), 0) AS INTEGER) AS avg_duration_ms, \
              COALESCE(MAX(duration_ms), 0) AS max_duration_ms \
              FROM tool_calls \

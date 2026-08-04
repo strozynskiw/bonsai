@@ -88,24 +88,24 @@ impl TranscriptRecorder {
         &self,
         id: &str,
         result: &str,
-        success: bool,
+        status: crate::output::ToolExecutionStatus,
         diff: Option<FileDiff>,
     ) {
         self.with_state(|state| {
             state.flush_text_buffers();
             let now = Instant::now();
             if let Some(mut activity) = state.tools.remove(id) {
-                finish_tool_activity(&mut activity, result, success, diff, now);
+                finish_tool_activity(&mut activity, result, status, diff, now);
                 state.items.push(TranscriptItem::ToolActivity(activity));
                 return;
             }
             if let Some(activity) = recorded_tool_activity_mut(&mut state.items, id) {
-                finish_tool_activity(activity, result, success, diff, now);
+                finish_tool_activity(activity, result, status, diff, now);
                 return;
             }
             let mut activity =
                 ToolActivity::new(id.to_string(), "tool".to_string(), String::new(), now);
-            finish_tool_activity(&mut activity, result, success, diff, now);
+            finish_tool_activity(&mut activity, result, status, diff, now);
             state.items.push(TranscriptItem::ToolActivity(activity));
         });
     }
@@ -127,15 +127,11 @@ impl TranscriptRecorder {
 fn finish_tool_activity(
     activity: &mut ToolActivity,
     result: &str,
-    success: bool,
+    status: crate::output::ToolExecutionStatus,
     diff: Option<FileDiff>,
     now: Instant,
 ) {
-    activity.status = if success {
-        ToolStatus::Succeeded
-    } else {
-        ToolStatus::Failed
-    };
+    activity.status = ToolStatus::from_execution_status(status);
     activity.result = Some(result.to_string());
     activity.diff = diff;
     activity.finished_at.get_or_insert(now);
@@ -199,7 +195,7 @@ impl TranscriptRecorderState {
         let now = Instant::now();
         for (_id, mut activity) in std::mem::take(&mut self.tools) {
             if activity.status == ToolStatus::Running {
-                activity.status = ToolStatus::Failed;
+                activity.status = ToolStatus::Interrupted;
                 activity
                     .result
                     .get_or_insert_with(|| "Interrupted before completion".to_string());
@@ -255,7 +251,12 @@ mod tests {
         let recorder = TranscriptRecorder::default();
 
         recorder.tool_started("call-1", "read", r#"{"path":"README.md"}"#);
-        recorder.tool_finished("call-1", "ok", true, None);
+        recorder.tool_finished(
+            "call-1",
+            "ok",
+            crate::output::ToolExecutionStatus::Succeeded,
+            None,
+        );
 
         let items = recorder.take();
         assert_eq!(items.len(), 1);
@@ -269,12 +270,40 @@ mod tests {
     }
 
     #[test]
+    fn recorder_preserves_interrupted_tool_status() {
+        let recorder = TranscriptRecorder::default();
+
+        recorder.tool_started("self-review-1", "agent", r#"{"agent":"self-review"}"#);
+        recorder.tool_finished(
+            "self-review-1",
+            "parent interrupted reviewer",
+            crate::output::ToolExecutionStatus::Interrupted,
+            None,
+        );
+
+        let items = recorder.take();
+        assert!(matches!(&items[0], TranscriptItem::ToolActivity(activity)
+            if activity.status == ToolStatus::Interrupted
+                && activity.result.as_deref() == Some("parent interrupted reviewer")));
+    }
+
+    #[test]
     fn recorder_updates_duplicate_tool_finish_in_place() {
         let recorder = TranscriptRecorder::default();
 
         recorder.tool_started("call-1", "read", r#"{"path":"README.md"}"#);
-        recorder.tool_finished("call-1", "full output", true, None);
-        recorder.tool_finished("call-1", "reused previous read", true, None);
+        recorder.tool_finished(
+            "call-1",
+            "full output",
+            crate::output::ToolExecutionStatus::Succeeded,
+            None,
+        );
+        recorder.tool_finished(
+            "call-1",
+            "reused previous read",
+            crate::output::ToolExecutionStatus::Succeeded,
+            None,
+        );
 
         let items = recorder.take();
         assert_eq!(items.len(), 1);
@@ -287,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn recorder_marks_drained_running_tools_failed() {
+    fn recorder_marks_drained_running_tools_interrupted() {
         let recorder = TranscriptRecorder::default();
 
         recorder.tool_started("call-1", "bash", r#"{"command":"sleep 30"}"#);
@@ -297,7 +326,7 @@ mod tests {
         let TranscriptItem::ToolActivity(activity) = &items[0] else {
             panic!("expected tool activity");
         };
-        assert_eq!(activity.status, ToolStatus::Failed);
+        assert_eq!(activity.status, ToolStatus::Interrupted);
         assert_eq!(
             activity.result.as_deref(),
             Some("Interrupted before completion")

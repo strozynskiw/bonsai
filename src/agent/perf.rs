@@ -189,6 +189,10 @@ impl OutputSink for PerfSink {
         self.inner.tool_finished_with_diff(id, result, status, diff);
     }
 
+    fn delivery_barrier(&self) -> Option<crate::output::OutputDeliveryBarrier> {
+        self.inner.delivery_barrier()
+    }
+
     fn workspace_changed(&self, paths: &[String], intent: &str) {
         self.inner.workspace_changed(paths, intent);
     }

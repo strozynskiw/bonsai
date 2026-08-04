@@ -273,6 +273,7 @@ impl SubagentRunner {
 
     pub(crate) async fn run_self_review(
         &self,
+        tool_call_id: &str,
         instructions: &str,
         task: &str,
         registry: Arc<ToolRegistry>,
@@ -283,24 +284,33 @@ impl SubagentRunner {
         UsageTotals,
         Vec<UsageTurn>,
         Vec<DelegatedReadEvidence>,
+        SubagentStatus,
     ) {
-        self.run_new(
-            SubagentRunSpec {
-                label: "self-review".to_string(),
-                instructions: instructions.to_string(),
-                task: task.to_string(),
-                registry,
-                model_chain: SubagentModelChain::single(model_override),
-                lane_kind: ExecutionLaneKind::SelfReview,
-                limits: SubagentRunLimits {
-                    max_iterations: SELF_REVIEW_MAX_ITERATIONS,
-                    timeout: SELF_REVIEW_TIMEOUT,
-                    conclude_timeout: SELF_REVIEW_CONCLUDE_TIMEOUT,
-                },
+        let spec = SubagentRunSpec {
+            label: "self-review".to_string(),
+            instructions: instructions.to_string(),
+            task: task.to_string(),
+            registry,
+            model_chain: SubagentModelChain::single(model_override),
+            lane_kind: ExecutionLaneKind::SelfReview,
+            limits: SubagentRunLimits {
+                max_iterations: SELF_REVIEW_MAX_ITERATIONS,
+                timeout: SELF_REVIEW_TIMEOUT,
+                conclude_timeout: SELF_REVIEW_CONCLUDE_TIMEOUT,
             },
-            cancellation,
-        )
-        .await
+        };
+        let subtask_id = self.subagents.register(&spec.label, &spec.task, false);
+        let _ = self
+            .subagents
+            .attach_tool_call(&subtask_id, tool_call_id.to_string());
+        let (result, usage, turns, evidence) = self
+            .run_registered(spec, subtask_id.clone(), cancellation, true)
+            .await;
+        let status = self
+            .subagents
+            .snapshot(&subtask_id)
+            .map_or(SubagentStatus::Failed, |snapshot| snapshot.status);
+        (result, usage, turns, evidence, status)
     }
 
     pub(super) async fn run_new(
@@ -587,8 +597,7 @@ impl SubagentRunner {
                     )
                 } else {
                     match run_result {
-                        AgentRunResult::Completed(conclusion)
-                        | AgentRunResult::Interrupted(conclusion) => {
+                        AgentRunResult::Completed(conclusion) => {
                             let evidence =
                                 subagent.delegated_read_evidence_manifest(&subtask_id, &conclusion);
                             self.subagents
@@ -600,6 +609,19 @@ impl SubagentRunner {
                                 usage_turns.clone(),
                             );
                             (Ok(conclusion), evidence)
+                        }
+                        AgentRunResult::Interrupted(partial) => {
+                            let report = failure_with_partial(
+                                &format!("'{}' subagent interrupted", spec.label),
+                                (!partial.trim().is_empty()).then_some(partial.as_str()),
+                            );
+                            guard.finish_with_usage(
+                                SubagentStatus::Cancelled,
+                                Some(report.clone()),
+                                Some(usage),
+                                usage_turns.clone(),
+                            );
+                            (Err(anyhow!(report)), Vec::new())
                         }
                         AgentRunResult::Incomplete { failure, .. } => {
                             guard.finish_with_usage(

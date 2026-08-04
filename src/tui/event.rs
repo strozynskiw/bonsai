@@ -750,19 +750,22 @@ pub enum UiEvent {
     ToolFinished {
         id: String,
         result: String,
-        success: bool,
+        status: crate::output::ToolExecutionStatus,
         finished_at: Instant,
     },
     ToolFinishedWithDiff {
         id: String,
         result: String,
-        success: bool,
+        status: crate::output::ToolExecutionStatus,
         // Boxed: `FileDiff` carries a `Vec<DiffHunk>` and is far larger than the
         // other `UiEvent` variants, which would otherwise inflate every event
         // moved through the channel.
         diff: Box<FileDiff>,
         finished_at: Instant,
     },
+    /// Ordered output fence used by lifecycle-sensitive tool completions.
+    /// Applying it acknowledges that every prior event reached the reducer.
+    OutputDeliveryBarrier(crate::output::OutputDeliveryMarker),
     /// Paths observed changing after an unstructured mutation such as Bash.
     WorkspaceChanged {
         paths: Vec<String>,

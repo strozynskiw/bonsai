@@ -62,7 +62,7 @@ use crate::review::{
 use crate::sandbox::CommandSandbox;
 use crate::self_review::{
     SelfReviewDecision, SelfReviewDisposition, SelfReviewFindingCounts, SelfReviewMode,
-    SelfReviewRunRecord, SelfReviewScope,
+    SelfReviewRunRecord, SelfReviewRunStatus, SelfReviewScope,
 };
 use crate::terminal::TerminalRegistry;
 use crate::todo::{SharedTodoStore, TodoItem};

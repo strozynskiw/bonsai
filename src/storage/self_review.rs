@@ -1,7 +1,7 @@
 use super::*;
 use crate::self_review::{
     SelfReviewDisposition, SelfReviewFindingCounts, SelfReviewMode, SelfReviewRunRecord,
-    SelfReviewScope, SelfReviewStats,
+    SelfReviewRunStatus, SelfReviewScope, SelfReviewStats,
 };
 
 impl Storage {
@@ -39,15 +39,17 @@ impl Storage {
                 sqlx::query(
                     r#"
                     INSERT INTO self_review_runs (
-                      session_id, seq, started_at_ms, mode, scope, diff_line_count,
+                      session_id, seq, tool_call_id, started_at_ms, mode, scope, diff_line_count,
                       reviewer_duration_ms, reviewer_prompt_tokens,
                       reviewer_completion_tokens, reviewer_cost_micros,
-                      blocker_count, major_count, minor_count, nit_count, disposition
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      status, result, blocker_count, major_count, minor_count, nit_count,
+                      disposition
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
                 )
                 .bind(session_id.as_i64())
                 .bind(i64::try_from(seq).context("Self-review sequence is out of range")?)
+                .bind(run.tool_call_id.as_deref())
                 .bind(run.started_at_ms)
                 .bind(run.mode.label())
                 .bind(run.scope.label())
@@ -59,6 +61,8 @@ impl Storage {
                     run.reviewer_cost_micros
                         .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
                 )
+                .bind(run.status.label())
+                .bind(run.result.as_deref())
                 .bind(i64::from(run.findings.blocker))
                 .bind(i64::from(run.findings.major))
                 .bind(i64::from(run.findings.minor))
@@ -75,10 +79,11 @@ impl Storage {
     ) -> Result<Vec<SelfReviewRunRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT started_at_ms, mode, scope, diff_line_count,
+            SELECT tool_call_id, started_at_ms, mode, scope, diff_line_count,
                    reviewer_duration_ms, reviewer_prompt_tokens,
                    reviewer_completion_tokens, reviewer_cost_micros,
-                   blocker_count, major_count, minor_count, nit_count, disposition
+                   status, result, blocker_count, major_count, minor_count, nit_count,
+                   disposition
             FROM self_review_runs WHERE session_id = ? ORDER BY seq
             "#,
         )
@@ -87,7 +92,12 @@ impl Storage {
         .await
         .context("Failed to load self-review runs")?;
 
-        rows.iter().map(self_review_run_from_row).collect()
+        let mut runs = rows
+            .iter()
+            .map(self_review_run_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        crate::self_review::reconcile_abandoned_runs(&mut runs);
+        Ok(runs)
     }
 
     #[cfg(test)]
@@ -107,6 +117,9 @@ impl Storage {
         let mut quarantined = 0_i64;
 
         for (_, run) in runs {
+            if !run.status.is_terminal() {
+                continue;
+            }
             let fingerprint = super::quality_evidence::self_review_fingerprint(&run)?;
             if duplicates.contains(&fingerprint) {
                 quarantined = quarantined.saturating_add(1);
@@ -149,10 +162,11 @@ impl Storage {
     async fn load_all_self_review_runs(&self) -> Result<Vec<(SessionId, SelfReviewRunRecord)>> {
         let rows = sqlx::query(
             r#"
-            SELECT session_id, seq, started_at_ms, mode, scope, diff_line_count,
+            SELECT session_id, seq, tool_call_id, started_at_ms, mode, scope, diff_line_count,
                    reviewer_duration_ms, reviewer_prompt_tokens,
                    reviewer_completion_tokens, reviewer_cost_micros,
-                   blocker_count, major_count, minor_count, nit_count, disposition
+                   status, result, blocker_count, major_count, minor_count, nit_count,
+                   disposition
             FROM self_review_runs
             ORDER BY session_id, seq
             "#,
@@ -175,8 +189,10 @@ impl Storage {
 fn self_review_run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SelfReviewRunRecord> {
     let mode: String = row.try_get("mode")?;
     let scope: String = row.try_get("scope")?;
+    let status: String = row.try_get("status")?;
     let disposition: Option<String> = row.try_get("disposition")?;
     Ok(SelfReviewRunRecord {
+        tool_call_id: row.try_get("tool_call_id")?,
         started_at_ms: row.try_get("started_at_ms")?,
         mode: SelfReviewMode::parse(&mode)
             .with_context(|| format!("Unknown self-review mode {mode:?}"))?,
@@ -190,6 +206,9 @@ fn self_review_run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SelfReviewR
             .try_get::<Option<i64>, _>("reviewer_cost_micros")?
             .map(|value| u64::try_from(value).context("Reviewer cost is out of range"))
             .transpose()?,
+        status: SelfReviewRunStatus::from_label(&status)
+            .with_context(|| format!("Unknown self-review status {status:?}"))?,
+        result: row.try_get("result")?,
         findings: SelfReviewFindingCounts {
             blocker: read_u32(row, "blocker_count")?,
             major: read_u32(row, "major_count")?,

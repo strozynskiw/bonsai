@@ -3651,6 +3651,7 @@ mod tests {
             async move {
                 runner
                     .run_self_review(
+                        "self-review-test",
                         "instructions",
                         "wait",
                         Arc::new(ToolRegistry::new()),
