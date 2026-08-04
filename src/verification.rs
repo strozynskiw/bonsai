@@ -1,5 +1,6 @@
 //! Project verification profiles and focused verification-workflow prompts.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::config::VerificationConfig;
@@ -79,6 +80,93 @@ pub(crate) struct VerificationWorkflow {
     pub(crate) kind: VerificationKind,
     pub(crate) checks: Vec<VerificationCheck>,
     pub(crate) prompt: String,
+}
+
+/// Canonical inputs that bind verification evidence to one delivered workspace.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct VerificationWorkspaceIdentity {
+    /// Canonical Git common-directory path. `None` means the workspace is not
+    /// backed by Git; verification remains usable and is bound to a content
+    /// fingerprint of the relevant project inputs instead.
+    pub(crate) repository_root: Option<String>,
+    pub(crate) worktree_root: String,
+    pub(crate) project_root: String,
+    pub(crate) head_oid: Option<String>,
+    pub(crate) index_digest: String,
+    pub(crate) tracked_worktree_digest: String,
+    pub(crate) untracked_inputs: BTreeMap<String, String>,
+    pub(crate) command_cwd: String,
+    pub(crate) command_fingerprint: String,
+    pub(crate) toolchain_environment_fingerprint: String,
+}
+
+impl VerificationWorkspaceIdentity {
+    pub(crate) fn digest(&self) -> Result<String, serde_json::Error> {
+        let encoded = serde_json::to_vec(self)?;
+        Ok(blake3::hash(&encoded).to_hex().to_string())
+    }
+}
+
+/// Typed outcome of capturing the workspace inputs for a verification attempt.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum VerificationBinding {
+    Bound {
+        digest: String,
+        identity: Box<VerificationWorkspaceIdentity>,
+    },
+    Blocked {
+        reason: VerificationTerminalReason,
+    },
+}
+
+/// Typed reason why verification did not produce fresh pass/fail evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VerificationTerminalReason {
+    Irrelevant,
+    PolicyDisabled,
+    UserSkipped,
+    Delegated,
+    Cancelled,
+    EnvironmentBlocked,
+    Interrupted,
+    RepeatedDeterministicFailure,
+    RepairBudgetExhausted,
+    UnstableFailure,
+}
+
+impl VerificationTerminalReason {
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::Irrelevant => "irrelevant",
+            Self::PolicyDisabled => "policy_disabled",
+            Self::UserSkipped => "user_skipped",
+            Self::Delegated => "delegated",
+            Self::Cancelled => "cancelled",
+            Self::EnvironmentBlocked => "environment_blocked",
+            Self::Interrupted => "interrupted",
+            Self::RepeatedDeterministicFailure => "repeated_deterministic_failure",
+            Self::RepairBudgetExhausted => "repair_budget_exhausted",
+            Self::UnstableFailure => "unstable_failure",
+        }
+    }
+
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "irrelevant" => Some(Self::Irrelevant),
+            "policy_disabled" => Some(Self::PolicyDisabled),
+            "user_skipped" => Some(Self::UserSkipped),
+            "delegated" => Some(Self::Delegated),
+            "cancelled" => Some(Self::Cancelled),
+            "environment_blocked" => Some(Self::EnvironmentBlocked),
+            "interrupted" => Some(Self::Interrupted),
+            "repeated_deterministic_failure" => Some(Self::RepeatedDeterministicFailure),
+            "repair_budget_exhausted" => Some(Self::RepairBudgetExhausted),
+            "unstable_failure" => Some(Self::UnstableFailure),
+            _ => None,
+        }
+    }
 }
 
 /// Persisted state of one configured check in a verification run.
@@ -166,6 +254,11 @@ pub(crate) struct VerificationCheckRecord {
     pub(crate) completed_at_ms: Option<i64>,
     pub(crate) attempt_count: u32,
     pub(crate) last_failure_signature: Option<String>,
+    pub(crate) binding: Option<VerificationBinding>,
+    pub(crate) delivered_binding: Option<VerificationBinding>,
+    pub(crate) attempt_timestamps_ms: Vec<i64>,
+    pub(crate) failure_signatures: Vec<String>,
+    pub(crate) terminal_reason_kind: Option<VerificationTerminalReason>,
 }
 
 /// Evidence that a failed repair caused one request-local reasoning increase.
@@ -192,6 +285,8 @@ pub(crate) struct VerificationRunRecord {
     pub(crate) repair_attempts: u32,
     pub(crate) reasoning_escalations: Vec<VerificationReasoningEscalation>,
     pub(crate) terminal_reason: Option<String>,
+    pub(crate) terminal_reason_kind: Option<VerificationTerminalReason>,
+    pub(crate) delivered_workspace_binding: Option<VerificationBinding>,
 }
 
 impl VerificationRunRecord {
@@ -210,6 +305,11 @@ impl VerificationRunRecord {
                     completed_at_ms: None,
                     attempt_count: 0,
                     last_failure_signature: None,
+                    binding: None,
+                    delivered_binding: None,
+                    attempt_timestamps_ms: Vec::new(),
+                    failure_signatures: Vec::new(),
+                    terminal_reason_kind: None,
                 })
                 .collect(),
             started_at_ms: crate::util::time::now_ms(),
@@ -219,8 +319,37 @@ impl VerificationRunRecord {
             repair_attempts: 0,
             reasoning_escalations: Vec::new(),
             terminal_reason: None,
+            terminal_reason_kind: None,
+            delivered_workspace_binding: None,
         }
     }
+}
+
+pub(crate) fn normalize_verification_command(command: &str) -> String {
+    let mut normalized = String::with_capacity(command.len());
+    let mut quote = None;
+    let mut pending_space = false;
+    for character in command.trim().chars() {
+        if character.is_whitespace() && quote.is_none() {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+        if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = if quote == Some(character) {
+                None
+            } else if quote.is_none() {
+                Some(character)
+            } else {
+                quote
+            };
+        }
+        normalized.push(character);
+    }
+    normalized
 }
 
 impl VerificationProfile {

@@ -969,6 +969,12 @@ pub trait Tool: Send + Sync {
     fn coerce_arguments(&self, _args: &mut serde_json::Value) -> Vec<arg_repair::RepairNote> {
         Vec::new()
     }
+    /// Resolve the process working directory that this call would use without
+    /// executing it. Stateful command tools override this so pre-execution
+    /// evidence can bind to the same directory as the eventual process.
+    async fn execution_cwd(&self, _args: &serde_json::Value) -> Option<PathBuf> {
+        None
+    }
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput>;
     async fn execute_with_context(
         &self,

@@ -124,6 +124,15 @@ failed verification after file changes, unfixed review findings, denied
 authorizations, or an unenforceable cost budget. A nominally-complete run
 with an unresolved tool failure is reclassified as `failed`.
 
+`verification_evidence` is the machine-readable delivery view. Its
+`freshness` is `fresh`, `stale`, `skipped`, or `blocked`; `workspace_binding`
+is a short identifier for diagnosis, and `reason` carries a typed reason when
+no fresh pass exists. Freshness is computed by comparing every check's
+pre-execution workspace binding with a new binding captured immediately before
+the completion report is built. Consumers must not treat a persisted `passed`
+status, or claims in assistant output, as fresh evidence when these bindings
+do not match.
+
 ## What headless does differently
 
 The surface contract is explicit (`src/runtime.rs`):

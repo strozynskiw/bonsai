@@ -1,8 +1,9 @@
 use super::*;
+use crate::agent::{BackgroundVerificationCapture, capture_verification_workspace_binding};
 use crate::provider::ReasoningSelection;
 use crate::verification::{
-    VerificationCheck, VerificationCheckStatus, VerificationKind, VerificationRunStatus,
-    VerifyAfterEdit,
+    VerificationBinding, VerificationCheck, VerificationCheckStatus, VerificationKind,
+    VerificationRunStatus, VerificationTerminalReason, VerifyAfterEdit,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -103,6 +104,72 @@ async fn foreground_profile_checks_feed_self_review_and_verification_evidence() 
         run.workspace_changes_after_last_check,
         ["src/lib.rs".to_string()]
     );
+}
+
+#[tokio::test]
+async fn manual_and_automatic_checks_populate_the_same_evidence_fields() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[workspace]\n",
+        "baseline",
+    );
+    let call = crate::provider::ToolCall {
+        id: "check".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+    };
+    let mut manual = verification_agent(&fixture);
+    manual
+        .record_verification_tool_result(
+            &call,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    manual.revalidate_verification_for_delivery(0).await;
+
+    let mut automatic = verification_agent(&fixture);
+    automatic
+        .begin_verification_run(
+            VerificationKind::Test,
+            &[VerificationCheck {
+                name: "Rust tests".to_string(),
+                command: "cargo test --locked".to_string(),
+            }],
+            "verify",
+        )
+        .await;
+    automatic
+        .record_verification_tool_result(
+            &call,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    let outcome: anyhow::Result<AgentRunResult> =
+        Ok(AgentRunResult::Completed("verified".to_string()));
+    automatic.finish_verification_run(&outcome).await;
+
+    for check in [
+        &manual.verification_runs()[0].checks[0],
+        &automatic.verification_runs()[0].checks[0],
+    ] {
+        assert_eq!(check.status, VerificationCheckStatus::Passed);
+        assert_eq!(check.attempt_count, 1);
+        assert_eq!(check.attempt_timestamps_ms.len(), 1);
+        assert!(matches!(
+            check.binding.as_ref(),
+            Some(VerificationBinding::Bound { .. })
+        ));
+        assert!(matches!(
+            check.delivered_binding.as_ref(),
+            Some(VerificationBinding::Bound { .. })
+        ));
+        assert!(check.terminal_reason_kind.is_none());
+    }
 }
 
 fn model_tool_response(
@@ -411,6 +478,152 @@ async fn verification_marks_a_passed_check_stale_after_a_later_workspace_change(
 }
 
 #[tokio::test]
+async fn active_mutation_reopens_earlier_passes_for_the_final_gate() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    let mut agent = verification_agent(&fixture);
+    let checks = vec![
+        VerificationCheck {
+            name: "Compile".to_string(),
+            command: "cargo check".to_string(),
+        },
+        VerificationCheck {
+            name: "Tests".to_string(),
+            command: "cargo test".to_string(),
+        },
+    ];
+    agent
+        .begin_verification_run(VerificationKind::Test, &checks, "verify")
+        .await;
+    let call = |id: &str, command: &str| crate::provider::ToolCall {
+        id: id.to_string(),
+        name: "bash".to_string(),
+        arguments: serde_json::json!({"command": command}).to_string(),
+    };
+
+    agent
+        .record_verification_tool_result(
+            &call("compile-before-repair", "cargo check"),
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    std::fs::write(fixture.project_root.join("src.rs"), "repair\n").unwrap();
+    agent.note_typed_verification_worthy_mutation(vec!["src.rs".to_string()]);
+    assert_eq!(
+        agent.verification_runs().last().unwrap().checks[0].status,
+        VerificationCheckStatus::Pending
+    );
+
+    for (id, command) in [
+        ("tests-after-repair", "cargo test"),
+        ("compile-final", "cargo check"),
+    ] {
+        agent
+            .record_verification_tool_result(
+                &call(id, command),
+                &command_result(0),
+                crate::output::ToolExecutionStatus::Succeeded,
+            )
+            .await;
+    }
+    let outcome: anyhow::Result<AgentRunResult> =
+        Ok(AgentRunResult::Completed("verified".to_string()));
+    agent.finish_verification_run(&outcome).await;
+
+    let run = agent.verification_runs().last().unwrap();
+    assert_eq!(run.status, VerificationRunStatus::Passed);
+    assert_eq!(run.checks[0].attempt_count, 2);
+    assert_eq!(run.checks[1].attempt_count, 1);
+    assert_eq!(run.observed_final_workspace, Some(true));
+    assert!(!agent.verification.after_edit_verification_pending);
+}
+
+#[tokio::test]
+async fn delivery_revalidation_ignores_unrelated_untracked_notes_but_not_config() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[workspace]\n",
+        "baseline",
+    );
+    let mut agent = verification_agent(&fixture);
+    let call = crate::provider::ToolCall {
+        id: "call-test".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+    };
+    agent
+        .record_verification_tool_result(
+            &call,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+
+    std::fs::write(fixture.project_root.join("notes.md"), "unrelated").unwrap();
+    agent.revalidate_verification_for_delivery(0).await;
+    assert_eq!(
+        agent.verification_runs()[0].status,
+        VerificationRunStatus::Passed
+    );
+
+    std::fs::create_dir(fixture.project_root.join(".cargo")).unwrap();
+    std::fs::write(
+        fixture.project_root.join(".cargo/config.toml"),
+        "[build]\nrustflags = []\n",
+    )
+    .unwrap();
+    agent.revalidate_verification_for_delivery(0).await;
+    assert_eq!(
+        agent.verification_runs()[0].status,
+        VerificationRunStatus::Stale
+    );
+}
+
+#[tokio::test]
+async fn delivery_revalidation_binds_failed_checks_without_turning_them_into_passes() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[workspace]\n",
+        "baseline",
+    );
+    let mut agent = verification_agent(&fixture);
+    agent
+        .record_verification_tool_result(
+            &crate::provider::ToolCall {
+                id: "failed-check".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+            },
+            &command_failure("error: broken test"),
+            crate::output::ToolExecutionStatus::Failed,
+        )
+        .await;
+
+    agent.revalidate_verification_for_delivery(0).await;
+    let run = &agent.verification_runs()[0];
+    assert_eq!(run.status, VerificationRunStatus::Failed);
+    assert_eq!(run.observed_final_workspace, Some(true));
+    assert!(run.checks[0].delivered_binding.is_some());
+
+    std::fs::write(
+        fixture.project_root.join("Cargo.toml"),
+        "[workspace]\nmembers = []\n",
+    )
+    .unwrap();
+    agent.revalidate_verification_for_delivery(0).await;
+    let run = &agent.verification_runs()[0];
+    assert_eq!(run.status, VerificationRunStatus::Failed);
+    assert_eq!(run.observed_final_workspace, Some(false));
+}
+
+#[tokio::test]
 async fn verification_failure_wins_over_an_incomplete_agent_summary() {
     let fixture = TestFixture::new();
     init_repo(&fixture.project_root);
@@ -489,6 +702,372 @@ async fn repeated_deterministic_verification_failure_stops_the_run() {
         run.terminal_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("same deterministic failure"))
+    );
+}
+
+#[tokio::test]
+async fn manual_retries_share_history_and_confirmed_failure_is_suppressed() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[workspace]\n",
+        "baseline",
+    );
+    let mut agent = verification_agent(&fixture);
+    let call = |id: &str| crate::provider::ToolCall {
+        id: id.to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+    };
+
+    for id in ["attempt-1", "attempt-2"] {
+        agent
+            .record_verification_tool_result(
+                &call(id),
+                &command_failure("error: stable root cause"),
+                crate::output::ToolExecutionStatus::Failed,
+            )
+            .await;
+    }
+
+    let run = &agent.verification_runs()[0];
+    assert_eq!(run.checks[0].attempt_count, 2);
+    assert_eq!(run.checks[0].attempt_timestamps_ms.len(), 2);
+    assert_eq!(run.checks[0].failure_signatures.len(), 2);
+    assert_eq!(run.status, VerificationRunStatus::Blocked);
+    assert_eq!(
+        run.terminal_reason_kind,
+        Some(VerificationTerminalReason::RepeatedDeterministicFailure)
+    );
+
+    let suppressed = call("attempt-3");
+    let rejections = agent
+        .capture_pending_verification_bindings(std::slice::from_ref(&suppressed))
+        .await;
+    assert!(rejections.contains_key("attempt-3"));
+    agent
+        .record_verification_tool_result(
+            &suppressed,
+            &ToolOutput::Text("guarded".to_string()),
+            crate::output::ToolExecutionStatus::Skipped,
+        )
+        .await;
+
+    assert_eq!(
+        agent.verification_runs()[0].checks[0].attempt_count,
+        2,
+        "a rejected request is not an executed attempt"
+    );
+    let rejected = agent.verification_runs().last().unwrap();
+    assert_eq!(rejected.status, VerificationRunStatus::Blocked);
+    assert_eq!(rejected.checks[0].attempt_count, 0);
+}
+
+#[tokio::test]
+async fn manual_checks_in_separate_user_runs_keep_separate_delivery_evidence() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[workspace]\n",
+        "baseline",
+    );
+    let mut agent = verification_agent(&fixture);
+    let call = |id: &str| crate::provider::ToolCall {
+        id: id.to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+    };
+
+    agent
+        .record_verification_tool_result(
+            &call("first-run"),
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    agent.begin_verification_observation_window();
+    agent
+        .record_verification_tool_result(
+            &call("second-run"),
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+
+    assert_eq!(agent.verification_runs().len(), 2);
+    assert_eq!(agent.verification_runs()[0].checks[0].attempt_count, 1);
+    assert_eq!(agent.verification_runs()[1].checks[0].attempt_count, 1);
+    assert_eq!(
+        agent.verification_runs()[1].checks[0]
+            .tool_call_id
+            .as_deref(),
+        Some("second-run")
+    );
+}
+
+#[tokio::test]
+async fn pre_execution_binding_uses_the_persistent_bash_working_directory() {
+    let fixture = TestFixture::new();
+    let subdir = fixture.project_root.join("subdir");
+    tokio::fs::create_dir(&subdir).await.unwrap();
+    let expected = subdir.canonicalize().unwrap();
+    let bash = Arc::new(crate::tool::BashTool::new(
+        fixture.project_root.clone(),
+        fixture.permissions.clone(),
+        fixture.read_tracker.clone(),
+        fixture.interaction.clone(),
+    ));
+    bash.execute(serde_json::json!({"command": "cd subdir"}))
+        .await
+        .unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(bash);
+    let mut config = crate::config::Config::empty();
+    config.verification.test = Some(vec!["cargo test".to_string()]);
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .system_context(String::new())
+    .config(Arc::new(config))
+    .build()
+    .unwrap();
+    let call = crate::provider::ToolCall {
+        id: "persistent-cwd".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test"}"#.to_string(),
+    };
+
+    agent
+        .capture_pending_verification_bindings(std::slice::from_ref(&call))
+        .await;
+
+    let binding = agent
+        .verification
+        .pending_verification_bindings
+        .get(&call.id)
+        .unwrap();
+    let VerificationBinding::Bound { identity, .. } = binding else {
+        panic!("persistent cwd should produce a bound identity");
+    };
+    assert_eq!(identity.command_cwd, expected.to_string_lossy());
+}
+
+#[tokio::test]
+async fn denied_verification_is_user_skipped_not_a_deterministic_failure() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    let mut agent = verification_agent(&fixture);
+    let checks = vec![VerificationCheck {
+        name: "Rust tests".to_string(),
+        command: "cargo test".to_string(),
+    }];
+    agent
+        .begin_verification_run(VerificationKind::Test, &checks, "verify")
+        .await;
+    let call = crate::provider::ToolCall {
+        id: "denied".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test"}"#.to_string(),
+    };
+
+    agent
+        .record_verification_tool_result(
+            &call,
+            &ToolOutput::Text(
+                "Error: Permission denied by user for command: cargo test".to_string(),
+            ),
+            crate::output::ToolExecutionStatus::Failed,
+        )
+        .await;
+
+    let run = agent.verification_runs().last().unwrap();
+    assert_eq!(run.status, VerificationRunStatus::Incomplete);
+    assert_eq!(
+        run.terminal_reason_kind,
+        Some(VerificationTerminalReason::UserSkipped)
+    );
+    assert_eq!(run.checks[0].attempt_count, 0);
+}
+
+#[tokio::test]
+async fn interactive_verification_is_typed_as_delegated() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    let mut agent = verification_agent(&fixture);
+    agent
+        .begin_verification_run(
+            VerificationKind::Test,
+            &[VerificationCheck {
+                name: "Interactive tests".to_string(),
+                command: "cargo test".to_string(),
+            }],
+            "verify",
+        )
+        .await;
+    let call = crate::provider::ToolCall {
+        id: "interactive".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"cargo test","interactive":true}"#.to_string(),
+    };
+
+    agent
+        .record_verification_tool_result(
+            &call,
+            &ToolOutput::BackgroundTaskStarted {
+                task_id: "terminal-1".to_string(),
+                message: "interactive terminal started".to_string(),
+            },
+            crate::output::ToolExecutionStatus::Started,
+        )
+        .await;
+
+    let run = agent.verification_runs().last().unwrap();
+    assert_eq!(run.status, VerificationRunStatus::Incomplete);
+    assert_eq!(
+        run.terminal_reason_kind,
+        Some(VerificationTerminalReason::Delegated)
+    );
+    assert_eq!(run.checks[0].attempt_count, 0);
+}
+
+#[tokio::test]
+async fn completed_background_check_produces_observed_verification_evidence() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[workspace]\n",
+        "baseline",
+    );
+    let mut agent = verification_agent(&fixture);
+    let binding = capture_verification_workspace_binding(
+        &fixture.project_root,
+        &fixture.project_root,
+        "cargo test --locked",
+    )
+    .await;
+    assert!(matches!(binding, VerificationBinding::Bound { .. }));
+    agent.verification.background_verification_bindings.insert(
+        "bg-1".to_string(),
+        BackgroundVerificationCapture {
+            binding,
+            record_index: None,
+            command: "cargo test --locked".to_string(),
+        },
+    );
+    let now = std::time::SystemTime::now();
+    let task = crate::background::BackgroundTaskSnapshot {
+        id: "bg-1".to_string(),
+        incarnation: "incarnation-1".to_string(),
+        command: "cargo test --locked".to_string(),
+        cwd: fixture.project_root.clone(),
+        status: crate::background::BackgroundTaskStatus::Succeeded,
+        started_at: now,
+        finished_at: Some(now),
+        exit_code: Some(0),
+        timeout_secs: 30,
+        timed_out: false,
+        tail: "tests passed".to_string(),
+        tail_truncated: false,
+        total_output_chars: 12,
+        version: 2,
+        tool_call_id: Some("background-call".to_string()),
+    };
+
+    agent.record_background_verification_results(&[task]).await;
+
+    let run = agent.verification_runs().last().unwrap();
+    assert_eq!(run.status, VerificationRunStatus::Passed);
+    assert_eq!(run.checks[0].attempt_count, 1);
+    assert_eq!(
+        run.checks[0].tool_call_id.as_deref(),
+        Some("background-call")
+    );
+}
+
+#[tokio::test]
+async fn older_background_check_does_not_consume_a_new_active_workflow() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[workspace]\n",
+        "baseline",
+    );
+    let mut agent = verification_agent(&fixture);
+    let binding = capture_verification_workspace_binding(
+        &fixture.project_root,
+        &fixture.project_root,
+        "cargo test --locked",
+    )
+    .await;
+    agent.verification.background_verification_bindings.insert(
+        "older-bg".to_string(),
+        BackgroundVerificationCapture {
+            binding,
+            record_index: None,
+            command: "cargo test --locked".to_string(),
+        },
+    );
+    agent
+        .begin_verification_run(
+            VerificationKind::Test,
+            &[VerificationCheck {
+                name: "Current tests".to_string(),
+                command: "cargo test --locked".to_string(),
+            }],
+            "verify current work",
+        )
+        .await;
+    let now = std::time::SystemTime::now();
+    let task = crate::background::BackgroundTaskSnapshot {
+        id: "older-bg".to_string(),
+        incarnation: "older-incarnation".to_string(),
+        command: "cargo test --locked".to_string(),
+        cwd: fixture.project_root.clone(),
+        status: crate::background::BackgroundTaskStatus::Succeeded,
+        started_at: now,
+        finished_at: Some(now),
+        exit_code: Some(0),
+        timeout_secs: 30,
+        timed_out: false,
+        tail: "older tests passed".to_string(),
+        tail_truncated: false,
+        total_output_chars: 18,
+        version: 2,
+        tool_call_id: Some("older-call".to_string()),
+    };
+
+    agent.record_background_verification_results(&[task]).await;
+
+    assert_eq!(agent.verification_runs().len(), 2);
+    assert_eq!(
+        agent.verification_runs()[0].status,
+        VerificationRunStatus::Running
+    );
+    assert_eq!(
+        agent.verification_runs()[0].checks[0].status,
+        VerificationCheckStatus::Pending
+    );
+    assert_eq!(
+        agent.verification_runs()[1].status,
+        VerificationRunStatus::Passed
+    );
+    assert_eq!(
+        agent.verification_runs()[1].checks[0]
+            .tool_call_id
+            .as_deref(),
+        Some("older-call")
     );
 }
 
@@ -779,7 +1358,12 @@ async fn post_edit_ask_skips_without_an_interactive_surface() {
             .maybe_verify_after_edit(&sink, CancellationToken::new())
             .await
     );
-    assert!(agent.verification_runs().is_empty());
+    let run = agent.verification_runs().last().expect("typed skipped run");
+    assert_eq!(run.status, VerificationRunStatus::Blocked);
+    assert_eq!(
+        run.terminal_reason_kind,
+        Some(crate::verification::VerificationTerminalReason::EnvironmentBlocked)
+    );
 }
 
 #[tokio::test]
@@ -813,6 +1397,10 @@ async fn resume_replaces_verification_state_and_interrupts_in_flight_run() {
     assert_eq!(
         agent.verification_runs()[0].status,
         VerificationRunStatus::Interrupted
+    );
+    assert_eq!(
+        agent.verification_runs()[0].checks[0].terminal_reason_kind,
+        Some(VerificationTerminalReason::Interrupted)
     );
     assert!(agent.verification.active_verification.is_none());
     assert!(!agent.verification.after_edit_verification_pending);
@@ -896,12 +1484,14 @@ async fn coding_run_executes_post_edit_verification_before_completing() {
     .build()
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    let (_queue_sender, queue_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let result = agent
-        .run(
-            "make a change",
+        .run_with_queue(
+            crate::agent::UserInput::from_text("make a change"),
             CancellationToken::new(),
             Arc::new(StdoutSink),
+            queue_receiver,
         )
         .await
         .unwrap();

@@ -183,6 +183,7 @@ impl Agent {
         if let Some(bus) = &self.peer_bus {
             bus.begin_turn(crate::peer::TurnOrigin::Human);
         }
+        self.begin_verification_observation_window();
         self.set_planning_advisory(None);
         // Volatile project state (git status) refreshes at the top of every
         // run-loop iteration, which covers the first model call too — no
@@ -219,8 +220,11 @@ impl Agent {
         mut queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
     ) -> Result<AgentRunResult> {
         self.begin_run(&input, &sink).await?;
-        self.run_current_context_inner(cancellation_token, sink, Some(&mut queued_messages))
-            .await
+        let result = self
+            .run_current_context_inner(cancellation_token, sink, Some(&mut queued_messages))
+            .await;
+        self.finish_verification_run(&result).await;
+        result
     }
 
     pub async fn run_current_context(
@@ -506,7 +510,7 @@ impl Agent {
         &mut self,
         tool_calls: &[ToolCall],
         tool_registry: &Arc<ToolRegistry>,
-        tool_rejections: ToolRejections,
+        mut tool_rejections: ToolRejections,
         sink: &SharedSink,
         cancellation_token: CancellationToken,
         mut queued_messages: QueuedMessageState<'_, '_>,
@@ -546,6 +550,9 @@ impl Agent {
                 id
             });
         while let Some(batch) = batches.next() {
+            tool_rejections
+                .repeated_failure
+                .extend(self.capture_pending_verification_bindings(&batch).await);
             let foreground_bash = batch.iter().any(foreground_bash_call);
             let diagnostic_baseline = if foreground_bash && self.lsp_hub.is_some() {
                 Some(crate::lsp::DiagnosticSnapshot::default())

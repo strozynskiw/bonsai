@@ -2,14 +2,20 @@
 //! per-tool completion reporting, and image-result message construction.
 
 use async_openai::types::chat::ChatCompletionRequestUserMessage;
+use futures::future::BoxFuture;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 use super::*;
 use crate::tool::Tool;
 use crate::tool::arg_repair::{RepairNote, repair_arguments, unwrap_double_encoded_arguments};
 use crate::tool::schema::compact_schema_hint;
+use crate::verification::{
+    VerificationBinding, VerificationTerminalReason, VerificationWorkspaceIdentity,
+    normalize_verification_command,
+};
 
 const TOOL_ARGUMENT_PREVIEW_CHARS: usize = 600;
 const TOOL_RESULT_PREVIEW_CHARS: usize = 4_000;
@@ -46,8 +52,24 @@ pub(super) async fn capture_worktree_snapshot_including(
     retained_paths: &[String],
 ) -> Option<WorktreeSnapshot> {
     let commands: [&[&str]; 3] = [
-        &["diff", "--name-only", "-z", "HEAD", "--"],
-        &["diff", "--cached", "--name-only", "-z", "--"],
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--",
+        ],
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--",
+        ],
         &["ls-files", "--others", "--exclude-standard", "-z"],
     ];
     let mut paths = retained_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -75,28 +97,666 @@ pub(super) async fn capture_worktree_snapshot_including(
 
     let mut files = BTreeMap::new();
     for path in paths {
-        let absolute = root.join(&path);
-        let fingerprint = match tokio::fs::symlink_metadata(&absolute).await {
-            Ok(metadata) if metadata.file_type().is_symlink() => tokio::fs::read_link(&absolute)
-                .await
-                .map(|target| format!("link:{}", target.to_string_lossy()))
-                .unwrap_or_else(|_| "unreadable-link".to_string()),
-            Ok(metadata) if metadata.is_file() => match tokio::fs::read(&absolute).await {
-                Ok(content) => {
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update(&content);
-                    hasher.update(&metadata.len().to_le_bytes());
-                    format!("file:{}", hasher.finalize())
-                }
-                Err(_) => "unreadable-file".to_string(),
-            },
-            Ok(_) => "other".to_string(),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => "deleted".to_string(),
-            Err(_) => "unreadable".to_string(),
-        };
+        let fingerprint = fingerprint_path(&root.join(&path)).await;
         files.insert(path, fingerprint);
     }
     Some(WorktreeSnapshot { files })
+}
+
+pub(super) fn capture_verification_workspace_binding<'a>(
+    root: &'a Path,
+    command_cwd: &'a Path,
+    command: &'a str,
+) -> BoxFuture<'a, VerificationBinding> {
+    // Workspace capture has several process and filesystem await points. Box
+    // that state machine so it does not inflate every caller all the way up to
+    // the long-lived agent turn future.
+    Box::pin(async move {
+        match capture_verification_workspace_identity(root, command_cwd, command).await {
+            Ok(identity) => match identity.digest() {
+                Ok(digest) => VerificationBinding::Bound {
+                    digest,
+                    identity: Box::new(identity),
+                },
+                Err(_) => VerificationBinding::Blocked {
+                    reason: VerificationTerminalReason::EnvironmentBlocked,
+                },
+            },
+            Err(_) => VerificationBinding::Blocked {
+                reason: VerificationTerminalReason::EnvironmentBlocked,
+            },
+        }
+    })
+}
+
+async fn capture_verification_workspace_identity(
+    root: &Path,
+    command_cwd: &Path,
+    command: &str,
+) -> Result<VerificationWorkspaceIdentity, std::io::Error> {
+    let project_root = tokio::fs::canonicalize(root).await?;
+    let command_cwd = tokio::fs::canonicalize(command_cwd).await?;
+    let git_worktree_root = git_stdout(root, &["rev-parse", "--show-toplevel"])
+        .await
+        .ok()
+        .map(|path| PathBuf::from(path.trim()));
+    let (
+        repository_root,
+        worktree_root,
+        head_oid,
+        index_digest,
+        tracked_worktree_digest,
+        untracked_inputs,
+    ) = if let Some(git_worktree_root) = git_worktree_root {
+        let worktree_root = tokio::fs::canonicalize(git_worktree_root).await?;
+        let repository_root = git_common_dir(&worktree_root)
+            .await
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+        let head_oid = git_stdout(&worktree_root, &["rev-parse", "--verify", "HEAD"])
+            .await
+            .ok()
+            .map(|oid| oid.trim().to_string());
+        let (index_args, tracked_args): (&[&str], &[&str]) = if head_oid.is_some() {
+            (
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--cached",
+                    "--binary",
+                    "HEAD",
+                    "--",
+                ],
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--binary",
+                    "HEAD",
+                    "--",
+                ],
+            )
+        } else {
+            (
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--cached",
+                    "--binary",
+                    "--",
+                ],
+                &["diff", "--no-ext-diff", "--no-textconv", "--binary", "--"],
+            )
+        };
+        let index_digest = git_digest(&worktree_root, index_args).await?;
+        let tracked_worktree_digest = git_digest(&worktree_root, tracked_args).await?;
+        let untracked_inputs = capture_git_untracked_inputs(&worktree_root, command).await?;
+        (
+            repository_root,
+            worktree_root,
+            head_oid,
+            index_digest,
+            tracked_worktree_digest,
+            untracked_inputs,
+        )
+    } else {
+        let inputs = capture_unversioned_inputs(&project_root, command).await?;
+        let input_digest = digest_serializable(&inputs)?;
+        (
+            None,
+            project_root.clone(),
+            None,
+            blake3::hash(&[]).to_hex().to_string(),
+            input_digest,
+            inputs,
+        )
+    };
+
+    let mut environment = BTreeMap::new();
+    for name in [
+        "CI",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "CC",
+        "CFLAGS",
+        "CXX",
+        "CXXFLAGS",
+        "GOENV",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTUP_TOOLCHAIN",
+        "NODE_ENV",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "GOFLAGS",
+        "PATH",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            environment.insert(name, value.to_string_lossy().into_owned());
+        }
+    }
+    let command_config = verification_command_config(&project_root, &command_cwd, command).await;
+    let command_fingerprint = digest_serializable(&(normalize_command(command), command_config))?;
+    let toolchain = verification_toolchain_fingerprint(&command_cwd, command).await;
+    let toolchain_environment_fingerprint = digest_serializable(&(environment, toolchain))?;
+
+    Ok(VerificationWorkspaceIdentity {
+        repository_root,
+        worktree_root: worktree_root.to_string_lossy().into_owned(),
+        project_root: project_root.to_string_lossy().into_owned(),
+        head_oid,
+        index_digest,
+        tracked_worktree_digest,
+        untracked_inputs,
+        command_cwd: command_cwd.to_string_lossy().into_owned(),
+        command_fingerprint,
+        toolchain_environment_fingerprint,
+    })
+}
+
+async fn verification_command_config(
+    root: &Path,
+    command_cwd: &Path,
+    command: &str,
+) -> BTreeMap<String, String> {
+    const INPUTS: &[&str] = &[
+        ".bonsai/config.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".npmrc",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "tsconfig.json",
+        "pyproject.toml",
+        "requirements.txt",
+        "requirements-dev.txt",
+        "pytest.ini",
+        "setup.cfg",
+        "tox.ini",
+        "uv.lock",
+        "poetry.lock",
+        "go.mod",
+        "go.sum",
+        "go.work",
+        "go.work.sum",
+    ];
+    let mut inputs = BTreeMap::new();
+    for (scope, base) in [("project", root), ("cwd", command_cwd)] {
+        for path in INPUTS {
+            if let Ok(content) = tokio::fs::read(base.join(path)).await {
+                inputs.insert(
+                    format!("{scope}:{path}"),
+                    blake3::hash(&content).to_hex().to_string(),
+                );
+            }
+        }
+    }
+    inputs.insert("command".to_string(), normalize_command(command));
+    inputs
+}
+
+fn normalize_command(command: &str) -> String {
+    normalize_verification_command(command)
+}
+
+fn is_relevant_verification_input(path: &str, command: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let known_config = matches!(
+        file_name,
+        "Cargo.toml"
+            | "Cargo.lock"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lock"
+            | "bun.lockb"
+            | "tsconfig.json"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "requirements-dev.txt"
+            | "pytest.ini"
+            | "setup.cfg"
+            | "tox.ini"
+            | "uv.lock"
+            | "poetry.lock"
+            | "go.mod"
+            | "go.sum"
+            | "go.work"
+            | "go.work.sum"
+            | "rust-toolchain"
+            | "rust-toolchain.toml"
+    );
+    known_config
+        || normalized.starts_with("src/")
+        || normalized.starts_with("test/")
+        || normalized.starts_with("tests/")
+        || normalized.rsplit_once('.').is_some_and(|(_, extension)| {
+            matches!(
+                extension,
+                "c" | "cc"
+                    | "cpp"
+                    | "cxx"
+                    | "go"
+                    | "h"
+                    | "hpp"
+                    | "java"
+                    | "js"
+                    | "jsx"
+                    | "kt"
+                    | "kts"
+                    | "proto"
+                    | "py"
+                    | "rs"
+                    | "sh"
+                    | "sql"
+                    | "swift"
+                    | "ts"
+                    | "tsx"
+            )
+        })
+        || command_mentions_path(command, &normalized)
+}
+
+fn command_mentions_path(command: &str, path: &str) -> bool {
+    let path = path.trim_start_matches("./");
+    command.split_whitespace().any(|word| {
+        let word = word.trim_matches(|character: char| "'\";,&|()".contains(character));
+        let word = word
+            .split_once('=')
+            .map_or(word, |(_, value)| value)
+            .trim_start_matches("./");
+        word == path
+    })
+}
+
+async fn capture_git_untracked_inputs(
+    worktree_root: &Path,
+    command: &str,
+) -> Result<BTreeMap<String, String>, std::io::Error> {
+    let mut child = tokio::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .current_dir(worktree_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("Git stdout pipe was unavailable"))?;
+    let mut stdout = tokio::io::BufReader::new(stdout);
+    let mut inputs = BTreeMap::new();
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        let read = stdout.read_until(0, &mut raw).await?;
+        if read == 0 {
+            break;
+        }
+        if raw.last() == Some(&0) {
+            raw.pop();
+        }
+        if raw.is_empty() {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&raw).into_owned();
+        if is_relevant_verification_input(&path, command) {
+            inputs.insert(
+                path.clone(),
+                fingerprint_path(&worktree_root.join(path)).await,
+            );
+        }
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "Git exited with status {status}"
+        )));
+    }
+    Ok(inputs)
+}
+
+async fn capture_unversioned_inputs(
+    root: &Path,
+    command: &str,
+) -> Result<BTreeMap<String, String>, std::io::Error> {
+    let walk_root = root.to_path_buf();
+    let command = command.to_string();
+    let paths = tokio::task::spawn_blocking(move || {
+        let mut paths = Vec::new();
+        let mut builder = ignore::WalkBuilder::new(&walk_root);
+        builder.hidden(false).follow_links(false);
+        for entry in builder.build() {
+            let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
+            let Some(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let Ok(relative) = entry.path().strip_prefix(&walk_root) else {
+                continue;
+            };
+            if generated_path(relative) {
+                continue;
+            }
+            let path = relative.to_string_lossy().replace('\\', "/");
+            if is_relevant_verification_input(&path, &command) {
+                paths.push(path);
+            }
+        }
+        Ok::<_, std::io::Error>(paths)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+
+    let mut inputs = BTreeMap::new();
+    for path in paths {
+        inputs.insert(path.clone(), fingerprint_path(&root.join(path)).await);
+    }
+    Ok(inputs)
+}
+
+fn generated_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(".git" | ".venv" | "__pycache__" | "build" | "dist" | "node_modules" | "target")
+        )
+    })
+}
+
+async fn verification_toolchain_fingerprint(
+    command_cwd: &Path,
+    command: &str,
+) -> BTreeMap<String, String> {
+    let mut tools = BTreeMap::new();
+    for program in verification_command_programs(command) {
+        let fingerprint = match resolve_executable(command_cwd, &program).await {
+            Some(path) => {
+                let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
+                format!(
+                    "{}:{}",
+                    canonical.to_string_lossy(),
+                    fingerprint_executable(&canonical).await
+                )
+            }
+            None => "unresolved".to_string(),
+        };
+        tools.insert(program, fingerprint);
+    }
+    tools
+}
+
+async fn fingerprint_executable(path: &Path) -> String {
+    type CacheKey = (PathBuf, u64, String);
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CacheKey, String>>,
+    > = std::sync::OnceLock::new();
+
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return fingerprint_path(path).await,
+    };
+    let key = (
+        path.to_path_buf(),
+        metadata.len(),
+        executable_change_stamp(&metadata),
+    );
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(cache) = cache.lock()
+        && let Some(fingerprint) = cache.get(&key)
+    {
+        return fingerprint.clone();
+    }
+
+    let fingerprint = fingerprint_path(path).await;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, fingerprint.clone());
+    }
+    fingerprint
+}
+
+#[cfg(unix)]
+fn executable_change_stamp(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+
+    format!(
+        "{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
+    )
+}
+
+#[cfg(not(unix))]
+fn executable_change_stamp(metadata: &std::fs::Metadata) -> String {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn verification_command_programs(command: &str) -> BTreeSet<String> {
+    let analysis = crate::tool::analyze_bash_command(command);
+    analysis
+        .permission_commands()
+        .iter()
+        .filter_map(|segment| command_program(segment))
+        .collect()
+}
+
+fn command_program(segment: &str) -> Option<String> {
+    let words = segment
+        .split_whitespace()
+        .map(|word| word.trim_matches(['(', ')', '\'', '"']))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    while words.get(index).is_some_and(|word| shell_assignment(word)) {
+        index += 1;
+    }
+    if words.get(index) == Some(&"env") {
+        index += 1;
+        while let Some(word) = words.get(index) {
+            if *word == "--" {
+                index += 1;
+                break;
+            }
+            if matches!(*word, "-u" | "--unset" | "-C" | "--chdir") {
+                index = index.saturating_add(2);
+                continue;
+            }
+            if word.starts_with('-') || shell_assignment(word) {
+                index += 1;
+                continue;
+            }
+            break;
+        }
+    }
+    while matches!(words.get(index), Some(&"command" | &"exec")) {
+        index += 1;
+    }
+    words.get(index).map(|program| program.to_string())
+}
+
+fn shell_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|character| character == '_' || character.is_ascii_alphanumeric())
+    })
+}
+
+async fn resolve_executable(command_cwd: &Path, program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('/') || program.contains('\\') {
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            command_cwd.join(path)
+        };
+        return tokio::fs::symlink_metadata(&candidate)
+            .await
+            .ok()
+            .map(|_| candidate);
+    }
+    let search_path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&search_path) {
+        let candidate = directory.join(program);
+        if tokio::fs::symlink_metadata(&candidate).await.is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+async fn fingerprint_path(path: &Path) -> String {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return "missing".to_string();
+        }
+        Err(_) => return "unreadable".to_string(),
+    };
+    if metadata.file_type().is_symlink() {
+        let target = tokio::fs::read_link(path)
+            .await
+            .map(|target| target.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unreadable".to_string());
+        let resolved = match tokio::fs::canonicalize(path).await {
+            Ok(resolved) => resolved,
+            Err(_) => return format!("link:{target}:missing-target"),
+        };
+        let resolved_metadata = match tokio::fs::metadata(&resolved).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return format!("link:{target}:non-regular-target"),
+            Err(_) => return format!("link:{target}:unreadable-target"),
+        };
+        return format!(
+            "link:{target}:{}:{}",
+            resolved_metadata.len(),
+            fingerprint_regular_file(&resolved).await,
+        );
+    }
+    if metadata.is_file() {
+        return fingerprint_regular_file(path).await;
+    }
+    "other".to_string()
+}
+
+async fn fingerprint_regular_file(path: &Path) -> String {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return "non-regular-file".to_string(),
+        Err(_) => return "unreadable-file".to_string(),
+    };
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(_) => return "unreadable-file".to_string(),
+    };
+    let mut hasher = blake3::Hasher::new();
+    // Keep the read buffer off the async state machine's stack. This helper is
+    // nested under the already-large agent turn future, so an inline 64 KiB
+    // array can push ordinary debug/test threads over their stack limit.
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => {
+                hasher.update(&buffer[..read]);
+            }
+            Err(_) => return "unreadable-file".to_string(),
+        }
+    }
+    format!("file:{}:{}", metadata.len(), hasher.finalize())
+}
+
+async fn git_common_dir(root: &Path) -> Result<PathBuf, std::io::Error> {
+    let path = git_stdout(root, &["rev-parse", "--git-common-dir"]).await?;
+    let path = PathBuf::from(path.trim());
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    tokio::fs::canonicalize(path).await
+}
+
+fn digest_serializable(value: &impl serde::Serialize) -> Result<String, std::io::Error> {
+    serde_json::to_vec(value)
+        .map(|encoded| blake3::hash(&encoded).to_hex().to_string())
+        .map_err(std::io::Error::other)
+}
+
+async fn git_stdout(root: &Path, args: &[&str]) -> Result<String, std::io::Error> {
+    String::from_utf8(git_bytes(root, args).await?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, std::io::Error> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .await?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+async fn git_digest(root: &Path, args: &[&str]) -> Result<String, std::io::Error> {
+    let mut child = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("Git stdout pipe was unavailable"))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = stdout.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "Git exited with status {status}"
+        )));
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// Parse a tool call's JSON arguments, returning a model-readable error string
@@ -736,5 +1396,184 @@ mod tests {
             result.ends_with("last_output:\ntail"),
             "footer should remain the final section: {result}"
         );
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("run git");
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn verification_identity_distinguishes_index_and_untracked_inputs() {
+        let root = tempfile::tempdir().expect("temp repository");
+        run_git(root.path(), &["init", "-q"]);
+        run_git(root.path(), &["config", "user.email", "test@example.com"]);
+        run_git(root.path(), &["config", "user.name", "Test"]);
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        run_git(root.path(), &["add", "Cargo.toml"]);
+        run_git(root.path(), &["commit", "-qm", "initial"]);
+
+        let clean =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        std::fs::write(root.path().join("input.rs"), "untracked").expect("untracked input");
+        let untracked =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        assert_ne!(clean, untracked);
+
+        run_git(root.path(), &["add", "input.rs"]);
+        let indexed =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        assert_ne!(untracked, indexed);
+
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("dirty tracked manifest");
+        let dirty =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        assert_ne!(indexed, dirty, "equal HEAD must not hide tracked dirt");
+    }
+
+    #[tokio::test]
+    async fn verification_identity_ignores_unrelated_untracked_notes() {
+        let root = tempfile::tempdir().expect("temp repository");
+        run_git(root.path(), &["init", "-q"]);
+        run_git(root.path(), &["config", "user.email", "test@example.com"]);
+        run_git(root.path(), &["config", "user.name", "Test"]);
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        run_git(root.path(), &["add", "Cargo.toml"]);
+        run_git(root.path(), &["commit", "-qm", "initial"]);
+
+        let clean =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        std::fs::write(root.path().join("scratch-notes.md"), "not a test input")
+            .expect("unrelated note");
+        let with_note =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+
+        assert_eq!(clean, with_note);
+    }
+
+    #[tokio::test]
+    async fn verification_identity_supports_unversioned_projects() {
+        let root = tempfile::tempdir().expect("temp project");
+        std::fs::write(root.path().join("main.py"), "print('first')\n").expect("source");
+        let first =
+            capture_verification_workspace_binding(root.path(), root.path(), "python -m pytest")
+                .await;
+        assert!(matches!(first, VerificationBinding::Bound { .. }));
+
+        std::fs::write(root.path().join("main.py"), "print('second')\n").expect("changed source");
+        let second =
+            capture_verification_workspace_binding(root.path(), root.path(), "python -m pytest")
+                .await;
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verification_tool_fingerprint_never_executes_the_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temp project");
+        let tool = root.path().join("verify-tool");
+        let marker = root.path().join("tool-was-executed");
+        std::fs::write(
+            &tool,
+            format!("#!/bin/sh\ntouch {:?}\n", marker.to_string_lossy()),
+        )
+        .expect("tool script");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+            .expect("executable tool");
+
+        let first =
+            capture_verification_workspace_binding(root.path(), root.path(), "./verify-tool test")
+                .await;
+        assert!(matches!(first, VerificationBinding::Bound { .. }));
+        assert!(
+            !marker.exists(),
+            "fingerprinting must never execute an unapproved command"
+        );
+
+        std::fs::write(&tool, "#!/bin/sh\nexit 2\n").expect("changed tool");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+            .expect("executable tool");
+        let second =
+            capture_verification_workspace_binding(root.path(), root.path(), "./verify-tool test")
+                .await;
+        assert_ne!(first, second, "toolchain changes must alter the binding");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verification_binding_never_runs_git_external_diff_drivers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temp repository");
+        run_git(root.path(), &["init", "-q"]);
+        run_git(root.path(), &["config", "user.email", "test@example.com"]);
+        run_git(root.path(), &["config", "user.name", "Test"]);
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        run_git(root.path(), &["add", "Cargo.toml"]);
+        run_git(root.path(), &["commit", "-qm", "initial"]);
+
+        let marker = root.path().join("external-diff-ran");
+        let driver = root.path().join("external-diff");
+        std::fs::write(
+            &driver,
+            format!("#!/bin/sh\ntouch {:?}\n", marker.to_string_lossy()),
+        )
+        .expect("external diff driver");
+        std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755))
+            .expect("executable driver");
+        run_git(
+            root.path(),
+            &[
+                "config",
+                "diff.external",
+                driver.to_str().expect("utf-8 driver path"),
+            ],
+        );
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("dirty manifest");
+
+        let binding =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+
+        assert!(matches!(binding, VerificationBinding::Bound { .. }));
+        assert!(
+            !marker.exists(),
+            "workspace fingerprinting must disable Git external diff execution"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fingerprinting_a_device_symlink_never_reads_the_device() {
+        let root = tempfile::tempdir().expect("temp project");
+        let link = root.path().join("device-link");
+        std::os::unix::fs::symlink("/dev/zero", &link).expect("device symlink");
+
+        let fingerprint =
+            tokio::time::timeout(std::time::Duration::from_secs(1), fingerprint_path(&link))
+                .await
+                .expect("device fingerprint must remain bounded");
+
+        assert!(fingerprint.contains("non-regular-target"), "{fingerprint}");
     }
 }

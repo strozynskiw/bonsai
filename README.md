@@ -709,13 +709,27 @@ after_edit = "off"        # default; off | ask | on
   from their manifests in stable order; `Cargo.lock` adds `--locked`.
   Commands execute through the agent's normal Bash
   permission, sandbox, hook, cancellation, and transcript-evidence path.
+  Every check is bound to a canonical BLAKE3 workspace identity captured
+  without executing a probe: repository/worktree roots, `HEAD`, index and
+  tracked-file state, relevant untracked source/config inputs, command and
+  working directory, verification configuration, environment, and resolved
+  executable content. Non-Git projects use a relevant-input content fingerprint
+  instead.
+  Bonsai compares that binding with a fresh identity at the TUI/headless
+  delivery boundary; a pass is reported as fresh only when every check still
+  matches. Later edits, commits/checkouts, index changes, dependency/config
+  changes, or toolchain changes make the affected evidence stale.
   `after_edit` defaults to `off`. Set `after_edit = "on"` to run the detected
   test profile once after a coding turn that changed workspace state (falling
   back to build when no tests exist). `ask` prompts in the TUI and skips on
   noninteractive surfaces.
   In headless mode use `bonsai -p /test` or `bonsai -p /build`; the slash
   request expands to the same bounded profile workflow before the agent runs.
-  JSON output includes the typed check results and final-workspace freshness;
+  Identical retries share one attempt history; an unchanged deterministic
+  failure is recorded and suppressed until an input changes. JSON output
+  includes typed check results, attempt history, short workspace-binding ids,
+  and `fresh`/`stale`/`skipped`/`blocked` freshness without parsing assistant
+  prose.
   stale, failed, interrupted, or incomplete verification exits non-zero.
 - **`/config`** — the merged view: every configured MCP server and hook, each
   annotated with the layer that won (`global`/`project`/`env`) and its file

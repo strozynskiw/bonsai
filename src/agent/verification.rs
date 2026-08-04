@@ -1,9 +1,10 @@
 use super::*;
 use crate::output::ToolExecutionStatus;
 use crate::verification::{
-    VerificationCheck, VerificationCheckRecord, VerificationCheckStatus, VerificationKind,
-    VerificationProfile, VerificationReasoningEscalation, VerificationRunRecord,
-    VerificationRunStatus, VerificationWorkflow, VerifyAfterEdit,
+    VerificationBinding, VerificationCheck, VerificationCheckRecord, VerificationCheckStatus,
+    VerificationKind, VerificationProfile, VerificationReasoningEscalation, VerificationRunRecord,
+    VerificationRunStatus, VerificationTerminalReason, VerificationWorkflow, VerifyAfterEdit,
+    normalize_verification_command,
 };
 
 const MAX_VERIFICATION_REPAIR_ATTEMPTS: u32 = 2;
@@ -66,6 +67,54 @@ impl VerificationRecoveryEvent {
 }
 
 impl Agent {
+    pub(super) fn begin_verification_observation_window(&mut self) {
+        self.verification.observed_verification_run_indices.clear();
+    }
+
+    pub(super) async fn capture_pending_verification_bindings(
+        &mut self,
+        calls: &[ToolCall],
+    ) -> HashMap<String, String> {
+        let mut suppressed = HashMap::new();
+        for call in calls {
+            if call.name != "bash" {
+                continue;
+            }
+            let Some(command) = bash_command(&call.arguments) else {
+                continue;
+            };
+            if self.verification_kind_for_command(&command).is_none() {
+                continue;
+            }
+            let fallback_cwd = bash_command_cwd(&self.project_root, &call.arguments);
+            let command_cwd = match serde_json::from_str(&call.arguments) {
+                Ok(arguments) => match self.tool_registry.get("bash") {
+                    Some(tool) => tool.execution_cwd(&arguments).await.unwrap_or(fallback_cwd),
+                    None => fallback_cwd,
+                },
+                Err(_) => fallback_cwd,
+            };
+            let binding =
+                capture_verification_workspace_binding(&self.project_root, &command_cwd, &command)
+                    .await;
+            self.verification
+                .pending_verification_bindings
+                .insert(call.id.clone(), binding.clone());
+            if self.has_deterministic_failure(&command, &binding) {
+                self.verification
+                    .suppressed_verification_calls
+                    .insert(call.id.clone());
+                suppressed.insert(
+                    call.id.clone(),
+                    format!(
+                        "Verification blocked: {command:?} already produced the same deterministic failure for unchanged inputs."
+                    ),
+                );
+            }
+        }
+        suppressed
+    }
+
     /// Reset to a focused coding context and arm typed verification evidence.
     pub(crate) async fn begin_verification_run(
         &mut self,
@@ -73,6 +122,7 @@ impl Agent {
         checks: &[VerificationCheck],
         prompt: &str,
     ) {
+        self.begin_verification_observation_window();
         self.begin_focused_coding_run(prompt).await;
         self.arm_verification_record(kind, checks);
     }
@@ -120,25 +170,55 @@ impl Agent {
     }
 
     fn mark_latest_verification_stale(&mut self, paths: &[String]) {
-        if self.verification.active_verification.is_some() {
-            return;
-        }
-        let Some(record) = self.verification.verification_runs.last_mut() else {
-            return;
-        };
-        if !matches!(
-            record.status,
-            VerificationRunStatus::Passed | VerificationRunStatus::Unstable
-        ) {
-            return;
-        }
-        record.status = VerificationRunStatus::Stale;
-        record.observed_final_workspace = Some(false);
-        self.verification.after_edit_verification_injected = false;
-        for path in paths {
-            if !record.workspace_changes_after_last_check.contains(path) {
-                record.workspace_changes_after_last_check.push(path.clone());
+        if let Some(record_index) = self
+            .verification
+            .active_verification
+            .as_ref()
+            .map(|active| active.record_index)
+        {
+            let invalidated = self
+                .verification
+                .verification_runs
+                .get_mut(record_index)
+                .map(|record| {
+                    let mut invalidated = Vec::new();
+                    for check in &mut record.checks {
+                        if check.status == VerificationCheckStatus::Passed {
+                            check.status = VerificationCheckStatus::Pending;
+                            check.delivered_binding = None;
+                            invalidated.push(check.name.clone());
+                        }
+                    }
+                    invalidated
+                })
+                .unwrap_or_default();
+            if !invalidated.is_empty() {
+                self.push_harness_note(&format!(
+                    "The active verification gate was invalidated by a workspace mutation. After the focused repair succeeds, rerun these previously passing checks against the final workspace: {}.",
+                    invalidated.join(", ")
+                ));
             }
+            return;
+        }
+        let mut invalidated = false;
+        for record in &mut self.verification.verification_runs {
+            if !matches!(
+                record.status,
+                VerificationRunStatus::Passed | VerificationRunStatus::Unstable
+            ) {
+                continue;
+            }
+            invalidated = true;
+            record.status = VerificationRunStatus::Stale;
+            record.observed_final_workspace = Some(false);
+            for path in paths {
+                if !record.workspace_changes_after_last_check.contains(path) {
+                    record.workspace_changes_after_last_check.push(path.clone());
+                }
+            }
+        }
+        if invalidated {
+            self.verification.after_edit_verification_injected = false;
         }
     }
 
@@ -166,6 +246,11 @@ impl Agent {
             .filter(|run| run.status == VerificationRunStatus::Stale)
             .map(|run| run.kind);
         if policy == VerifyAfterEdit::Off && stale_kind.is_none() {
+            self.record_skipped_profile(
+                VerificationKind::Test,
+                &[],
+                VerificationTerminalReason::PolicyDisabled,
+            );
             return false;
         }
 
@@ -178,6 +263,11 @@ impl Agent {
             VerificationKind::Build
         } else {
             sink.status("Post-edit verification skipped: no checks are configured or detected.");
+            self.record_skipped_profile(
+                VerificationKind::Test,
+                &[],
+                VerificationTerminalReason::Irrelevant,
+            );
             return false;
         };
         let workflow = VerificationWorkflow {
@@ -187,6 +277,11 @@ impl Agent {
                 Ok(prompt) => prompt,
                 Err(message) => {
                     sink.status(&format!("Post-edit verification skipped: {message}"));
+                    self.record_skipped_profile(
+                        kind,
+                        profile.checks(kind),
+                        VerificationTerminalReason::EnvironmentBlocked,
+                    );
                     return false;
                 }
             },
@@ -194,10 +289,11 @@ impl Agent {
 
         if policy == VerifyAfterEdit::Ask
             && stale_kind.is_none()
-            && !self
+            && let Err(reason) = self
                 .confirm_after_edit_verification(kind, cancellation_token)
                 .await
         {
+            self.record_skipped_profile(kind, &workflow.checks, reason);
             return false;
         }
 
@@ -222,9 +318,9 @@ impl Agent {
         &self,
         kind: VerificationKind,
         cancellation_token: CancellationToken,
-    ) -> bool {
+    ) -> Result<(), VerificationTerminalReason> {
         let Some(interaction) = self.interaction.as_ref() else {
-            return false;
+            return Err(VerificationTerminalReason::EnvironmentBlocked);
         };
         let outcome = interaction
             .request_with_cancellation(
@@ -253,15 +349,154 @@ impl Agent {
                 cancellation_token,
             )
             .await;
-        matches!(
-            outcome,
+        match outcome {
             Ok(InteractionOutcome::Question(Some(InteractionAnswer::Choices(choices))))
-                if choices.first() == Some(&0)
-        )
+                if choices.first() == Some(&0) =>
+            {
+                Ok(())
+            }
+            Ok(InteractionOutcome::Question(Some(_))) => {
+                Err(VerificationTerminalReason::UserSkipped)
+            }
+            Ok(_) => Err(VerificationTerminalReason::UserSkipped),
+            Err(crate::interaction::InteractionStatus::Noninteractive) => {
+                Err(VerificationTerminalReason::EnvironmentBlocked)
+            }
+            Err(crate::interaction::InteractionStatus::Cancelled) => {
+                Err(VerificationTerminalReason::Cancelled)
+            }
+        }
     }
 
     pub(crate) fn verification_runs(&self) -> &[VerificationRunRecord] {
         &self.verification.verification_runs
+    }
+
+    fn verification_kind_for_command(&self, command: &str) -> Option<VerificationKind> {
+        let normalized = normalize_verification_command(command);
+        let active_kind = self
+            .verification
+            .active_verification
+            .as_ref()
+            .and_then(|active| self.verification.verification_runs.get(active.record_index))
+            .and_then(|run| {
+                run.checks
+                    .iter()
+                    .any(|check| normalize_verification_command(&check.command) == normalized)
+                    .then_some(run.kind)
+            });
+        active_kind
+            .or_else(|| {
+                self.config
+                    .verification
+                    .test
+                    .as_deref()
+                    .is_some_and(|checks| {
+                        checks
+                            .iter()
+                            .any(|check| normalize_verification_command(check) == normalized)
+                    })
+                    .then_some(VerificationKind::Test)
+            })
+            .or_else(|| {
+                self.config
+                    .verification
+                    .build
+                    .as_deref()
+                    .is_some_and(|checks| {
+                        checks
+                            .iter()
+                            .any(|check| normalize_verification_command(check) == normalized)
+                    })
+                    .then_some(VerificationKind::Build)
+            })
+            .or_else(|| observed_verification_kind(command))
+    }
+
+    fn has_deterministic_failure(&self, command: &str, binding: &VerificationBinding) -> bool {
+        if !matches!(binding, VerificationBinding::Bound { .. }) {
+            return false;
+        }
+        let normalized = normalize_verification_command(command);
+        self.verification.verification_runs.iter().any(|run| {
+            run.checks.iter().any(|check| {
+                normalize_verification_command(&check.command) == normalized
+                    && check.binding.as_ref() == Some(binding)
+                    && check.terminal_reason_kind
+                        == Some(VerificationTerminalReason::RepeatedDeterministicFailure)
+            })
+        })
+    }
+
+    /// Rebind completion-relevant checks to the workspace about to be delivered.
+    pub(crate) async fn revalidate_verification_for_delivery(&mut self, baseline: usize) {
+        let run_indices = self
+            .verification
+            .verification_runs
+            .iter()
+            .enumerate()
+            .skip(baseline)
+            .filter_map(|(index, run)| {
+                matches!(
+                    run.status,
+                    VerificationRunStatus::Passed
+                        | VerificationRunStatus::Unstable
+                        | VerificationRunStatus::Failed
+                        | VerificationRunStatus::Blocked
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for run_index in run_indices {
+            let checks = self.verification.verification_runs[run_index]
+                .checks
+                .iter()
+                .map(|check| (check.command.clone(), check.binding.clone()))
+                .collect::<Vec<_>>();
+            let mut delivered_bindings = Vec::with_capacity(checks.len());
+            let mut stale = false;
+            let mut blocked_reason = None;
+            for (command, recorded_binding) in checks {
+                let command_cwd = recorded_binding
+                    .as_ref()
+                    .and_then(binding_command_cwd)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.project_root.clone());
+                let current = capture_verification_workspace_binding(
+                    &self.project_root,
+                    &command_cwd,
+                    &command,
+                )
+                .await;
+                stale |= !bindings_are_fresh(recorded_binding.as_ref(), &current);
+                if let VerificationBinding::Blocked { reason } = &current {
+                    blocked_reason.get_or_insert(*reason);
+                }
+                delivered_bindings.push(current);
+            }
+            let run = &mut self.verification.verification_runs[run_index];
+            let was_successful = matches!(
+                run.status,
+                VerificationRunStatus::Passed | VerificationRunStatus::Unstable
+            );
+            for (check, delivered) in run.checks.iter_mut().zip(delivered_bindings) {
+                check.delivered_binding = Some(delivered);
+            }
+            run.delivered_workspace_binding = run
+                .checks
+                .last()
+                .and_then(|check| check.delivered_binding.clone());
+            if let Some(reason) = blocked_reason {
+                run.status = VerificationRunStatus::Blocked;
+                run.observed_final_workspace = None;
+                run.terminal_reason_kind = Some(reason);
+            } else if stale && was_successful {
+                run.status = VerificationRunStatus::Stale;
+                run.observed_final_workspace = Some(false);
+            } else {
+                run.observed_final_workspace = Some(!stale);
+            }
+        }
     }
 
     pub(crate) fn restore_verification_runs(&mut self, mut runs: Vec<VerificationRunRecord>) {
@@ -270,6 +505,13 @@ impl Agent {
             if run.status == VerificationRunStatus::Running {
                 run.status = VerificationRunStatus::Interrupted;
                 run.finished_at_ms = Some(now);
+                run.terminal_reason_kind = Some(VerificationTerminalReason::Interrupted);
+                for check in &mut run.checks {
+                    if check.status == VerificationCheckStatus::Pending {
+                        check.completed_at_ms = Some(now);
+                        check.terminal_reason_kind = Some(VerificationTerminalReason::Interrupted);
+                    }
+                }
             }
         }
         self.verification = VerificationState {
@@ -278,31 +520,248 @@ impl Agent {
         };
     }
 
+    pub(super) async fn record_background_verification_results(
+        &mut self,
+        tasks: &[crate::background::BackgroundTaskSnapshot],
+    ) {
+        for task in tasks {
+            let Some(capture) = self
+                .verification
+                .background_verification_bindings
+                .remove(&task.id)
+            else {
+                continue;
+            };
+            let tool_call_id = task
+                .tool_call_id
+                .clone()
+                .unwrap_or_else(|| format!("background:{}", task.id));
+            let arguments = serde_json::json!({
+                "command": capture.command.clone(),
+                "workdir": task.cwd,
+            })
+            .to_string();
+            let tool_call = ToolCall {
+                id: tool_call_id.clone(),
+                name: "bash".to_string(),
+                arguments,
+            };
+            let result = ToolOutput::Command {
+                rendered: task.completion_report(),
+                stdout: task.tail.clone(),
+                stderr: String::new(),
+                exit_code: task.exit_code,
+                timed_out: task.timed_out,
+                truncation: None,
+            };
+            let status = match task.status {
+                crate::background::BackgroundTaskStatus::Succeeded => {
+                    ToolExecutionStatus::Succeeded
+                }
+                crate::background::BackgroundTaskStatus::Failed
+                | crate::background::BackgroundTaskStatus::TimedOut => ToolExecutionStatus::Failed,
+                crate::background::BackgroundTaskStatus::Stopped => {
+                    ToolExecutionStatus::Interrupted
+                }
+                crate::background::BackgroundTaskStatus::Running => {
+                    self.verification
+                        .background_verification_bindings
+                        .insert(task.id.clone(), capture);
+                    continue;
+                }
+            };
+            self.verification
+                .pending_verification_bindings
+                .insert(tool_call_id, capture.binding);
+            let active_record_index = self
+                .verification
+                .active_verification
+                .as_ref()
+                .map(|active| active.record_index);
+            let belongs_to_active =
+                capture.record_index.is_some() && capture.record_index == active_record_index;
+            if active_record_index.is_none() || belongs_to_active {
+                self.record_verification_tool_result(&tool_call, &result, status)
+                    .await;
+                continue;
+            }
+
+            // A detached command may finish during a later, unrelated
+            // verification workflow. Record it as its own observed check
+            // without letting the shared command text consume that workflow's
+            // pending check.
+            let unrelated_active = self.verification.active_verification.take();
+            self.record_verification_tool_result(&tool_call, &result, status)
+                .await;
+            self.verification.active_verification = unrelated_active;
+        }
+    }
+
     pub(super) async fn record_verification_tool_result(
         &mut self,
         tool_call: &ToolCall,
         result: &ToolOutput,
         status: ToolExecutionStatus,
     ) {
-        if tool_call.name != "bash"
-            || matches!(
-                status,
-                ToolExecutionStatus::Skipped
-                    | ToolExecutionStatus::Interrupted
-                    | ToolExecutionStatus::Started
-            )
-        {
+        if tool_call.name != "bash" {
             return;
         }
         let Some(command) = bash_command(&tool_call.arguments) else {
             return;
         };
+        if self.verification_kind_for_command(&command).is_none() {
+            self.verification
+                .pending_verification_bindings
+                .remove(&tool_call.id);
+            self.verification
+                .suppressed_verification_calls
+                .remove(&tool_call.id);
+            return;
+        }
+        let command_cwd = bash_command_cwd(&self.project_root, &tool_call.arguments);
+        let pending_binding = self
+            .verification
+            .pending_verification_bindings
+            .remove(&tool_call.id);
+        if status == ToolExecutionStatus::Started {
+            let ToolOutput::BackgroundTaskStarted { task_id, .. } = result else {
+                return;
+            };
+            if let Some(task) = self.background_tasks.snapshot(task_id).await {
+                let binding = pending_binding
+                    .filter(|binding| binding_matches_background_start(binding, &task.cwd))
+                    .unwrap_or(VerificationBinding::Blocked {
+                        reason: VerificationTerminalReason::EnvironmentBlocked,
+                    });
+                let record_index = self
+                    .verification
+                    .active_verification
+                    .as_ref()
+                    .filter(|active| {
+                        self.verification
+                            .verification_runs
+                            .get(active.record_index)
+                            .is_some_and(|record| {
+                                let command = normalize_verification_command(&command);
+                                record.checks.iter().any(|check| {
+                                    normalize_verification_command(&check.command) == command
+                                })
+                            })
+                    })
+                    .map(|active| active.record_index);
+                if let Some(record_index) = record_index
+                    && let Some(check) = self
+                        .verification
+                        .verification_runs
+                        .get_mut(record_index)
+                        .and_then(|record| {
+                            let command = normalize_verification_command(&command);
+                            record.checks.iter_mut().find(|check| {
+                                normalize_verification_command(&check.command) == command
+                            })
+                        })
+                {
+                    check.tool_call_id = Some(tool_call.id.clone());
+                    check.binding = Some(binding.clone());
+                }
+                self.verification.background_verification_bindings.insert(
+                    task_id.clone(),
+                    BackgroundVerificationCapture {
+                        binding,
+                        record_index,
+                        command: command.clone(),
+                    },
+                );
+            } else {
+                let binding = match pending_binding {
+                    Some(binding) => binding,
+                    None => {
+                        capture_verification_workspace_binding(
+                            &self.project_root,
+                            &command_cwd,
+                            &command,
+                        )
+                        .await
+                    }
+                };
+                self.record_nonexecuted_verification(
+                    &command,
+                    Some(&tool_call.id),
+                    VerificationTerminalReason::Delegated,
+                    binding,
+                    "Verification was delegated to an interactive process without a capturable terminal result.",
+                );
+            }
+            return;
+        }
+        let binding = match pending_binding {
+            Some(binding) => binding,
+            None => {
+                capture_verification_workspace_binding(&self.project_root, &command_cwd, &command)
+                    .await
+            }
+        };
+        let deterministic_failure_suppressed = self
+            .verification
+            .suppressed_verification_calls
+            .remove(&tool_call.id);
+        if matches!(
+            status,
+            ToolExecutionStatus::Skipped | ToolExecutionStatus::Interrupted
+        ) {
+            let reason = if deterministic_failure_suppressed {
+                VerificationTerminalReason::RepeatedDeterministicFailure
+            } else if status == ToolExecutionStatus::Interrupted {
+                VerificationTerminalReason::Interrupted
+            } else {
+                verification_nonexecution_reason(result, status)
+            };
+            let message = if deterministic_failure_suppressed {
+                format!(
+                    "Verification blocked: {command:?} was not executed because the same workspace already produced a confirmed deterministic failure."
+                )
+            } else {
+                format!(
+                    "Verification did not execute {command:?}: {}.",
+                    reason.label()
+                )
+            };
+            self.record_nonexecuted_verification(
+                &command,
+                Some(&tool_call.id),
+                reason,
+                binding,
+                &message,
+            );
+            return;
+        }
+        if !matches!(result, ToolOutput::Command { .. }) {
+            let reason = verification_nonexecution_reason(result, status);
+            let message = format!(
+                "Verification did not execute {command:?}: {}.",
+                reason.label()
+            );
+            self.record_nonexecuted_verification(
+                &command,
+                Some(&tool_call.id),
+                reason,
+                binding,
+                &message,
+            );
+            return;
+        }
         let explicit = self
             .verification
             .active_verification
             .as_ref()
             .and_then(|active| self.verification.verification_runs.get(active.record_index))
-            .is_some_and(|record| record.checks.iter().any(|check| check.command == command));
+            .is_some_and(|record| {
+                let command = normalize_verification_command(&command);
+                record
+                    .checks
+                    .iter()
+                    .any(|check| normalize_verification_command(&check.command) == command)
+            });
         let passed = matches!(
             result,
             ToolOutput::Command {
@@ -314,7 +773,7 @@ impl Agent {
         self.self_review
             .note_check_result(&command, passed, explicit);
         if self.verification.active_verification.is_none() {
-            self.record_observed_verification(&command, tool_call, result, status);
+            self.record_observed_verification(&command, tool_call, result, status, binding);
             return;
         }
         let Some(active) = self.verification.active_verification.as_ref() else {
@@ -324,8 +783,10 @@ impl Agent {
         let Some(record) = self.verification.verification_runs.get(record_index) else {
             return;
         };
+        let normalized = normalize_verification_command(&command);
         let Some(check_index) = record.checks.iter().position(|check| {
-            check.status != VerificationCheckStatus::Passed && check.command == command
+            check.status != VerificationCheckStatus::Passed
+                && normalize_verification_command(&check.command) == normalized
         }) else {
             return;
         };
@@ -338,10 +799,15 @@ impl Agent {
             .unwrap_or_default();
         let snapshot =
             capture_worktree_snapshot_including(&self.project_root, &retained_paths).await;
-        let workspace_changed = match (active.last_check_snapshot.as_ref(), snapshot.as_ref()) {
-            (Some(previous), Some(current)) => !previous.changed_paths(current).is_empty(),
-            _ => false,
-        };
+        let workspace_changed = record.checks[check_index]
+            .binding
+            .as_ref()
+            .is_some_and(|previous| previous != &binding)
+            || match (active.last_check_snapshot.as_ref(), snapshot.as_ref()) {
+                (Some(previous), Some(current)) => !previous.changed_paths(current).is_empty(),
+                _ => false,
+            };
+        let binding_blocker = binding_terminal_reason(&binding);
         let failure_signature = (check_status != VerificationCheckStatus::Passed)
             .then(|| verification_failure_signature(&command, result, check_status));
 
@@ -358,10 +824,22 @@ impl Agent {
             check.status = check_status;
             check.tool_call_id = Some(tool_call.id.clone());
             check.exit_code = exit_code;
-            check.completed_at_ms = Some(crate::util::time::now_ms());
+            let now = crate::util::time::now_ms();
+            check.completed_at_ms = Some(now);
             check.attempt_count = check.attempt_count.saturating_add(1);
+            check.attempt_timestamps_ms.push(now);
+            check.binding = Some(binding);
 
-            if check_status == VerificationCheckStatus::Passed {
+            if let Some(reason) = binding_blocker {
+                let message = format!(
+                    "Verification evidence for {command:?} could not be bound to the workspace: {}.",
+                    reason.label()
+                );
+                check.terminal_reason_kind = Some(reason);
+                record.terminal_reason = Some(message.clone());
+                record.terminal_reason_kind = Some(reason);
+                active.pending_blocker = Some(message);
+            } else if check_status == VerificationCheckStatus::Passed {
                 if active.last_failure_signature.take().is_some() && !workspace_changed {
                     active.unstable_observed = true;
                     recovery_event = Some(VerificationRecoveryEvent::UnstablePass {
@@ -371,6 +849,7 @@ impl Agent {
                 active.flaky_rerun_used = false;
             } else if let Some(signature) = failure_signature {
                 check.last_failure_signature = Some(signature.clone());
+                check.failure_signatures.push(signature.clone());
                 let previous_signature = active.last_failure_signature.replace(signature.clone());
                 match previous_signature {
                     None if record.repair_attempts >= MAX_VERIFICATION_REPAIR_ATTEMPTS => {
@@ -378,6 +857,10 @@ impl Agent {
                             "Verification blocked: {command:?} failed after the run exhausted its {MAX_VERIFICATION_REPAIR_ATTEMPTS} focused repair attempts."
                         );
                         record.terminal_reason = Some(reason.clone());
+                        record.terminal_reason_kind =
+                            Some(VerificationTerminalReason::RepairBudgetExhausted);
+                        check.terminal_reason_kind =
+                            Some(VerificationTerminalReason::RepairBudgetExhausted);
                         active.pending_blocker = Some(reason);
                     }
                     None => {
@@ -394,6 +877,10 @@ impl Agent {
                             "Verification blocked: {command:?} repeated the same deterministic failure ({signature}) without a workspace change."
                         );
                         record.terminal_reason = Some(reason.clone());
+                        record.terminal_reason_kind =
+                            Some(VerificationTerminalReason::RepeatedDeterministicFailure);
+                        check.terminal_reason_kind =
+                            Some(VerificationTerminalReason::RepeatedDeterministicFailure);
                         active.pending_blocker = Some(reason);
                     }
                     Some(_) if !workspace_changed && !active.flaky_rerun_used => {
@@ -408,6 +895,10 @@ impl Agent {
                             "Verification blocked: {command:?} remained unstable after its one bounded no-change rerun."
                         );
                         record.terminal_reason = Some(reason.clone());
+                        record.terminal_reason_kind =
+                            Some(VerificationTerminalReason::UnstableFailure);
+                        check.terminal_reason_kind =
+                            Some(VerificationTerminalReason::UnstableFailure);
                         active.pending_blocker = Some(reason);
                     }
                     Some(_) if record.repair_attempts >= MAX_VERIFICATION_REPAIR_ATTEMPTS => {
@@ -415,6 +906,10 @@ impl Agent {
                             "Verification blocked: {command:?} still failed after {MAX_VERIFICATION_REPAIR_ATTEMPTS} focused repair attempts."
                         );
                         record.terminal_reason = Some(reason.clone());
+                        record.terminal_reason_kind =
+                            Some(VerificationTerminalReason::RepairBudgetExhausted);
+                        check.terminal_reason_kind =
+                            Some(VerificationTerminalReason::RepairBudgetExhausted);
                         active.pending_blocker = Some(reason);
                     }
                     Some(_) => {
@@ -449,46 +944,110 @@ impl Agent {
         tool_call: &ToolCall,
         result: &ToolOutput,
         status: ToolExecutionStatus,
+        binding: VerificationBinding,
     ) {
-        let configured_kind = self
-            .config
-            .verification
-            .test
-            .as_deref()
-            .is_some_and(|checks| checks.iter().any(|check| check.trim() == command))
-            .then_some(VerificationKind::Test)
-            .or_else(|| {
-                self.config
-                    .verification
-                    .build
-                    .as_deref()
-                    .is_some_and(|checks| checks.iter().any(|check| check.trim() == command))
-                    .then_some(VerificationKind::Build)
-            });
-        let Some(kind) = configured_kind.or_else(|| observed_verification_kind(command)) else {
+        let Some(kind) = self.verification_kind_for_command(command) else {
             return;
         };
+        let normalized = normalize_verification_command(command);
         let profile = VerificationProfile::resolve(&self.project_root, &self.config.verification);
         let check_name = profile
             .checks(kind)
             .iter()
-            .find(|check| check.command == command)
+            .find(|check| normalize_verification_command(&check.command) == normalized)
             .map(|check| check.name.clone())
             .unwrap_or_else(|| format!("Observed {} command", kind.label()));
 
         let (check_status, exit_code) = verification_check_outcome(result, status);
+        let binding_blocker = binding_terminal_reason(&binding);
         let now = crate::util::time::now_ms();
         let failure_signature = (check_status != VerificationCheckStatus::Passed)
             .then(|| verification_failure_signature(command, result, check_status));
+        let failure_signatures = failure_signature.iter().cloned().collect();
+        let existing_index = self
+            .verification
+            .observed_verification_run_indices
+            .get(&normalized)
+            .copied()
+            .filter(|index| {
+                self.verification
+                    .verification_runs
+                    .get(*index)
+                    .is_some_and(|run| {
+                        run.checks.len() == 1
+                            && normalize_verification_command(&run.checks[0].command) == normalized
+                            && run.checks[0].binding.as_ref() == Some(&binding)
+                    })
+            });
+        if let Some(existing) =
+            existing_index.and_then(|index| self.verification.verification_runs.get_mut(index))
+        {
+            let check = &mut existing.checks[0];
+            let previous_status = check.status;
+            let previous_signature = check.last_failure_signature.clone();
+            check.status = check_status;
+            check.tool_call_id = Some(tool_call.id.clone());
+            check.exit_code = exit_code;
+            check.completed_at_ms = Some(now);
+            check.attempt_count = check.attempt_count.saturating_add(1);
+            check.attempt_timestamps_ms.push(now);
+            check.delivered_binding = None;
+            if let Some(signature) = failure_signature.as_ref() {
+                check.last_failure_signature = Some(signature.clone());
+                check.failure_signatures.push(signature.clone());
+            }
+            let repeated_failure = matches!(
+                previous_status,
+                VerificationCheckStatus::Failed | VerificationCheckStatus::TimedOut
+            ) && failure_signature.is_some()
+                && previous_signature.as_ref() == failure_signature.as_ref();
+            existing.status = if let Some(reason) = binding_blocker {
+                check.terminal_reason_kind = Some(reason);
+                existing.terminal_reason_kind = Some(reason);
+                VerificationRunStatus::Blocked
+            } else if repeated_failure {
+                check.terminal_reason_kind =
+                    Some(VerificationTerminalReason::RepeatedDeterministicFailure);
+                existing.terminal_reason_kind =
+                    Some(VerificationTerminalReason::RepeatedDeterministicFailure);
+                existing.terminal_reason = Some(format!(
+                    "Verification blocked: {command:?} repeated the same deterministic failure without an input change."
+                ));
+                VerificationRunStatus::Blocked
+            } else if check_status == VerificationCheckStatus::Passed
+                && matches!(
+                    previous_status,
+                    VerificationCheckStatus::Failed | VerificationCheckStatus::TimedOut
+                )
+            {
+                existing.terminal_reason = Some(
+                    "The check passed only after a no-change rerun and is unstable.".to_string(),
+                );
+                VerificationRunStatus::Unstable
+            } else if check_status == VerificationCheckStatus::Passed {
+                VerificationRunStatus::Passed
+            } else {
+                VerificationRunStatus::Failed
+            };
+            existing.finished_at_ms = Some(now);
+            existing.observed_final_workspace = binding_blocker.is_none().then_some(true);
+            existing.delivered_workspace_binding = None;
+            return;
+        }
+        let terminal_reason_kind = binding_blocker;
+        let run_status = if terminal_reason_kind.is_some() {
+            VerificationRunStatus::Blocked
+        } else if check_status == VerificationCheckStatus::Passed {
+            VerificationRunStatus::Passed
+        } else {
+            VerificationRunStatus::Failed
+        };
+        let record_index = self.verification.verification_runs.len();
         self.verification
             .verification_runs
             .push(VerificationRunRecord {
                 kind,
-                status: if check_status == VerificationCheckStatus::Passed {
-                    VerificationRunStatus::Passed
-                } else {
-                    VerificationRunStatus::Failed
-                },
+                status: run_status,
                 checks: vec![VerificationCheckRecord {
                     name: check_name,
                     command: command.to_string(),
@@ -498,14 +1057,126 @@ impl Agent {
                     completed_at_ms: Some(now),
                     attempt_count: 1,
                     last_failure_signature: failure_signature,
+                    binding: Some(binding),
+                    delivered_binding: None,
+                    attempt_timestamps_ms: vec![now],
+                    failure_signatures,
+                    terminal_reason_kind,
                 }],
                 started_at_ms: now,
                 finished_at_ms: Some(now),
-                observed_final_workspace: Some(true),
+                observed_final_workspace: terminal_reason_kind.is_none().then_some(true),
                 workspace_changes_after_last_check: Vec::new(),
                 repair_attempts: 0,
                 reasoning_escalations: Vec::new(),
                 terminal_reason: None,
+                terminal_reason_kind,
+                delivered_workspace_binding: None,
+            });
+        self.verification
+            .observed_verification_run_indices
+            .insert(normalized, record_index);
+    }
+
+    fn record_skipped_profile(
+        &mut self,
+        kind: VerificationKind,
+        checks: &[VerificationCheck],
+        reason: VerificationTerminalReason,
+    ) {
+        let now = crate::util::time::now_ms();
+        let mut record = VerificationRunRecord::running(kind, checks);
+        record.status = verification_status_for_terminal_reason(reason);
+        record.started_at_ms = now;
+        record.finished_at_ms = Some(now);
+        record.terminal_reason_kind = Some(reason);
+        for check in &mut record.checks {
+            check.terminal_reason_kind = Some(reason);
+        }
+        self.verification.verification_runs.push(record);
+    }
+
+    fn record_nonexecuted_verification(
+        &mut self,
+        command: &str,
+        tool_call_id: Option<&str>,
+        reason: VerificationTerminalReason,
+        binding: VerificationBinding,
+        message: &str,
+    ) {
+        let now = crate::util::time::now_ms();
+        let normalized = normalize_verification_command(command);
+        let active_index = self
+            .verification
+            .active_verification
+            .as_ref()
+            .map(|active| active.record_index)
+            .filter(|index| {
+                self.verification
+                    .verification_runs
+                    .get(*index)
+                    .is_some_and(|record| {
+                        record.checks.iter().any(|check| {
+                            normalize_verification_command(&check.command) == normalized
+                        })
+                    })
+            });
+        if let Some(index) = active_index {
+            if let Some(record) = self.verification.verification_runs.get_mut(index) {
+                record.status = verification_status_for_terminal_reason(reason);
+                record.finished_at_ms = Some(now);
+                record.observed_final_workspace = None;
+                record.terminal_reason = Some(message.to_string());
+                record.terminal_reason_kind = Some(reason);
+                if let Some(check) = record
+                    .checks
+                    .iter_mut()
+                    .find(|check| normalize_verification_command(&check.command) == normalized)
+                {
+                    check.tool_call_id = tool_call_id.map(str::to_string);
+                    check.completed_at_ms = Some(now);
+                    check.binding = Some(binding);
+                    check.terminal_reason_kind = Some(reason);
+                }
+            }
+            if let Some(active) = self.verification.active_verification.as_mut() {
+                active.pending_blocker = Some(message.to_string());
+            }
+            return;
+        }
+
+        let kind = self
+            .verification_kind_for_command(command)
+            .unwrap_or(VerificationKind::Test);
+        self.verification
+            .verification_runs
+            .push(VerificationRunRecord {
+                kind,
+                status: verification_status_for_terminal_reason(reason),
+                checks: vec![VerificationCheckRecord {
+                    name: format!("Non-executed {} command", kind.label()),
+                    command: command.to_string(),
+                    status: VerificationCheckStatus::Pending,
+                    tool_call_id: tool_call_id.map(str::to_string),
+                    exit_code: None,
+                    completed_at_ms: Some(now),
+                    attempt_count: 0,
+                    last_failure_signature: None,
+                    binding: Some(binding),
+                    delivered_binding: None,
+                    attempt_timestamps_ms: Vec::new(),
+                    failure_signatures: Vec::new(),
+                    terminal_reason_kind: Some(reason),
+                }],
+                started_at_ms: now,
+                finished_at_ms: Some(now),
+                observed_final_workspace: None,
+                workspace_changes_after_last_check: Vec::new(),
+                repair_attempts: 0,
+                reasoning_escalations: Vec::new(),
+                terminal_reason: Some(message.to_string()),
+                terminal_reason_kind: Some(reason),
+                delivered_workspace_binding: None,
             });
     }
 
@@ -524,12 +1195,43 @@ impl Agent {
             return;
         };
 
+        let checks = self
+            .verification
+            .verification_runs
+            .get(active.record_index)
+            .map(|record| {
+                record
+                    .checks
+                    .iter()
+                    .map(|check| (check.command.clone(), check.binding.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut delivered_bindings = Vec::with_capacity(checks.len());
+        let mut bindings_fresh = !checks.is_empty();
+        let mut delivery_blocker = None;
+        for (command, recorded_binding) in checks {
+            let command_cwd = recorded_binding
+                .as_ref()
+                .and_then(binding_command_cwd)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.project_root.clone());
+            let delivered =
+                capture_verification_workspace_binding(&self.project_root, &command_cwd, &command)
+                    .await;
+            bindings_fresh &= bindings_are_fresh(recorded_binding.as_ref(), &delivered);
+            if let VerificationBinding::Blocked { reason } = &delivered {
+                delivery_blocker.get_or_insert(*reason);
+            }
+            delivered_bindings.push(delivered);
+        }
+
         let final_snapshot = if let Some(last) = active.last_check_snapshot.as_ref() {
             capture_worktree_snapshot_including(&self.project_root, &last.paths()).await
         } else {
             None
         };
-        let (observed_final_workspace, changes) =
+        let (snapshot_observed_final_workspace, changes) =
             match (active.last_check_snapshot.as_ref(), final_snapshot.as_ref()) {
                 (Some(last), Some(final_snapshot)) => {
                     let changes = last.changed_paths(final_snapshot);
@@ -537,6 +1239,13 @@ impl Agent {
                 }
                 _ => (None, Vec::new()),
             };
+        let observed_final_workspace = if delivery_blocker.is_some() {
+            None
+        } else if delivered_bindings.is_empty() {
+            snapshot_observed_final_workspace
+        } else {
+            Some(bindings_fresh && snapshot_observed_final_workspace.unwrap_or(true))
+        };
 
         let Some(record) = self
             .verification
@@ -548,6 +1257,16 @@ impl Agent {
         record.finished_at_ms = Some(crate::util::time::now_ms());
         record.observed_final_workspace = observed_final_workspace;
         record.workspace_changes_after_last_check = changes;
+        for (check, delivered) in record.checks.iter_mut().zip(delivered_bindings) {
+            check.delivered_binding = Some(delivered);
+        }
+        record.delivered_workspace_binding = record
+            .checks
+            .last()
+            .and_then(|check| check.delivered_binding.clone());
+        if let Some(reason) = delivery_blocker {
+            record.terminal_reason_kind = Some(reason);
+        }
         let any_failed = record.checks.iter().any(|check| {
             matches!(
                 check.status,
@@ -559,11 +1278,17 @@ impl Agent {
                 .checks
                 .iter()
                 .all(|check| check.status == VerificationCheckStatus::Passed);
-        record.status = if active.pending_blocker.is_some() {
+        record.status = if delivery_blocker.is_some() {
             VerificationRunStatus::Blocked
+        } else if active.pending_blocker.is_some() {
+            record
+                .terminal_reason_kind
+                .map(verification_status_for_terminal_reason)
+                .unwrap_or(VerificationRunStatus::Blocked)
         } else if any_failed {
             VerificationRunStatus::Failed
         } else if matches!(result, Ok(AgentRunResult::Interrupted(_))) {
+            record.terminal_reason_kind = Some(VerificationTerminalReason::Interrupted);
             VerificationRunStatus::Interrupted
         } else if all_passed && active.unstable_observed {
             if record.terminal_reason.is_none() {
@@ -578,6 +1303,62 @@ impl Agent {
         } else {
             VerificationRunStatus::Incomplete
         };
+        match record.status {
+            VerificationRunStatus::Passed | VerificationRunStatus::Unstable => {
+                self.verification.after_edit_verification_pending = false;
+            }
+            VerificationRunStatus::Stale => {
+                self.verification.after_edit_verification_pending = true;
+                self.verification.after_edit_verification_injected = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn verification_status_for_terminal_reason(
+    reason: VerificationTerminalReason,
+) -> VerificationRunStatus {
+    match reason {
+        VerificationTerminalReason::EnvironmentBlocked
+        | VerificationTerminalReason::RepeatedDeterministicFailure
+        | VerificationTerminalReason::RepairBudgetExhausted
+        | VerificationTerminalReason::UnstableFailure => VerificationRunStatus::Blocked,
+        VerificationTerminalReason::Cancelled | VerificationTerminalReason::Interrupted => {
+            VerificationRunStatus::Interrupted
+        }
+        VerificationTerminalReason::Irrelevant
+        | VerificationTerminalReason::PolicyDisabled
+        | VerificationTerminalReason::UserSkipped
+        | VerificationTerminalReason::Delegated => VerificationRunStatus::Incomplete,
+    }
+}
+
+fn binding_terminal_reason(binding: &VerificationBinding) -> Option<VerificationTerminalReason> {
+    match binding {
+        VerificationBinding::Bound { .. } => None,
+        VerificationBinding::Blocked { reason } => Some(*reason),
+    }
+}
+
+fn verification_nonexecution_reason(
+    result: &ToolOutput,
+    status: ToolExecutionStatus,
+) -> VerificationTerminalReason {
+    if status == ToolExecutionStatus::Interrupted {
+        return VerificationTerminalReason::Interrupted;
+    }
+    let message = result.rendered_summary().to_ascii_lowercase();
+    if message.contains("prompt cancelled") || message.contains("request cancelled") {
+        VerificationTerminalReason::Cancelled
+    } else if message.contains("permission denied by user")
+        || message.contains("denied for command")
+    {
+        VerificationTerminalReason::UserSkipped
+    } else if status == ToolExecutionStatus::Skipped {
+        VerificationTerminalReason::Interrupted
+    } else {
+        VerificationTerminalReason::EnvironmentBlocked
     }
 }
 
@@ -718,6 +1499,52 @@ fn bash_command(arguments: &str) -> Option<String> {
         .as_str()
         .map(str::trim)
         .map(str::to_string)
+}
+
+fn bash_command_cwd(project_root: &Path, arguments: &str) -> PathBuf {
+    let workdir = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|value| value.get("workdir")?.as_str().map(str::to_owned));
+    workdir.map_or_else(
+        || project_root.to_path_buf(),
+        |workdir| {
+            let path = PathBuf::from(workdir);
+            if path.is_absolute() {
+                path
+            } else {
+                project_root.join(path)
+            }
+        },
+    )
+}
+
+fn binding_command_cwd(binding: &VerificationBinding) -> Option<&str> {
+    match binding {
+        VerificationBinding::Bound { identity, .. } => Some(&identity.command_cwd),
+        VerificationBinding::Blocked { .. } => None,
+    }
+}
+
+fn binding_matches_background_start(binding: &VerificationBinding, started_cwd: &Path) -> bool {
+    match binding {
+        VerificationBinding::Bound { identity, .. } => {
+            Path::new(&identity.command_cwd) == started_cwd
+        }
+        VerificationBinding::Blocked { .. } => true,
+    }
+}
+
+fn bindings_are_fresh(
+    recorded: Option<&VerificationBinding>,
+    delivered: &VerificationBinding,
+) -> bool {
+    matches!(
+        (recorded, delivered),
+        (
+            Some(VerificationBinding::Bound { digest: recorded, .. }),
+            VerificationBinding::Bound { digest: delivered, .. }
+        ) if recorded == delivered
+    )
 }
 
 #[cfg(test)]

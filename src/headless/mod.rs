@@ -717,6 +717,9 @@ async fn run_inner_with_provider_runtime(
             "Budget exhausted: {reason}. Partial work and session state were preserved."
         ));
     }
+    agent
+        .revalidate_verification_for_delivery(evidence_baseline.verification_runs)
+        .await;
     let usage_totals = agent.usage_totals();
     let verification = run_local_last(
         agent.verification_runs(),

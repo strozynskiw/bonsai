@@ -306,6 +306,9 @@ impl Agent {
             return false;
         }
 
+        self.record_background_verification_results(&completed)
+            .await;
+
         self.push_untrusted_runtime_note(
             MessageProvenance::Background,
             "background command completion",

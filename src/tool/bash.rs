@@ -583,6 +583,11 @@ impl Tool for BashTool {
     ) -> Result<ToolOutput> {
         self.execute_inner(args, Some(context)).await
     }
+
+    async fn execution_cwd(&self, args: &serde_json::Value) -> Option<PathBuf> {
+        let args = serde_json::from_value::<BashArgs>(args.clone()).ok()?;
+        self.resolve_workdir(args.workdir.as_deref()).await.ok()
+    }
 }
 
 impl BashTool {
@@ -2646,6 +2651,25 @@ mod tests {
             rendered_command_output(smol.execute(json!({"command": "pwd"})).await.unwrap());
 
         assert_eq!(command_body(&output).trim(), expected.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn execution_cwd_reports_the_persistent_shell_directory() {
+        let fixture = TestFixture::new();
+        let subdir = fixture.project_root.join("subdir");
+        tokio::fs::create_dir(&subdir).await.unwrap();
+        let expected = subdir.canonicalize().unwrap();
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        );
+        tool.execute(json!({"command": "cd subdir"})).await.unwrap();
+
+        let cwd = tool.execution_cwd(&json!({"command": "cargo test"})).await;
+
+        assert_eq!(cwd.as_deref(), Some(expected.as_path()));
     }
 
     #[tokio::test]

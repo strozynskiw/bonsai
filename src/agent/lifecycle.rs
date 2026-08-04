@@ -18,6 +18,7 @@ impl Agent {
         if let Some(bus) = &self.peer_bus {
             bus.begin_turn(crate::peer::TurnOrigin::Human);
         }
+        self.begin_verification_observation_window();
         self.set_planning_advisory(None);
         self.arm_self_review_for_coding_task("retry the latest user request")
             .await;
@@ -49,6 +50,9 @@ impl Agent {
         self.summary_sources.clear();
         self.compaction_events.clear();
         self.pending_context_rewrite = PendingContextRewrite::default();
+        self.verification.pending_verification_bindings.clear();
+        self.verification.suppressed_verification_calls.clear();
+        self.begin_verification_observation_window();
         self.caches.last_prompt_estimate = None;
         self.caches.last_sent_prompt_estimate = None;
         self.caches.last_perf_report = None;

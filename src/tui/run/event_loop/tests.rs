@@ -370,6 +370,11 @@ fn sample_verification_run(
             completed_at_ms: Some(started_at_ms + 10),
             attempt_count: 1,
             last_failure_signature: None,
+            binding: None,
+            delivered_binding: None,
+            attempt_timestamps_ms: vec![started_at_ms + 10],
+            failure_signatures: Vec::new(),
+            terminal_reason_kind: None,
         }],
         started_at_ms,
         finished_at_ms: Some(started_at_ms + 20),
@@ -378,6 +383,8 @@ fn sample_verification_run(
         repair_attempts: 0,
         reasoning_escalations: Vec::new(),
         terminal_reason: None,
+        terminal_reason_kind: None,
+        delivered_workspace_binding: None,
     }
 }
 

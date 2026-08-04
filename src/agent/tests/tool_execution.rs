@@ -768,7 +768,7 @@ async fn identical_failed_tool_call_retries_once_then_rejects_and_stops() {
                 tool_calls: vec![test_tool_call(
                     &format!("bash-{turn}"),
                     "bash",
-                    r#"{"command":"cargo test --locked"}"#,
+                    r#"{"command":"rustc broken.rs"}"#,
                 )],
                 ..StreamedResponse::default()
             })

@@ -80,6 +80,26 @@ pub(crate) struct CompletionUsage {
     pub(crate) budget_exhaustion: Option<RunBudgetExhaustion>,
 }
 
+/// Delivery-time freshness of the verification evidence shown in a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompletionVerificationFreshness {
+    Fresh,
+    Stale,
+    Skipped,
+    Blocked,
+}
+
+/// Structured summary for consumers that must not infer freshness from prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompletionVerificationEvidence {
+    pub(crate) freshness: CompletionVerificationFreshness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace_binding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+}
+
 /// Compact terminal recap derived only from tool, verification, review,
 /// authorization, and usage evidence Bonsai directly observed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +108,8 @@ pub struct CompletionReport {
     pub(crate) changed_files: Vec<CompletionFileChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verification: Option<VerificationRunRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verification_evidence: Option<CompletionVerificationEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) review: Option<SelfReviewRunRecord>,
     pub(crate) authorization: CompletionAuthorization,
@@ -104,6 +126,64 @@ pub(crate) struct CompletionSessionEvidence<'a> {
     pub(crate) usage: UsageTotals,
     pub(crate) session_budget: crate::run_budget::SessionBudgetUsage,
     pub(crate) budget_exhaustion: Option<RunBudgetExhaustion>,
+}
+
+fn completion_verification_evidence(
+    run: Option<&VerificationRunRecord>,
+) -> Option<CompletionVerificationEvidence> {
+    let run = run?;
+    let has_fresh_binding = !run.checks.is_empty()
+        && run.checks.iter().all(|check| {
+            matches!(
+                (check.binding.as_ref(), check.delivered_binding.as_ref()),
+                (
+                    Some(crate::verification::VerificationBinding::Bound {
+                        digest: recorded,
+                        ..
+                    }),
+                    Some(crate::verification::VerificationBinding::Bound {
+                        digest: delivered,
+                        ..
+                    })
+                ) if recorded == delivered
+            )
+        });
+    let freshness = match run.status {
+        VerificationRunStatus::Passed | VerificationRunStatus::Unstable
+            if run.observed_final_workspace == Some(true) && has_fresh_binding =>
+        {
+            CompletionVerificationFreshness::Fresh
+        }
+        VerificationRunStatus::Stale
+        | VerificationRunStatus::Passed
+        | VerificationRunStatus::Unstable => CompletionVerificationFreshness::Stale,
+        VerificationRunStatus::Blocked => CompletionVerificationFreshness::Blocked,
+        VerificationRunStatus::Incomplete | VerificationRunStatus::Interrupted => {
+            CompletionVerificationFreshness::Skipped
+        }
+        VerificationRunStatus::Running | VerificationRunStatus::Failed => {
+            CompletionVerificationFreshness::Blocked
+        }
+    };
+    let workspace_binding = run
+        .delivered_workspace_binding
+        .as_ref()
+        .or_else(|| run.checks.last().and_then(|check| check.binding.as_ref()))
+        .and_then(|binding| match binding {
+            crate::verification::VerificationBinding::Bound { digest, .. } => {
+                Some(digest.chars().take(12).collect())
+            }
+            crate::verification::VerificationBinding::Blocked { .. } => None,
+        });
+    Some(CompletionVerificationEvidence {
+        freshness,
+        workspace_binding,
+        reason: run
+            .terminal_reason_kind
+            .as_ref()
+            .map(|reason| reason.label().to_string())
+            .or_else(|| run.terminal_reason.clone()),
+    })
 }
 
 impl CompletionReport {
@@ -165,10 +245,12 @@ impl CompletionReport {
             );
         }
 
+        let verification_evidence = completion_verification_evidence(session.verification.as_ref());
         Self {
             status,
             changed_files: evidence.changed_files,
             verification: session.verification,
+            verification_evidence,
             review: session.review,
             authorization,
             usage: CompletionUsage {
@@ -238,6 +320,18 @@ impl CompletionReport {
             );
             if run.observed_final_workspace != Some(true) {
                 summary.push_str(" · final workspace not observed");
+            }
+            if let Some(evidence) = self.verification_evidence.as_ref() {
+                let freshness = match evidence.freshness {
+                    CompletionVerificationFreshness::Fresh => "fresh",
+                    CompletionVerificationFreshness::Stale => "stale",
+                    CompletionVerificationFreshness::Skipped => "skipped",
+                    CompletionVerificationFreshness::Blocked => "blocked",
+                };
+                summary.push_str(&format!(" · {freshness}"));
+                if let Some(binding) = evidence.workspace_binding.as_deref() {
+                    summary.push_str(&format!(" · workspace {binding}"));
+                }
             }
             lines.push(summary);
         }
@@ -797,6 +891,8 @@ mod tests {
             repair_attempts: 0,
             reasoning_escalations: Vec::new(),
             terminal_reason: None,
+            terminal_reason_kind: None,
+            delivered_workspace_binding: None,
         };
         assert_eq!(
             classify_completion_status(
@@ -820,6 +916,29 @@ mod tests {
                 CompletionStatus::Completed
             );
         }
+    }
+
+    #[test]
+    fn verification_evidence_is_structured_without_parsing_prose() {
+        let run = VerificationRunRecord {
+            kind: crate::verification::VerificationKind::Test,
+            status: VerificationRunStatus::Stale,
+            checks: Vec::new(),
+            started_at_ms: 0,
+            finished_at_ms: Some(1),
+            observed_final_workspace: Some(false),
+            workspace_changes_after_last_check: Vec::new(),
+            repair_attempts: 0,
+            reasoning_escalations: Vec::new(),
+            terminal_reason: Some("arbitrary prose".to_string()),
+            terminal_reason_kind: None,
+            delivered_workspace_binding: None,
+        };
+
+        let evidence = completion_verification_evidence(Some(&run)).expect("evidence");
+
+        assert_eq!(evidence.freshness, CompletionVerificationFreshness::Stale);
+        assert_eq!(evidence.reason.as_deref(), Some("arbitrary prose"));
     }
 
     #[test]

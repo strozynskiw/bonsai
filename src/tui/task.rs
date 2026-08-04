@@ -1226,7 +1226,10 @@ async fn build_completion_report(
         crate::tui::event::AgentRunOutcome::Waiting(_) => return None,
     };
     let (verification, review, usage, session_budget) = {
-        let agent = context.agent.lock().await;
+        let mut agent = context.agent.lock().await;
+        agent
+            .revalidate_verification_for_delivery(baseline.verification_runs)
+            .await;
         (
             run_local_last(agent.verification_runs(), baseline.verification_runs),
             run_local_last(agent.self_review_runs(), baseline.self_review_runs),

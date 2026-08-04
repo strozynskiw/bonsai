@@ -72,12 +72,28 @@ async fn conversation_cache_keys_are_stable_and_unique_per_session() {
 #[tokio::test]
 async fn verification_runs_roundtrip_with_check_and_workspace_evidence() {
     use crate::verification::{
-        VerificationCheckRecord, VerificationCheckStatus, VerificationKind, VerificationRunRecord,
-        VerificationRunStatus,
+        VerificationBinding, VerificationCheckRecord, VerificationCheckStatus, VerificationKind,
+        VerificationRunRecord, VerificationRunStatus, VerificationWorkspaceIdentity,
     };
 
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;
+    let identity = VerificationWorkspaceIdentity {
+        repository_root: Some("/repo/.git".to_string()),
+        worktree_root: "/repo".to_string(),
+        project_root: "/repo".to_string(),
+        head_oid: Some("abc123".to_string()),
+        index_digest: "index".to_string(),
+        tracked_worktree_digest: "tracked".to_string(),
+        untracked_inputs: std::collections::BTreeMap::new(),
+        command_cwd: "/repo".to_string(),
+        command_fingerprint: "command".to_string(),
+        toolchain_environment_fingerprint: "toolchain".to_string(),
+    };
+    let binding = VerificationBinding::Bound {
+        digest: identity.digest().unwrap(),
+        identity: Box::new(identity),
+    };
     let runs = vec![VerificationRunRecord {
         kind: VerificationKind::Test,
         status: VerificationRunStatus::Stale,
@@ -90,6 +106,11 @@ async fn verification_runs_roundtrip_with_check_and_workspace_evidence() {
             completed_at_ms: Some(1_700_000_000_100),
             attempt_count: 2,
             last_failure_signature: Some("failure-a".to_string()),
+            binding: Some(binding.clone()),
+            delivered_binding: Some(binding.clone()),
+            attempt_timestamps_ms: vec![1_700_000_000_050, 1_700_000_000_100],
+            failure_signatures: vec!["failure-a".to_string()],
+            terminal_reason_kind: None,
         }],
         started_at_ms: 1_700_000_000_000,
         finished_at_ms: Some(1_700_000_000_200),
@@ -104,6 +125,8 @@ async fn verification_runs_roundtrip_with_check_and_workspace_evidence() {
             occurred_at_ms: 1_700_000_000_150,
         }],
         terminal_reason: Some("workspace changed after verification".to_string()),
+        terminal_reason_kind: Some(crate::verification::VerificationTerminalReason::UserSkipped),
+        delivered_workspace_binding: Some(binding),
     }];
 
     fixture
@@ -118,6 +141,73 @@ async fn verification_runs_roundtrip_with_check_and_workspace_evidence() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(snapshot.verification_runs, runs);
+}
+
+#[tokio::test]
+async fn verification_terminal_reason_kinds_all_roundtrip() {
+    use crate::verification::{
+        VerificationCheck, VerificationKind, VerificationRunRecord, VerificationRunStatus,
+        VerificationTerminalReason,
+    };
+
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let reasons = [
+        VerificationTerminalReason::Irrelevant,
+        VerificationTerminalReason::PolicyDisabled,
+        VerificationTerminalReason::UserSkipped,
+        VerificationTerminalReason::Delegated,
+        VerificationTerminalReason::Cancelled,
+        VerificationTerminalReason::EnvironmentBlocked,
+        VerificationTerminalReason::Interrupted,
+        VerificationTerminalReason::RepeatedDeterministicFailure,
+        VerificationTerminalReason::RepairBudgetExhausted,
+        VerificationTerminalReason::UnstableFailure,
+    ];
+    let runs = reasons
+        .into_iter()
+        .enumerate()
+        .map(|(index, reason)| {
+            let mut run = VerificationRunRecord::running(
+                VerificationKind::Test,
+                &[VerificationCheck {
+                    name: format!("check-{index}"),
+                    command: format!("cargo test check_{index}"),
+                }],
+            );
+            run.status = match reason {
+                VerificationTerminalReason::EnvironmentBlocked
+                | VerificationTerminalReason::RepeatedDeterministicFailure
+                | VerificationTerminalReason::RepairBudgetExhausted
+                | VerificationTerminalReason::UnstableFailure => VerificationRunStatus::Blocked,
+                VerificationTerminalReason::Cancelled | VerificationTerminalReason::Interrupted => {
+                    VerificationRunStatus::Interrupted
+                }
+                VerificationTerminalReason::Irrelevant
+                | VerificationTerminalReason::PolicyDisabled
+                | VerificationTerminalReason::UserSkipped
+                | VerificationTerminalReason::Delegated => VerificationRunStatus::Incomplete,
+            };
+            run.finished_at_ms = Some(run.started_at_ms);
+            run.terminal_reason_kind = Some(reason);
+            run.checks[0].terminal_reason_kind = Some(reason);
+            run
+        })
+        .collect::<Vec<_>>();
+
+    fixture
+        .storage
+        .replace_verification_runs_snapshot(session_id, &runs)
+        .await
+        .unwrap();
+    let snapshot = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+
     assert_eq!(snapshot.verification_runs, runs);
 }
 
@@ -279,6 +369,11 @@ fn sample_verification_evidence(
             completed_at_ms: Some(started_at_ms + 10),
             attempt_count: 1,
             last_failure_signature: None,
+            binding: None,
+            delivered_binding: None,
+            attempt_timestamps_ms: vec![started_at_ms + 10],
+            failure_signatures: Vec::new(),
+            terminal_reason_kind: None,
         }],
         started_at_ms,
         finished_at_ms: Some(started_at_ms + 20),
@@ -287,6 +382,8 @@ fn sample_verification_evidence(
         repair_attempts: 0,
         reasoning_escalations: Vec::new(),
         terminal_reason: None,
+        terminal_reason_kind: None,
+        delivered_workspace_binding: None,
     }
 }
 
@@ -1695,7 +1792,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 2);
+    assert_eq!(migration_count, 3);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \

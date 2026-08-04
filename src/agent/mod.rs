@@ -300,13 +300,25 @@ pub(crate) struct PerfCaches {
 }
 
 /// State for verification workflows (`/test`, `/build`, post-edit verification).
-/// Four fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
 #[derive(Debug, Default)]
 pub(crate) struct VerificationState {
     pub(crate) verification_runs: Vec<crate::verification::VerificationRunRecord>,
     pub(crate) active_verification: Option<ActiveVerificationRun>,
+    pub(crate) pending_verification_bindings:
+        HashMap<String, crate::verification::VerificationBinding>,
+    pub(crate) suppressed_verification_calls: HashSet<String>,
+    pub(crate) observed_verification_run_indices: HashMap<String, usize>,
+    pub(crate) background_verification_bindings: HashMap<String, BackgroundVerificationCapture>,
     pub(crate) after_edit_verification_pending: bool,
     pub(crate) after_edit_verification_injected: bool,
+}
+
+/// Pre-execution evidence retained while a Bash verification runs detached.
+#[derive(Debug)]
+pub(crate) struct BackgroundVerificationCapture {
+    pub(crate) binding: crate::verification::VerificationBinding,
+    pub(crate) record_index: Option<usize>,
+    pub(crate) command: String,
 }
 
 /// Quality evidence staged while `/clear` or `/new` rotates the durable

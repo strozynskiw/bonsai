@@ -103,6 +103,50 @@ noninteractive surfaces. In headless mode, `bonsai -p /test` or
 `-p /build` expands to the same bounded workflow, and stale, failed,
 interrupted, or incomplete verification exits non-zero.
 
+### Verification evidence and freshness
+
+Bonsai captures a canonical workspace binding immediately before each
+recognized verification Bash command executes. The deterministic BLAKE3
+identity includes canonical repository/worktree roots, Git `HEAD`, index and
+tracked-worktree state, relevant non-ignored untracked source/config inputs,
+the command working directory, normalized command and verification
+configuration, selected environment inputs (including `PATH`), and the
+resolved executable's content fingerprint. Capture never launches the
+candidate command or a `--version` probe. In a non-Git project the same model
+uses a content fingerprint of relevant project inputs. Ignored build products
+and unrelated untracked files are excluded from the input set; any observed
+tracked-file mutation is conservatively invalidating. A mutation attributed to
+the active agent task is also treated as relevant immediately, even when its
+new path is not tracked yet; unrelated untracked files that appear externally
+remain governed by the narrower input policy above.
+
+Manual recognized Bash checks (including auto-backgrounded checks) and
+`/test`/`/build` workflows use the same evidence path. A logical check persists
+its binding, exit state, tool-call id, attempt count and timestamps,
+failure-signature history, and typed terminal reason. Identical retries
+aggregate into that record. If unchanged inputs
+already produced the same deterministic failure, Bonsai records a
+`repeated_deterministic_failure` blocked request instead of launching Bash
+again. A failure is confirmed deterministic only after two executions produce
+the same normalized failure signature against the same binding; changing the
+workspace, command, working directory, configuration, environment, or
+toolchain permits another execution.
+
+At the true TUI/headless completion boundary Bonsai captures a delivery
+binding for every check. A pass is **fresh** only when every execution binding
+is valid and equals its corresponding delivery binding. Equal `HEAD` alone is
+not sufficient: dirty tracked files, staged changes, relevant untracked
+inputs, dependency/config changes, and toolchain/environment changes all
+participate. Completion evidence is structured as `fresh`, `stale`, `skipped`,
+or `blocked` and includes a short binding id. Skips and capture failures use
+typed reasons such as `policy_disabled`, `user_skipped`, `cancelled`,
+`environment_blocked`, and `interrupted`; freshness is never inferred from
+the assistant's final prose.
+
+These records describe evidence; they do not independently define the final
+task-success policy. Cross-session execution sharing is also outside this
+mechanism.
+
 ## `/config` commands
 
 - **`/config`** — the merged view: layer paths and provenance, every MCP

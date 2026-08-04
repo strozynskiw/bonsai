@@ -19,6 +19,11 @@ context messages (resume-authoritative), tool calls with args/results/diffs,
 compaction and episode records, read evidence, the per-turn usage ledger,
 verification and self-review runs, plan and todos, and a full-text-searchable
 copy of plain messages (powering `/search` and `recall`'s query mode).
+Verification snapshots include each logical check's execution and delivery
+workspace bindings, attempt timestamps, failure-signature history, final
+result, and typed skip/block reason. An in-flight verification restored after
+a crash or resume is converted to typed `interrupted` evidence rather than
+left running.
 Secrets never enter the database — credentials are stored by
 [reference only](security.md#credentials).
 

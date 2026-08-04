@@ -263,6 +263,10 @@ impl Agent {
             verification: VerificationState {
                 verification_runs: Vec::new(),
                 active_verification: None,
+                pending_verification_bindings: HashMap::new(),
+                suppressed_verification_calls: HashSet::new(),
+                observed_verification_run_indices: HashMap::new(),
+                background_verification_bindings: HashMap::new(),
                 after_edit_verification_pending: false,
                 after_edit_verification_injected: false,
             },
