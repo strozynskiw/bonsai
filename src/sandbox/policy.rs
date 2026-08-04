@@ -35,8 +35,12 @@ pub(crate) fn writable_roots(project_root: &Path, temp_root: &Path) -> Vec<PathB
     // Temp is shared scratch by design; the sandbox exists to confine writes
     // to user data and system state, not to break standard tooling. The
     // private TMPDIR still steers well-behaved tools into per-session space.
-    push_canonical(&mut roots, std::env::temp_dir());
-    push_canonical(&mut roots, PathBuf::from("/tmp"));
+    #[cfg(target_os = "macos")]
+    if let Some(os_temp_root) = darwin_user_temp_dir() {
+        push_canonical_with_alias(&mut roots, os_temp_root);
+    }
+    push_canonical_with_alias(&mut roots, std::env::temp_dir());
+    push_canonical_with_alias(&mut roots, PathBuf::from("/tmp"));
     if let Some(git_dir) = external_git_common_dir(project_root) {
         push_canonical_outside(&mut roots, git_dir);
     }
@@ -142,12 +146,39 @@ fn extra_writable_roots_from_env() -> Vec<PathBuf> {
     roots
 }
 
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    let output = std::process::Command::new("/usr/bin/getconf")
+        .arg("DARWIN_USER_TEMP_DIR")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
 /// Canonicalize and de-dup into `roots`. Falls back to the raw path when it can't
 /// be canonicalized (e.g. it doesn't exist yet) so the rule is still emitted.
 fn push_canonical(roots: &mut Vec<PathBuf>, path: PathBuf) {
     let canonical = path.canonicalize().unwrap_or(path);
     if !roots.contains(&canonical) {
         roots.push(canonical);
+    }
+}
+
+/// Add both the path as reported by the OS and its canonical target. macOS
+/// Seatbelt matches BSD `mktemp`'s `/var/folders` spelling before resolving the
+/// `/var` → `/private/var` alias, so permitting only the canonical target is
+/// insufficient.
+fn push_canonical_with_alias(roots: &mut Vec<PathBuf>, path: PathBuf) {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    for candidate in [path, canonical] {
+        if !roots.contains(&candidate) {
+            roots.push(candidate);
+        }
     }
 }
 
@@ -190,6 +221,27 @@ mod tests {
         let tmp = PathBuf::from("/tmp");
         let tmp = tmp.canonicalize().unwrap_or(tmp);
         assert!(roots.contains(&tmp), "/tmp missing from {roots:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writable_roots_preserve_darwin_temp_alias_and_canonical_target() {
+        let proj = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let raw = darwin_user_temp_dir().expect("macOS must report its user temp directory");
+        let canonical = raw
+            .canonicalize()
+            .expect("macOS user temp directory must be canonicalizable");
+
+        let roots = writable_roots(proj.path(), temp.path());
+        assert!(
+            roots.contains(&raw),
+            "raw temp alias {raw:?} missing from {roots:?}"
+        );
+        assert!(
+            roots.contains(&canonical),
+            "canonical temp root {canonical:?} missing from {roots:?}"
+        );
     }
 
     #[test]
