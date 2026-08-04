@@ -1270,14 +1270,6 @@ impl TaskController {
         }
     }
 
-    pub fn interrupt_foreground(&self) {
-        if let Some(active) = &self.active
-            && let Some(cancellation) = &active.cancellation
-        {
-            cancellation.interrupt_foreground();
-        }
-    }
-
     pub fn abort(&mut self) {
         if let Some(active) = self.active.take() {
             if let Some(cancellation) = &active.cancellation {
@@ -2022,58 +2014,6 @@ mod tests {
             task.terminal_reason.map(|reason| reason.code),
             Some(TaskTerminalReasonCode::ProviderFailure)
         );
-    }
-
-    #[tokio::test]
-    async fn foreground_interrupt_keeps_detached_cancellation_channel_live() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        let mut tasks = TaskController::new(sender);
-        let (foreground_seen_tx, foreground_seen_rx) = tokio::sync::oneshot::channel();
-        let (full_cancel_seen_tx, full_cancel_seen_rx) = tokio::sync::oneshot::channel();
-        tasks
-            .spawn_agent_task(
-                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
-                Vec::new(),
-                TaskRunIntent::ContinueActive,
-                None,
-                |cancellation, _queue| async move {
-                    cancellation.foreground_token().cancelled().await;
-                    let detached_was_cancelled =
-                        cancellation.detached_subagents_token().is_cancelled();
-                    let _ = foreground_seen_tx.send(detached_was_cancelled);
-                    cancellation.detached_subagents_token().cancelled().await;
-                    let _ = full_cancel_seen_tx.send(());
-                    Ok(AgentRunResult::Interrupted(String::new()))
-                },
-            )
-            .unwrap();
-
-        let started = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap();
-        assert!(matches!(started, Some(RuntimeEvent::AgentStarted)));
-        tasks.interrupt_foreground();
-        assert!(
-            !tokio::time::timeout(Duration::from_secs(1), foreground_seen_rx)
-                .await
-                .unwrap()
-                .unwrap()
-        );
-
-        tasks.cancel();
-        tokio::time::timeout(Duration::from_secs(1), full_cancel_seen_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        let finished = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap();
-        assert!(matches!(
-            finished,
-            Some(RuntimeEvent::AgentFinished(Ok(
-                crate::tui::event::AgentRunOutcome::Interrupted
-            )))
-        ));
     }
 
     #[tokio::test]

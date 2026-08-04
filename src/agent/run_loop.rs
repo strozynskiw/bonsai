@@ -3712,44 +3712,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn foreground_interrupt_leaves_detached_subagents_running() {
-        let (runner, subagents, subtask_id) = parked_subagent_run().await;
-
-        let cancellation = RunCancellation::split();
-        let watcher = SubagentCancelWatcher::spawn(
-            Some(runner.clone()),
-            cancellation.detached_subagents_token(),
-        );
-        cancellation.interrupt_foreground();
-        drop(watcher);
-
-        assert_eq!(
-            subagents
-                .snapshot(&subtask_id)
-                .expect("run should be registered")
-                .status,
-            crate::subagent::SubagentStatus::Running,
-            "a foreground-only interrupt must not stop detached subagents"
-        );
-        runner.cancel_all_running();
-    }
-
-    #[test]
-    fn split_cancellation_interrupts_only_foreground_channel() {
-        let cancellation = RunCancellation::split();
-
-        cancellation.interrupt_foreground();
-
-        assert_eq!(
-            (
-                cancellation.foreground_token().is_cancelled(),
-                cancellation.detached_subagents_token().is_cancelled(),
-            ),
-            (true, false)
-        );
-    }
-
     #[test]
     fn only_known_slow_verification_commands_auto_background() {
         assert!(known_slow_verification("cargo test --locked"));

@@ -3349,16 +3349,6 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                     break 'run Ok(());
                                 }
                             }
-                            KeyIntent::InterruptAgent => {
-                                if matches!(app.task_state, TaskState::Running) {
-                                    tasks.interrupt_foreground();
-                                    app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
-                                    push_transient_notice(
-                                        &mut app,
-                                        "Stopping foreground agent; background subagents continue",
-                                    );
-                                }
-                            }
                             intent @ (KeyIntent::Submit
                             | KeyIntent::SubmitReplacement(_)
                             | KeyIntent::Queue) => {

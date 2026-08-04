@@ -1710,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn steering_message_renders_in_transcript_and_composer_footer() {
+    fn steering_message_renders_in_transcript_without_composer_footer_summary() {
         let backend = TestBackend::new(130, 40);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut app = AppState::new("codex", "gpt-5.5".to_string(), "bonsai".to_string(), None);
@@ -1737,8 +1737,8 @@ mod tests {
             "pending transcript block should be labeled steer"
         );
         assert!(
-            combined.contains("steer: follow-up instruction"),
-            "composer footer should show steering summary"
+            !combined.contains("steer: follow-up instruction"),
+            "the visible transcript row should not be duplicated in the composer footer"
         );
     }
 

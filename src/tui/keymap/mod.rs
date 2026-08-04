@@ -22,7 +22,6 @@ pub enum KeyIntent {
     Submit,
     SubmitReplacement(String),
     Queue,
-    InterruptAgent,
     CancelOrQuit,
     Quit,
     Insert(char),
@@ -518,12 +517,8 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         }
         KeyEvent {
             code: KeyCode::Esc, ..
-        } if matches!(
-            app.task_state,
-            crate::tui::event::TaskState::Running | crate::tui::event::TaskState::Cancelling
-        ) =>
-        {
-            KeyIntent::InterruptAgent
+        } if matches!(app.task_state, crate::tui::event::TaskState::Running) => {
+            KeyIntent::Action(AppAction::SetFocus(Focus::Input))
         }
         // Esc progressively clears: selection first, then the draft.
         KeyEvent {
@@ -3111,13 +3106,16 @@ mod tests {
     }
 
     #[test]
-    fn esc_interrupts_running_agent_without_clearing_draft() {
+    fn esc_steers_running_agent_without_clearing_draft() {
         let mut app = input_app_with_text("keep this draft");
         app.task_state = crate::tui::event::TaskState::Running;
 
         let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
 
-        assert!(matches!(intent, KeyIntent::InterruptAgent));
+        assert!(matches!(
+            intent,
+            KeyIntent::Action(AppAction::SetFocus(Focus::Input))
+        ));
     }
 
     #[test]

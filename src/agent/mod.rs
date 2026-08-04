@@ -96,8 +96,8 @@ pub enum PlanContextMode {
 /// Cancellation channels for one foreground run and its detached subagents.
 ///
 /// Most non-interactive callers couple both channels through [`From`]. The TUI
-/// keeps them separate so `Esc` can stop the foreground turn without discarding
-/// useful background research, while `Ctrl+C` still cancels the whole run tree.
+/// keeps them separate so detached subagents can outlive the foreground turn,
+/// while `Ctrl+C` still cancels the whole run tree.
 #[derive(Debug, Clone)]
 pub(crate) struct RunCancellation {
     foreground: CancellationToken,
@@ -118,10 +118,6 @@ impl RunCancellation {
 
     pub(crate) fn detached_subagents_token(&self) -> CancellationToken {
         self.detached_subagents.clone()
-    }
-
-    pub(crate) fn interrupt_foreground(&self) {
-        self.foreground.cancel();
     }
 
     pub(crate) fn cancel_all(&self) {

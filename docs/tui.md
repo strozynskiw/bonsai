@@ -95,9 +95,9 @@ high-contrast theming are covered in [Theming](theming.md).
   argument completion covers providers, models, themes, sessions, autonomy
   levels, and more. `Tab` accepts; `Enter` on a fully-typed command submits
   as typed.
-- **While the agent runs** — `Enter` steers the active turn, while `Tab` queues
-  the draft for the next turn. `Esc` stops only the foreground agent and leaves
-  detached/background subagents running; `Ctrl+C` cancels the whole run tree.
+- **While the agent runs** — `Esc` is the steer cue and keeps the active turn
+  running; edit the draft, then press `Enter` to steer it into the active turn.
+  `Tab` queues the draft for the next turn; `Ctrl+C` cancels the whole run tree.
   Withdraw a pending message with `Up` on an empty composer, or cancel a focused
   pending item with `Delete`. Busy-incompatible slash commands open the
   busy-command modal ([details](slash-commands.md#behavior-while-the-agent-is-running)).
@@ -121,7 +121,7 @@ Keybindings are fixed (no user keymap file). The essentials:
 | `Ctrl+G` (or `/select`) | copy mode: release mouse capture for native terminal text selection (toggle; a `⊙ select` marker shows while it's on) |
 | `Ctrl+T` | cycle focus pane |
 | `Ctrl+End` | jump transcript to latest |
-| `Esc` while running | stop the foreground agent; keep background subagents running |
+| `Esc` while running | enter the steer flow without stopping the active turn |
 | `Esc` otherwise | progressive: dismiss popup → clear selection → clear draft → close modal |
 
 Full editing/selection/scroll tables are in `/keys` inside the app.

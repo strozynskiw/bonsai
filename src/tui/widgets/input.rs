@@ -589,21 +589,25 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
         left.push(view::sandbox_marker_span(sandbox));
     }
     left.extend(composer_chip_meta_spans(app));
-    if let Some(queued) = app.first_queued_input() {
+    if let Some(queued) = app
+        .queued_inputs
+        .iter()
+        .find(|queued| matches!(queued.delivery, crate::tui::app::FollowUpDelivery::Queue))
+    {
         push_sep(&mut left, "  |  ");
-        let extra = app.queued_inputs.len().saturating_sub(1);
+        let extra = app
+            .queued_inputs
+            .iter()
+            .filter(|queued| matches!(queued.delivery, crate::tui::app::FollowUpDelivery::Queue))
+            .count()
+            .saturating_sub(1);
         let suffix = if extra == 0 {
             String::new()
         } else {
             format!(" +{extra}")
         };
         left.push(Span::styled(
-            format!(
-                "{}: {}{}",
-                queued.delivery.pending_label(),
-                view::truncate_phase(&queued.text, 40),
-                suffix
-            ),
+            format!("queued: {}{suffix}", view::truncate_phase(&queued.text, 40)),
             theme::dim(),
         ));
     }
@@ -629,7 +633,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Esc", " dismiss"),
         ]
     } else if matches!(app.task_state, crate::tui::event::TaskState::Running) {
-        vec![("Enter", " steer  "), ("Tab", " queue  "), ("Esc", " stop")]
+        vec![("[esc to steer]", "  "), ("Tab", " queue")]
     } else {
         // Trailing version tag keeps the running build visible at a glance; a
         // self-update notice takes its place for the rest of the session.
@@ -1084,9 +1088,38 @@ mod tests {
         let text = line_text(&meta_line(&app, 120, false));
 
         assert!(
-            text.contains("Enter steer") && text.contains("Tab queue") && text.contains("Esc stop"),
+            text.contains("[esc to steer]") && text.contains("Tab queue"),
             "{text}"
         );
+        assert!(!text.contains("Enter steer"), "{text}");
+    }
+
+    #[test]
+    fn meta_line_suppresses_steer_summary_but_keeps_queue_summary() {
+        let mut app = AppState::new(
+            "codex",
+            "test-model".to_string(),
+            "workspace".to_string(),
+            None,
+        );
+        app.task_state = crate::tui::event::TaskState::Running;
+        app.reduce(crate::tui::event::AppAction::SteerInput {
+            id: 1,
+            text: "visible steer".to_string(),
+            content: crate::tui::app::ComposerContent::default(),
+            mode: crate::agent::AgentMode::Coding,
+        });
+        app.reduce(crate::tui::event::AppAction::QueueNextInput {
+            id: 2,
+            text: "later queue".to_string(),
+            content: crate::tui::app::ComposerContent::default(),
+            mode: crate::agent::AgentMode::Coding,
+        });
+
+        let text = line_text(&meta_line(&app, 160, false));
+
+        assert!(!text.contains("visible steer"), "{text}");
+        assert!(text.contains("queued: later queue"), "{text}");
     }
 
     #[test]
