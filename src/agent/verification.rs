@@ -123,7 +123,8 @@ impl Agent {
         prompt: &str,
     ) {
         self.begin_verification_observation_window();
-        self.begin_focused_coding_run(prompt).await;
+        self.begin_focused_coding_run(prompt, TaskCompletionContract::verification_action())
+            .await;
         self.arm_verification_record(kind, checks);
     }
 
@@ -160,12 +161,14 @@ impl Agent {
     pub(super) fn note_typed_verification_worthy_mutation(&mut self, paths: Vec<String>) {
         self.mark_latest_verification_stale(&paths);
         self.self_review.note_typed_mutation(paths);
+        self.note_completion_workspace_mutation();
         self.verification.after_edit_verification_pending = true;
     }
 
     pub(super) fn note_bash_window_verification_worthy_mutation(&mut self, paths: Vec<String>) {
         self.mark_latest_verification_stale(&paths);
         self.self_review.note_bash_window_mutation(paths);
+        self.note_completion_workspace_mutation();
         self.verification.after_edit_verification_pending = true;
     }
 

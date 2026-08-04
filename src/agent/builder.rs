@@ -187,6 +187,7 @@ impl Agent {
             read_tracker: builder.read_tracker,
             lsp_hub: builder.lsp_hub,
             todo_store: None,
+            completion: CompletionGuardState::default(),
             messages: vec![system_message],
             budget: SessionBudget {
                 max_iterations: builder.max_iterations,

@@ -379,6 +379,7 @@ pub struct Agent {
     read_tracker: ReadTracker,
     lsp_hub: Option<Arc<LspHub>>,
     todo_store: Option<SharedTodoStore>,
+    completion: CompletionGuardState,
     messages: Vec<ChatCompletionRequestMessage>,
     budget: SessionBudget,
     cached_models: Vec<String>,
@@ -1759,6 +1760,7 @@ fn append_volatile_advisories(mut context: String, advisories: &[&str]) -> Strin
 mod batching;
 mod builder;
 mod compaction;
+mod completion;
 mod controls;
 mod episodes;
 mod lifecycle;
@@ -1782,6 +1784,9 @@ mod verification;
 
 use batching::*;
 use compaction::*;
+pub use completion::{CompletionFailureOutcome, CompletionGap, CompletionGuardFailure};
+use completion::{CompletionGuardState, CompletionGuardVerdict};
+pub(crate) use completion::{CompletionGuardTrace, TaskCompletionContract};
 use messages::*;
 use output::*;
 use perf::*;

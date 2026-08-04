@@ -672,7 +672,7 @@ async fn retry_continues_latest_turn_without_replaying_user_prompt() {
 
     agent
         .run(
-            "fix the bug",
+            "explain the bug",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )
@@ -692,7 +692,7 @@ async fn retry_continues_latest_turn_without_replaying_user_prompt() {
     assert_eq!(requests.len(), 2);
     assert_eq!(
         user_messages_in(&requests[1]),
-        ["fix the bug"],
+        ["explain the bug"],
         "the retry instruction must not duplicate the human prompt"
     );
     assert!(
@@ -874,6 +874,262 @@ fn messages_contain_self_review(messages: &[ChatCompletionRequestMessage]) -> bo
     messages
         .iter()
         .any(|message| format!("{message:?}").contains("Self-review before finishing"))
+}
+
+#[tokio::test]
+async fn completion_guard_retries_once_then_rejects_open_todos() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![
+        finished_response("I will finish the remaining work next."),
+        finished_response("I will continue with it shortly."),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let mut todos = crate::todo::TodoStore::new();
+    todos.set_todos(vec![crate::todo::TodoItem {
+        content: "finish implementation".to_string(),
+        status: crate::todo::TodoStatus::InProgress,
+    }]);
+    agent.set_todo_store(Arc::new(tokio::sync::Mutex::new(todos)));
+
+    let result = agent
+        .run(
+            "continue the task",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    let AgentRunResult::Incomplete { output, failure } = result else {
+        panic!("open todos must not produce a successful result");
+    };
+    assert_eq!(output, "I will continue with it shortly.");
+    assert_eq!(
+        failure.outcome,
+        crate::agent::CompletionFailureOutcome::Failed
+    );
+    assert!(matches!(
+        failure.gaps.as_slice(),
+        [crate::agent::CompletionGap::InProgressTodos(1)]
+    ));
+    assert_eq!(
+        requests.lock().await.len(),
+        2,
+        "the guard may inject exactly one bounded continuation"
+    );
+    let trace = agent
+        .completion_guard_trace()
+        .expect("terminal guard decision should be retained");
+    assert_eq!(trace.attempts.len(), 2);
+    assert!(trace.render_compact().starts_with("failed"));
+    assert!(trace.render_compact().contains("todo(s) in progress"));
+}
+
+#[tokio::test]
+async fn completion_guard_does_not_accept_future_prose_as_mutation_evidence() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![
+        finished_response("I will implement the fix now."),
+        finished_response("Next I will edit the parser."),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run(
+            "Fix the parser bug",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        result,
+        AgentRunResult::Incomplete {
+            failure: crate::agent::CompletionGuardFailure {
+                outcome: crate::agent::CompletionFailureOutcome::Failed,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn completion_guard_continues_promised_research_until_a_read_is_observed() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![
+        finished_response("I will research the parser next."),
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "read-1",
+                "read",
+                r#"{"title":"inspect parser"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        finished_response("The parser state is confirmed."),
+    ]);
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MockTool::new("read", "parser source")));
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run(
+            "Check the parser state",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("The parser state is confirmed.".to_string())
+    );
+    assert_eq!(requests.lock().await.len(), 3);
+    let trace = agent.completion_guard_trace().unwrap();
+    assert_eq!(trace.attempts.len(), 2);
+    assert!(trace.render_compact().starts_with("accepted"));
+}
+
+#[tokio::test]
+async fn completion_guard_accepts_explicit_unnecessary_mutation_disposition() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![finished_response(
+        "No change was needed; the fix is already implemented.",
+    )]);
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run(
+            "Fix the parser bug",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AgentRunResult::Completed(
+            "No change was needed; the fix is already implemented.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn completion_guard_returns_explicit_cancellation_without_retrying() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![finished_response(
+        "Task cancelled by the user. No change was needed.",
+    )]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run(
+            "Fix the parser bug",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        result,
+        AgentRunResult::Incomplete {
+            failure: crate::agent::CompletionGuardFailure {
+                outcome: crate::agent::CompletionFailureOutcome::Cancelled,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn completion_guard_returns_explicit_blocker_without_retrying() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![finished_response(
+        "Blocked by missing credentials. No change was needed.",
+    )]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run(
+            "Fix the parser bug",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        result,
+        AgentRunResult::Incomplete {
+            failure: crate::agent::CompletionGuardFailure {
+                outcome: crate::agent::CompletionFailureOutcome::Blocked,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(requests.lock().await.len(), 1);
 }
 
 #[tokio::test]

@@ -308,10 +308,51 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )));
         }
 
+        self.agent.finalize_pending_self_review(&response.content);
+        // A focused verification run is terminalized by the run wrapper, but
+        // the completion decision must see that final typed record before it
+        // can accept the candidate response. Terminalize it here with the same
+        // candidate result; the wrapper's later call is then a no-op.
+        let candidate_result = Ok(AgentRunResult::Completed(response.content.clone()));
+        self.agent.finish_verification_run(&candidate_result).await;
+
+        match self.agent.completion_guard_verdict(&response.content).await {
+            CompletionGuardVerdict::Accept => {}
+            CompletionGuardVerdict::Continue { note } => {
+                deferred_sink.discard();
+                tracing::warn!(
+                    target: "bonsai::guard",
+                    guard = "completion_evidence",
+                    action = "continue_once",
+                    "guard continued incomplete task"
+                );
+                self.agent.push_harness_note(&note);
+                self.agent.emit_context_updated(&self.sink);
+                return Ok(TurnOutcome::Continue);
+            }
+            CompletionGuardVerdict::Reject(failure) => {
+                deferred_sink.flush();
+                self.agent
+                    .push_message(assistant_text_message(&response.content));
+                self.agent.emit_context_updated(&self.sink);
+                tracing::warn!(
+                    target: "bonsai::guard",
+                    guard = "completion_evidence",
+                    action = "reject",
+                    outcome = ?failure.outcome,
+                    gaps = failure.gaps.len(),
+                    "guard rejected incomplete task"
+                );
+                return Ok(TurnOutcome::Finished(AgentRunResult::Incomplete {
+                    output: response.content,
+                    failure,
+                }));
+            }
+        }
+
         deferred_sink.flush();
         self.agent
             .push_message(assistant_text_message(&response.content));
-        self.agent.finalize_pending_self_review(&response.content);
         self.agent.emit_context_updated(&self.sink);
         Ok(TurnOutcome::Finished(AgentRunResult::Completed(
             response.content,
@@ -428,6 +469,22 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )
             .await?;
         self.state.policies.observe_tool_execution(&tool_execution);
+        if tool_execution.tool_observations.iter().any(|observation| {
+            matches!(
+                observation.status,
+                crate::output::ToolExecutionStatus::Succeeded
+                    | crate::output::ToolExecutionStatus::Started
+            )
+        }) {
+            self.agent.note_completion_action();
+        }
+        if tool_execution
+            .tool_observations
+            .iter()
+            .any(|observation| observation.leaves_pending_work)
+        {
+            self.agent.note_completion_pending_work_started();
+        }
         if tool_execution.reset_loop_guards {
             self.agent.set_planning_advisory(None);
         }
@@ -555,6 +612,7 @@ mod tests {
                 tool_name: "read".to_string(),
                 status: crate::output::ToolExecutionStatus::Succeeded,
                 makes_progress: false,
+                leaves_pending_work: false,
             }],
             ..ToolExecutionOutcome::default()
         };

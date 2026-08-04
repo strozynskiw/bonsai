@@ -95,6 +95,7 @@ impl HeadlessRunOutcome {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HeadlessStatus {
     Completed,
+    Blocked,
     Failed,
     BudgetExhausted,
     Interrupted,
@@ -106,7 +107,7 @@ impl HeadlessStatus {
     pub(crate) const fn exit_code(self) -> i32 {
         match self {
             Self::Completed => 0,
-            Self::Failed | Self::BudgetExhausted => 1,
+            Self::Blocked | Self::Failed | Self::BudgetExhausted => 1,
             Self::Interrupted => 130,
             Self::Terminated => 143,
             Self::TimedOut => 124,
@@ -116,7 +117,7 @@ impl HeadlessStatus {
     const fn storage_status(self) -> SessionStatus {
         match self {
             Self::Completed => SessionStatus::Completed,
-            Self::Failed => SessionStatus::Failed,
+            Self::Blocked | Self::Failed => SessionStatus::Failed,
             Self::BudgetExhausted | Self::Interrupted | Self::Terminated | Self::TimedOut => {
                 SessionStatus::Interrupted
             }
@@ -126,6 +127,7 @@ impl HeadlessStatus {
     const fn completion_status(self) -> crate::completion_report::CompletionStatus {
         match self {
             Self::Completed => crate::completion_report::CompletionStatus::Completed,
+            Self::Blocked => crate::completion_report::CompletionStatus::Blocked,
             Self::Failed => crate::completion_report::CompletionStatus::Failed,
             Self::BudgetExhausted => crate::completion_report::CompletionStatus::BudgetExhausted,
             Self::Interrupted | Self::Terminated | Self::TimedOut => {
@@ -178,6 +180,7 @@ fn classify_headless_status(
         evidence,
         verification,
     ) {
+        crate::completion_report::CompletionStatus::Blocked => HeadlessStatus::Blocked,
         crate::completion_report::CompletionStatus::Failed => HeadlessStatus::Failed,
         _ => run_status,
     }
@@ -194,6 +197,13 @@ async fn finish_headless_task(
 
     let (outcome, reason) = match status {
         HeadlessStatus::Completed => (TaskOutcome::Succeeded, None),
+        HeadlessStatus::Blocked => (
+            TaskOutcome::Blocked,
+            Some(TaskTerminalReason::new(
+                TaskTerminalReasonCode::ExecutionFailure,
+                &report.caveats.join(" "),
+            )),
+        ),
         HeadlessStatus::Failed => {
             let verification_status = report
                 .verification
@@ -790,6 +800,15 @@ async fn run_inner_with_provider_runtime(
 
     let (run_status, output, mut budget_exhaustion) = match run_result {
         Ok(AgentRunResult::Completed(output)) => (HeadlessStatus::Completed, output, None),
+        Ok(AgentRunResult::Incomplete { output, failure }) => (
+            match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Blocked => HeadlessStatus::Blocked,
+                crate::agent::CompletionFailureOutcome::Failed => HeadlessStatus::Failed,
+                crate::agent::CompletionFailureOutcome::Cancelled => HeadlessStatus::Interrupted,
+            },
+            output,
+            None,
+        ),
         Ok(AgentRunResult::Interrupted(output)) => match cancel_reason
             .get()
             .copied()
@@ -942,6 +961,7 @@ async fn run_inner_with_provider_runtime(
         status.completion_status(),
         completion_evidence,
         crate::completion_report::CompletionSessionEvidence {
+            completion_guard: agent.completion_guard_trace(),
             verification: verification.clone(),
             review,
             authorization_decisions: &authorization_decisions,
@@ -2298,6 +2318,7 @@ mod tests {
             crate::completion_report::CompletionStatus::Interrupted,
             crate::completion_report::CompletionEvidenceSnapshot::default(),
             crate::completion_report::CompletionSessionEvidence {
+                completion_guard: None,
                 verification: None,
                 review: None,
                 authorization_decisions: &[],

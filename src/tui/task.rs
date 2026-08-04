@@ -502,6 +502,9 @@ impl TaskController {
                     Ok(AgentRunResult::Completed(_)) => {
                         crate::tui::event::AgentRunOutcome::Completed
                     }
+                    Ok(AgentRunResult::Incomplete { failure, .. }) => {
+                        crate::tui::event::AgentRunOutcome::Incomplete(failure)
+                    }
                     Ok(AgentRunResult::Interrupted(_)) => {
                         crate::tui::event::AgentRunOutcome::Interrupted
                     }
@@ -609,6 +612,7 @@ impl TaskController {
         &mut self,
         agent: Arc<tokio::sync::Mutex<Agent>>,
         prompt: String,
+        completion_contract: crate::agent::TaskCompletionContract,
         sink: SharedSink,
     ) -> Result<(), UiError> {
         let completion = CompletionRunContext {
@@ -623,7 +627,9 @@ impl TaskController {
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
-                guard.begin_focused_coding_run(&prompt).await;
+                guard
+                    .begin_focused_coding_run(&prompt, completion_contract)
+                    .await;
                 sink.context_updated(guard.context_report());
                 guard
                     .run_current_context_with_queue(run_token, sink, queue_receiver)
@@ -1404,6 +1410,37 @@ async fn finish_task_for_outcome(
 ) -> anyhow::Result<()> {
     let terminal = match outcome {
         crate::tui::event::AgentRunOutcome::Completed => (TaskOutcome::Succeeded, None),
+        crate::tui::event::AgentRunOutcome::Incomplete(failure) => {
+            let (outcome, code) = match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Blocked => (
+                    TaskOutcome::Blocked,
+                    if failure.gaps.iter().any(|gap| {
+                        matches!(
+                            gap,
+                            crate::agent::CompletionGap::VerificationMissing
+                                | crate::agent::CompletionGap::VerificationStale
+                                | crate::agent::CompletionGap::VerificationBlocked(_)
+                        )
+                    }) {
+                        TaskTerminalReasonCode::VerificationFailure
+                    } else {
+                        TaskTerminalReasonCode::ExecutionFailure
+                    },
+                ),
+                crate::agent::CompletionFailureOutcome::Failed => (
+                    TaskOutcome::Failed,
+                    TaskTerminalReasonCode::ExecutionFailure,
+                ),
+                crate::agent::CompletionFailureOutcome::Cancelled => (
+                    TaskOutcome::Cancelled,
+                    TaskTerminalReasonCode::UserCancelled,
+                ),
+            };
+            (
+                outcome,
+                Some(TaskTerminalReason::new(code, failure.compact_detail())),
+            )
+        }
         crate::tui::event::AgentRunOutcome::Failed => {
             let verification_status = report
                 .and_then(|report| report.verification.as_ref())
@@ -1500,6 +1537,14 @@ async fn build_completion_report(
 ) -> Option<CompletionReport> {
     let (base_status, budget_exhaustion) = match outcome {
         crate::tui::event::AgentRunOutcome::Completed => (CompletionStatus::Completed, None),
+        crate::tui::event::AgentRunOutcome::Incomplete(failure) => (
+            match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Blocked => CompletionStatus::Blocked,
+                crate::agent::CompletionFailureOutcome::Failed => CompletionStatus::Failed,
+                crate::agent::CompletionFailureOutcome::Cancelled => CompletionStatus::Interrupted,
+            },
+            None,
+        ),
         crate::tui::event::AgentRunOutcome::Failed => (CompletionStatus::Failed, None),
         crate::tui::event::AgentRunOutcome::Interrupted => (CompletionStatus::Interrupted, None),
         crate::tui::event::AgentRunOutcome::BudgetExhausted(reason) => {
@@ -1507,12 +1552,13 @@ async fn build_completion_report(
         }
         crate::tui::event::AgentRunOutcome::Waiting(_) => return None,
     };
-    let (verification, review, usage, session_budget) = {
+    let (completion_guard, verification, review, usage, session_budget) = {
         let mut agent = context.agent.lock().await;
         agent
             .revalidate_verification_for_delivery(baseline.verification_runs)
             .await;
         (
+            agent.completion_guard_trace(),
             run_local_last(agent.verification_runs(), baseline.verification_runs),
             run_local_last(agent.self_review_runs(), baseline.self_review_runs),
             agent.usage_totals(),
@@ -1550,6 +1596,7 @@ async fn build_completion_report(
         status,
         evidence,
         CompletionSessionEvidence {
+            completion_guard,
             verification,
             review,
             authorization_decisions: &authorization_decisions,

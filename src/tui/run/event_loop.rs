@@ -731,6 +731,22 @@ async fn submit_and_start_run(
     {
         tracing::warn!(%err, "failed to cancel background-work wait before a new turn");
     }
+    if take_safe_plan_start_confirmation(app, input) {
+        let plan_exists = !deps.plan_store.lock().await.is_empty() || !app.plan.is_empty();
+        if plan_exists {
+            let _ = implement_plan_with_context(
+                app,
+                tasks,
+                deps.agent.clone(),
+                deps.sink.clone(),
+                deps.todo_store.clone(),
+                deps.plan_store.clone(),
+                crate::agent::PlanContextMode::Clean,
+            )
+            .await;
+            return false;
+        }
+    }
     if input.starts_with('/') {
         app.reduce(AppAction::ScrollBottom);
         app.reduce(AppAction::SubmitCommandInput(input.to_string()));
@@ -802,6 +818,18 @@ async fn submit_and_start_run(
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
     }
     false
+}
+
+/// Consume the one-shot, plan-scoped natural confirmation. Exact matching is
+/// intentional: broader affirmative parsing would risk turning an answer to a
+/// permission or external-action prompt into authority for unrelated work.
+fn take_safe_plan_start_confirmation(app: &mut AppState, input: &str) -> bool {
+    let armed = std::mem::take(&mut app.pending_safe_plan_start_confirmation);
+    armed
+        && matches!(
+            input.trim().to_ascii_lowercase().as_str(),
+            "go" | "continue"
+        )
 }
 
 /// Handle the always-available and running-state submit commands (the `/`

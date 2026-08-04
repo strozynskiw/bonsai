@@ -79,6 +79,7 @@ async fn surface_acceptance_snapshot(surface: SurfaceKind) -> SurfaceAcceptanceS
         completion_status,
         completion_evidence,
         CompletionSessionEvidence {
+            completion_guard: None,
             verification: None,
             review: None,
             authorization_decisions: &[],

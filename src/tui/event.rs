@@ -789,6 +789,7 @@ pub enum UiEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRunOutcome {
     Completed,
+    Incomplete(crate::agent::CompletionGuardFailure),
     Failed,
     Interrupted,
     BudgetExhausted(crate::run_budget::RunBudgetExhaustion),

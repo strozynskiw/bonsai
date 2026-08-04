@@ -1213,10 +1213,58 @@ async fn transcript_snapshot_populates_search_index() {
 async fn completion_report_roundtrips_as_one_typed_transcript_block() {
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;
+    let completion_guard: crate::agent::CompletionGuardTrace =
+        serde_json::from_value(serde_json::json!({
+            "contract": {
+                "goal_kind": "action",
+                "effect": "workspace_mutation",
+                "verification_required": false
+            },
+            "superseded_goals": 0,
+            "attempts": [{
+                "ordinal": 1,
+                "evidence": {
+                    "contract": {
+                        "goal_kind": "action",
+                        "effect": "workspace_mutation",
+                        "verification_required": false
+                    },
+                    "todos": {
+                        "pending": 0,
+                        "in_progress": 0,
+                        "completed": 0,
+                        "cancelled": 0
+                    },
+                    "action_observed": false,
+                    "workspace_mutated": false,
+                    "mutation_declared_unnecessary": false,
+                    "pending_work_started": false,
+                    "verification": {"state": "not_required"},
+                    "review": {"state": "not_required"},
+                    "pending": {
+                        "interactions": 0,
+                        "subagents": 0,
+                        "background_tasks": 0,
+                        "terminals": 0,
+                        "external_waits": 0
+                    }
+                },
+                "response_signals": {
+                    "promises_future_action": true,
+                    "explicit_blocker": false,
+                    "explicit_cancellation": false,
+                    "mutation_unnecessary": false
+                },
+                "gaps": [{"kind": "workspace_mutation_missing"}]
+            }],
+            "disposition": "failed"
+        }))
+        .unwrap();
     let report = crate::completion_report::CompletionReport::from_evidence(
         crate::completion_report::CompletionStatus::Interrupted,
         crate::completion_report::CompletionEvidenceSnapshot::default(),
         crate::completion_report::CompletionSessionEvidence {
+            completion_guard: Some(completion_guard),
             verification: None,
             review: None,
             authorization_decisions: &[],
@@ -1270,6 +1318,7 @@ async fn completion_report_roundtrips_as_one_typed_transcript_block() {
         crate::completion_report::CompletionStatus::Completed,
         crate::completion_report::CompletionEvidenceSnapshot::default(),
         crate::completion_report::CompletionSessionEvidence {
+            completion_guard: None,
             verification: None,
             review: None,
             authorization_decisions: &[],

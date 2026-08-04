@@ -21,6 +21,7 @@ const MAX_RENDERED_FILES: usize = 5;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CompletionStatus {
     Completed,
+    Blocked,
     Failed,
     Interrupted,
     BudgetExhausted,
@@ -30,6 +31,7 @@ impl CompletionStatus {
     const fn headline(self) -> &'static str {
         match self {
             Self::Completed => "Completed",
+            Self::Blocked => "Blocked",
             Self::Failed => "Failed",
             Self::Interrupted => "Interrupted",
             Self::BudgetExhausted => "Budget exhausted",
@@ -39,6 +41,7 @@ impl CompletionStatus {
     const fn caveat(self) -> Option<&'static str> {
         match self {
             Self::Completed => None,
+            Self::Blocked => Some("Run stopped with structured work still blocked."),
             Self::Failed => Some("Run finished with unresolved tool or verification failures."),
             Self::Interrupted => Some("Run was interrupted; partial work may remain."),
             Self::BudgetExhausted => {
@@ -105,6 +108,8 @@ pub(crate) struct CompletionVerificationEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionReport {
     pub(crate) status: CompletionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_guard: Option<crate::agent::CompletionGuardTrace>,
     pub(crate) changed_files: Vec<CompletionFileChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verification: Option<VerificationRunRecord>,
@@ -120,6 +125,7 @@ pub struct CompletionReport {
 /// Session-level ledgers folded into one terminal report construction.
 #[derive(Debug)]
 pub(crate) struct CompletionSessionEvidence<'a> {
+    pub(crate) completion_guard: Option<crate::agent::CompletionGuardTrace>,
     pub(crate) verification: Option<VerificationRunRecord>,
     pub(crate) review: Option<SelfReviewRunRecord>,
     pub(crate) authorization_decisions: &'a [AuthorizationDecisionRecord],
@@ -248,6 +254,7 @@ impl CompletionReport {
         let verification_evidence = completion_verification_evidence(session.verification.as_ref());
         Self {
             status,
+            completion_guard: session.completion_guard,
             changed_files: evidence.changed_files,
             verification: session.verification,
             verification_evidence,
@@ -294,6 +301,9 @@ impl CompletionReport {
         }
 
         let mut lines = vec![outcome];
+        if let Some(guard) = self.completion_guard.as_ref() {
+            lines.push(format!("Completion gate · {}", guard.render_compact()));
+        }
         if !self.changed_files.is_empty() {
             for change in self.changed_files.iter().take(MAX_RENDERED_FILES) {
                 lines.push(format!("  {} · {}", change.path, change.intent));
@@ -974,6 +984,7 @@ mod tests {
                 started_at_ms: 0,
             },
             CompletionSessionEvidence {
+                completion_guard: None,
                 verification: None,
                 review: None,
                 authorization_decisions: &[],
@@ -1008,6 +1019,7 @@ mod tests {
             CompletionStatus::Interrupted,
             CompletionEvidenceSnapshot::default(),
             CompletionSessionEvidence {
+                completion_guard: None,
                 verification: None,
                 review: None,
                 authorization_decisions: &[],
@@ -1035,6 +1047,7 @@ mod tests {
             CompletionStatus::Completed,
             CompletionEvidenceSnapshot::default(),
             CompletionSessionEvidence {
+                completion_guard: None,
                 verification: None,
                 review: None,
                 authorization_decisions: &[],
@@ -1064,6 +1077,7 @@ mod tests {
             CompletionStatus::Completed,
             CompletionEvidenceSnapshot::default(),
             CompletionSessionEvidence {
+                completion_guard: None,
                 verification: None,
                 review: None,
                 authorization_decisions: &[],

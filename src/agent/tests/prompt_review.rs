@@ -921,7 +921,12 @@ async fn begin_focused_coding_run_arms_self_review() {
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
 
-    agent.begin_focused_coding_run("focused prompt").await;
+    agent
+        .begin_focused_coding_run(
+            "focused prompt",
+            crate::agent::TaskCompletionContract::informational(),
+        )
+        .await;
 
     assert_eq!(agent.mode, AgentMode::Coding);
     assert!(

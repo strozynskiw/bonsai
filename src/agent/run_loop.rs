@@ -81,6 +81,7 @@ struct ToolCallObservation {
     tool_name: String,
     status: crate::output::ToolExecutionStatus,
     makes_progress: bool,
+    leaves_pending_work: bool,
 }
 
 struct QueuedMessageState<'state, 'receiver> {
@@ -189,6 +190,7 @@ impl Agent {
         }
         self.begin_verification_observation_window();
         self.set_planning_advisory(None);
+        self.begin_inferred_completion_task(&input.text);
         // Volatile project state (git status) refreshes at the top of every
         // run-loop iteration, which covers the first model call too — no
         // begin_run refresh needed. Self-review and memory recall key off the
@@ -267,6 +269,7 @@ impl Agent {
         // outcome line the support lifecycle log needs.
         let outcome = match &result {
             Ok(AgentRunResult::Completed(_)) => "completed",
+            Ok(AgentRunResult::Incomplete { .. }) => "incomplete",
             Ok(AgentRunResult::Interrupted(_)) => "interrupted",
             Ok(AgentRunResult::Waiting(_)) => "waiting",
             Err(_) => "error",
@@ -307,6 +310,7 @@ impl Agent {
         }
         for message in queued {
             self.self_review.append_request(&message.input.text);
+            self.merge_completion_steering(&message.input.text);
             self.push_live_user_message(&message.input).await?;
             // Mid-run steering only moves the episode boundary anchor (and
             // opens a span when none is active); it never closes an episode.
@@ -732,6 +736,7 @@ impl Agent {
                     .await?;
                     for message in queued {
                         self.self_review.append_request(&message.input.text);
+                        self.merge_completion_steering(&message.input.text);
                         self.push_live_user_message(&message.input).await?;
                         sink.queued_user_message_sent(message.id, &message.transcript_text);
                     }
@@ -1821,12 +1826,17 @@ impl ToolCallObservation {
             tool_name: tool_call.name.clone(),
             status,
             makes_progress: status.is_success() && failed_call_progress_candidate(tool_call),
+            leaves_pending_work: false,
         }
     }
 
     fn observe_result(&mut self, result: &ToolOutput) {
-        if matches!(result, ToolOutput::BackgroundTaskStarted { .. }) {
+        if matches!(
+            result,
+            ToolOutput::BackgroundTaskStarted { .. } | ToolOutput::SubagentStarted { .. }
+        ) {
             self.makes_progress = true;
+            self.leaves_pending_work = true;
         }
     }
 }

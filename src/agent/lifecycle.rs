@@ -20,6 +20,7 @@ impl Agent {
         }
         self.begin_verification_observation_window();
         self.set_planning_advisory(None);
+        self.retry_completion_task();
         self.arm_self_review_for_coding_task("retry the latest user request")
             .await;
         self.push_harness_note(
@@ -50,6 +51,7 @@ impl Agent {
         self.summary_sources.clear();
         self.compaction_events.clear();
         self.pending_context_rewrite = PendingContextRewrite::default();
+        self.completion = CompletionGuardState::default();
         self.verification.pending_verification_bindings.clear();
         self.verification.suppressed_verification_calls.clear();
         self.begin_verification_observation_window();
@@ -368,6 +370,10 @@ impl Agent {
         }
         self.reset_transient_state();
 
+        if has_plan {
+            self.begin_completion_task(TaskCompletionContract::workspace_action());
+        }
+
         if let Some(store) = &self.todo_store {
             let mut store = store.lock().await;
             if has_tasks {
@@ -423,9 +429,14 @@ impl Agent {
     /// This resets conversation context like `/start` so command workflows do not
     /// inherit unrelated chat history, then installs `prompt` as the sole user
     /// message for the next run.
-    pub(crate) async fn begin_focused_coding_run(&mut self, prompt: &str) {
+    pub(crate) async fn begin_focused_coding_run(
+        &mut self,
+        prompt: &str,
+        completion_contract: TaskCompletionContract,
+    ) {
         let _ = self.set_mode(AgentMode::Coding);
         self.reset_for_hard_boundary().await;
+        self.begin_completion_task(completion_contract);
         self.arm_self_review_for_coding_task(prompt).await;
         self.push_message(user_text_message(prompt));
     }

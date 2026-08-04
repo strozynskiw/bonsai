@@ -1145,6 +1145,15 @@ async fn repair_advisory_blocks_read_only_refresh_after_failed_command() {
             usage: None,
             ..StreamedResponse::default()
         }),
+        Ok(StreamedResponse {
+            content: "The compile error remains unresolved.".to_string(),
+            tool_calls: vec![],
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::Stop,
+            ),
+            usage: None,
+            ..StreamedResponse::default()
+        }),
     ]);
     let requests = provider.requests();
 
@@ -1170,7 +1179,15 @@ async fn repair_advisory_blocks_read_only_refresh_after_failed_command() {
         .await
         .unwrap();
 
-    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+    let AgentRunResult::Incomplete { failure, .. } = result else {
+        panic!("a promised compile-error fix must not succeed without a mutation");
+    };
+    assert!(
+        failure
+            .gaps
+            .iter()
+            .any(|gap| matches!(gap, crate::agent::CompletionGap::WorkspaceMutationMissing))
+    );
     assert_eq!(
         read_calls.lock().await.len(),
         1,
@@ -1293,6 +1310,15 @@ async fn failed_bash_output_stays_detailed_for_model_context() {
             usage: None,
             ..StreamedResponse::default()
         }),
+        Ok(StreamedResponse {
+            content: "The failing test remains unresolved.".to_string(),
+            tool_calls: Vec::new(),
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::Stop,
+            ),
+            usage: None,
+            ..StreamedResponse::default()
+        }),
     ]);
     let mut agent = Agent::new(
         Box::new(provider),
@@ -1309,7 +1335,16 @@ async fn failed_bash_output_stays_detailed_for_model_context() {
         .await
         .unwrap();
 
-    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+    assert!(matches!(
+        result,
+        AgentRunResult::Incomplete {
+            failure: crate::agent::CompletionGuardFailure {
+                outcome: crate::agent::CompletionFailureOutcome::Blocked,
+                ..
+            },
+            ..
+        }
+    ));
     let model_text = tool_message_text(&agent, "bash-1");
     assert!(
         model_text.starts_with("error[E0609]"),

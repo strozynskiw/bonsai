@@ -788,6 +788,15 @@ async fn run_task(
 
     let (status, output, run_error) = match run_result {
         Ok(AgentRunResult::Completed(output)) => (TaskStatus::Completed, output, None),
+        Ok(AgentRunResult::Incomplete { output, failure }) => (
+            match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Blocked => TaskStatus::Blocked,
+                crate::agent::CompletionFailureOutcome::Failed => TaskStatus::Failed,
+                crate::agent::CompletionFailureOutcome::Cancelled => TaskStatus::Interrupted,
+            },
+            output,
+            Some(failure.detail),
+        ),
         Ok(AgentRunResult::Interrupted(output)) => (TaskStatus::Interrupted, output, None),
         Ok(AgentRunResult::Waiting(reason)) => (
             TaskStatus::Error,
@@ -797,6 +806,7 @@ async fn run_task(
         Err(err) => (TaskStatus::Error, String::new(), Some(err.to_string())),
     };
     let usage_totals = agent.usage_totals();
+    let completion_guard = agent.completion_guard_trace();
     let usage = UsageReport::from_totals(usage_totals);
     let usage_turns = agent.context_report().usage_turns;
     let repair_turns = agent
@@ -914,6 +924,7 @@ async fn run_task(
         score,
         output,
         run_error,
+        completion_guard,
         usage,
         usage_turns,
         budget,

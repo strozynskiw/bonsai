@@ -111,7 +111,7 @@ async fn stall_guard_keeps_long_exploration_run_alive_with_persistent_nudges() {
 
     let result = agent
         .run(
-            "implement the feature",
+            "research the feature",
             CancellationToken::new(),
             sink.clone(),
         )
@@ -183,7 +183,7 @@ async fn stall_guard_resets_on_progress_making_bash_turn() {
 
     let result = agent
         .run(
-            "implement the feature",
+            "research the feature",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )

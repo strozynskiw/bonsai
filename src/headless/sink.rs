@@ -554,6 +554,7 @@ mod tests {
                 crate::completion_report::CompletionStatus::Completed,
                 crate::completion_report::CompletionEvidenceSnapshot::default(),
                 crate::completion_report::CompletionSessionEvidence {
+                    completion_guard: None,
                     verification: None,
                     review: None,
                     authorization_decisions: &[],
@@ -614,6 +615,7 @@ mod tests {
             crate::completion_report::CompletionStatus::BudgetExhausted,
             crate::completion_report::CompletionEvidenceSnapshot::default(),
             crate::completion_report::CompletionSessionEvidence {
+                completion_guard: None,
                 verification: None,
                 review: None,
                 authorization_decisions: &[],

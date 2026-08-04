@@ -171,6 +171,39 @@ fn app() -> AppState {
     )
 }
 
+#[test]
+fn safe_plan_start_confirmation_accepts_only_exact_scoped_words_once() {
+    for input in ["go", "GO", " continue "] {
+        let mut app = app();
+        app.pending_safe_plan_start_confirmation = true;
+        assert!(take_safe_plan_start_confirmation(&mut app, input));
+        assert!(!app.pending_safe_plan_start_confirmation);
+        assert!(
+            !take_safe_plan_start_confirmation(&mut app, input),
+            "confirmation authority must be one-shot"
+        );
+    }
+
+    for input in [
+        "yes",
+        "go ahead and delete it",
+        "continue with deployment",
+        "allow",
+        "approve",
+    ] {
+        let mut app = app();
+        app.pending_safe_plan_start_confirmation = true;
+        assert!(!take_safe_plan_start_confirmation(&mut app, input));
+        assert!(!app.pending_safe_plan_start_confirmation);
+    }
+}
+
+#[test]
+fn safe_plan_start_confirmation_requires_prior_planning_completion() {
+    let mut app = app();
+    assert!(!take_safe_plan_start_confirmation(&mut app, "go"));
+}
+
 fn provider_command_event() -> RuntimeEvent {
     provider_command_event_with_generation(None)
 }
@@ -4461,7 +4494,7 @@ async fn implement_plan_task_runs_section_only_plan() {
     .expect("implement plan run should finish");
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(
         requests[0]
             .iter()
@@ -4513,7 +4546,7 @@ async fn commit_handoff_starts_coding_agent_with_commit_workflow_prompt() {
     .expect("commit workflow run should finish");
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(
         requests[0]
             .iter()
@@ -4576,7 +4609,7 @@ async fn init_handoff_starts_coding_agent_with_project_aware_workflow_prompt() {
     .expect("init workflow run should finish");
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(
         requests[0]
             .iter()
@@ -4622,7 +4655,7 @@ async fn pr_handoff_starts_coding_agent_with_pr_workflow_prompt() {
     .expect("pr workflow run should finish");
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(
         requests[0]
             .iter()
@@ -4690,7 +4723,7 @@ async fn test_handoff_uses_detected_profile_and_bounded_workflow_prompt() {
     .await
     .expect("verification workflow should finish");
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     let prompt = requests[0].join("\n");
     assert!(prompt.contains("cargo test --locked"));
     assert!(prompt.contains("Run each command once"));
@@ -4743,7 +4776,7 @@ async fn start_handoff_seeds_visible_todos_and_sends_plan_context() {
     .expect("implement plan run should finish");
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(
         requests[0]
             .iter()
@@ -4822,7 +4855,7 @@ async fn start_handoff_uses_markdown_checklist_fallback_as_todos() {
     .expect("implement plan run should finish");
 
     let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(
         requests[0]
             .iter()
@@ -4910,7 +4943,7 @@ async fn withdraw_queued_action_cancels_and_restores_most_recent_message() {
 
     let mut app = app();
     app.task_state = TaskState::Running;
-    for (id, text) in [(1, "edit me"), (2, "keep me")] {
+    for (id, text) in [(1, "tell me more"), (2, "keep me")] {
         tasks
             .queue_agent_message(QueuedUserMessage {
                 id,
@@ -4947,13 +4980,13 @@ async fn withdraw_queued_action_cancels_and_restores_most_recent_message() {
     let requests = requests.lock().await;
     assert_eq!(
         requests.as_slice(),
-        &[vec!["initial".to_string(), "edit me".to_string()]]
+        &[vec!["initial".to_string(), "tell me more".to_string()]]
     );
     assert_eq!(app.input(), "keep me");
     assert_eq!(app.composer.text, "keep me");
     assert!(matches!(
         app.queued_inputs.as_slice(),
-        [QueuedInput { id: 1, text, .. }] if text == "edit me"
+        [QueuedInput { id: 1, text, .. }] if text == "tell me more"
     ));
 }
 

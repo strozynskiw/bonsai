@@ -358,6 +358,11 @@ pub struct AppState {
     /// fresh plan, then consumed by the event loop after it protects and clears
     /// the old canvas. `None` on any other finish.
     pub(crate) pending_start_new_plan: bool,
+    /// One-shot authority for the literal natural-language confirmations
+    /// `go`/`continue` to enter the existing `/start` plan handoff. It is armed
+    /// only by a completed planning run and never applies to permission,
+    /// destructive, privileged, or external-action prompts.
+    pub(crate) pending_safe_plan_start_confirmation: bool,
     pub(crate) tick: u64,
     /// The bonsai in the empty todo sidebar. Fully grown at startup; `/bonsai`
     /// replants the tree and replays the growth.
@@ -604,6 +609,7 @@ impl AppState {
             plan_execution: None,
             phase_advance: None,
             pending_start_new_plan: false,
+            pending_safe_plan_start_confirmation: false,
             tick: 0,
             sidebar_bonsai: crate::tui::widgets::bonsai::BonsaiGrowth::sprout(),
             copy_notice: None,
@@ -1167,6 +1173,7 @@ impl AppState {
     fn apply_runtime_event(&mut self, event: RuntimeEvent) {
         match event {
             RuntimeEvent::AgentStarted => {
+                self.pending_safe_plan_start_confirmation = false;
                 self.current_session_status = SessionStatus::Active;
                 self.current_terminal_reason = None;
                 self.waiting_for_peer = None;
@@ -1177,6 +1184,14 @@ impl AppState {
             RuntimeEvent::CompletionReport(report) => drop(report),
             RuntimeEvent::AgentFinished(result) => {
                 let finished_at = Instant::now();
+                let finished_mode = self
+                    .running_persona
+                    .as_ref()
+                    .and_then(crate::agent::ActivePersona::builtin)
+                    .unwrap_or_else(|| self.active_mode());
+                self.pending_safe_plan_start_confirmation =
+                    matches!(&result, Ok(AgentRunOutcome::Completed))
+                        && finished_mode == crate::agent::AgentMode::Planning;
                 let waiting_phase = match &result {
                     Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::Peer(wait))) => {
                         Some(format!("Waiting for peer #{}", wait.session_id))
@@ -1215,16 +1230,29 @@ impl AppState {
                 // making a Ctrl+C'd phase read as a success and auto-advance.
                 // Keep the state check as a backstop for cancels the run
                 // couldn't observe before finishing.
+                let completion_cancelled = matches!(
+                    &result,
+                    Ok(AgentRunOutcome::Incomplete(failure))
+                        if failure.outcome == crate::agent::CompletionFailureOutcome::Cancelled
+                );
                 let interrupted = matches!(
                     &result,
                     Ok(AgentRunOutcome::Interrupted | AgentRunOutcome::BudgetExhausted(_))
-                ) || matches!(self.task_state, TaskState::Cancelling);
-                let run_failed = result.is_err() || matches!(&result, Ok(AgentRunOutcome::Failed));
+                ) || completion_cancelled
+                    || matches!(self.task_state, TaskState::Cancelling);
+                let run_failed = result.is_err()
+                    || matches!(&result, Ok(AgentRunOutcome::Failed))
+                    || matches!(
+                        &result,
+                        Ok(AgentRunOutcome::Incomplete(failure))
+                            if failure.outcome != crate::agent::CompletionFailureOutcome::Cancelled
+                    );
                 // BudgetExhausted is treated as success for phase advancement —
                 // the agent completed its work but hit the turn/time limit.
                 // Only a real interrupt (Ctrl+C) or actual failure halts phases.
                 let phase_interrupted = matches!(self.task_state, TaskState::Cancelling)
-                    || matches!(&result, Ok(AgentRunOutcome::Interrupted));
+                    || matches!(&result, Ok(AgentRunOutcome::Interrupted))
+                    || completion_cancelled;
                 // A fresh-plan transition is ignored after interruption.
                 self.pending_start_new_plan = matches!(
                     &result,
@@ -1238,10 +1266,10 @@ impl AppState {
                 };
                 self.current_session_status = if waiting {
                     SessionStatus::Active
-                } else if run_failed {
-                    SessionStatus::Failed
                 } else if interrupted {
                     SessionStatus::Interrupted
+                } else if run_failed {
+                    SessionStatus::Failed
                 } else {
                     SessionStatus::Completed
                 };
@@ -1283,6 +1311,13 @@ impl AppState {
                         self.push_transcript_item(TranscriptItem::CommandOutput {
                             kind: CommandOutputKind::Status,
                             text: "Run interrupted.".to_string(),
+                        });
+                        self.maybe_scroll_to_bottom_current();
+                    }
+                    Ok(AgentRunOutcome::Incomplete(failure)) => {
+                        self.push_transcript_item(TranscriptItem::CommandOutput {
+                            kind: CommandOutputKind::Status,
+                            text: failure.detail,
                         });
                         self.maybe_scroll_to_bottom_current();
                     }
@@ -1610,6 +1645,37 @@ mod tests {
             "workspace".to_string(),
             None,
         )
+    }
+
+    #[test]
+    fn completed_planning_run_arms_only_safe_plan_start_confirmation() {
+        let mut app = app();
+        app.running_persona = Some(crate::agent::ActivePersona::Builtin(AgentMode::Planning));
+
+        app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
+            AgentRunOutcome::Completed,
+        ))));
+
+        assert!(app.pending_safe_plan_start_confirmation);
+        assert!(!app.pending_start_new_plan);
+
+        app.reduce(AppAction::Runtime(RuntimeEvent::AgentStarted));
+        assert!(!app.pending_safe_plan_start_confirmation);
+    }
+
+    #[test]
+    fn completion_guard_cancellation_marks_the_session_interrupted() {
+        let mut app = app();
+        app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
+            AgentRunOutcome::Incomplete(crate::agent::CompletionGuardFailure {
+                outcome: crate::agent::CompletionFailureOutcome::Cancelled,
+                gaps: Vec::new(),
+                detail: "Completion cancelled.".to_string(),
+            }),
+        ))));
+
+        assert_eq!(app.current_session_status, SessionStatus::Interrupted);
+        assert!(!app.pending_safe_plan_start_confirmation);
     }
 
     #[test]
@@ -3369,6 +3435,7 @@ mod tests {
                 status,
                 crate::completion_report::CompletionEvidenceSnapshot::default(),
                 crate::completion_report::CompletionSessionEvidence {
+                    completion_guard: None,
                     verification: None,
                     review: None,
                     authorization_decisions: &[],

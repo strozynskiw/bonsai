@@ -601,6 +601,22 @@ impl SubagentRunner {
                             );
                             (Ok(conclusion), evidence)
                         }
+                        AgentRunResult::Incomplete { failure, .. } => {
+                            guard.finish_with_usage(
+                                SubagentStatus::Failed,
+                                Some(failure.detail.clone()),
+                                Some(usage),
+                                usage_turns.clone(),
+                            );
+                            (
+                                Err(anyhow!(
+                                    "'{}' subagent did not complete: {}",
+                                    spec.label,
+                                    failure.detail
+                                )),
+                                Vec::new(),
+                            )
+                        }
                         AgentRunResult::Waiting(reason) => {
                             guard.finish_with_usage(
                                 SubagentStatus::Failed,

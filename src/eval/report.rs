@@ -46,6 +46,10 @@ pub(crate) enum TaskStatus {
     /// The agent finished its run normally.
     #[default]
     Completed,
+    /// Structured completion evidence showed an external or policy blocker.
+    Blocked,
+    /// The bounded completion recovery still left actionable work unresolved.
+    Failed,
     /// The run was interrupted (e.g. cancellation).
     Interrupted,
     /// The run aborted with an error.
@@ -56,6 +60,8 @@ impl TaskStatus {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Completed => "completed",
+            Self::Blocked => "blocked",
+            Self::Failed => "failed",
             Self::Interrupted => "interrupted",
             Self::Error => "error",
         }
@@ -74,6 +80,8 @@ pub(crate) struct TaskReport {
     pub(crate) output: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) run_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_guard: Option<crate::agent::CompletionGuardTrace>,
     pub(crate) usage: UsageReport,
     pub(crate) usage_turns: Vec<crate::agent::UsageTurnReport>,
     pub(crate) budget: EvalBudgetReport,
@@ -343,6 +351,7 @@ mod tests {
             score: ScoreReport::new(1, 1),
             output: String::new(),
             run_error: None,
+            completion_guard: None,
             usage: UsageReport {
                 prompt_tokens: 1,
                 completion_tokens: 1,

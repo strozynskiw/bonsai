@@ -203,6 +203,13 @@ impl InteractionService {
         self.noninteractive
     }
 
+    /// Number of unresolved permission/question responders owned by this
+    /// service. Completion gates use this authoritative state instead of
+    /// inferring pending user input from assistant prose.
+    pub(crate) async fn pending_count(&self) -> usize {
+        self.pending.lock().await.responders.len()
+    }
+
     pub async fn request(
         &self,
         build: impl FnOnce(u64) -> InteractionRequest,

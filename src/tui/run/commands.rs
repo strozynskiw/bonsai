@@ -1526,6 +1526,7 @@ async fn start_focused_coding_workflow(
     agent: Arc<Mutex<Agent>>,
     sink: SharedSink,
     prompt: String,
+    completion_contract: crate::agent::TaskCompletionContract,
     status: &str,
 ) -> bool {
     if app.task_state.is_busy() {
@@ -1538,7 +1539,7 @@ async fn start_focused_coding_workflow(
     app.mark_run_started(std::time::Instant::now());
     app.reduce(AppAction::Agent(UiEvent::Thinking(status.to_string())));
     sync_agent_self_review_mode(app.self_review_mode, &agent).await;
-    if let Err(err) = tasks.start_focused_coding_run(agent, prompt, sink) {
+    if let Err(err) = tasks.start_focused_coding_run(agent, prompt, completion_contract, sink) {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
         return false;
     }
@@ -1559,6 +1560,7 @@ pub(in crate::tui) async fn commit_changes(
         agent,
         sink,
         commit_workflow_prompt(),
+        crate::agent::TaskCompletionContract::action(),
         "Committing pending changes",
     )
     .await
@@ -1578,6 +1580,7 @@ pub(in crate::tui) async fn initialize_agents_md(
         agent,
         sink,
         init_workflow_prompt(),
+        crate::agent::TaskCompletionContract::workspace_action(),
         "Preparing project-aware AGENTS.md guidance",
     )
     .await
@@ -1838,6 +1841,7 @@ pub(in crate::tui) async fn create_pull_request(
         agent,
         sink,
         pr_workflow_prompt(),
+        crate::agent::TaskCompletionContract::action(),
         "Preparing pull request",
     )
     .await

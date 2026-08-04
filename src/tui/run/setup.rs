@@ -661,6 +661,7 @@ mod tests {
             status,
             evidence,
             CompletionSessionEvidence {
+                completion_guard: None,
                 verification: None,
                 review: None,
                 authorization_decisions: &[],
