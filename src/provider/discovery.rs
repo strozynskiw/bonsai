@@ -212,6 +212,10 @@ async fn fetch_qwencloud_models(
 fn is_qwencloud_chat_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
     id.starts_with("qwen")
+        // DashScope still lists the retired Qwen 2 generation even though
+        // inference was decommissioned in August 2025. Keeping it selectable
+        // produces an unusable model with no current metadata.
+        && !id.starts_with("qwen2-")
         && ![
             "embedding",
             "rerank",
@@ -1520,6 +1524,7 @@ mod tests {
                     {"id": "qwen-max"},
                     {"id": "qwen-plus"},
                     {"id": "qwen-turbo"},
+                    {"id": "qwen2-7b-instruct"},
                     {"id": "qwen3-embedding-8b"},
                     {"id": "paraformer-v2"},
                     {"id": "deepseek-v4"}

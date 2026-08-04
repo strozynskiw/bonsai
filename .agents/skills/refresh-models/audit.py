@@ -339,24 +339,35 @@ def main() -> int:
     # full history (dated snapshots, embeddings, retired ids) drowns the list;
     # without a live cache, fall back to the whole block.
     live_served: dict[str, set] = {}
+    live_mapped: dict[str, set] = {}
     if os.path.isdir(LIVE_DIR):
         for fn in os.listdir(LIVE_DIR):
             if fn.endswith(".json"):
                 with open(os.path.join(LIVE_DIR, fn)) as f:
                     data = json.load(f)
-                live_served[fn[:-5]] = {
+                connection_id = fn[:-5]
+                live_served[connection_id] = {
                     str(lm.get("remote_model_id"))
                     for lm in data.get("models") or []
                 }
+                live_mapped[connection_id] = {
+                    str(lm.get("remote_model_id"))
+                    for lm in data.get("models") or []
+                    if lm.get("model_id")
+                }
 
-    print("## lineup gaps (served + in models.dev, but no TOML target)")
+    print("## lineup gaps (served + in models.dev, but no static or dynamic target)")
     for name in tomls:
         for block in blocks_of_interest.get(name, []):
             have = covered.get(name, set())
             rows = set(block_rows.get(block, set()))
             if name in live_served:
                 # High confidence: the connection demonstrably serves these.
-                missing = sorted((rows & live_served[name]) - have)
+                missing = sorted(
+                    (rows & live_served[name])
+                    - have
+                    - live_mapped.get(name, set())
+                )
                 if missing:
                     problems += 1
                     print(f"- `{name}` (block `{block}`): {', '.join(missing)}")
@@ -416,8 +427,13 @@ def main() -> int:
                     for mid in unmapped
                 ]
                 print(f"- `{conn}`: {', '.join(annotated)}")
+                if any(
+                    mid not in all_remote_ids and mid not in all_not_shipped
+                    for mid in unmapped
+                ):
+                    problems += 1
 
-    print(f"\n{problems} target(s) with unexplained findings")
+    print(f"\n{problems} unexplained finding(s)")
     return 1 if problems else 0
 
 

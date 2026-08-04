@@ -112,7 +112,7 @@ impl ModelCatalog {
             if model.model_id.is_some() {
                 continue;
             }
-            model.model_id = self
+            let static_model_id = self
                 .target_order
                 .iter()
                 .filter(|(target_connection_id, _model_id)| target_connection_id == connection_id)
@@ -128,6 +128,14 @@ impl ModelCatalog {
                         .unwrap_or_else(|| target.model.model());
                     (remote_model == model.remote_model_id.as_ref()).then(|| model_id.clone())
                 });
+            model.model_id = static_model_id.or_else(|| {
+                self.discovered_models_dev_match(connection_id, &model.remote_model_id)
+                    .and_then(|_| {
+                        format!("{connection_id}/{}", model.remote_model_id)
+                            .parse()
+                            .ok()
+                    })
+            });
         }
     }
 }

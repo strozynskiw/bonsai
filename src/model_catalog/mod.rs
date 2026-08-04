@@ -600,6 +600,20 @@ impl ModelCatalog {
             .or_else(|| self.resolve_shadow_target(connection_id, model))
     }
 
+    fn discovered_models_dev_match(
+        &self,
+        connection_id: &ConnectionId,
+        remote_model_id: &str,
+    ) -> Option<models_dev::DiscoveredModelMatch> {
+        let connection = self.connections.get(connection_id)?;
+        let provider = connection
+            .models_dev_provider
+            .as_ref()
+            .unwrap_or(connection_id);
+        self.models_dev_read()
+            .discovered_model(provider, remote_model_id)
+    }
+
     /// Resolve a model that has no static catalog target by synthesizing a
     /// minimal "shadow" target from live discovery and/or models.dev metadata.
     ///
@@ -618,22 +632,19 @@ impl ModelCatalog {
     ) -> Option<ResolvedModel> {
         let connection = self.connections.get(connection_id)?;
         let live = self.live_model_for_connection_model(connection_id, model);
-        // models.dev keys models as `provider/model`; a bare remote id (how
-        // live discovery stores them) is namespaced under the connection's
-        // explicit models.dev provider when configured, or its own id for
-        // direct providers.
         let canonical: ModelId = model
             .parse()
             .or_else(|_err| format!("{connection_id}/{model}").parse())
             .ok()?;
-        let metadata_model = connection
-            .models_dev_provider
+        let models_dev_match = self.discovered_models_dev_match(connection_id, canonical.model());
+        let exact_route_metadata = models_dev_match.as_ref().is_some_and(|matched| {
+            matched.kind == models_dev::DiscoveredModelMatchKind::RouteExact
+        });
+        let metadata_model_override = models_dev_match
             .as_ref()
-            .and_then(|provider| format!("{provider}/{}", canonical.model()).parse().ok())
-            .unwrap_or_else(|| canonical.clone());
-        let models_dev = self.models_dev_read().model(&metadata_model).cloned();
-        let metadata_model_override =
-            (metadata_model != canonical).then_some(metadata_model.clone());
+            .map(|matched| matched.model.id.clone())
+            .filter(|metadata_model| metadata_model != &canonical);
+        let models_dev = models_dev_match.map(|matched| matched.model);
         // Only synthesize when something real backs the model. Neither signal
         // present → keep the historical `None` so we never fabricate a target.
         if models_dev.is_none() && live.is_none() {
@@ -693,7 +704,7 @@ impl ModelCatalog {
             models_dev.as_ref(),
             live.as_ref(),
             ModelSource::Discovered,
-            models_dev.is_none(),
+            !exact_route_metadata,
         ))
     }
 
@@ -3279,6 +3290,183 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
+    fn qwen_discovery_preserves_exact_snapshot_and_cross_route_metadata() {
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "qwencloud"
+                    display_name = "Qwen Cloud API"
+                    auth = "api-key"
+                    transport = "openai-chat"
+                    models_dev_provider = "alibaba"
+                    reasoning_codec = "kimi-thinking"
+                    default_base_url = "https://dashscope.example/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "qwen3"
+                "#,
+            )],
+            &[],
+        )
+        .unwrap()
+        .with_models_dev(
+            parse_models_dev_catalog(
+                "test",
+                r#"{
+                    "alibaba": {
+                        "models": {
+                            "qwen3.6-plus": {
+                                "id": "qwen3.6-plus",
+                                "name": "Qwen3.6 Plus",
+                                "reasoning": true,
+                                "reasoning_options": [{"type": "toggle"}],
+                                "tool_call": true,
+                                "attachment": true,
+                                "modalities": {
+                                    "input": ["text", "image"],
+                                    "output": ["text"]
+                                },
+                                "cost": {"input": 0.5, "output": 2},
+                                "limit": {"context": 1000000, "output": 65536}
+                            },
+                            "qwen3.7-max": {
+                                "id": "qwen3.7-max",
+                                "name": "Qwen3.7 Max",
+                                "reasoning": true,
+                                "reasoning_options": [{"type": "toggle"}],
+                                "tool_call": true,
+                                "cost": {"input": 2.5, "output": 7.5},
+                                "limit": {"context": 1000000, "output": 65536}
+                            }
+                        }
+                    },
+                    "alibaba-token-plan": {
+                        "models": {
+                            "qwen3.8-max": {
+                                "id": "qwen3.8-max",
+                                "name": "Qwen3.8 Max",
+                                "reasoning": true,
+                                "reasoning_options": [{"type": "toggle"}],
+                                "tool_call": true,
+                                "attachment": true,
+                                "modalities": {
+                                    "input": ["text", "image"],
+                                    "output": ["text"]
+                                },
+                                "cost": {"input": 0, "output": 0},
+                                "limit": {"context": 1000000, "output": 131072}
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("qwencloud");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability::from_remote_ids([
+                    "qwen3.6-plus".to_string(),
+                    "qwen3.6-plus-2026-04-02".to_string(),
+                    "qwen3.7-max-preview".to_string(),
+                    "qwen3.8-max".to_string(),
+                    "unknown-qwen".to_string(),
+                ]),
+            )
+            .unwrap();
+
+        let exact = catalog
+            .resolve_connection_model(&connection, "qwen3.6-plus")
+            .expect("exact Qwen metadata resolves");
+        assert!(!exact.unverified);
+        assert_eq!(exact.context_window, Some(1_000_000));
+        assert_eq!(exact.output_limit, Some(65_536));
+        assert_eq!(
+            exact
+                .pricing
+                .expect("same-route models.dev pricing")
+                .input_micros_per_million,
+            500_000
+        );
+        assert_eq!(exact.reasoning_codec, ReasoningCodec::KimiThinking);
+        assert!(exact.features.contains(&ModelFeature::Attachment));
+
+        let snapshot = catalog
+            .resolve_connection_model(&connection, "qwen3.6-plus-2026-04-02")
+            .expect("dated Qwen alias resolves through its base model");
+        assert!(snapshot.unverified);
+        assert_eq!(snapshot.display_name.as_ref(), "qwen3.6-plus-2026-04-02");
+        assert_eq!(snapshot.context_window, Some(1_000_000));
+        assert_eq!(snapshot.output_limit, Some(65_536));
+        assert!(snapshot.pricing.is_some());
+        assert_eq!(
+            snapshot.reasoning_selections(),
+            vec![ReasoningSelection::Default]
+        );
+
+        let preview = catalog
+            .resolve_connection_model(&connection, "qwen3.7-max-preview")
+            .expect("Qwen preview resolves through its documented base model");
+        assert!(preview.unverified);
+        assert_eq!(preview.display_name.as_ref(), "qwen3.7-max-preview");
+        assert_eq!(preview.context_window, Some(1_000_000));
+        assert_eq!(preview.output_limit, Some(65_536));
+        assert!(preview.pricing.is_some());
+        assert_eq!(
+            preview.reasoning_selections(),
+            vec![ReasoningSelection::Default]
+        );
+
+        let cross_route = catalog
+            .resolve_connection_model(&connection, "qwen3.8-max")
+            .expect("structural metadata resolves across routes");
+        assert!(cross_route.unverified);
+        assert_eq!(cross_route.context_window, Some(1_000_000));
+        assert_eq!(cross_route.output_limit, Some(131_072));
+        assert!(cross_route.features.contains(&ModelFeature::Attachment));
+        assert!(cross_route.pricing.is_none());
+        assert_eq!(
+            cross_route.reasoning_selections(),
+            vec![ReasoningSelection::Default]
+        );
+
+        let availability = catalog.live_availability_snapshot();
+        let models = &availability
+            .iter()
+            .find(|(id, _)| id == &connection)
+            .expect("Qwen availability snapshot")
+            .1
+            .models;
+        for remote_model_id in [
+            "qwen3.6-plus",
+            "qwen3.6-plus-2026-04-02",
+            "qwen3.7-max-preview",
+            "qwen3.8-max",
+        ] {
+            let model = models
+                .iter()
+                .find(|model| model.remote_model_id.as_ref() == remote_model_id)
+                .expect("matched live Qwen model");
+            let expected_model_id = format!("qwencloud/{remote_model_id}");
+            assert_eq!(
+                model.model_id.as_ref().map(ModelId::as_str),
+                Some(expected_model_id.as_str())
+            );
+        }
+        assert!(
+            models
+                .iter()
+                .find(|model| model.remote_model_id.as_ref() == "unknown-qwen")
+                .expect("unknown live Qwen model")
+                .model_id
+                .is_none()
+        );
+    }
+
+    #[test]
     fn refreshed_metadata_overrides_unpinned_offline_fallbacks() {
         let spec = load_catalog_sources(
             &[source(
@@ -4554,6 +4742,31 @@ default_base_url = "http://localhost:11434/v1"
         )));
         assert!(openai.contains(&("eu".to_string(), "https://eu.api.openai.com/v1".to_string())));
         assert!(openai.contains(&("ae".to_string(), "https://ae.api.openai.com/v1".to_string())));
+    }
+
+    #[test]
+    fn qwen_builtin_connections_bind_live_ids_to_models_dev_metadata() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+
+        for (connection_id_value, models_dev_provider) in [
+            ("qwencloud", "alibaba"),
+            ("qwencloud-token-plan", "alibaba-token-plan"),
+        ] {
+            let connection = catalog
+                .connection(&connection_id(connection_id_value))
+                .expect("built-in Qwen connection");
+            assert_eq!(
+                connection
+                    .models_dev_provider
+                    .as_ref()
+                    .map(ConnectionId::as_str),
+                Some(models_dev_provider)
+            );
+            assert_eq!(
+                connection.reasoning_codec,
+                Some(ReasoningCodec::KimiThinking)
+            );
+        }
     }
 
     #[test]

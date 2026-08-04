@@ -15,6 +15,24 @@ pub(crate) struct ModelsDevCatalog {
     models: HashMap<ModelId, ModelsDevModel>,
 }
 
+/// How confidently a live-only model was matched to Models.dev metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DiscoveredModelMatchKind {
+    /// The configured Models.dev provider contains the exact remote id.
+    RouteExact,
+    /// The configured provider contains the undated base of a snapshot alias.
+    RouteAlias,
+    /// Another provider contains the same model id; route pricing is excluded.
+    CrossProvider,
+}
+
+/// Models.dev metadata selected for a model discovered from a live endpoint.
+#[derive(Debug, Clone)]
+pub(super) struct DiscoveredModelMatch {
+    pub(super) model: ModelsDevModel,
+    pub(super) kind: DiscoveredModelMatchKind,
+}
+
 impl ModelsDevCatalog {
     pub(crate) fn len(&self) -> usize {
         self.models.len()
@@ -28,6 +46,66 @@ impl ModelsDevCatalog {
         self.models.get(id)
     }
 
+    /// Resolve metadata for a raw live model id without inventing model
+    /// capabilities. Exact rows from the configured route win. Dated and
+    /// `-latest` aliases, plus Qwen's documented `-preview` aliases, may reuse
+    /// their route's base limits and pricing. An exact row from another
+    /// provider contributes only model-intrinsic structure (never that
+    /// provider's price or reasoning controls).
+    pub(super) fn discovered_model(
+        &self,
+        preferred_provider: &ConnectionId,
+        remote_model_id: &str,
+    ) -> Option<DiscoveredModelMatch> {
+        let exact_id = namespaced_model_id(preferred_provider, remote_model_id)?;
+        if let Some(model) = self
+            .models
+            .get(&exact_id)
+            .filter(|model| model.source_provider.as_ref() == preferred_provider.as_str())
+        {
+            return Some(DiscoveredModelMatch {
+                model: model.clone(),
+                kind: DiscoveredModelMatchKind::RouteExact,
+            });
+        }
+
+        let alias_base = snapshot_alias_base(remote_model_id);
+        if let Some(base) = alias_base
+            && let Some(model) = namespaced_model_id(preferred_provider, base).and_then(|id| {
+                self.models
+                    .get(&id)
+                    .filter(|model| model.source_provider.as_ref() == preferred_provider.as_str())
+            })
+        {
+            return Some(DiscoveredModelMatch {
+                model: snapshot_alias_metadata(model, remote_model_id),
+                kind: DiscoveredModelMatchKind::RouteAlias,
+            });
+        }
+
+        if let Some(model) = self.cross_provider_model(remote_model_id) {
+            return Some(DiscoveredModelMatch {
+                model: cross_provider_metadata(model, None),
+                kind: DiscoveredModelMatchKind::CrossProvider,
+            });
+        }
+
+        alias_base.and_then(|base| {
+            self.cross_provider_model(base)
+                .map(|model| DiscoveredModelMatch {
+                    model: cross_provider_metadata(model, Some(remote_model_id)),
+                    kind: DiscoveredModelMatchKind::CrossProvider,
+                })
+        })
+    }
+
+    fn cross_provider_model(&self, remote_model_id: &str) -> Option<&ModelsDevModel> {
+        self.models
+            .values()
+            .filter(|model| model.id.model() == remote_model_id)
+            .min_by(|left, right| left.id.as_str().cmp(right.id.as_str()))
+    }
+
     fn insert_with_direct_provider_precedence(&mut self, provider_id: &str, model: ModelsDevModel) {
         let is_direct_provider = model.id.catalog_provider() == provider_id;
         if is_direct_provider {
@@ -36,6 +114,67 @@ impl ModelsDevCatalog {
             self.models.entry(model.id.clone()).or_insert(model);
         }
     }
+}
+
+fn namespaced_model_id(provider: &ConnectionId, model: &str) -> Option<ModelId> {
+    format!("{provider}/{model}").parse().ok()
+}
+
+fn snapshot_alias_base(model: &str) -> Option<&str> {
+    if let Some(base) = model.strip_suffix("-latest")
+        && !base.is_empty()
+    {
+        return Some(base);
+    }
+    if model
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("qwen"))
+        && let Some(base) = model.strip_suffix("-preview")
+        && !base.is_empty()
+    {
+        return Some(base);
+    }
+
+    let split = model.len().checked_sub(11)?;
+    let base = model.get(..split)?;
+    let suffix = model.get(split..)?;
+    let bytes = suffix.as_bytes();
+    (!base.is_empty()
+        && bytes.len() == 11
+        && bytes[0] == b'-'
+        && bytes[1..5].iter().all(u8::is_ascii_digit)
+        && bytes[5] == b'-'
+        && bytes[6..8].iter().all(u8::is_ascii_digit)
+        && bytes[8] == b'-'
+        && bytes[9..11].iter().all(u8::is_ascii_digit))
+    .then_some(base)
+}
+
+fn snapshot_alias_metadata(model: &ModelsDevModel, remote_model_id: &str) -> ModelsDevModel {
+    let mut metadata = model.clone();
+    metadata.display_name = remote_model_id.into();
+    // Snapshot modes can differ from their moving alias (for example a
+    // thinking-only dated Qwen Max). Limits and same-route billing remain
+    // reusable, but controls must stay conservative without an exact row.
+    metadata.reasoning_options.clear();
+    metadata
+}
+
+fn cross_provider_metadata(
+    model: &ModelsDevModel,
+    display_model_id: Option<&str>,
+) -> ModelsDevModel {
+    let mut metadata = model.clone();
+    if let Some(display_model_id) = display_model_id {
+        metadata.display_name = display_model_id.into();
+    }
+    // Context/output limits and modalities describe the model. Pricing and
+    // accepted reasoning parameters describe a route, so never copy them from
+    // another provider.
+    metadata.pricing = None;
+    metadata.context_pricing.clear();
+    metadata.reasoning_options.clear();
+    metadata
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,6 +186,7 @@ pub(crate) struct ModelModalities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelsDevModel {
     pub id: ModelId,
+    source_provider: Box<str>,
     pub display_name: Box<str>,
     pub family: Option<Box<str>>,
     pub release_date: Option<Box<str>>,
@@ -256,6 +396,7 @@ impl RawModelsDevModel {
 
         Ok(ModelsDevModel {
             id: model_id,
+            source_provider: provider_id.into(),
             display_name,
             family: self.family,
             release_date: self.release_date,
@@ -910,6 +1051,141 @@ mod tests {
 
     fn model_id(value: &str) -> ModelId {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn discovered_model_prefers_exact_metadata_from_the_configured_route() {
+        let catalog = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "alibaba": { "models": { "qwen3.6-plus": {
+                "id": "qwen3.6-plus",
+                "name": "Qwen3.6 Plus",
+                "reasoning": true,
+                "reasoning_options": [{"type": "toggle"}],
+                "tool_call": true,
+                "limit": { "context": 1000000, "output": 65536 },
+                "cost": { "input": 0.5, "output": 2 }
+              }}},
+              "router": { "models": { "qwen3.6-plus": {
+                "id": "qwen3.6-plus",
+                "limit": { "context": 120000, "output": 8192 }
+              }}}
+            }
+            "#,
+        )
+        .unwrap();
+
+        let matched = catalog
+            .discovered_model(&"alibaba".parse().unwrap(), "qwen3.6-plus")
+            .unwrap();
+
+        assert_eq!(matched.kind, DiscoveredModelMatchKind::RouteExact);
+        assert_eq!(matched.model.id, model_id("alibaba/qwen3.6-plus"));
+        assert_eq!(matched.model.context_window, Some(1_000_000));
+        assert_eq!(matched.model.output_limit, Some(65_536));
+        assert_eq!(
+            matched.model.pricing,
+            Some(ModelPricing::new(500_000, 2_000_000))
+        );
+        assert_eq!(
+            matched.model.reasoning_options,
+            vec![ReasoningOption::Toggle]
+        );
+    }
+
+    #[test]
+    fn discovered_route_aliases_reuse_metadata_without_reasoning_controls() {
+        let catalog = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "alibaba": { "models": { "qwen3.6-plus": {
+                "id": "qwen3.6-plus",
+                "name": "Qwen3.6 Plus",
+                "reasoning": true,
+                "reasoning_options": [{"type": "toggle"}],
+                "tool_call": true,
+                "limit": { "context": 1000000, "output": 65536 },
+                "cost": { "input": 0.5, "output": 2 }
+              }}}
+            }
+            "#,
+        )
+        .unwrap();
+
+        let matched = catalog
+            .discovered_model(&"alibaba".parse().unwrap(), "qwen3.6-plus-2026-04-02")
+            .unwrap();
+
+        assert_eq!(matched.kind, DiscoveredModelMatchKind::RouteAlias);
+        assert_eq!(matched.model.id, model_id("alibaba/qwen3.6-plus"));
+        assert_eq!(
+            matched.model.display_name.as_ref(),
+            "qwen3.6-plus-2026-04-02"
+        );
+        assert_eq!(matched.model.context_window, Some(1_000_000));
+        assert_eq!(matched.model.output_limit, Some(65_536));
+        assert_eq!(
+            matched.model.pricing,
+            Some(ModelPricing::new(500_000, 2_000_000))
+        );
+        assert!(matched.model.reasoning_options.is_empty());
+
+        let preview = catalog
+            .discovered_model(&"alibaba".parse().unwrap(), "qwen3.6-plus-preview")
+            .unwrap();
+        assert_eq!(preview.kind, DiscoveredModelMatchKind::RouteAlias);
+        assert_eq!(preview.model.context_window, Some(1_000_000));
+        assert_eq!(preview.model.output_limit, Some(65_536));
+        assert_eq!(preview.model.display_name.as_ref(), "qwen3.6-plus-preview");
+        assert!(preview.model.reasoning_options.is_empty());
+    }
+
+    #[test]
+    fn discovered_cross_provider_match_excludes_route_specific_metadata() {
+        let catalog = parse_models_dev_catalog(
+            "models-dev.json",
+            r#"
+            {
+              "alibaba-token-plan": { "models": { "qwen3.8-max": {
+                "id": "qwen3.8-max",
+                "name": "Qwen3.8 Max",
+                "reasoning": true,
+                "reasoning_options": [{"type": "toggle"}],
+                "tool_call": true,
+                "attachment": true,
+                "modalities": { "input": ["text", "image"], "output": ["text"] },
+                "limit": { "context": 1000000, "output": 131072 },
+                "cost": { "input": 0, "output": 0 }
+              }}},
+              "vercel": { "models": { "alibaba/qwen3.8-max": {
+                "id": "alibaba/qwen3.8-max",
+                "name": "Qwen3.8 Max via Vercel",
+                "reasoning": true,
+                "reasoning_options": [{"type": "toggle"}],
+                "limit": { "context": 1000000, "output": 131072 },
+                "cost": { "input": 2, "output": 6 }
+              }}}
+            }
+            "#,
+        )
+        .unwrap();
+
+        let matched = catalog
+            .discovered_model(&"alibaba".parse().unwrap(), "qwen3.8-max")
+            .unwrap();
+
+        assert_eq!(matched.kind, DiscoveredModelMatchKind::CrossProvider);
+        assert_eq!(matched.model.id, model_id("alibaba-token-plan/qwen3.8-max"));
+        assert_eq!(matched.model.context_window, Some(1_000_000));
+        assert_eq!(matched.model.output_limit, Some(131_072));
+        assert!(matched.model.features().contains(&ModelFeature::ToolCall));
+        assert!(matched.model.features().contains(&ModelFeature::Attachment));
+        assert!(matched.model.pricing.is_none());
+        assert!(matched.model.context_pricing.is_empty());
+        assert!(matched.model.reasoning_options.is_empty());
     }
 
     #[test]

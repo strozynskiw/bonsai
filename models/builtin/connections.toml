@@ -401,6 +401,10 @@ transport = "openai-chat"
 # The Qwen Cloud discovery strategy keeps only Qwen 3 text-chat families while
 # preserving this catalog's curated metadata for known models.
 discovery = "qwen-cloud"
+# Live DashScope listings expose ids only. Resolve those ids against the
+# Alibaba models.dev block so /refresh retains documented windows, limits,
+# prices, and capabilities instead of synthesizing ~120K placeholders.
+models_dev_provider = "alibaba"
 default_base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 origins = [
   { id = "singapore", display_name = "Singapore", base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" },
@@ -413,6 +417,9 @@ base_url_env = "DASHSCOPE_BASE_URL"
 default_model = "qwencloud/qwen3.7-plus"
 default_endpoint_path = "chat/completions"
 default_token_counter = "qwen3"
+# Qwen's documented thinking toggle is carried by the same
+# `thinking: {type: enabled|disabled}` envelope as the shared Kimi codec.
+reasoning_codec = "kimi-thinking"
 # Automatic server-side prefix caching, no explicit markers: verified live
 # (qwen3.7-plus, ~6.9K-token prompt) — cold cached_tokens: 0, immediate warm
 # repeat cached_tokens: 6272/6896 (~91%), reported in
@@ -452,6 +459,8 @@ default_token_counter = "qwen3"
 # against this plan's regional host and key, so plan-exclusive models remain
 # discoverable without leaking unrelated DashScope products into the picker.
 discovery = "qwen-cloud"
+models_dev_provider = "alibaba-token-plan"
+reasoning_codec = "kimi-thinking"
 prompt_cache = true
 prompt_cache_policy = "rolling-history"
 
