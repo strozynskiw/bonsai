@@ -514,7 +514,7 @@ impl Tool for BashTool {
                  supports bounded foreground, background task, PTY, parallel, and approved sandbox-escape modes."
             }
             BashCapability::Planning => {
-                "Run a restricted planning command: safe local inspection or approved gh/glab issue and pull/merge-request collaboration. gh/glab resolve from system and package-manager bin directories (PATH is not consulted). Foreground only; shell syntax, redirects, project mutation, and sandbox escape are unavailable."
+                "Run a restricted planning command: safe local inspection or approved gh/glab issue and pull/merge-request collaboration. gh/glab resolve from fixed trusted directories or validated collaboration-only PATH entries; local tools never resolve from PATH. Foreground only; shell syntax, redirects, project mutation, and sandbox escape are unavailable."
             }
         }
     }

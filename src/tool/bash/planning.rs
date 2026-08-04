@@ -8,10 +8,10 @@
 //!
 //! Local inspection tools resolve only from the root-owned system directories.
 //! The collaboration clients (`gh`/`glab`) additionally resolve from fixed
-//! package-manager binary directories; those candidates must stay inside the
-//! matching installation prefix, be owned by root or the current user, have no
-//! group/other-writable component in their directory chain, and never resolve
-//! inside the project root. `PATH` is never consulted.
+//! package-manager binary directories and validated absolute directories from
+//! `PATH`. Collaboration candidates must be owned by root or the current user,
+//! have no group/other-writable component in their protected directory chain,
+//! and never resolve inside the project root.
 
 use std::path::{Path, PathBuf};
 
@@ -67,6 +67,27 @@ pub(super) fn classify_planning_command_in(
     input: &str,
     project_root: Option<&Path>,
 ) -> Result<PlanningCommand> {
+    let path_dirs = collaboration_path_dirs();
+    classify_planning_command_with_paths(
+        input,
+        project_root,
+        SYSTEM_BIN_DIRS,
+        SYSTEM_BIN_DIRS,
+        COLLABORATION_BIN_DIRS,
+        &path_dirs,
+        Path::new("/"),
+    )
+}
+
+fn classify_planning_command_with_paths(
+    input: &str,
+    project_root: Option<&Path>,
+    local_system_dirs: &[&str],
+    collaboration_system_dirs: &[&str],
+    collaboration_package_dirs: &[&str],
+    path_dirs: &[PathBuf],
+    path_protected_root: &Path,
+) -> Result<PlanningCommand> {
     let input = input.trim();
     if input.is_empty() {
         bail!("planning Bash command is required");
@@ -81,8 +102,15 @@ pub(super) fn classify_planning_command_in(
         bail!("planning Bash only permits named trusted executables");
     }
     let executable = match program.as_str() {
-        "gh" | "glab" => trusted_collaboration_executable(program, project_root),
-        _ => trusted_executable(program),
+        "gh" | "glab" => trusted_collaboration_executable_in(
+            program,
+            project_root,
+            collaboration_system_dirs,
+            collaboration_package_dirs,
+            path_dirs,
+            path_protected_root,
+        ),
+        _ => resolve_system_executable(program, local_system_dirs),
     }
     .ok_or_else(|| anyhow::anyhow!("{program} is not an available planning-mode executable"))?;
 
@@ -178,15 +206,45 @@ const COLLABORATION_BIN_DIRS: &[&str] = &[
     "/home/linuxbrew/.linuxbrew/bin", // Linuxbrew
 ];
 
+#[cfg(test)]
 fn trusted_executable(program: &str) -> Option<PathBuf> {
     resolve_system_executable(program, SYSTEM_BIN_DIRS)
 }
 
-/// Resolve a collaboration client from the fixed system directories first,
-/// then from the fixed package-manager directories.
+/// Resolve a collaboration client from fixed trusted directories first, then
+/// from validated absolute directories supplied by the process `PATH`.
+#[cfg(test)]
 fn trusted_collaboration_executable(program: &str, project_root: Option<&Path>) -> Option<PathBuf> {
-    resolve_system_executable(program, SYSTEM_BIN_DIRS)
-        .or_else(|| resolve_package_executable(program, COLLABORATION_BIN_DIRS, project_root))
+    let path_dirs = collaboration_path_dirs();
+    trusted_collaboration_executable_in(
+        program,
+        project_root,
+        SYSTEM_BIN_DIRS,
+        COLLABORATION_BIN_DIRS,
+        &path_dirs,
+        Path::new("/"),
+    )
+}
+
+fn collaboration_path_dirs() -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default()
+}
+
+fn trusted_collaboration_executable_in(
+    program: &str,
+    project_root: Option<&Path>,
+    system_dirs: &[&str],
+    package_dirs: &[&str],
+    path_dirs: &[PathBuf],
+    path_protected_root: &Path,
+) -> Option<PathBuf> {
+    resolve_system_executable(program, system_dirs)
+        .or_else(|| resolve_package_executable(program, package_dirs, project_root))
+        .or_else(|| {
+            resolve_path_executable_in(program, path_dirs, project_root, path_protected_root)
+        })
 }
 
 fn resolve_system_executable(program: &str, dirs: &[&str]) -> Option<PathBuf> {
@@ -221,30 +279,98 @@ fn resolve_package_executable<S: AsRef<str>>(
         let Ok(canonical) = candidate.canonicalize() else {
             continue;
         };
-        if package_executable_file(&canonical, &prefix, project_root) {
+        if collaboration_executable_file(&canonical, &prefix, project_root) {
             return Some(canonical);
         }
     }
     None
 }
 
+/// Resolve `program` from validated absolute `PATH` directories.
+///
+/// Canonical targets must be protected all the way to the filesystem root, so
+/// entries below a group- or other-writable directory fail closed.
+fn resolve_path_executable_in(
+    program: &str,
+    dirs: &[PathBuf],
+    project_root: Option<&Path>,
+    protected_root: &Path,
+) -> Option<PathBuf> {
+    for directory in dirs {
+        if !directory.is_absolute() || path_entry_is_project_controlled(directory, project_root) {
+            continue;
+        }
+        let Ok(canonical_directory) = directory.canonicalize() else {
+            continue;
+        };
+        if path_entry_is_project_controlled(&canonical_directory, project_root)
+            || !path_entry_is_protected(&canonical_directory, protected_root)
+        {
+            continue;
+        }
+        let Ok(canonical) = canonical_directory.join(program).canonicalize() else {
+            continue;
+        };
+        if canonical.is_absolute()
+            && collaboration_executable_file(&canonical, protected_root, project_root)
+        {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
+fn path_entry_is_project_controlled(directory: &Path, project_root: Option<&Path>) -> bool {
+    let Some(project_root) = project_root else {
+        return false;
+    };
+    let Ok(canonical_root) = project_root.canonicalize() else {
+        return true;
+    };
+    directory.starts_with(&canonical_root)
+        || directory
+            .canonicalize()
+            .is_ok_and(|canonical| canonical.starts_with(&canonical_root))
+}
+
 #[cfg(unix)]
-fn package_executable_file(path: &Path, prefix: &Path, project_root: Option<&Path>) -> bool {
+fn path_entry_is_protected(directory: &Path, protected_root: &Path) -> bool {
+    protected_dir_chain(directory, protected_root)
+}
+
+#[cfg(not(unix))]
+fn path_entry_is_protected(_directory: &Path, _protected_root: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn collaboration_executable_file(
+    path: &Path,
+    protected_root: &Path,
+    project_root: Option<&Path>,
+) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let Ok(metadata) = path.metadata() else {
         return false;
     };
-    let mode = metadata.permissions().mode();
-    if !metadata.is_file() || mode & 0o111 == 0 || mode & 0o022 != 0 {
-        return false;
-    }
     let current_uid = nix::unistd::geteuid().as_raw();
-    if metadata.uid() != 0 && metadata.uid() != current_uid {
+    let current_gid = nix::unistd::getegid().as_raw();
+    if !metadata.is_file()
+        || !collaboration_metadata_is_trusted(
+            metadata.uid(),
+            metadata.gid(),
+            metadata.permissions().mode(),
+            current_uid,
+            current_gid,
+        )
+    {
         return false;
     }
     if let Some(root) = project_root {
-        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let Ok(canonical_root) = root.canonicalize() else {
+            return false;
+        };
         if path.starts_with(&canonical_root) {
             return false;
         }
@@ -252,21 +378,49 @@ fn package_executable_file(path: &Path, prefix: &Path, project_root: Option<&Pat
     let Some(parent) = path.parent() else {
         return false;
     };
-    protected_dir_chain(parent, prefix)
+    protected_dir_chain(parent, protected_root)
+}
+
+#[cfg(unix)]
+fn collaboration_metadata_is_trusted(
+    owner_uid: u32,
+    owner_gid: u32,
+    mode: u32,
+    current_uid: u32,
+    current_gid: u32,
+) -> bool {
+    if (owner_uid != 0 && owner_uid != current_uid) || mode & 0o022 != 0 {
+        return false;
+    }
+    if current_uid == 0 {
+        return mode & 0o111 != 0;
+    }
+    if owner_uid == current_uid {
+        return mode & 0o100 != 0;
+    }
+    if owner_gid == current_gid {
+        mode & 0o010 != 0
+    } else {
+        mode & 0o001 != 0
+    }
 }
 
 #[cfg(not(unix))]
-fn package_executable_file(_path: &Path, _prefix: &Path, _project_root: Option<&Path>) -> bool {
+fn collaboration_executable_file(
+    _path: &Path,
+    _protected_root: &Path,
+    _project_root: Option<&Path>,
+) -> bool {
     // The collaboration prefixes are unix paths; no candidate can exist on
     // other platforms, so fail closed rather than trusting any file.
     false
 }
 
-/// Require every directory from `start` up to and including `prefix` to be a
-/// directory that is not group- or other-writable. Walking up to `prefix` also
-/// enforces that the canonical target stays inside the prefix.
+/// Require every directory from `start` up to and including `protected_root`
+/// to be a directory that is not group- or other-writable. Walking upward also
+/// enforces that the canonical target stays inside the protected root.
 #[cfg(unix)]
-fn protected_dir_chain(start: &Path, prefix: &Path) -> bool {
+fn protected_dir_chain(start: &Path, protected_root: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
     let mut current = start;
@@ -277,7 +431,7 @@ fn protected_dir_chain(start: &Path, prefix: &Path) -> bool {
         if !metadata.is_dir() || metadata.permissions().mode() & 0o022 != 0 {
             return false;
         }
-        if current == prefix {
+        if current == protected_root {
             return true;
         }
         let Some(parent) = current.parent() else {
@@ -537,7 +691,12 @@ fn collaboration_grammar(program: &str, area: &str, action: &str) -> Option<Coll
         ],
         flags: &[],
     };
-    const VIEW: CollaborationGrammar = CollaborationGrammar {
+    const GH_VIEW: CollaborationGrammar = CollaborationGrammar {
+        read_only: true,
+        values: &["--repo", "--json"],
+        flags: &[],
+    };
+    const GLAB_VIEW: CollaborationGrammar = CollaborationGrammar {
         read_only: true,
         values: &[],
         flags: &[],
@@ -613,7 +772,8 @@ fn collaboration_grammar(program: &str, area: &str, action: &str) -> Option<Coll
 
     match (program, area, action) {
         ("gh", "issue" | "pr", "list") | ("glab", "issue" | "mr", "list") => Some(LIST),
-        ("gh", "issue" | "pr", "view") | ("glab", "issue" | "mr", "view") => Some(VIEW),
+        ("gh", "issue" | "pr", "view") => Some(GH_VIEW),
+        ("glab", "issue" | "mr", "view") => Some(GLAB_VIEW),
         ("gh", "issue", "create") => Some(CREATE_ISSUE),
         ("gh", "pr", "create") => Some(CREATE_PR),
         ("gh", "issue", "edit") => Some(EDIT_ISSUE),
@@ -622,7 +782,7 @@ fn collaboration_grammar(program: &str, area: &str, action: &str) -> Option<Coll
         ("gh", "issue" | "pr", "comment") => Some(COMMENT),
         ("glab", "issue" | "mr", "create") => Some(GLAB_CREATE),
         ("glab", "issue" | "mr", "update") => Some(GLAB_UPDATE),
-        ("glab", "issue" | "mr", "close" | "reopen") => Some(VIEW),
+        ("glab", "issue" | "mr", "close" | "reopen") => Some(GLAB_VIEW),
         _ => None,
     }
 }
@@ -951,6 +1111,149 @@ mod tests {
         let dir = package_dir(&writable_dir);
         let dirs = [dir.as_str()];
         assert!(resolve_package_executable("gh", &dirs, None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_executable_accepts_approved_issue_lookup_and_canonical_symlink() {
+        let prefix = temp_prefix("path-accept");
+        let installed_bin = prefix.join("installed/gh/bin");
+        std::fs::create_dir_all(&installed_bin).unwrap();
+        let target = installed_bin.join("gh");
+        write_executable(&target, 0o755);
+        std::os::unix::fs::symlink(&target, prefix.join("bin/gh")).unwrap();
+        let dirs = [prefix.join("bin")];
+        let protected_root = prefix.canonicalize().unwrap();
+
+        let command = classify_planning_command_with_paths(
+            "gh issue view 173 --repo strozynskiw/bonsai --json title,body",
+            None,
+            &[],
+            &[],
+            &[],
+            &dirs,
+            &protected_root,
+        )
+        .unwrap();
+
+        assert_eq!(command.kind(), PlanningCommandKind::CollaborationRead);
+        assert!(command.command().starts_with(&shell_quote(
+            &target.canonicalize().unwrap().to_string_lossy()
+        )));
+        assert!(command.command().contains("'--repo' 'strozynskiw/bonsai'"));
+        assert!(command.command().contains("'--json' 'title,body'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_executable_rejects_project_controlled_and_unsafe_candidates() {
+        let project = temp_prefix("path-project");
+        let project_bin = project.join("bin/gh");
+        write_executable(&project_bin, 0o755);
+        let project_dirs = [project.join("bin")];
+        assert!(
+            resolve_path_executable_in("gh", &project_dirs, Some(&project), &project).is_none()
+        );
+
+        let writable_binary = temp_prefix("path-writable-binary");
+        write_executable(&writable_binary.join("bin/gh"), 0o777);
+        assert!(
+            resolve_path_executable_in(
+                "gh",
+                &[writable_binary.join("bin")],
+                None,
+                &writable_binary,
+            )
+            .is_none()
+        );
+
+        let writable_directory = temp_prefix("path-writable-directory");
+        write_executable(&writable_directory.join("bin/gh"), 0o755);
+        std::fs::set_permissions(
+            writable_directory.join("bin"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        assert!(
+            resolve_path_executable_in(
+                "gh",
+                &[writable_directory.join("bin")],
+                None,
+                &writable_directory,
+            )
+            .is_none()
+        );
+
+        let relative = PathBuf::from("relative-bin");
+        assert!(resolve_path_executable_in("gh", &[relative], None, Path::new("/")).is_none());
+        assert!(
+            resolve_path_executable_in(
+                "gh",
+                &[temp_prefix("path-missing").join("bin")],
+                None,
+                Path::new("/"),
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collaboration_metadata_rejects_foreign_and_unusable_ownership_modes() {
+        assert!(!collaboration_metadata_is_trusted(
+            2000, 2000, 0o755, 1000, 1000
+        ));
+        assert!(!collaboration_metadata_is_trusted(
+            1000, 1000, 0o001, 1000, 1000
+        ));
+        assert!(collaboration_metadata_is_trusted(
+            1000, 1000, 0o100, 1000, 1000
+        ));
+        assert!(collaboration_metadata_is_trusted(
+            0, 1000, 0o010, 1000, 1000
+        ));
+        assert!(collaboration_metadata_is_trusted(
+            0, 2000, 0o001, 1000, 1000
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_resolution_skips_unusable_candidate_for_later_executable() {
+        let prefix = temp_prefix("path-execute-mode");
+        let unusable_dir = prefix.join("unusable");
+        let executable_dir = prefix.join("executable");
+        std::fs::create_dir_all(&unusable_dir).unwrap();
+        std::fs::create_dir_all(&executable_dir).unwrap();
+        write_executable(&unusable_dir.join("gh"), 0o001);
+        write_executable(&executable_dir.join("gh"), 0o700);
+        let resolved = resolve_path_executable_in(
+            "gh",
+            &[unusable_dir, executable_dir.clone()],
+            None,
+            &prefix.canonicalize().unwrap(),
+        );
+        let expected = executable_dir.join("gh").canonicalize().unwrap();
+        assert_eq!(resolved.as_deref(), Some(expected.as_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_collaboration_tools_never_resolve_from_path() {
+        let fake = temp_prefix("path-scope");
+        write_executable(&fake.join("bin/cat"), 0o755);
+        assert!(
+            classify_planning_command_with_paths(
+                "cat src/main.rs",
+                None,
+                &[],
+                &[],
+                &[],
+                &[fake.join("bin")],
+                &fake,
+            )
+            .is_err()
+        );
     }
 
     #[cfg(unix)]

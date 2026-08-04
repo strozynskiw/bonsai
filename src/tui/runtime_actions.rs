@@ -2275,14 +2275,6 @@ async fn submit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
 }
 
 async fn commit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
-    if app.task_state.is_busy() {
-        push_command_message(
-            app,
-            CommandOutputKind::Error,
-            "Can't save an agent while the agent is running.",
-        );
-        return;
-    }
     let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
         app.modal.as_ref()
     else {
@@ -2297,9 +2289,9 @@ async fn commit_agent_composer(app: &mut AppState, deps: RuntimeActionDeps<'_>) 
         return;
     }
     if let Some((id, settings)) = state.builtin_subagent_settings() {
-        // Same shared handle as the agent's, read lock-free. The `is_busy`
-        // guard above already blocks saving mid-run, but locking the agent here
-        // would still be wrong the moment that guard ever narrows.
+        // Same shared handle as the agent's, read lock-free. Persist before
+        // publishing so later subagent launches observe durable settings while
+        // already-running subagents keep their launch-time configuration.
         let handle = app.builtin_subagents.clone();
         if let Err(err) =
             persist_builtin_subagent_settings(deps.storage, &handle, id, settings).await

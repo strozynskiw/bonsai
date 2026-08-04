@@ -3130,6 +3130,80 @@ async fn agent_browser_edit_and_toggle_do_not_block_on_held_agent_lock() {
         ),
         "edit must open the composer mid-run"
     );
+
+    let expected_settings = {
+        let Some(ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { state })) =
+            &mut app.modal
+        else {
+            panic!("built-in composer must remain open");
+        };
+        state.model.set_text("codex:gpt-5-live".to_string());
+        state.effort_index = 4;
+        state
+            .fallback_model
+            .set_text("anthropic:claude-live".to_string());
+        state.fallback_effort_index = 2;
+        state.step = crate::tui::agent_composer::AgentComposerStep::Review;
+        state.builtin_subagent_settings().unwrap().1
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        handle_runtime_action(
+            AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Submit),
+            &mut app,
+            &mut tasks,
+            make_deps(),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("saving built-in settings must not await the held agent lock");
+    assert_eq!(
+        app.builtin_subagents.get(builtin_id).as_ref(),
+        Some(&expected_settings),
+        "successful persistence must publish the settings to later launches"
+    );
+    assert_eq!(
+        storage
+            .load_builtin_subagent_settings()
+            .await
+            .unwrap()
+            .get(&builtin_id),
+        Some(&expected_settings),
+        "built-in settings must reach storage before publication"
+    );
+
+    let mut custom = crate::tui::agent_composer::AgentComposerState::new();
+    custom.name.set_text("live custom".to_string());
+    custom
+        .description
+        .set_text("saved during an active run".to_string());
+    custom
+        .prompt
+        .set_text("Inspect the requested files.".to_string());
+    custom.step = crate::tui::agent_composer::AgentComposerStep::Review;
+    let custom_path =
+        crate::tui::agent_composer::agent_file_path(&custom, storage.home_dir(), temp_dir.path());
+    app.modal = Some(ModalKind::Wizard(
+        crate::tui::event::WizardModal::AgentComposer {
+            state: Box::new(custom),
+        },
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        handle_runtime_action(
+            AppAction::AgentComposer(crate::tui::event::AgentComposerAction::Submit),
+            &mut app,
+            &mut tasks,
+            make_deps(),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("saving a custom agent must not await the held agent lock");
+    let custom_markdown = std::fs::read_to_string(&custom_path).unwrap();
+    assert!(custom_markdown.contains("name: \"live custom\""));
+    assert!(custom_markdown.contains("Inspect the requested files."));
 }
 
 #[tokio::test]
