@@ -542,6 +542,265 @@ fn session_status_db_strings_roundtrip() {
 }
 
 #[test]
+fn task_outcome_and_reason_db_strings_roundtrip() {
+    for (outcome, db) in [
+        (TaskOutcome::Succeeded, "succeeded"),
+        (TaskOutcome::Blocked, "blocked"),
+        (TaskOutcome::Failed, "failed"),
+        (TaskOutcome::Cancelled, "cancelled"),
+        (TaskOutcome::Superseded, "superseded"),
+        (TaskOutcome::Unknown, "unknown"),
+    ] {
+        assert_eq!(outcome.as_db_str(), db);
+        assert_eq!(TaskOutcome::from_db_str(db), outcome);
+    }
+    for (code, db) in [
+        (TaskTerminalReasonCode::GoalSuperseded, "goal_superseded"),
+        (TaskTerminalReasonCode::UserCancelled, "user_cancelled"),
+        (TaskTerminalReasonCode::BudgetExhausted, "budget_exhausted"),
+        (TaskTerminalReasonCode::ProviderFailure, "provider_failure"),
+        (
+            TaskTerminalReasonCode::ExecutionFailure,
+            "execution_failure",
+        ),
+        (
+            TaskTerminalReasonCode::VerificationFailure,
+            "verification_failure",
+        ),
+        (
+            TaskTerminalReasonCode::ProcessInterrupted,
+            "process_interrupted",
+        ),
+        (TaskTerminalReasonCode::SessionEnded, "session_ended"),
+    ] {
+        assert_eq!(code.as_db_str(), db);
+        assert_eq!(TaskTerminalReasonCode::from_db_str(db), code);
+    }
+}
+
+#[tokio::test]
+async fn task_outcome_is_independent_from_session_lifecycle_and_resume() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let task = fixture
+        .storage
+        .start_task_run(session_id, Some(3), "Ship durable task outcomes")
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .finish_task_run(task.id, TaskOutcome::Succeeded, None)
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .mark_session_status(session_id, SessionStatus::Interrupted)
+        .await
+        .unwrap();
+
+    let before_resume = fixture
+        .storage
+        .session_summary(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before_resume.status, SessionStatus::Interrupted);
+    assert_eq!(
+        before_resume
+            .latest_task
+            .as_ref()
+            .and_then(|task| task.outcome),
+        Some(TaskOutcome::Succeeded)
+    );
+    assert_eq!(before_resume.latest_task.unwrap().episode_seq, Some(3));
+
+    assert_eq!(
+        fixture
+            .storage
+            .claim_session_for_resume(fixture.project_path(), session_id)
+            .await
+            .unwrap(),
+        ResumeSessionOutcome::Resumed
+    );
+    assert!(
+        fixture
+            .storage
+            .active_task_run(session_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .and_then(|task| task.outcome),
+        Some(TaskOutcome::Succeeded)
+    );
+}
+
+#[tokio::test]
+async fn non_success_task_requires_typed_reason_and_goal_change_supersedes() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let first = fixture
+        .storage
+        .start_task_run(session_id, None, "First user goal")
+        .await
+        .unwrap();
+    let second = fixture
+        .storage
+        .start_task_run(session_id, None, "Replacement user goal")
+        .await
+        .unwrap();
+
+    let first = fixture.storage.task_run(first.id).await.unwrap().unwrap();
+    assert_eq!(first.outcome, Some(TaskOutcome::Superseded));
+    assert_eq!(
+        first.terminal_reason.as_ref().map(|reason| reason.code),
+        Some(TaskTerminalReasonCode::GoalSuperseded)
+    );
+    assert!(!first.terminal_reason.unwrap().detail.is_empty());
+    assert!(
+        fixture
+            .storage
+            .finish_task_run(second.id, TaskOutcome::Blocked, None)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .storage
+            .task_run(second.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+
+    let reason = TaskTerminalReason::new(
+        TaskTerminalReasonCode::BudgetExhausted,
+        "Configured run budget was exhausted.",
+    );
+    let blocked = fixture
+        .storage
+        .finish_task_run(second.id, TaskOutcome::Blocked, Some(&reason))
+        .await
+        .unwrap();
+    assert_eq!(blocked.outcome, Some(TaskOutcome::Blocked));
+    assert_eq!(blocked.terminal_reason, Some(reason));
+
+    let late_cancel = TaskTerminalReason::new(
+        TaskTerminalReasonCode::UserCancelled,
+        "Late shutdown must not rewrite the result.",
+    );
+    let unchanged = fixture
+        .storage
+        .finish_task_run(second.id, TaskOutcome::Cancelled, Some(&late_cancel))
+        .await
+        .unwrap();
+    assert_eq!(unchanged.outcome, Some(TaskOutcome::Blocked));
+
+    let cancelled = fixture
+        .storage
+        .start_task_run(session_id, None, "User-cancelled goal")
+        .await
+        .unwrap();
+    let cancel_reason = TaskTerminalReason::new(
+        TaskTerminalReasonCode::UserCancelled,
+        "The user cancelled the task.",
+    );
+    let cancelled = fixture
+        .storage
+        .finish_task_run(cancelled.id, TaskOutcome::Cancelled, Some(&cancel_reason))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.outcome, Some(TaskOutcome::Cancelled));
+    assert_eq!(cancelled.terminal_reason, Some(cancel_reason));
+
+    let provider_failed = fixture
+        .storage
+        .start_task_run(session_id, None, "Provider-failed goal")
+        .await
+        .unwrap();
+    let provider_reason = TaskTerminalReason::new(
+        TaskTerminalReasonCode::ProviderFailure,
+        "Provider retries were exhausted.",
+    );
+    let provider_failed = fixture
+        .storage
+        .finish_task_run(
+            provider_failed.id,
+            TaskOutcome::Failed,
+            Some(&provider_reason),
+        )
+        .await
+        .unwrap();
+    assert_eq!(provider_failed.outcome, Some(TaskOutcome::Failed));
+    assert_eq!(provider_failed.terminal_reason, Some(provider_reason));
+    assert_eq!(
+        fixture
+            .storage
+            .task_runs_for_session(session_id)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn retry_creates_a_new_attempt_with_the_same_stable_goal_id() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let first = fixture
+        .storage
+        .start_task_run(session_id, Some(2), "Retry the same user goal")
+        .await
+        .unwrap();
+    let reason = TaskTerminalReason::new(
+        TaskTerminalReasonCode::ProviderFailure,
+        "The first provider attempt failed.",
+    );
+    fixture
+        .storage
+        .finish_task_run(first.id, TaskOutcome::Failed, Some(&reason))
+        .await
+        .unwrap();
+
+    let retry = fixture
+        .storage
+        .retry_latest_task_run(session_id)
+        .await
+        .unwrap()
+        .expect("terminal task should create a retry attempt");
+    assert_ne!(retry.id, first.id);
+    assert_eq!(retry.goal_id, first.goal_id);
+    assert_eq!(retry.goal, first.goal);
+    assert_eq!(retry.episode_seq, first.episode_seq);
+    assert!(retry.is_active());
+
+    let same_active = fixture
+        .storage
+        .retry_latest_task_run(session_id)
+        .await
+        .unwrap()
+        .expect("an active retry should be reused");
+    assert_eq!(same_active.id, retry.id);
+    assert_eq!(
+        fixture
+            .storage
+            .task_runs_for_session(session_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn saved_plan_status_db_strings_roundtrip() {
     for (status, db) in [
         (SavedPlanStatus::Draft, "draft"),
@@ -1792,7 +2051,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 3);
+    assert_eq!(migration_count, 4);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \
@@ -1940,6 +2199,65 @@ async fn fresh_database_uses_one_current_schema_baseline() {
         usage_turns_sql.contains("'episode'"),
         "rewrite_kind CHECK must include 'episode': {usage_turns_sql}"
     );
+}
+
+#[tokio::test]
+async fn task_run_migration_marks_historical_sessions_unknown() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let paths = BonsaiPaths::from_home_dir(temp_dir.path().to_path_buf());
+    let v1 = upgrade_test_migrator(&[(
+        1,
+        "initial",
+        include_str!("../../migrations/0001_initial.sql"),
+    )]);
+    let old_storage = Storage::open_paths_with_migrator(paths.clone(), &v1)
+        .await
+        .unwrap();
+    let session_id = old_storage
+        .start_session(
+            temp_dir.path(),
+            "codex",
+            "gpt-test",
+            ReasoningSelection::default(),
+        )
+        .await
+        .unwrap();
+    old_storage
+        .set_session_summary(session_id, "Ambiguous historical work")
+        .await
+        .unwrap();
+    old_storage.close().await;
+
+    let current = upgrade_test_migrator(&[
+        (
+            1,
+            "initial",
+            include_str!("../../migrations/0001_initial.sql"),
+        ),
+        (
+            2,
+            "background wake subscriptions",
+            include_str!("../../migrations/0002_background_wake_subscriptions.sql"),
+        ),
+        (
+            3,
+            "verification workspace bindings",
+            include_str!("../../migrations/0003_verification_workspace_bindings.sql"),
+        ),
+        (
+            4,
+            "task runs",
+            include_str!("../../migrations/0004_task_runs.sql"),
+        ),
+    ]);
+    let storage = Storage::open_paths_with_migrator(paths, &current)
+        .await
+        .unwrap();
+    let migrated = storage.latest_task_run(session_id).await.unwrap().unwrap();
+    assert_eq!(migrated.goal, "Ambiguous historical work");
+    assert_eq!(migrated.outcome, Some(TaskOutcome::Unknown));
+    assert!(migrated.terminal_reason.is_none());
+    assert!(migrated.ended_at_ms.is_some());
 }
 
 fn upgrade_test_migrator(
@@ -2232,6 +2550,27 @@ async fn usage_dashboard_aggregates_across_sessions() {
         .await
         .unwrap();
 
+    let succeeded = storage
+        .start_task_run(s1, None, "Successful task")
+        .await
+        .unwrap();
+    storage
+        .finish_task_run(succeeded.id, TaskOutcome::Succeeded, None)
+        .await
+        .unwrap();
+    let blocked = storage
+        .start_task_run(s2, None, "Blocked task")
+        .await
+        .unwrap();
+    let blocked_reason = TaskTerminalReason::new(
+        TaskTerminalReasonCode::BudgetExhausted,
+        "Budget exhausted during test.",
+    );
+    storage
+        .finish_task_run(blocked.id, TaskOutcome::Blocked, Some(&blocked_reason))
+        .await
+        .unwrap();
+
     let dashboard = storage.load_usage_dashboard().await.unwrap();
 
     // Pin SQLite's julian truncation (midnight-UTC .5 truncates to JDN − 1) —
@@ -2350,6 +2689,10 @@ async fn usage_dashboard_aggregates_across_sessions() {
 
     // Statuses and tools.
     assert_eq!(dashboard.status_counts, vec![(SessionStatus::Active, 3)]);
+    assert_eq!(
+        dashboard.task_outcome_counts,
+        vec![(TaskOutcome::Blocked, 1), (TaskOutcome::Succeeded, 1)]
+    );
     assert_eq!(dashboard.tools.len(), 2);
     assert_eq!(
         (
@@ -3226,6 +3569,10 @@ async fn promote_active_sessions_to_interrupted_only_promotes_leftovers() {
 
     // A previous run that crashed: its row is still `Active`.
     let crashed = fixture.start_session().await;
+    storage
+        .start_task_run(crashed, None, "Task interrupted by process loss")
+        .await
+        .unwrap();
     // An earlier run that exited cleanly.
     let completed = fixture.start_session().await;
     storage
@@ -3244,6 +3591,15 @@ async fn promote_active_sessions_to_interrupted_only_promotes_leftovers() {
     assert_eq!(promoted.len(), 1);
     assert_eq!(promoted[0].id, crashed);
     assert_eq!(promoted[0].status, SessionStatus::Interrupted);
+    let crashed_task = promoted[0].latest_task.as_ref().unwrap();
+    assert_eq!(crashed_task.outcome, Some(TaskOutcome::Failed));
+    assert_eq!(
+        crashed_task
+            .terminal_reason
+            .as_ref()
+            .map(|reason| reason.code),
+        Some(TaskTerminalReasonCode::ProcessInterrupted)
+    );
 
     // The cleanly-closed session is untouched and never surfaced.
     assert!(promoted.iter().all(|session| session.id != completed));
@@ -3263,6 +3619,38 @@ async fn promote_active_sessions_to_interrupted_only_promotes_leftovers() {
     assert!(second.is_empty());
     let current_summary = storage.session_summary(current).await.unwrap().unwrap();
     assert_eq!(current_summary.status, SessionStatus::Active);
+}
+
+#[tokio::test]
+async fn crash_promotion_does_not_erase_an_already_successful_task() {
+    let fixture = TestStorage::new().await;
+    let crashed = fixture.start_session().await;
+    let task = fixture
+        .storage
+        .start_task_run(crashed, None, "Completed before process loss")
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .finish_task_run(task.id, TaskOutcome::Succeeded, None)
+        .await
+        .unwrap();
+    let current = fixture.start_session().await;
+
+    let promoted = fixture
+        .storage
+        .promote_active_sessions_to_interrupted(fixture.project_path(), current, 5)
+        .await
+        .unwrap();
+    let crashed = promoted
+        .iter()
+        .find(|session| session.id == crashed)
+        .unwrap();
+    assert_eq!(crashed.status, SessionStatus::Interrupted);
+    assert_eq!(
+        crashed.latest_task.as_ref().and_then(|task| task.outcome),
+        Some(TaskOutcome::Succeeded)
+    );
 }
 
 #[tokio::test]

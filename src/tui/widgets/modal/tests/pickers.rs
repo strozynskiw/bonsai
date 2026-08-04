@@ -375,7 +375,7 @@ fn authorize_provider_picker_renders_supported_providers() {
 #[test]
 fn session_picker_renders_dense_header_and_single_row_sessions() {
     let area = Rect::new(0, 0, 100, 18);
-    let sessions = vec![
+    let mut sessions = vec![
         session_summary(
             1,
             "Inspect startup crash",
@@ -393,6 +393,21 @@ fn session_picker_renders_dense_header_and_single_row_sessions() {
             9,
         ),
     ];
+    let first_session_id = sessions[0].id;
+    sessions[0].latest_task = Some(Box::new(crate::storage::TaskRun {
+        id: crate::storage::TaskRunId::from_raw(10),
+        session_id: first_session_id,
+        episode_seq: Some(1),
+        goal_id: "goal-1".to_string(),
+        goal: "Inspect startup crash".to_string(),
+        outcome: Some(crate::storage::TaskOutcome::Blocked),
+        terminal_reason: Some(crate::storage::TaskTerminalReason::new(
+            crate::storage::TaskTerminalReasonCode::BudgetExhausted,
+            "Run budget exhausted.",
+        )),
+        started_at_ms: 1,
+        ended_at_ms: Some(2),
+    }));
     let buffer = render_sessions_to_buffer(area, &sessions, 1);
     let rows = (0..area.height)
         .map(|y| row_text(&buffer, y))
@@ -402,7 +417,8 @@ fn session_picker_renders_dense_header_and_single_row_sessions() {
     assert!(text.contains("ID"));
     assert!(text.contains("Session"));
     assert!(text.contains("Updated"));
-    assert!(text.contains("Status"));
+    assert!(text.contains("Lifecycle"));
+    assert!(text.contains("Task"));
     assert!(text.contains("Msgs"));
 
     let first = rows
@@ -410,6 +426,7 @@ fn session_picker_renders_dense_header_and_single_row_sessions() {
         .find(|row| row.contains("Inspect startup crash"))
         .expect("first session should render");
     assert!(first.contains("completed"));
+    assert!(first.contains("blocked"));
     assert!(first.contains("14"));
 
     let selected = rows

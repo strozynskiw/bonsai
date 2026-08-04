@@ -23,7 +23,9 @@ use crate::plan::PlanDoc;
 use crate::provider::ProviderRegistry;
 use crate::session::{CredentialPersistence, SessionStore};
 use crate::session_activity::{SessionActivity, SessionActivityGate};
-use crate::storage::{SessionId, Storage};
+use crate::storage::{
+    SessionId, Storage, TaskOutcome, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode,
+};
 use crate::subagent::SubagentRegistry;
 use crate::tui::app::TranscriptItem;
 use crate::tui::event::{
@@ -43,12 +45,20 @@ enum ReviewWorkflow {
     Security,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TaskRunIntent {
+    Start(String),
+    ContinueActive,
+    RetryLatest,
+}
+
 struct ActiveTask {
     kind: TaskKind,
     handle: JoinHandle<()>,
     cancellation: Option<CancellationToken>,
     queued_messages: Option<mpsc::UnboundedSender<QueuedUserMessageCommand>>,
     agent_persona: Option<crate::agent::ActivePersona>,
+    task_run_id: Option<Arc<tokio::sync::Mutex<Option<TaskRunId>>>>,
 }
 
 #[derive(Clone)]
@@ -294,6 +304,7 @@ impl TaskController {
         &mut self,
         agent_persona: crate::agent::ActivePersona,
         queued_messages: Vec<QueuedUserMessage>,
+        task_run_intent: TaskRunIntent,
         completion: Option<CompletionRunContext>,
         run: F,
     ) -> Result<(), UiError>
@@ -328,6 +339,8 @@ impl TaskController {
         let session_runtime_budget = self.session_runtime_budget.clone();
         let persona_model_deps = self.persona_model_deps.clone();
         let persona_for_model = agent_persona.clone();
+        let active_task_run_id = Arc::new(tokio::sync::Mutex::new(None));
+        let spawned_task_run_id = active_task_run_id.clone();
         let _ = sender.send(RuntimeEvent::AgentStarted);
         let handle = tokio::spawn(async move {
             // Every run starts under the model its persona selected: the
@@ -350,6 +363,28 @@ impl TaskController {
                     return;
                 }
             };
+            let task_run_id = match begin_task_run(
+                session_runtime_budget.as_ref(),
+                session_timing.map(|(session_id, _)| session_id),
+                task_run_intent,
+            )
+            .await
+            {
+                Ok(task_run_id) => task_run_id,
+                Err(err) => {
+                    let _ = finish_session_timing(
+                        session_runtime_budget.as_ref(),
+                        session_timing.map(|(session_id, _)| session_id),
+                    )
+                    .await;
+                    let _ = sender.send(RuntimeEvent::AgentFinished(Err(UiError::new(
+                        "Persistence failed",
+                        format!("{err:#}"),
+                    ))));
+                    return;
+                }
+            };
+            *spawned_task_run_id.lock().await = task_run_id;
             let completion_baseline = match completion.as_ref() {
                 Some(context) => {
                     context.sink.begin_completion_run();
@@ -402,6 +437,12 @@ impl TaskController {
             {
                 Ok(active_run_ms) => active_run_ms,
                 Err(err) => {
+                    finish_task_after_persistence_failure(
+                        session_runtime_budget.as_ref(),
+                        task_run_id,
+                        &err,
+                    )
+                    .await;
                     let _ = sender.send(RuntimeEvent::AgentFinished(Err(UiError::new(
                         "Persistence failed",
                         format!("{err:#}"),
@@ -412,6 +453,15 @@ impl TaskController {
             let timeout_exhaustion = selected_timeout.map(|(_, exhaustion)| {
                 crate::run_budget::refresh_session_time_exhaustion(exhaustion, final_active_run_ms)
             });
+            if let Err(err) = attach_task_episode(
+                session_runtime_budget.as_ref(),
+                task_run_id,
+                completion.as_ref(),
+            )
+            .await
+            {
+                tracing::warn!(error = %format!("{err:#}"), "failed to attach task episode");
+            }
             let mut outcome = if let Some(exhaustion) = preflight_exhaustion {
                 crate::tui::event::AgentRunOutcome::BudgetExhausted(
                     crate::run_budget::refresh_session_time_exhaustion(
@@ -428,9 +478,23 @@ impl TaskController {
                 ))
             } else {
                 let Some(result) = result else {
+                    let detail = "Agent run did not produce a result.";
+                    if let Err(err) = finish_task_run(
+                        session_runtime_budget.as_ref(),
+                        task_run_id,
+                        TaskOutcome::Failed,
+                        Some(TaskTerminalReason::new(
+                            TaskTerminalReasonCode::ExecutionFailure,
+                            detail,
+                        )),
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %format!("{err:#}"), "failed to persist missing agent result");
+                    }
                     let _ = sender.send(RuntimeEvent::AgentFinished(Err(UiError::new(
                         "Agent failed",
-                        "Agent run did not produce a result.",
+                        detail,
                     ))));
                     return;
                 };
@@ -450,6 +514,27 @@ impl TaskController {
                             .copied()
                         else {
                             let detail = crate::provider::agent_failure_detail(&err);
+                            let reason_code = if err
+                                .downcast_ref::<crate::provider::ProviderFailure>()
+                                .is_some()
+                            {
+                                TaskTerminalReasonCode::ProviderFailure
+                            } else {
+                                TaskTerminalReasonCode::ExecutionFailure
+                            };
+                            if let Err(persist_err) = finish_task_run(
+                                session_runtime_budget.as_ref(),
+                                task_run_id,
+                                TaskOutcome::Failed,
+                                Some(TaskTerminalReason::new(reason_code, &detail)),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    error = %format!("{persist_err:#}"),
+                                    "failed to persist agent task failure"
+                                );
+                            }
                             let _ = sender.send(RuntimeEvent::AgentFinished(Err(UiError::new(
                                 "Agent failed",
                                 detail,
@@ -460,6 +545,7 @@ impl TaskController {
                     }
                 }
             };
+            let mut completion_report = None;
             if let (Some(context), Some(baseline)) = (completion.as_ref(), completion_baseline)
                 && let Some(report) = build_completion_report(
                     context,
@@ -476,6 +562,23 @@ impl TaskController {
                 {
                     outcome = crate::tui::event::AgentRunOutcome::Failed;
                 }
+                completion_report = Some(report);
+            }
+            if let Err(err) = finish_task_for_outcome(
+                session_runtime_budget.as_ref(),
+                task_run_id,
+                &outcome,
+                completion_report.as_ref(),
+            )
+            .await
+            {
+                let _ = sender.send(RuntimeEvent::AgentFinished(Err(UiError::new(
+                    "Persistence failed",
+                    format!("{err:#}"),
+                ))));
+                return;
+            }
+            if let Some(report) = completion_report {
                 let _ = sender.send(RuntimeEvent::CompletionReport(Box::new(report)));
             }
             let _ = sender.send(RuntimeEvent::AgentFinished(Ok(outcome)));
@@ -487,6 +590,7 @@ impl TaskController {
             cancellation: Some(cancellation),
             queued_messages: Some(queue_sender),
             agent_persona: Some(agent_persona),
+            task_run_id: Some(active_task_run_id),
         });
         Ok(())
     }
@@ -511,9 +615,11 @@ impl TaskController {
             agent: agent.clone(),
             sink: sink.clone(),
         };
+        let task_goal = prompt.clone();
         self.spawn_agent_task(
             crate::agent::ActivePersona::Builtin(AgentMode::Coding),
             Vec::new(),
+            TaskRunIntent::Start(task_goal),
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -536,9 +642,11 @@ impl TaskController {
             agent: agent.clone(),
             sink: sink.clone(),
         };
+        let task_goal = workflow.prompt.clone();
         self.spawn_agent_task(
             crate::agent::ActivePersona::Builtin(AgentMode::Coding),
             Vec::new(),
+            TaskRunIntent::Start(task_goal),
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -569,6 +677,7 @@ impl TaskController {
         self.spawn_agent_task(
             persona,
             Vec::new(),
+            TaskRunIntent::RetryLatest,
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -612,6 +721,7 @@ impl TaskController {
         self.spawn_agent_task(
             persona,
             Vec::new(),
+            TaskRunIntent::RetryLatest,
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -637,9 +747,15 @@ impl TaskController {
             agent: agent.clone(),
             sink: sink.clone(),
         };
+        let task_goal = if input.text.trim().is_empty() {
+            "Image-based user request".to_string()
+        } else {
+            input.text.clone()
+        };
         self.spawn_agent_task(
             persona,
             queued_messages,
+            TaskRunIntent::Start(task_goal),
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -685,9 +801,17 @@ impl TaskController {
             agent: agent.clone(),
             sink: sink.clone(),
         };
+        let task_goal = if plan.title.trim().is_empty() {
+            "Implement plan".to_string()
+        } else if let Some(phase) = phase {
+            format!("Implement plan: {} (phase {})", plan.title, phase + 1)
+        } else {
+            format!("Implement plan: {}", plan.title)
+        };
         self.spawn_agent_task(
             crate::agent::ActivePersona::Builtin(AgentMode::Coding),
             Vec::new(),
+            TaskRunIntent::Start(task_goal),
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -771,6 +895,10 @@ impl TaskController {
         self.spawn_agent_task(
             crate::agent::ActivePersona::Builtin(AgentMode::Review),
             Vec::new(),
+            TaskRunIntent::Start(match workflow {
+                ReviewWorkflow::General => "Review pending changes".to_string(),
+                ReviewWorkflow::Security => "Security-review pending changes".to_string(),
+            }),
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -795,6 +923,7 @@ impl TaskController {
         self.spawn_agent_task(
             crate::agent::ActivePersona::Builtin(mode),
             Vec::new(),
+            TaskRunIntent::ContinueActive,
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -1049,6 +1178,7 @@ impl TaskController {
             cancellation: None,
             queued_messages: None,
             agent_persona: None,
+            task_run_id: None,
         });
         Ok(())
     }
@@ -1151,13 +1281,33 @@ impl TaskController {
         }
 
         let active = self.active.take()?;
-        if let Err(err) = active.handle.await
-            && let Err(send_err) = self.sender.send(RuntimeEvent::TaskPanicked(UiError::new(
+        if let Err(err) = active.handle.await {
+            if matches!(active.kind, TaskKind::AgentRun)
+                && let Some(runtime) = &self.session_runtime_budget
+                && let Some(task_run_id) = active.task_run_id
+                && let Some(task_run_id) = *task_run_id.lock().await
+            {
+                let reason = TaskTerminalReason::new(
+                    TaskTerminalReasonCode::ExecutionFailure,
+                    &format!("Agent task panicked: {err}"),
+                );
+                if let Err(persist_err) = runtime
+                    .storage
+                    .finish_task_run(task_run_id, TaskOutcome::Failed, Some(&reason))
+                    .await
+                {
+                    tracing::warn!(
+                        error = %format!("{persist_err:#}"),
+                        "failed to persist panicked task outcome"
+                    );
+                }
+            }
+            if let Err(send_err) = self.sender.send(RuntimeEvent::TaskPanicked(UiError::new(
                 "Task panicked",
                 format!("task panicked: {}", err),
-            )))
-        {
-            tracing::warn!(%send_err, "failed to deliver task-panicked event");
+            ))) {
+                tracing::warn!(%send_err, "failed to deliver task-panicked event");
+            }
         }
         Some(active.kind)
     }
@@ -1167,6 +1317,138 @@ impl TaskController {
     pub fn is_busy(&self) -> bool {
         self.active.is_some()
     }
+}
+
+async fn begin_task_run(
+    runtime: Option<&SessionRuntimeBudget>,
+    session_id: Option<SessionId>,
+    intent: TaskRunIntent,
+) -> anyhow::Result<Option<TaskRunId>> {
+    let (Some(runtime), Some(session_id)) = (runtime, session_id) else {
+        return Ok(None);
+    };
+    match intent {
+        TaskRunIntent::Start(goal) => runtime
+            .storage
+            .start_task_run(session_id, None, &goal)
+            .await
+            .map(|task| Some(task.id)),
+        TaskRunIntent::ContinueActive => runtime
+            .storage
+            .active_task_run(session_id)
+            .await
+            .map(|task| task.map(|task| task.id)),
+        TaskRunIntent::RetryLatest => runtime
+            .storage
+            .retry_latest_task_run(session_id)
+            .await
+            .map(|task| task.map(|task| task.id)),
+    }
+}
+
+async fn attach_task_episode(
+    runtime: Option<&SessionRuntimeBudget>,
+    task_run_id: Option<TaskRunId>,
+    completion: Option<&CompletionRunContext>,
+) -> anyhow::Result<()> {
+    let (Some(runtime), Some(task_run_id), Some(completion)) = (runtime, task_run_id, completion)
+    else {
+        return Ok(());
+    };
+    let episode_seq = completion.agent.lock().await.active_episode_seq();
+    if let Some(episode_seq) = episode_seq {
+        runtime
+            .storage
+            .attach_task_run_episode(task_run_id, episode_seq)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn finish_task_run(
+    runtime: Option<&SessionRuntimeBudget>,
+    task_run_id: Option<TaskRunId>,
+    outcome: TaskOutcome,
+    reason: Option<TaskTerminalReason>,
+) -> anyhow::Result<()> {
+    let (Some(runtime), Some(task_run_id)) = (runtime, task_run_id) else {
+        return Ok(());
+    };
+    runtime
+        .storage
+        .finish_task_run(task_run_id, outcome, reason.as_ref())
+        .await?;
+    Ok(())
+}
+
+async fn finish_task_after_persistence_failure(
+    runtime: Option<&SessionRuntimeBudget>,
+    task_run_id: Option<TaskRunId>,
+    error: &anyhow::Error,
+) {
+    let reason = TaskTerminalReason::new(
+        TaskTerminalReasonCode::ExecutionFailure,
+        &format!("Session persistence failed: {error:#}"),
+    );
+    if let Err(err) = finish_task_run(runtime, task_run_id, TaskOutcome::Failed, Some(reason)).await
+    {
+        tracing::warn!(error = %format!("{err:#}"), "failed to persist task outcome after persistence error");
+    }
+}
+
+async fn finish_task_for_outcome(
+    runtime: Option<&SessionRuntimeBudget>,
+    task_run_id: Option<TaskRunId>,
+    outcome: &crate::tui::event::AgentRunOutcome,
+    report: Option<&CompletionReport>,
+) -> anyhow::Result<()> {
+    let terminal = match outcome {
+        crate::tui::event::AgentRunOutcome::Completed => (TaskOutcome::Succeeded, None),
+        crate::tui::event::AgentRunOutcome::Failed => {
+            let verification_status = report
+                .and_then(|report| report.verification.as_ref())
+                .map(|verification| verification.status);
+            let detail = report
+                .map(|report| report.caveats.join(" "))
+                .unwrap_or_else(|| "The agent run ended with unresolved failures.".to_string());
+            let code = if matches!(
+                verification_status,
+                Some(
+                    crate::verification::VerificationRunStatus::Failed
+                        | crate::verification::VerificationRunStatus::Blocked
+                )
+            ) {
+                TaskTerminalReasonCode::VerificationFailure
+            } else {
+                TaskTerminalReasonCode::ExecutionFailure
+            };
+            (
+                if verification_status == Some(crate::verification::VerificationRunStatus::Blocked)
+                {
+                    TaskOutcome::Blocked
+                } else {
+                    TaskOutcome::Failed
+                },
+                Some(TaskTerminalReason::new(code, &detail)),
+            )
+        }
+        crate::tui::event::AgentRunOutcome::Interrupted => (
+            TaskOutcome::Cancelled,
+            Some(TaskTerminalReason::new(
+                TaskTerminalReasonCode::UserCancelled,
+                "The user interrupted the active task.",
+            )),
+        ),
+        crate::tui::event::AgentRunOutcome::BudgetExhausted(exhaustion) => (
+            TaskOutcome::Blocked,
+            Some(TaskTerminalReason::new(
+                TaskTerminalReasonCode::BudgetExhausted,
+                &exhaustion.to_string(),
+            )),
+        ),
+        crate::tui::event::AgentRunOutcome::Waiting(_) => return Ok(()),
+    };
+    finish_task_run(runtime, task_run_id, terminal.0, terminal.1).await
 }
 
 async fn capture_completion_baseline(
@@ -1539,6 +1821,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_tui_run_persists_success_independently_from_session() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let active_session_id = Arc::new(tokio::sync::Mutex::new(Some(session_id)));
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(sender);
+        tasks.configure_session_runtime_budget(
+            fixture.storage.clone(),
+            active_session_id,
+            None,
+            Arc::new(SubagentRegistry::new()),
+        );
+        tasks
+            .spawn_agent_task(
+                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+                Vec::new(),
+                TaskRunIntent::Start("Implement issue 138".to_string()),
+                None,
+                |_token, _queue| async move { Ok(AgentRunResult::Completed("done".to_string())) },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RuntimeEvent::AgentStarted)
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RuntimeEvent::AgentFinished(Ok(
+                crate::tui::event::AgentRunOutcome::Completed
+            )))
+        ));
+        let session = fixture
+            .storage
+            .session_summary(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.status, crate::storage::SessionStatus::Active);
+        assert_eq!(
+            session.latest_task.and_then(|task| task.outcome),
+            Some(TaskOutcome::Succeeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_defers_task_terminalization_to_the_shutdown_owner() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let active_session_id = Arc::new(tokio::sync::Mutex::new(Some(session_id)));
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(sender);
+        tasks.configure_session_runtime_budget(
+            fixture.storage.clone(),
+            active_session_id,
+            None,
+            Arc::new(SubagentRegistry::new()),
+        );
+        tasks
+            .spawn_agent_task(
+                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+                Vec::new(),
+                TaskRunIntent::Start("Keep one deterministic shutdown writer".to_string()),
+                None,
+                |_token, _queue| async move {
+                    std::future::pending::<anyhow::Result<AgentRunResult>>().await
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RuntimeEvent::AgentStarted)
+        ));
+        let active = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(task) = fixture.storage.active_task_run(session_id).await.unwrap() {
+                    break task;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("task run should start before the timeout");
+
+        tasks.abort();
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            fixture
+                .storage
+                .active_task_run(session_id)
+                .await
+                .unwrap()
+                .map(|task| task.id),
+            Some(active.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_failure_persists_typed_failed_task_reason() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let active_session_id = Arc::new(tokio::sync::Mutex::new(Some(session_id)));
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(sender);
+        tasks.configure_session_runtime_budget(
+            fixture.storage.clone(),
+            active_session_id,
+            None,
+            Arc::new(SubagentRegistry::new()),
+        );
+        tasks
+            .spawn_agent_task(
+                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+                Vec::new(),
+                TaskRunIntent::Start("Call provider".to_string()),
+                None,
+                |_token, _queue| async move {
+                    Err(anyhow::Error::new(
+                        crate::provider::ProviderFailure::configuration("invalid endpoint"),
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RuntimeEvent::AgentStarted)
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RuntimeEvent::AgentFinished(Err(_)))
+        ));
+        let task = fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.outcome, Some(TaskOutcome::Failed));
+        assert_eq!(
+            task.terminal_reason.map(|reason| reason.code),
+            Some(TaskTerminalReasonCode::ProviderFailure)
+        );
+    }
+
+    #[tokio::test]
     async fn run_budget_cancels_a_foreground_task() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut tasks = TaskController::new(sender);
@@ -1548,6 +1977,7 @@ mod tests {
             .spawn_agent_task(
                 crate::agent::ActivePersona::Builtin(AgentMode::Coding),
                 Vec::new(),
+                TaskRunIntent::ContinueActive,
                 Some(completion),
                 |token, _queue| async move {
                     token.cancelled().await;
@@ -1598,6 +2028,7 @@ mod tests {
             .spawn_agent_task(
                 crate::agent::ActivePersona::Builtin(AgentMode::Coding),
                 Vec::new(),
+                TaskRunIntent::ContinueActive,
                 Some(completion),
                 move |_token, _queue| async move {
                     // The demotion needs a detected loop (the same invocation
@@ -1645,6 +2076,7 @@ mod tests {
             .spawn_agent_task(
                 crate::agent::ActivePersona::Builtin(AgentMode::Coding),
                 Vec::new(),
+                TaskRunIntent::ContinueActive,
                 Some(completion),
                 |_token, _queue| async move { Ok(AgentRunResult::Interrupted(String::new())) },
             )
@@ -1715,6 +2147,7 @@ mod tests {
             .spawn_agent_task(
                 crate::agent::ActivePersona::Builtin(AgentMode::Coding),
                 Vec::new(),
+                TaskRunIntent::Start("Budget-limited task".to_string()),
                 None,
                 move |_token, _queue| async move {
                     invoked_by_run.store(true, Ordering::Release);
@@ -1738,5 +2171,16 @@ mod tests {
             )))
         ));
         assert!(!invoked.load(Ordering::Acquire));
+        let task = fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.outcome, Some(TaskOutcome::Blocked));
+        assert_eq!(
+            task.terminal_reason.map(|reason| reason.code),
+            Some(TaskTerminalReasonCode::BudgetExhausted)
+        );
     }
 }

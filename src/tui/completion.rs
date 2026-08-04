@@ -1061,6 +1061,7 @@ mod tests {
             reasoning: ReasoningSelection::default(),
             status: crate::storage::SessionStatus::Completed,
             terminal_reason: None,
+            latest_task: None,
             updated_at_ms: 0,
             message_count: 0,
             prompt_token_count: 0,

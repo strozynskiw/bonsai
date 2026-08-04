@@ -318,10 +318,21 @@ fn session_columns() -> Vec<TableColumn<crate::storage::SessionSummary>> {
             style: CellStyle::Meta,
         },
         TableColumn {
-            header: "Status",
+            header: "Lifecycle",
             width: TableWidth::Fit { cap: 12 },
             render: CellRender::Value(|session| session.status.label().to_string()),
             style: CellStyle::Custom(|session| session_status_style(&session.status)),
+        },
+        TableColumn {
+            header: "Task",
+            width: TableWidth::Fit { cap: 12 },
+            render: CellRender::Value(|session| {
+                session
+                    .latest_task
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |task| task.outcome_label().to_string())
+            }),
+            style: CellStyle::Custom(session_task_style),
         },
         TableColumn {
             header: "Msgs",
@@ -330,6 +341,29 @@ fn session_columns() -> Vec<TableColumn<crate::storage::SessionSummary>> {
             style: CellStyle::Meta,
         },
     ]
+}
+
+fn session_task_style(session: &crate::storage::SessionSummary) -> Style {
+    let palette = theme::palette();
+    let color = match session.latest_task.as_ref().and_then(|task| task.outcome) {
+        Some(crate::storage::TaskOutcome::Succeeded) => palette.success,
+        Some(crate::storage::TaskOutcome::Failed) => palette.error,
+        Some(crate::storage::TaskOutcome::Blocked)
+        | Some(crate::storage::TaskOutcome::Cancelled)
+        | Some(crate::storage::TaskOutcome::Superseded) => palette.muted,
+        Some(crate::storage::TaskOutcome::Unknown) | None => {
+            if session
+                .latest_task
+                .as_ref()
+                .is_some_and(|task| task.is_active())
+            {
+                palette.progress
+            } else {
+                palette.dim
+            }
+        }
+    };
+    status_style(color)
 }
 
 pub(super) fn session_title(session: &crate::storage::SessionSummary) -> String {

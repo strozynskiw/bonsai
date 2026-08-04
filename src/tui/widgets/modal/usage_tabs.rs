@@ -248,7 +248,22 @@ fn session_lines(dashboard: &UsageDashboard) -> Vec<Line<'static>> {
     let total: i64 = dashboard.status_counts.iter().map(|(_, count)| count).sum();
     lines.push(metric_line("Sessions", format!("{total} total")));
     if !statuses.is_empty() {
-        lines.push(metric_line("Statuses", statuses));
+        lines.push(metric_line("Lifecycle", statuses));
+    }
+    let task_outcomes = dashboard
+        .task_outcome_counts
+        .iter()
+        .map(|(outcome, count)| format!("{count} {}", outcome.label()))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let task_total: i64 = dashboard
+        .task_outcome_counts
+        .iter()
+        .map(|(_, count)| count)
+        .sum();
+    lines.push(metric_line("Task outcomes", format!("{task_total} total")));
+    if !task_outcomes.is_empty() {
+        lines.push(metric_line("Results", task_outcomes));
     }
     lines.push(metric_line(
         "Avg duration",

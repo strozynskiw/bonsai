@@ -622,6 +622,7 @@ pub(super) fn session_summary(
         reasoning: ReasoningSelection::default(),
         status: crate::storage::SessionStatus::from_db_str(status),
         terminal_reason: None,
+        latest_task: None,
         updated_at_ms: current_time_ms(),
         message_count,
         prompt_token_count: 0,

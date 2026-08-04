@@ -560,6 +560,29 @@ impl Storage {
             return Ok(Vec::new());
         }
 
+        // The process died while these sessions were live. Close only active
+        // task rows; an outcome persisted before the crash is immutable and
+        // must remain independent from the interrupted session lifecycle.
+        let placeholders = vec!["?"; promoted_ids.len()].join(", ");
+        let finish_tasks = format!(
+            "UPDATE task_runs SET outcome = ?, terminal_reason_code = ?, \
+             terminal_reason_detail = ?, ended_at_ms = ? \
+             WHERE outcome IS NULL AND session_id IN ({placeholders})"
+        );
+        let mut finish_tasks_query = sqlx::query(sqlx::AssertSqlSafe(finish_tasks))
+            .bind(TaskOutcome::Failed.as_db_str())
+            .bind(TaskTerminalReasonCode::ProcessInterrupted.as_db_str())
+            .bind("The prior Bonsai process ended before this task completed.")
+            .bind(now);
+        for id in &promoted_ids {
+            finish_tasks_query = finish_tasks_query.bind(id);
+        }
+        storage_op!(
+            &mut tx,
+            "finish tasks from interrupted sessions",
+            finish_tasks_query,
+        )?;
+
         // Crash leftovers hold no advisory claims (peers P4); release inside
         // the same transaction as the promotion.
         let placeholders = vec!["?"; promoted_ids.len()].join(", ");
@@ -990,6 +1013,13 @@ fn session_summary_query(where_clause: &str, suffix: &str) -> String {
 {SESSION_SUMMARY_PROJECTION}
             FROM sessions
             JOIN projects ON projects.id = sessions.project_id
+            LEFT JOIN task_runs AS latest_task ON latest_task.id = (
+              SELECT task_runs.id
+              FROM task_runs
+              WHERE task_runs.session_id = sessions.id
+              ORDER BY task_runs.started_at_ms DESC, task_runs.id DESC
+              LIMIT 1
+            )
             LEFT JOIN messages ON messages.session_id = sessions.id
             WHERE {where_clause}
             GROUP BY sessions.id
@@ -1017,6 +1047,8 @@ fn session_summary_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SessionSumma
                 .try_get::<Option<String>, _>("terminal_reason")?
                 .map(|value| crate::run_budget::RunBudgetExhaustion::from_json(&value))
                 .transpose()?,
+            latest_task: super::task_runs::latest_task_run_from_session_row(&row, id)?
+                .map(Box::new),
             updated_at_ms: row.try_get("updated_at_ms")?,
             message_count: row.try_get("message_count")?,
             prompt_token_count: row.try_get("prompt_token_count")?,

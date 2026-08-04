@@ -183,6 +183,73 @@ fn classify_headless_status(
     }
 }
 
+async fn finish_headless_task(
+    storage: &Storage,
+    task_run_id: crate::storage::TaskRunId,
+    status: HeadlessStatus,
+    budget_exhaustion: Option<crate::run_budget::RunBudgetExhaustion>,
+    report: &crate::completion_report::CompletionReport,
+) -> Result<crate::storage::TaskRun> {
+    use crate::storage::{TaskOutcome, TaskTerminalReason, TaskTerminalReasonCode};
+
+    let (outcome, reason) = match status {
+        HeadlessStatus::Completed => (TaskOutcome::Succeeded, None),
+        HeadlessStatus::Failed => {
+            let verification_status = report
+                .verification
+                .as_ref()
+                .map(|verification| verification.status);
+            let code = if matches!(
+                verification_status,
+                Some(
+                    crate::verification::VerificationRunStatus::Failed
+                        | crate::verification::VerificationRunStatus::Blocked
+                )
+            ) {
+                TaskTerminalReasonCode::VerificationFailure
+            } else {
+                TaskTerminalReasonCode::ExecutionFailure
+            };
+            (
+                if verification_status == Some(crate::verification::VerificationRunStatus::Blocked)
+                {
+                    TaskOutcome::Blocked
+                } else {
+                    TaskOutcome::Failed
+                },
+                Some(TaskTerminalReason::new(code, &report.caveats.join(" "))),
+            )
+        }
+        HeadlessStatus::BudgetExhausted | HeadlessStatus::TimedOut => (
+            TaskOutcome::Blocked,
+            Some(TaskTerminalReason::new(
+                TaskTerminalReasonCode::BudgetExhausted,
+                &budget_exhaustion.map_or_else(
+                    || "The headless run timed out.".to_string(),
+                    |exhaustion| exhaustion.to_string(),
+                ),
+            )),
+        ),
+        HeadlessStatus::Interrupted => (
+            TaskOutcome::Cancelled,
+            Some(TaskTerminalReason::new(
+                TaskTerminalReasonCode::UserCancelled,
+                "The user interrupted the headless task.",
+            )),
+        ),
+        HeadlessStatus::Terminated => (
+            TaskOutcome::Failed,
+            Some(TaskTerminalReason::new(
+                TaskTerminalReasonCode::ProcessInterrupted,
+                "The headless process received a termination signal.",
+            )),
+        ),
+    };
+    storage
+        .finish_task_run(task_run_id, outcome, reason.as_ref())
+        .await
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum HeadlessError {
     #[error("{0}")]
@@ -548,8 +615,6 @@ async fn run_inner_with_provider_runtime(
         todo_store.lock().await.set_todos(snapshot.todos.clone());
         *plan_store.lock().await = snapshot.plan.clone();
     }
-    let (terminal_event_stop, terminal_event_task) =
-        spawn_terminal_event_forwarder(terminals.subscribe(), sink.clone());
     let conversation_cache_key = storage.conversation_cache_key(current_session_id).await?;
     agent.set_conversation_cache_key(&conversation_cache_key);
     if let Some(snapshot) = resume_snapshot.as_ref() {
@@ -559,8 +624,71 @@ async fn run_inner_with_provider_runtime(
         }
     }
 
+    let task_run = storage
+        .start_task_run(current_session_id, None, &prompt)
+        .await?;
+    let verification = match crate::verification::resolve_slash_command(
+        &prompt,
+        &project_root,
+        &agent.config().verification,
+    ) {
+        Ok(verification) => verification,
+        Err(message) => {
+            let reason = crate::storage::TaskTerminalReason::new(
+                crate::storage::TaskTerminalReasonCode::VerificationFailure,
+                &message,
+            );
+            let task_result = storage
+                .finish_task_run(
+                    task_run.id,
+                    crate::storage::TaskOutcome::Failed,
+                    Some(&reason),
+                )
+                .await;
+            fire_session_end_hooks(&hooks, current_session_id).await;
+            fire_headless_wake_subscriptions(&peer_bus).await;
+            mark_headless_session_status(&storage, current_session_id, SessionStatus::Failed, None)
+                .await;
+            if let Err(task_error) = task_result {
+                return Err(HeadlessError::Runtime(anyhow::anyhow!(
+                    "{message}; task outcome persistence also failed: {task_error:#}"
+                )));
+            }
+            return Err(HeadlessError::Runtime(anyhow::anyhow!(message)));
+        }
+    };
+    let evidence_baseline =
+        HeadlessEvidenceBaseline::capture(&agent, &storage, current_session_id).await;
+
     let activity = crate::session_activity::SessionActivityGate::new(storage.clone());
-    let active_run_ms_before = activity.begin_main(current_session_id).await?.active_run_ms;
+    let active_run_ms_before = match activity.begin_main(current_session_id).await {
+        Ok(activity) => activity.active_run_ms,
+        Err(error) => {
+            let reason = crate::storage::TaskTerminalReason::new(
+                crate::storage::TaskTerminalReasonCode::ExecutionFailure,
+                &format!("Failed to start session activity: {error:#}"),
+            );
+            let task_result = storage
+                .finish_task_run(
+                    task_run.id,
+                    crate::storage::TaskOutcome::Failed,
+                    Some(&reason),
+                )
+                .await;
+            fire_session_end_hooks(&hooks, current_session_id).await;
+            fire_headless_wake_subscriptions(&peer_bus).await;
+            mark_headless_session_status(&storage, current_session_id, SessionStatus::Failed, None)
+                .await;
+            if let Err(task_error) = task_result {
+                return Err(HeadlessError::Runtime(anyhow::anyhow!(
+                    "failed to start session activity: {error:#}; task outcome persistence also failed: {task_error:#}"
+                )));
+            }
+            return Err(HeadlessError::Runtime(error));
+        }
+    };
+    let (terminal_event_stop, terminal_event_task) =
+        spawn_terminal_event_forwarder(terminals.subscribe(), sink.clone());
     let selected_timeout = crate::run_budget::select_runtime_timeout(
         config.timeout,
         run_budget.max_run_duration(),
@@ -580,14 +708,6 @@ async fn run_inner_with_provider_runtime(
         run_timeout_exhaustion,
     );
 
-    let verification = crate::verification::resolve_slash_command(
-        &prompt,
-        &project_root,
-        &agent.config().verification,
-    )
-    .map_err(|message| HeadlessError::Runtime(anyhow::anyhow!(message)))?;
-    let evidence_baseline =
-        HeadlessEvidenceBaseline::capture(&agent, &storage, current_session_id).await;
     sink.begin_completion_run();
     sink.user_message(&prompt);
     let run_result = if let Some(exhaustion) = preflight_exhaustion {
@@ -655,6 +775,18 @@ async fn run_inner_with_provider_runtime(
         .await;
     let _ = terminal_event_stop.send(());
     let _ = terminal_event_task.await;
+    if let Some(episode_seq) = agent.active_episode_seq()
+        && let Err(error) = storage
+            .attach_task_run_episode(task_run.id, episode_seq)
+            .await
+    {
+        tracing::warn!(
+            session_id = %current_session_id,
+            task_run_id = %task_run.id,
+            error = %format!("{error:#}"),
+            "failed to attach headless task episode"
+        );
+    }
 
     let (run_status, output, mut budget_exhaustion) = match run_result {
         Ok(AgentRunResult::Completed(output)) => (HeadlessStatus::Completed, output, None),
@@ -669,9 +801,43 @@ async fn run_inner_with_provider_runtime(
             reason => (reason.status(), output, None),
         },
         Ok(AgentRunResult::Waiting(reason)) => {
-            return Err(HeadlessError::Runtime(anyhow::anyhow!(
-                "headless agent entered nonterminal wait state: {reason:?}"
-            )));
+            let failure = format!("headless agent entered nonterminal wait state: {reason:?}");
+            let terminal_reason = crate::storage::TaskTerminalReason::new(
+                crate::storage::TaskTerminalReasonCode::ExecutionFailure,
+                &failure,
+            );
+            let task_persistence_result = storage
+                .finish_task_run(
+                    task_run.id,
+                    crate::storage::TaskOutcome::Failed,
+                    Some(&terminal_reason),
+                )
+                .await;
+            let persistence_result = persist_headless_snapshots(
+                &storage,
+                current_session_id,
+                &agent,
+                &sink,
+                &todo_store,
+                &plan_store,
+                &transcript_prefix,
+            )
+            .await;
+            fire_session_end_hooks(&hooks, current_session_id).await;
+            fire_headless_wake_subscriptions(&peer_bus).await;
+            mark_headless_session_status(&storage, current_session_id, SessionStatus::Failed, None)
+                .await;
+            if let Err(persistence_error) = persistence_result {
+                return Err(HeadlessError::Runtime(anyhow::anyhow!(
+                    "{failure}; session persistence also failed: {persistence_error:#}"
+                )));
+            }
+            if let Err(task_error) = task_persistence_result {
+                return Err(HeadlessError::Runtime(anyhow::anyhow!(
+                    "{failure}; task outcome persistence also failed: {task_error:#}"
+                )));
+            }
+            return Err(HeadlessError::Runtime(anyhow::anyhow!(failure)));
         }
         Err(err) => {
             if let Some(reason) = err
@@ -681,6 +847,23 @@ async fn run_inner_with_provider_runtime(
                 (HeadlessStatus::BudgetExhausted, String::new(), Some(reason))
             } else {
                 let agent_failure = crate::provider::agent_failure_detail(&err);
+                let reason_code = if err
+                    .downcast_ref::<crate::provider::ProviderFailure>()
+                    .is_some()
+                {
+                    crate::storage::TaskTerminalReasonCode::ProviderFailure
+                } else {
+                    crate::storage::TaskTerminalReasonCode::ExecutionFailure
+                };
+                let terminal_reason =
+                    crate::storage::TaskTerminalReason::new(reason_code, &agent_failure);
+                let task_persistence_result = storage
+                    .finish_task_run(
+                        task_run.id,
+                        crate::storage::TaskOutcome::Failed,
+                        Some(&terminal_reason),
+                    )
+                    .await;
                 let persistence_result = persist_headless_snapshots(
                     &storage,
                     current_session_id,
@@ -703,6 +886,11 @@ async fn run_inner_with_provider_runtime(
                 if let Err(persistence_error) = persistence_result {
                     return Err(HeadlessError::Runtime(anyhow::anyhow!(
                         "agent failed: {agent_failure}; session persistence also failed: {persistence_error:#}"
+                    )));
+                }
+                if let Err(task_error) = task_persistence_result {
+                    return Err(HeadlessError::Runtime(anyhow::anyhow!(
+                        "agent failed: {agent_failure}; task outcome persistence also failed: {task_error:#}"
                     )));
                 }
                 return Err(HeadlessError::Runtime(anyhow::anyhow!(agent_failure)));
@@ -764,8 +952,25 @@ async fn run_inner_with_provider_runtime(
             budget_exhaustion,
         },
     );
+    let finished_task = finish_headless_task(
+        &storage,
+        task_run.id,
+        status,
+        budget_exhaustion,
+        &completion_report,
+    )
+    .await?;
+    let task_outcome = finished_task.outcome.ok_or_else(|| {
+        HeadlessError::Runtime(anyhow::anyhow!(
+            "headless task {} remained active after terminalization",
+            finished_task.id
+        ))
+    })?;
     let mut final_output = HeadlessFinalOutput {
         status,
+        session_lifecycle: status.storage_status().as_db_str().to_string(),
+        task_outcome,
+        task_terminal_reason: finished_task.terminal_reason,
         output,
         provider: selection.provider,
         model: selection.model,
@@ -1287,6 +1492,12 @@ fn authorization_hint(metadata: &crate::provider::ProviderMetadata) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct HeadlessFinalOutput {
     pub status: HeadlessStatus,
+    /// Intended durable session/process lifecycle for this invocation.
+    pub session_lifecycle: String,
+    /// Durable result of the user task; never inferred from session lifecycle.
+    pub task_outcome: crate::storage::TaskOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_terminal_reason: Option<crate::storage::TaskTerminalReason>,
     pub output: String,
     pub provider: String,
     pub model: String,
@@ -1854,6 +2065,21 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         let session_id = summaries[0].id;
         assert_eq!(summaries[0].status, SessionStatus::Failed);
+        let failed_task = summaries[0]
+            .latest_task
+            .as_ref()
+            .expect("provider failure should persist a task outcome");
+        assert_eq!(
+            failed_task.outcome,
+            Some(crate::storage::TaskOutcome::Failed)
+        );
+        assert_eq!(
+            failed_task
+                .terminal_reason
+                .as_ref()
+                .map(|reason| reason.code),
+            Some(crate::storage::TaskTerminalReasonCode::ProviderFailure)
+        );
         let failed_snapshot = fixture
             .storage
             .load_session_snapshot(session_id)
@@ -1894,6 +2120,39 @@ mod tests {
             crate::tui::app::TranscriptItem::AssistantMessage { text }
                 if text == "recovered response"
         )));
+    }
+
+    #[tokio::test]
+    async fn verification_setup_failure_terminalizes_the_headless_task() {
+        let fixture = TestStorage::new().await;
+        let (factory, _scenario, attempts) = scenario_factory(ProviderScenario::Success);
+
+        let error = run_headless_scenario(
+            &fixture,
+            headless_test_config("/test", None),
+            scenario_runtime(factory),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("No test verification checks"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        let summaries = fixture
+            .storage
+            .recent_sessions_for_project(fixture.project_path(), 10)
+            .await
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].status, SessionStatus::Failed);
+        let task = summaries[0]
+            .latest_task
+            .as_ref()
+            .expect("verification setup failure should persist a task outcome");
+        assert_eq!(task.outcome, Some(crate::storage::TaskOutcome::Failed));
+        assert_eq!(
+            task.terminal_reason.as_ref().map(|reason| reason.code),
+            Some(crate::storage::TaskTerminalReasonCode::VerificationFailure)
+        );
     }
 
     #[tokio::test]
@@ -2024,6 +2283,45 @@ mod tests {
             assert_eq!(outcome.exit_code(), exit_code);
             assert_eq!(status.storage_status(), storage_status);
         }
+    }
+
+    #[tokio::test]
+    async fn terminated_process_persists_a_failed_task_with_a_typed_reason() {
+        let fixture = TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let task = fixture
+            .storage
+            .start_task_run(session_id, None, "Survive process termination")
+            .await
+            .unwrap();
+        let report = crate::completion_report::CompletionReport::from_evidence(
+            crate::completion_report::CompletionStatus::Interrupted,
+            crate::completion_report::CompletionEvidenceSnapshot::default(),
+            crate::completion_report::CompletionSessionEvidence {
+                verification: None,
+                review: None,
+                authorization_decisions: &[],
+                usage: crate::agent::UsageTotals::default(),
+                session_budget: crate::run_budget::SessionBudgetUsage::default(),
+                budget_exhaustion: None,
+            },
+        );
+
+        let finished = finish_headless_task(
+            &fixture.storage,
+            task.id,
+            HeadlessStatus::Terminated,
+            None,
+            &report,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(finished.outcome, Some(crate::storage::TaskOutcome::Failed));
+        assert_eq!(
+            finished.terminal_reason.as_ref().map(|reason| reason.code),
+            Some(crate::storage::TaskTerminalReasonCode::ProcessInterrupted)
+        );
     }
 
     #[test]

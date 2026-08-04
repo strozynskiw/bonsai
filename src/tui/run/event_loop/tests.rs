@@ -987,6 +987,7 @@ fn session_summary(id: i64) -> crate::storage::SessionSummary {
         reasoning: ReasoningSelection::default(),
         status: crate::storage::SessionStatus::Active,
         terminal_reason: None,
+        latest_task: None,
         updated_at_ms: 1_000,
         message_count: 0,
         prompt_token_count: 0,

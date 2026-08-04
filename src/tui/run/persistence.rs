@@ -1285,6 +1285,17 @@ pub(in crate::tui::run) async fn rotate_persisted_session(
     project_root: &std::path::Path,
     app: &AppState,
 ) -> Result<SessionId> {
+    let reason = crate::storage::TaskTerminalReason::new(
+        crate::storage::TaskTerminalReasonCode::GoalSuperseded,
+        "A session reset superseded the active task.",
+    );
+    storage
+        .finish_active_task_run(
+            current_session_id,
+            crate::storage::TaskOutcome::Superseded,
+            Some(&reason),
+        )
+        .await?;
     storage
         .mark_session_termination(
             current_session_id,

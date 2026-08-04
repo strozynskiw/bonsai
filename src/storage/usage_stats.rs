@@ -178,6 +178,9 @@ pub struct UsageDashboard {
     pub projects: Vec<ProjectUsage>,
     /// Ordered by count, descending.
     pub status_counts: Vec<(SessionStatus, i64)>,
+    /// Durable task results, kept separate from session/process lifecycle so
+    /// success metrics never treat a clean exit as task success.
+    pub task_outcome_counts: Vec<(TaskOutcome, i64)>,
     /// Ordered by call count, descending.
     pub tools: Vec<ToolUsage>,
     pub self_review: crate::self_review::SelfReviewStats,
@@ -235,6 +238,7 @@ impl Storage {
         let session_stats = self.load_session_stats().await?;
         let projects = self.load_project_usage(8).await?;
         let status_counts = self.load_session_status_counts().await?;
+        let task_outcome_counts = self.load_task_outcome_counts().await?;
         let tools = self.load_tool_usage().await?;
         let (self_review, quarantined_self_review_runs) =
             self.load_self_review_stats_with_quarantine().await?;
@@ -251,6 +255,7 @@ impl Storage {
             session_stats,
             projects,
             status_counts,
+            task_outcome_counts,
             tools,
             self_review,
             quality_evidence,
@@ -471,6 +476,24 @@ impl Storage {
             .collect()
     }
 
+    async fn load_task_outcome_counts(&self) -> Result<Vec<(TaskOutcome, i64)>> {
+        let rows = sqlx::query(
+            "SELECT outcome, COUNT(*) AS count FROM task_runs \
+             WHERE outcome IS NOT NULL GROUP BY outcome ORDER BY count DESC, outcome",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to load task outcome counts")?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    TaskOutcome::from_db_str(&row.try_get::<String, _>("outcome")?),
+                    row.try_get("count")?,
+                ))
+            })
+            .collect()
+    }
+
     async fn load_tool_usage(&self) -> Result<Vec<ToolUsage>> {
         let rows = sqlx::query(
             "SELECT name, COUNT(*) AS calls, \
@@ -560,6 +583,7 @@ mod derived_tests {
             session_stats: SessionStats::default(),
             projects: Vec::new(),
             status_counts: Vec::new(),
+            task_outcome_counts: Vec::new(),
             tools: Vec::new(),
             self_review: Default::default(),
             quality_evidence: Default::default(),

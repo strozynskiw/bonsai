@@ -123,6 +123,11 @@ impl Agent {
         self.episode_ledger().map(|ledger| ledger.snapshot())
     }
 
+    /// Sequence of the episode currently owning new conversation work.
+    pub(crate) fn active_episode_seq(&self) -> Option<usize> {
+        self.episode_ledger()?.active().map(Episode::seq)
+    }
+
     /// Restore the ledger from a persisted snapshot. Runs after context
     /// messages/ids are restored so the active span can be validated against
     /// live stable ids: on skew (the persisted start no longer resolves), the

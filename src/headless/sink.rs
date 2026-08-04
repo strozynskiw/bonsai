@@ -88,6 +88,18 @@ impl HeadlessSink {
                     *line_open = false;
                 }
                 self.write_stderr(&format!("{}\n", output.completion_report.render_compact()));
+                self.write_stderr(&format!(
+                    "Lifecycle: {} · Task: {}\n",
+                    output.session_lifecycle,
+                    output.task_outcome.label()
+                ));
+                if let Some(reason) = output.task_terminal_reason.as_ref() {
+                    self.write_stderr(&format!(
+                        "Task reason: {} · {}\n",
+                        reason.code.as_db_str(),
+                        reason.detail
+                    ));
+                }
                 self.write_stderr(&format!("Resume: bonsai -c {}\n", output.session_id));
             }
             OutputFormat::Json => {
@@ -521,6 +533,9 @@ mod tests {
     fn sample_final() -> HeadlessFinalOutput {
         HeadlessFinalOutput {
             status: HeadlessStatus::Completed,
+            session_lifecycle: "completed".to_string(),
+            task_outcome: crate::storage::TaskOutcome::Succeeded,
+            task_terminal_reason: None,
             output: "done".to_string(),
             provider: "provider-a".to_string(),
             model: "model-a".to_string(),
@@ -566,6 +581,9 @@ mod tests {
 
         let value: Value = serde_json::from_str(&read_buffer(&stdout_buffer)).unwrap();
         assert_eq!(value["status"], "completed");
+        assert_eq!(value["session_lifecycle"], "completed");
+        assert_eq!(value["task_outcome"], "succeeded");
+        assert!(value.get("task_terminal_reason").is_none());
         assert_eq!(value["schema_version"], HEADLESS_OUTPUT_SCHEMA_VERSION);
         assert_eq!(value["output"], "done");
         assert_eq!(value["session_id"], 42);
@@ -584,6 +602,12 @@ mod tests {
         let sink = HeadlessSink::new(OutputFormat::Json, Box::new(stdout), Box::new(stderr));
         let mut output = sample_final();
         output.status = HeadlessStatus::BudgetExhausted;
+        output.session_lifecycle = "interrupted".to_string();
+        output.task_outcome = crate::storage::TaskOutcome::Blocked;
+        output.task_terminal_reason = Some(crate::storage::TaskTerminalReason::new(
+            crate::storage::TaskTerminalReasonCode::BudgetExhausted,
+            "Run-time budget exhausted.",
+        ));
         output.budget_exhaustion =
             Some(crate::run_budget::RunBudgetExhaustion::RunTime { limit_seconds: 300 });
         output.completion_report = crate::completion_report::CompletionReport::from_evidence(
@@ -603,6 +627,9 @@ mod tests {
 
         let value: Value = serde_json::from_str(&read_buffer(&stdout_buffer)).unwrap();
         assert_eq!(value["status"], "budget_exhausted");
+        assert_eq!(value["session_lifecycle"], "interrupted");
+        assert_eq!(value["task_outcome"], "blocked");
+        assert_eq!(value["task_terminal_reason"]["code"], "budget_exhausted");
         assert_eq!(value["budget_exhaustion"]["kind"], "run_time");
         assert_eq!(value["budget_exhaustion"]["limit_seconds"], 300);
         assert_eq!(
@@ -679,7 +706,28 @@ mod tests {
         assert_eq!(stdout, "hello\n");
         assert!(stderr.contains("working"));
         assert!(stderr.contains("[tool:call-1 ok] ok"));
+        assert!(stderr.contains("Lifecycle: completed · Task: succeeded"));
         assert!(stderr.contains("Resume: bonsai -c 42"));
+    }
+
+    #[test]
+    fn text_output_surfaces_the_typed_task_reason() {
+        let (stdout, _stdout_buffer) = BufferWriter::new();
+        let (stderr, stderr_buffer) = BufferWriter::new();
+        let sink = HeadlessSink::new(OutputFormat::Text, Box::new(stdout), Box::new(stderr));
+        let mut output = sample_final();
+        output.session_lifecycle = "interrupted".to_string();
+        output.task_outcome = crate::storage::TaskOutcome::Blocked;
+        output.task_terminal_reason = Some(crate::storage::TaskTerminalReason::new(
+            crate::storage::TaskTerminalReasonCode::BudgetExhausted,
+            "Run-time budget exhausted.",
+        ));
+
+        sink.finish(&output).unwrap();
+
+        let stderr = read_buffer(&stderr_buffer);
+        assert!(stderr.contains("Lifecycle: interrupted · Task: blocked"));
+        assert!(stderr.contains("Task reason: budget_exhausted · Run-time budget exhausted."));
     }
 
     #[test]

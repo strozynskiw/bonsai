@@ -52,6 +52,7 @@ mod read_evidence;
 mod recovery;
 mod self_review;
 mod sessions;
+mod task_runs;
 #[cfg(test)]
 pub(crate) mod test_utils;
 #[cfg(test)]
@@ -77,6 +78,7 @@ pub use peers::{
 };
 pub use permissions::{PermissionScope, RuleKind, StoredPermissionRule};
 pub(crate) use recovery::{NewRecoveryPoint, RecoveryId, RecoveryPoint, RecoveryState};
+pub use task_runs::{TaskOutcome, TaskRun, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode};
 pub use usage_stats::{
     DailyUsage, LocalToday, ModelUsage, QualityEvidenceIntegrity, UsageDashboard,
 };
@@ -107,6 +109,15 @@ const SESSION_SUMMARY_PROJECTION: &str = r#"
               sessions.cost_micros,
               sessions.no_cache_cost_micros,
               sessions.source_plan_id,
+              latest_task.id AS latest_task_id,
+              latest_task.episode_seq AS latest_task_episode_seq,
+              latest_task.goal_id AS latest_task_goal_id,
+              latest_task.goal AS latest_task_goal,
+              latest_task.outcome AS latest_task_outcome,
+              latest_task.terminal_reason_code AS latest_task_terminal_reason_code,
+              latest_task.terminal_reason_detail AS latest_task_terminal_reason_detail,
+              latest_task.started_at_ms AS latest_task_started_at_ms,
+              latest_task.ended_at_ms AS latest_task_ended_at_ms,
               COUNT(messages.id) AS message_count
 "#;
 const SAVED_PLAN_SUMMARY_PROJECTION: &str = r#"
@@ -211,6 +222,9 @@ pub struct SessionSummary {
     pub reasoning: ReasoningSelection,
     pub status: SessionStatus,
     pub terminal_reason: Option<crate::run_budget::RunBudgetExhaustion>,
+    /// Latest durable user task, independent from `status` (process/session
+    /// lifecycle). Terminal task rows are immutable across resume.
+    pub latest_task: Option<Box<TaskRun>>,
     pub updated_at_ms: i64,
     pub message_count: i64,
     pub prompt_token_count: i64,

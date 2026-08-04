@@ -3167,7 +3167,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 "controlling terminal hung up; exiting TUI"
             );
             tasks.abort();
-            app.reduce(AppAction::SetTaskState(TaskState::Exiting));
+            prepare_termination_shutdown(&mut app);
             break 'run Ok(());
         }
 
@@ -3195,7 +3195,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             Err(err) => {
                 tracing::warn!(error = %err, "terminal event poll failed; exiting TUI");
                 tasks.abort();
-                app.reduce(AppAction::SetTaskState(TaskState::Exiting));
+                prepare_termination_shutdown(&mut app);
                 break 'run Ok(());
             }
         };
@@ -3215,7 +3215,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 "terminal input appears disconnected; exiting TUI"
             );
             tasks.abort();
-            app.reduce(AppAction::SetTaskState(TaskState::Exiting));
+            prepare_termination_shutdown(&mut app);
             break 'run Ok(());
         }
 
@@ -3226,7 +3226,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                 Err(err) => {
                     tracing::warn!(error = %err, "terminal event read failed; exiting TUI");
                     tasks.abort();
-                    app.reduce(AppAction::SetTaskState(TaskState::Exiting));
+                    prepare_termination_shutdown(&mut app);
                     break 'run Ok(());
                 }
             };
@@ -3720,6 +3720,33 @@ async fn shutdown_tui(
     // after the snapshot flush inside one shared 1s budget, a slow flush leaves
     // the row `Active`, which the next launch promotes to `Interrupted` —
     // mis-reporting a genuine clean quit as a crash.
+    let (task_outcome, task_reason) = if app.current_session_status == SessionStatus::Interrupted {
+        (
+            crate::storage::TaskOutcome::Failed,
+            crate::storage::TaskTerminalReason::new(
+                crate::storage::TaskTerminalReasonCode::ProcessInterrupted,
+                "The Bonsai process ended before the active task completed.",
+            ),
+        )
+    } else {
+        (
+            crate::storage::TaskOutcome::Cancelled,
+            crate::storage::TaskTerminalReason::new(
+                crate::storage::TaskTerminalReasonCode::SessionEnded,
+                "The session ended before the active task completed.",
+            ),
+        )
+    };
+    if let Err(err) = storage
+        .finish_active_task_run(current_session_id, task_outcome, Some(&task_reason))
+        .await
+    {
+        tracing::warn!(
+            session_id = %current_session_id,
+            error = %err,
+            "failed to finish active task during TUI shutdown"
+        );
+    }
     if let Err(err) = storage
         .mark_session_termination(
             current_session_id,
