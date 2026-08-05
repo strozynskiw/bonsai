@@ -257,6 +257,7 @@ pub enum CompletionGap {
     BackgroundTaskPending(usize),
     TerminalPending(usize),
     ExternalWaitPending(usize),
+    ImplementationStall(usize),
 }
 
 impl CompletionGap {
@@ -281,6 +282,9 @@ impl CompletionGap {
             }
             Self::TerminalPending(count) => format!("{count} terminal group(s) running"),
             Self::ExternalWaitPending(count) => format!("{count} external wait(s) unresolved"),
+            Self::ImplementationStall(turns) => {
+                format!("implementation stalled after {turns} consecutive tool turns")
+            }
         }
     }
 
@@ -327,6 +331,19 @@ pub struct CompletionGuardFailure {
 impl CompletionGuardFailure {
     pub(crate) fn compact_detail(&self) -> &str {
         &self.detail
+    }
+
+    pub(super) fn implementation_stall(turns: usize, evidence: &str) -> Self {
+        Self {
+            outcome: CompletionFailureOutcome::Failed,
+            gaps: vec![CompletionGap::ImplementationStall(turns)],
+            detail: format!(
+                "Agent stopped after {turns} consecutive tool turns without durable semantic \
+                 progress. The bounded nudge and recovery window were exhausted. Recent evidence: \
+                 {evidence}. Partial workspace and conversation state were preserved; steer or \
+                 retry this session to resume."
+            ),
+        }
     }
 }
 

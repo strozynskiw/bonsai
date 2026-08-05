@@ -1680,6 +1680,28 @@ mod tests {
     }
 
     #[test]
+    fn semantic_stall_is_visible_and_never_reported_as_success() {
+        let mut app = app();
+        let detail = "Agent stopped after 18 stalled tool turns; state was preserved.";
+        app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
+            AgentRunOutcome::Incomplete(crate::agent::CompletionGuardFailure {
+                outcome: crate::agent::CompletionFailureOutcome::Failed,
+                gaps: vec![crate::agent::CompletionGap::ImplementationStall(18)],
+                detail: detail.to_string(),
+            }),
+        ))));
+
+        assert_eq!(app.current_session_status, SessionStatus::Failed);
+        assert!(matches!(
+            app.transcript.as_slice(),
+            [TranscriptItem::CommandOutput {
+                kind: CommandOutputKind::Status,
+                text,
+            }] if text == detail
+        ));
+    }
+
+    #[test]
     fn toggle_mouse_capture_flips_flag_and_notifies() {
         let mut app = app();
         assert!(app.mouse_capture, "capture is on by default");

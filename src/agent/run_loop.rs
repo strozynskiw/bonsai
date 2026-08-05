@@ -41,22 +41,22 @@ const PLANNING_RESEARCH_REJECTION_LIMIT: usize = 1;
 const REPEATED_FAILED_CALL_LIMIT: usize = 2;
 const REPEATED_FAILED_CALL_REJECTION_LIMIT: usize = 1;
 const FAILED_CALL_WINDOW: usize = 8;
-/// Detects and steers the coding persona's silent research spiral (observed live: codex
-/// gpt-5.6-terra at max reasoning spent 47 minutes on ~60 consecutive
-/// one-read turns "assessing uncommitted peer changes", never editing and
-/// never telling the user why). Distinct-file reads defeat
-/// [`RepeatedInspectionGuard`]/[`ReadStormGuard`] (a fresh signature every
-/// turn), and on-disk churn from concurrent WIP kept disarming their
-/// freshness resets — so this guard counts *turns without progress*, not
-/// repeats, and deliberately ignores file versions.
-/// Allow a substantial initial investigation phase before interrupting with a
-/// progress nudge; complex cross-module changes often require several turns
-/// to locate the relevant implementation and tests. This guard never ends the
-/// run; explicit turn/time/cost budgets and cancellation remain its boundaries.
+/// Detects and terminates the coding persona's silent non-progress spirals.
+/// Progress is based on observed effects and deduplicated evidence, never the
+/// spelling of a tool call. The terminal bound is provider-independent: a
+/// deterministic failed/rejected loop stops after exactly this many stalled
+/// turns; a successful poll/read loop may first contribute one novel evidence
+/// frame, then stops after the same number of unchanged turns.
 pub(in crate::agent) const IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS: usize = 10;
-pub(in crate::agent) const IMPLEMENTATION_STALL_SECOND_NUDGE_TURNS: usize = 14;
-pub(in crate::agent) const IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS: usize = 18;
-pub(in crate::agent) const IMPLEMENTATION_STALL_REPEATED_NUDGE_INTERVAL_TURNS: usize = 16;
+pub(in crate::agent) const IMPLEMENTATION_STALL_RECOVERY_TURNS: usize = 14;
+pub(in crate::agent) const IMPLEMENTATION_STALL_TERMINAL_TURNS: usize = 18;
+/// Evidence fingerprints are retained across evidence-only resets so an A/B
+/// polling loop cannot alternate forever. Durable progress or user steering
+/// starts a fresh evidence epoch. The cap keeps adversarial tool batches from
+/// growing the guard without bound; once full, unseen frames are conservatively
+/// treated as non-progress until a durable transition occurs.
+const IMPLEMENTATION_STALL_EVIDENCE_LIMIT: usize = 128;
+const IMPLEMENTATION_STALL_EVIDENCE_HISTORY: usize = 4;
 
 /// Result of [`Agent::call_model`]: either the provider responded, or
 /// compaction was cancelled mid-preflight and the turn should end as
@@ -81,7 +81,15 @@ struct ToolCallObservation {
     tool_name: String,
     status: crate::output::ToolExecutionStatus,
     makes_progress: bool,
+    progress_reason: Option<String>,
+    semantic_evidence: Option<SemanticEvidence>,
     leaves_pending_work: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticEvidence {
+    fingerprint: blake3::Hash,
+    description: String,
 }
 
 struct QueuedMessageState<'state, 'receiver> {
@@ -573,6 +581,14 @@ impl Agent {
             tool_rejections
                 .repeated_failure
                 .extend(self.capture_pending_verification_bindings(&batch).await);
+            let todo_baseline = if batch.iter().any(|tool_call| tool_call.name == "todowrite") {
+                match &self.todo_store {
+                    Some(store) => Some(store.lock().await.todos().to_vec()),
+                    None => None,
+                }
+            } else {
+                None
+            };
             let foreground_bash = batch.iter().any(foreground_bash_call);
             let diagnostic_baseline = if foreground_bash && self.lsp_hub.is_some() {
                 Some(crate::lsp::DiagnosticSnapshot::default())
@@ -633,6 +649,13 @@ impl Agent {
                         .map(|current| baseline.changed_paths(&current));
                 refine_delegated_workspace_effects(&mut results, observed_paths.as_deref());
             }
+            let todo_resolution = match (&todo_baseline, &self.todo_store) {
+                (Some(before), Some(store)) => {
+                    let store = store.lock().await;
+                    todo_resolution_made_progress(before, store.todos())
+                }
+                _ => false,
+            };
 
             // Apply every result in the batch, then emit a single context
             // update. Emitting per result would rebuild the full report
@@ -671,7 +694,13 @@ impl Agent {
             }
             for (tool_call, result, status) in results {
                 let mut observation = ToolCallObservation::new(&tool_call, status);
-                observation.observe_result(&result);
+                let effect_policy = tool_registry
+                    .get(&tool_call.name)
+                    .map(|tool| tool.effect_policy());
+                observation.observe_result(&result, effect_policy);
+                if todo_resolution && tool_call.name == "todowrite" && status.is_success() {
+                    observation.mark_progress("todo item resolved");
+                }
                 outcome.tool_observations.push(observation);
                 if let ToolOutput::SubagentStarted { subtask_id, .. } = &result {
                     outcome.detached_subagent_ids.push(subtask_id.clone());
@@ -705,9 +734,13 @@ impl Agent {
                     "workspace changes observed after a successful bash command",
                 );
                 self.note_bash_window_verification_worthy_mutation(bash_changed_paths.clone());
+                let progress_reason = format!(
+                    "workspace changed after bash: {}",
+                    summarize_progress_paths(&bash_changed_paths)
+                );
                 for observation in &mut outcome.tool_observations[observation_start..] {
                     if observation.tool_name == "bash" && observation.status.is_success() {
-                        observation.makes_progress = true;
+                        observation.mark_progress(&progress_reason);
                     }
                 }
                 successful_rust_edits.extend(
@@ -895,6 +928,21 @@ fn path_has_extension(path: &str, extension: &str) -> bool {
 
 fn planning_tool_makes_progress(name: &str) -> bool {
     name.starts_with("plan_") || name == "question"
+}
+
+fn todo_resolution_made_progress(before: &[TodoItem], after: &[TodoItem]) -> bool {
+    before.iter().any(|prior| {
+        matches!(
+            prior.status,
+            crate::todo::TodoStatus::Pending | crate::todo::TodoStatus::InProgress
+        ) && after.iter().any(|current| {
+            current.content == prior.content
+                && matches!(
+                    current.status,
+                    crate::todo::TodoStatus::Completed | crate::todo::TodoStatus::Cancelled
+                )
+        })
+    })
 }
 
 fn tool_clears_repair_advisory(name: &str) -> bool {
@@ -1837,20 +1885,312 @@ impl ToolCallObservation {
             signature: tool_call_failure_signature(tool_call),
             tool_name: tool_call.name.clone(),
             status,
-            makes_progress: status.is_success() && failed_call_progress_candidate(tool_call),
+            makes_progress: false,
+            progress_reason: None,
+            semantic_evidence: None,
             leaves_pending_work: false,
         }
     }
 
-    fn observe_result(&mut self, result: &ToolOutput) {
-        if matches!(
-            result,
-            ToolOutput::BackgroundTaskStarted { .. } | ToolOutput::SubagentStarted { .. }
-        ) {
-            self.makes_progress = true;
-            self.leaves_pending_work = true;
+    fn observe_result(
+        &mut self,
+        result: &ToolOutput,
+        effect_policy: Option<crate::tool::ToolEffectPolicy>,
+    ) {
+        match result {
+            ToolOutput::BackgroundTaskStarted { task_id, .. } => {
+                self.mark_progress(&format!("background task {task_id} started"));
+                self.leaves_pending_work = true;
+                return;
+            }
+            ToolOutput::SubagentStarted { subtask_id, .. } => {
+                self.mark_progress(&format!("subagent {subtask_id} started"));
+                self.leaves_pending_work = true;
+                return;
+            }
+            _ => {}
+        }
+        if !self.status.is_success() {
+            return;
+        }
+        if let ToolOutput::Edit { diff, .. } = result {
+            self.mark_progress(&format!(
+                "workspace edit completed: {} file(s), primary {}",
+                diff.file_count(),
+                diff.path
+            ));
+            return;
+        }
+        if let Some(effect) = result.workspace_effect()
+            && let Some(reason) = workspace_effect_progress_reason(effect)
+        {
+            self.mark_progress(&reason);
+            return;
+        }
+        if self.tool_name == "question" {
+            self.mark_progress("user decision resolved");
+            return;
+        }
+        if self.tool_name == "plan_resolve_finding" {
+            self.mark_progress("plan finding resolved");
+            return;
+        }
+        if self.tool_name == "memory_write" {
+            self.mark_progress("memory state changed");
+            return;
+        }
+        self.semantic_evidence =
+            semantic_evidence_for_result(&self.tool_name, result, effect_policy);
+    }
+
+    fn mark_progress(&mut self, reason: &str) {
+        self.makes_progress = true;
+        self.progress_reason = Some(reason.to_string());
+        self.semantic_evidence = None;
+    }
+
+    fn stalled_evidence(&self, seen_evidence: &HashSet<blake3::Hash>) -> String {
+        if let Some(evidence) = &self.semantic_evidence {
+            return if seen_evidence.contains(&evidence.fingerprint) {
+                format!("equivalent {}", evidence.label())
+            } else {
+                format!("uncredited {} (evidence epoch full)", evidence.label())
+            };
+        }
+        format!("{} {} call", self.status.label(), self.tool_name)
+    }
+}
+
+fn workspace_effect_progress_reason(effect: &crate::tool::ToolWorkspaceEffect) -> Option<String> {
+    match effect {
+        crate::tool::ToolWorkspaceEffect::NoMutation => None,
+        crate::tool::ToolWorkspaceEffect::ScopedMutation(paths) => Some(format!(
+            "delegated workspace change observed: {}",
+            summarize_progress_paths(paths)
+        )),
+        crate::tool::ToolWorkspaceEffect::WindowMutation(paths) => Some(format!(
+            "workspace-window change observed: {}",
+            summarize_progress_paths(paths)
+        )),
+        crate::tool::ToolWorkspaceEffect::Unscoped => {
+            Some("unscoped delegated workspace change observed".to_string())
         }
     }
+}
+
+fn summarize_progress_paths(paths: &[String]) -> String {
+    const PATH_LIMIT: usize = 4;
+    let mut summary = paths
+        .iter()
+        .take(PATH_LIMIT)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let omitted = paths.len().saturating_sub(PATH_LIMIT);
+    if omitted > 0 {
+        summary.push_str(&format!(" (+{omitted} more)"));
+    }
+    if summary.is_empty() {
+        "unscoped paths".to_string()
+    } else {
+        summary
+    }
+}
+
+impl SemanticEvidence {
+    fn label(&self) -> String {
+        let digest = self
+            .fingerprint
+            .to_hex()
+            .as_str()
+            .chars()
+            .take(12)
+            .collect::<String>();
+        format!("{} [{digest}]", self.description)
+    }
+}
+
+fn semantic_evidence_for_result(
+    tool_name: &str,
+    result: &ToolOutput,
+    effect_policy: Option<crate::tool::ToolEffectPolicy>,
+) -> Option<SemanticEvidence> {
+    use crate::tool::ToolEffectPolicy;
+
+    let evidence_capable = matches!(
+        effect_policy,
+        Some(ToolEffectPolicy::ReadOnly | ToolEffectPolicy::Delegated)
+    ) || matches!(
+        tool_name,
+        "bash"
+            | "terminal"
+            | "tasks"
+            | "peers"
+            | "agent"
+            | "diagnostics"
+            | "webfetch"
+            | "websearch"
+            | "recall"
+    ) || tool_name.starts_with("mcp__");
+    if !evidence_capable {
+        return None;
+    }
+
+    let fingerprint = match result {
+        ToolOutput::Read { evidence, .. } | ToolOutput::ReadDelta { evidence, .. } => {
+            let observation = evidence.observation();
+            let mut hasher = blake3::Hasher::new();
+            hash_semantic_part(&mut hasher, tool_name.as_bytes());
+            hash_semantic_part(
+                &mut hasher,
+                observation.canonical_path().to_string_lossy().as_bytes(),
+            );
+            hash_semantic_part(
+                &mut hasher,
+                format!(
+                    "{}:{:?}:{:?}",
+                    observation.window().start_line,
+                    observation.window().end_line,
+                    observation.window().total_lines
+                )
+                .as_bytes(),
+            );
+            hash_semantic_part(&mut hasher, observation.visible_digest().as_bytes());
+            hasher.finalize()
+        }
+        // A reuse is explicit proof that the requested bytes were already in
+        // context. Counting it would turn unchanged reads back into progress.
+        ToolOutput::ReadReuse { .. } => return None,
+        ToolOutput::Command {
+            stdout,
+            stderr,
+            exit_code,
+            timed_out,
+            ..
+        } => {
+            let mut hasher = blake3::Hasher::new();
+            hash_semantic_part(&mut hasher, tool_name.as_bytes());
+            hash_semantic_part(
+                &mut hasher,
+                normalize_command_evidence_text(stdout).as_bytes(),
+            );
+            hash_semantic_part(
+                &mut hasher,
+                normalize_command_evidence_text(stderr).as_bytes(),
+            );
+            hash_semantic_part(&mut hasher, format!("{exit_code:?}:{timed_out}").as_bytes());
+            hasher.finalize()
+        }
+        ToolOutput::Text(text) | ToolOutput::TextWithUsage { text, .. } => {
+            semantic_text_fingerprint(tool_name, text)
+        }
+        ToolOutput::UntrustedContext {
+            source, content, ..
+        } => {
+            let normalized = normalize_semantic_evidence_text(tool_name, content);
+            let mut hasher = blake3::Hasher::new();
+            hash_semantic_part(&mut hasher, tool_name.as_bytes());
+            hash_semantic_part(&mut hasher, source.as_bytes());
+            hash_semantic_part(&mut hasher, normalized.as_bytes());
+            hasher.finalize()
+        }
+        ToolOutput::Image { description, .. } => semantic_text_fingerprint(tool_name, description),
+        ToolOutput::TrustedContext { .. }
+        | ToolOutput::BackgroundTaskStarted { .. }
+        | ToolOutput::SubagentStarted { .. }
+        | ToolOutput::WaitStarted { .. }
+        | ToolOutput::Edit { .. } => return None,
+    };
+    Some(SemanticEvidence {
+        fingerprint,
+        description: semantic_evidence_description(tool_name),
+    })
+}
+
+fn semantic_text_fingerprint(tool_name: &str, text: &str) -> blake3::Hash {
+    let normalized = normalize_semantic_evidence_text(tool_name, text);
+    let mut hasher = blake3::Hasher::new();
+    hash_semantic_part(&mut hasher, tool_name.as_bytes());
+    hash_semantic_part(&mut hasher, normalized.as_bytes());
+    hasher.finalize()
+}
+
+fn hash_semantic_part(hasher: &mut blake3::Hasher, part: &[u8]) {
+    hasher.update(&(part.len() as u64).to_le_bytes());
+    hasher.update(part);
+}
+
+fn semantic_evidence_description(tool_name: &str) -> String {
+    match tool_name {
+        "diagnostics" => "diagnostic evidence".to_string(),
+        "terminal" => "terminal state".to_string(),
+        "tasks" => "background-work state".to_string(),
+        "bash" => "command evidence".to_string(),
+        "agent" => "delegated evidence".to_string(),
+        "read" | "read_region" | "read_symbol" => "file evidence".to_string(),
+        _ => format!("{tool_name} evidence"),
+    }
+}
+
+fn normalize_semantic_evidence_text(tool_name: &str, text: &str) -> String {
+    if tool_name == "bash" {
+        return normalize_command_evidence_text(text);
+    }
+    if !matches!(tool_name, "terminal" | "tasks") {
+        return text.trim().to_string();
+    }
+
+    text.lines()
+        .map(|line| normalize_state_observation_line(tool_name, line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn normalize_command_evidence_text(text: &str) -> String {
+    static ELAPSED_DURATION: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    let Ok(pattern) = ELAPSED_DURATION
+        .get_or_init(|| regex::Regex::new(r"\b(?:\d+h\s+)?(?:\d+m\s+)?\d+(?:\.\d+)?(?:ms|s)\b"))
+    else {
+        return text.trim().to_string();
+    };
+    pattern.replace_all(text.trim(), "<elapsed>").into_owned()
+}
+
+fn normalize_state_observation_line(tool_name: &str, line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.starts_with("Elapsed:") {
+        return "Elapsed: <elapsed>".to_string();
+    }
+    if trimmed.starts_with("Output:") && trimmed.ends_with(" chars") {
+        return "Output: <count> chars".to_string();
+    }
+    if tool_name == "tasks" && line.contains('|') {
+        let mut columns = line.split('|').map(str::trim).collect::<Vec<_>>();
+        match columns.len() {
+            // Background Bash task table: duration and byte count are
+            // volatile; version/state/output content carry semantic changes.
+            7 => {
+                columns[3] = "<elapsed>";
+                columns[5] = "<count>";
+            }
+            // Interactive terminal table: raw byte count can change on a
+            // redraw while semantic version and normalized screen do not.
+            6 => columns[4] = "<count>",
+            _ => {}
+        }
+        return columns.join(" | ");
+    }
+    if tool_name == "tasks"
+        && let Some(start) = line.find("(elapsed ")
+        && let Some(relative_end) = line[start..].find(')')
+    {
+        let end = start.saturating_add(relative_end).saturating_add(1);
+        return format!("{}(elapsed <elapsed>){}", &line[..start], &line[end..]);
+    }
+    line.trim_end().to_string()
 }
 
 fn tool_call_failure_signature(tool_call: &ToolCall) -> String {
@@ -2374,99 +2714,205 @@ fn empty_response_nudge_message() -> String {
         .to_string()
 }
 
-/// Counts consecutive parent-lane coding turns whose tool observations all
-/// have `makes_progress == false` — turns that only inspect (read/grep/
-/// search/diff) without a single mutation, delegation, or plan step. Unlike
-/// [`RepeatedInspectionGuard`]/[`ReadStormGuard`] it never consults on-disk
-/// file versions: freshness resets are exactly the loophole that let a session
-/// loop forever amid peer worktree churn. Reset only by a progress-making
-/// observation or live user steering. Not model-gated; armed only for the
-/// built-in coding persona on the parent lane
-/// (see `Agent::implementation_stall_guarded`).
+/// Semantic circuit breaker for the parent coding lane.
+///
+/// Durable effects clear the whole evidence epoch. Evidence-only calls reset
+/// the stalled-turn streak only when their normalized result fingerprint is
+/// new; fingerprints remain remembered across that reset, which makes
+/// unchanged reads, equivalent terminal frames, repeated status polls, and
+/// syntactically varied commands converge on the same terminal bound.
 #[derive(Debug, Default)]
 struct ImplementationStallGuard {
     turns_without_progress: usize,
+    seen_evidence: HashSet<blake3::Hash>,
+    recent_stall_evidence: VecDeque<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImplementationStallPhase {
+    Nudge,
+    Recovery,
+    Stop,
+}
+
+impl ImplementationStallPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Nudge => "nudge",
+            Self::Recovery => "recovery",
+            Self::Stop => "stop",
+        }
+    }
 }
 
 #[derive(Debug)]
-struct ImplementationStallNudge {
+struct ImplementationStallTransition {
+    phase: ImplementationStallPhase,
     note: String,
+    evidence: String,
+}
+
+#[derive(Debug, Default)]
+struct ImplementationStallDecision {
+    made_progress: bool,
+    progress_reason: Option<String>,
+    transition: Option<ImplementationStallTransition>,
 }
 
 impl ImplementationStallGuard {
     fn observe_turn(
         &mut self,
         observations: &[ToolCallObservation],
-    ) -> Option<ImplementationStallNudge> {
-        if observations
+    ) -> ImplementationStallDecision {
+        let durable_reasons = observations
             .iter()
-            .any(|observation| observation.makes_progress)
-        {
+            .filter(|observation| observation.makes_progress)
+            .filter_map(|observation| observation.progress_reason.as_deref())
+            .collect::<BTreeSet<_>>();
+        if !durable_reasons.is_empty() {
+            let reason = durable_reasons.into_iter().collect::<Vec<_>>().join(", ");
+            let reason = format_progress_transition_reason(
+                &reason,
+                self.turns_without_progress,
+                "durable progress",
+            );
             self.reset();
-            return None;
+            return ImplementationStallDecision {
+                made_progress: true,
+                progress_reason: Some(reason),
+                transition: None,
+            };
         }
-        self.turns_without_progress = self.turns_without_progress.saturating_add(1);
-        if self.turns_without_progress == IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS {
-            return Some(ImplementationStallNudge {
-                note: implementation_stall_first_nudge_message(self.turns_without_progress),
-            });
-        }
-        if self.turns_without_progress == IMPLEMENTATION_STALL_SECOND_NUDGE_TURNS {
-            return Some(ImplementationStallNudge {
-                note: implementation_stall_second_nudge_message(self.turns_without_progress),
-            });
-        }
-        if self.turns_without_progress >= IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS
-            && (self.turns_without_progress - IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS)
-                .is_multiple_of(IMPLEMENTATION_STALL_REPEATED_NUDGE_INTERVAL_TURNS)
+
+        let mut novel_evidence = BTreeSet::new();
+        for evidence in observations
+            .iter()
+            .filter_map(|observation| observation.semantic_evidence.as_ref())
         {
-            return Some(ImplementationStallNudge {
-                note: implementation_stall_repeated_nudge_message(self.turns_without_progress),
-            });
+            if self.seen_evidence.contains(&evidence.fingerprint) {
+                continue;
+            }
+            if self.seen_evidence.len() >= IMPLEMENTATION_STALL_EVIDENCE_LIMIT {
+                break;
+            }
+            self.seen_evidence.insert(evidence.fingerprint);
+            novel_evidence.insert(evidence.label());
         }
-        None
+        if !novel_evidence.is_empty() {
+            let reason = format_progress_transition_reason(
+                &format!(
+                    "new {}",
+                    novel_evidence.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+                self.turns_without_progress,
+                "semantic evidence",
+            );
+            self.turns_without_progress = 0;
+            self.recent_stall_evidence.clear();
+            return ImplementationStallDecision {
+                made_progress: true,
+                progress_reason: Some(reason),
+                transition: None,
+            };
+        }
+
+        self.turns_without_progress = self.turns_without_progress.saturating_add(1);
+        let turn_evidence = observations
+            .iter()
+            .map(|observation| observation.stalled_evidence(&self.seen_evidence))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let turn_evidence = if turn_evidence.is_empty() {
+            "no completed tool observation".to_string()
+        } else {
+            turn_evidence
+        };
+        if self.recent_stall_evidence.back() != Some(&turn_evidence) {
+            self.recent_stall_evidence.push_back(turn_evidence);
+            while self.recent_stall_evidence.len() > IMPLEMENTATION_STALL_EVIDENCE_HISTORY {
+                self.recent_stall_evidence.pop_front();
+            }
+        }
+        let evidence = self.evidence_summary();
+        let phase = match self.turns_without_progress {
+            IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS => Some(ImplementationStallPhase::Nudge),
+            IMPLEMENTATION_STALL_RECOVERY_TURNS => Some(ImplementationStallPhase::Recovery),
+            IMPLEMENTATION_STALL_TERMINAL_TURNS => Some(ImplementationStallPhase::Stop),
+            _ => None,
+        };
+        let transition = phase.map(|phase| ImplementationStallTransition {
+            phase,
+            note: implementation_stall_transition_message(
+                phase,
+                self.turns_without_progress,
+                &evidence,
+            ),
+            evidence,
+        });
+        ImplementationStallDecision {
+            made_progress: false,
+            progress_reason: None,
+            transition,
+        }
     }
 
     fn reset(&mut self) {
         self.turns_without_progress = 0;
+        self.seen_evidence.clear();
+        self.recent_stall_evidence.clear();
+    }
+
+    fn evidence_summary(&self) -> String {
+        if self.recent_stall_evidence.is_empty() {
+            return "no completed tool observation".to_string();
+        }
+        self.recent_stall_evidence
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
-fn implementation_stall_first_nudge_message(turns: usize) -> String {
-    format!(
-        "You have spent {turns} consecutive turns on read-only exploration (read/grep/search/diff) \
-         without a single file edit, delegation, or user-visible answer. Stop assessing and act NOW \
-         — pick one: (1) begin the edits your task and todo list call for, starting with the \
-         smallest safe change; or (2) if something genuinely blocks editing, finish this run with a \
-         short reply naming the concrete blocker and what you need. Pre-existing uncommitted \
-         changes in this worktree are the expected baseline — other work in this repository, not \
-         yours to protect, reconcile, or re-verify. Make your edits on top of them and leave them \
-         alone. Do not restart your survey of the code. (Automated message — do not respond to it \
-         conversationally.)"
-    )
+fn format_progress_transition_reason(reason: &str, stalled_turns: usize, kind: &str) -> String {
+    if stalled_turns == 0 {
+        reason.to_string()
+    } else {
+        format!("{reason}; reset {stalled_turns} stalled tool turns with {kind}")
+    }
 }
 
-fn implementation_stall_second_nudge_message(turns: usize) -> String {
-    format!(
-        "Second notice: {turns} consecutive exploration-only turns and still no edit or answer. \
-         Further inspection is allowed when the task genuinely needs it, but keep it bounded to \
-         one unanswered question. Use the evidence already gathered to make the smallest safe edit, \
-         delegate that specific gap, or reply to the user naming the concrete blocker. Reminder: \
-         pre-existing uncommitted worktree changes are baseline from other work — edit on top of \
-         them; do not reconcile, protect, or re-verify them. (Automated message — do not respond to \
-         it conversationally.)"
-    )
-}
-
-fn implementation_stall_repeated_nudge_message(turns: usize) -> String {
-    format!(
-        "Persistent implementation nudge: {turns} consecutive exploration-only turns have \
-         produced no edit, delegation, or user-visible answer. Convert the evidence already in \
-         context into a concrete next step now. Make the smallest safe edit; if one specific fact \
-         is still missing, inspect or delegate only that bounded question before acting; if an \
-         external blocker prevents progress, tell the user exactly what it is. Do not restart a \
-         broad survey. (Automated message — do not respond to it conversationally.)"
-    )
+fn implementation_stall_transition_message(
+    phase: ImplementationStallPhase,
+    turns: usize,
+    evidence: &str,
+) -> String {
+    match phase {
+        ImplementationStallPhase::Nudge => format!(
+            "Implementation-stall guard: {turns} consecutive tool turns produced no durable \
+             semantic progress. Recent evidence: {evidence}. Stop repeating equivalent reads, \
+             polls, terminal frames, rejected calls, or no-op commands. Use the evidence already \
+             gathered to make the smallest safe edit or resolve one concrete blocker. \
+             (Automated message — do not respond to it conversationally.)"
+        ),
+        ImplementationStallPhase::Recovery => format!(
+            "Implementation-stall recovery: {turns} stalled turns have now exhausted the ordinary \
+             nudge. Recent evidence: {evidence}. This is the single bounded recovery window: \
+             summarize the decisive evidence briefly, then perform one concrete pending action. \
+             If that action cannot be performed, finish with the exact blocker and resumable next \
+             step. Do not start another survey or status-poll loop. (Automated message — do not \
+             respond to it conversationally.)"
+        ),
+        ImplementationStallPhase::Stop => format!(
+            "Implementation-stall terminal: Bonsai stopped this run after {turns} consecutive \
+             stalled tool turns, including the bounded recovery window. Recent evidence: \
+             {evidence}. No durable workspace change, novel evidence, resolved todo/finding, or \
+             background-work transition was observed. Partial workspace and conversation state \
+             are preserved and can be resumed with new steering."
+        ),
+    }
 }
 
 fn repeated_inspection_signature(tool_calls: &[ToolCall]) -> Option<String> {
@@ -2991,30 +3437,35 @@ mod tests {
     }
 
     #[test]
-    fn implementation_stall_guard_keeps_nudging_without_stopping_distinct_reads() {
-        // The repeated-read shape: a *distinct* read every turn, which the
-        // signature-based guards treat as fresh work forever.
+    fn implementation_stall_guard_escalates_to_a_terminal_outcome() {
         let mut guard = ImplementationStallGuard::default();
-        let last_turn = IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS
-            + IMPLEMENTATION_STALL_REPEATED_NUDGE_INTERVAL_TURNS;
-        let mut nudge_turns = Vec::new();
-        for turn in 1..=last_turn {
-            let action = guard.observe_turn(&[stall_observation(
+        let mut transitions = Vec::new();
+        for turn in 1..=IMPLEMENTATION_STALL_TERMINAL_TURNS {
+            let decision = guard.observe_turn(&[stall_observation(
                 "read",
                 &format!(r#"{{"path":"src/file{turn}.rs"}}"#),
                 crate::output::ToolExecutionStatus::Succeeded,
             )]);
-            if action.is_some() {
-                nudge_turns.push(turn);
+            assert!(!decision.made_progress);
+            if let Some(transition) = decision.transition {
+                transitions.push((turn, transition.phase));
             }
         }
         assert_eq!(
-            nudge_turns,
+            transitions,
             vec![
-                IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS,
-                IMPLEMENTATION_STALL_SECOND_NUDGE_TURNS,
-                IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS,
-                last_turn,
+                (
+                    IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS,
+                    ImplementationStallPhase::Nudge,
+                ),
+                (
+                    IMPLEMENTATION_STALL_RECOVERY_TURNS,
+                    ImplementationStallPhase::Recovery,
+                ),
+                (
+                    IMPLEMENTATION_STALL_TERMINAL_TURNS,
+                    ImplementationStallPhase::Stop,
+                ),
             ]
         );
     }
@@ -3030,30 +3481,48 @@ mod tests {
                         &format!(r#"{{"path":"src/a{turn}.rs"}}"#),
                         crate::output::ToolExecutionStatus::Succeeded,
                     )])
+                    .transition
                     .is_none()
             );
         }
-        // A successful mutation resets the counter and the nudge budget.
-        assert!(
-            guard
-                .observe_turn(&[stall_observation(
-                    "edit",
-                    r#"{"path":"src/a.rs"}"#,
-                    crate::output::ToolExecutionStatus::Succeeded,
-                )])
-                .is_none()
+        let mut progress = stall_observation(
+            "edit",
+            r#"{"path":"src/a.rs"}"#,
+            crate::output::ToolExecutionStatus::Succeeded,
         );
+        progress.observe_result(
+            &ToolOutput::Edit {
+                summary: "edited src/a.rs".to_string(),
+                diff: crate::diff::FileDiff {
+                    path: "src/a.rs".to_string(),
+                    status: crate::diff::DiffStatus::Modified,
+                    hunks: Vec::new(),
+                    truncated: false,
+                    old_size: Some(1),
+                    new_size: 2,
+                    added_lines: 1,
+                    removed_lines: 1,
+                    additional_files: Box::default(),
+                },
+            },
+            Some(crate::tool::ToolEffectPolicy::SelfAuthorized),
+        );
+        let decision = guard.observe_turn(&[progress]);
+        assert!(decision.made_progress);
+        assert!(decision.transition.is_none());
         assert_eq!(guard.turns_without_progress, 0);
         for turn in 1..=IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS {
-            let action = guard.observe_turn(&[stall_observation(
-                "read",
-                &format!(r#"{{"path":"src/b{turn}.rs"}}"#),
-                crate::output::ToolExecutionStatus::Succeeded,
-            )]);
+            let transition = guard
+                .observe_turn(&[stall_observation(
+                    "read",
+                    &format!(r#"{{"path":"src/b{turn}.rs"}}"#),
+                    crate::output::ToolExecutionStatus::Succeeded,
+                )])
+                .transition;
             if turn == IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS {
-                assert!(action.is_some(), "reset must re-arm the first nudge");
+                assert!(transition.is_some(), "reset must re-arm the first nudge");
             } else {
-                assert!(action.is_none());
+                assert!(transition.is_none());
             }
         }
     }
@@ -3062,18 +3531,22 @@ mod tests {
     fn implementation_stall_guard_resets_when_background_work_starts() {
         let mut guard = ImplementationStallGuard {
             turns_without_progress: IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS - 1,
+            ..ImplementationStallGuard::default()
         };
         let mut observation = stall_observation(
             "bash",
             r#"{"command":"cargo test --locked","run_in_background":true}"#,
             crate::output::ToolExecutionStatus::Started,
         );
-        observation.observe_result(&ToolOutput::BackgroundTaskStarted {
-            task_id: "bg-1".to_string(),
-            message: "Started background task bg-1".to_string(),
-        });
+        observation.observe_result(
+            &ToolOutput::BackgroundTaskStarted {
+                task_id: "bg-1".to_string(),
+                message: "Started background task bg-1".to_string(),
+            },
+            Some(crate::tool::ToolEffectPolicy::SelfAuthorized),
+        );
 
-        assert!(guard.observe_turn(&[observation]).is_none());
+        assert!(guard.observe_turn(&[observation]).made_progress);
         assert_eq!(guard.turns_without_progress, 0);
     }
 
@@ -3083,17 +3556,130 @@ mod tests {
         // edits the model aborts or that bounce off validation.
         let mut guard = ImplementationStallGuard::default();
         for turn in 1..=IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS {
-            let action = guard.observe_turn(&[stall_observation(
-                "edit",
-                &format!(r#"{{"path":"src/c{turn}.rs"}}"#),
-                crate::output::ToolExecutionStatus::Failed,
-            )]);
+            let transition = guard
+                .observe_turn(&[stall_observation(
+                    "edit",
+                    &format!(r#"{{"path":"src/c{turn}.rs"}}"#),
+                    crate::output::ToolExecutionStatus::Failed,
+                )])
+                .transition;
             if turn == IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS {
-                assert!(action.is_some());
+                assert!(transition.is_some());
             } else {
-                assert!(action.is_none(), "failed edits must count toward the stall");
+                assert!(
+                    transition.is_none(),
+                    "failed edits must count toward the stall"
+                );
             }
         }
+    }
+
+    #[test]
+    fn implementation_stall_ignores_syntactic_command_variation() {
+        let mut guard = ImplementationStallGuard::default();
+        let mut stop_turn = None;
+        for turn in 0..=IMPLEMENTATION_STALL_TERMINAL_TURNS {
+            let mut observation = stall_observation(
+                "bash",
+                &format!(r#"{{"command":"printf ok # variation {turn}"}}"#),
+                crate::output::ToolExecutionStatus::Succeeded,
+            );
+            observation.observe_result(
+                &ToolOutput::Command {
+                    rendered: format!("command spelling {turn}"),
+                    stdout: format!("tests passed in {turn}.00s\n"),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    timed_out: false,
+                    truncation: None,
+                },
+                Some(crate::tool::ToolEffectPolicy::SelfAuthorized),
+            );
+            let decision = guard.observe_turn(&[observation]);
+            if turn == 0 {
+                assert!(decision.made_progress, "the first result is new evidence");
+            }
+            if decision
+                .transition
+                .is_some_and(|transition| transition.phase == ImplementationStallPhase::Stop)
+            {
+                stop_turn = Some(turn);
+            }
+        }
+        assert_eq!(stop_turn, Some(IMPLEMENTATION_STALL_TERMINAL_TURNS));
+    }
+
+    #[test]
+    fn implementation_stall_normalizes_equivalent_terminal_frames() {
+        let evidence = |output_chars| {
+            semantic_evidence_for_result(
+                "terminal",
+                &ToolOutput::untrusted_context(
+                    "terminal:pty-1",
+                    &format!(
+                        "ID: pty-1\nSemantic version: 7\nStatus: running\nOutput: {output_chars} chars\nNormalized screen:\nworking"
+                    ),
+                ),
+                Some(crate::tool::ToolEffectPolicy::LocalState),
+            )
+        };
+
+        assert_eq!(
+            evidence(120).map(|evidence| evidence.fingerprint),
+            evidence(9_999).map(|evidence| evidence.fingerprint),
+        );
+    }
+
+    #[test]
+    fn implementation_stall_new_diagnostic_resets_but_repeat_does_not() {
+        let diagnostic = |text: &str| {
+            let mut observation = stall_observation(
+                "diagnostics",
+                r#"{"path":"src/main.rs"}"#,
+                crate::output::ToolExecutionStatus::Succeeded,
+            );
+            observation.observe_result(
+                &ToolOutput::Text(text.to_string()),
+                Some(crate::tool::ToolEffectPolicy::SelfAuthorized),
+            );
+            observation
+        };
+        let mut guard = ImplementationStallGuard::default();
+
+        assert!(guard.observe_turn(&[diagnostic("error E1")]).made_progress);
+        assert!(!guard.observe_turn(&[diagnostic("error E1")]).made_progress);
+        assert_eq!(guard.turns_without_progress, 1);
+        assert!(guard.observe_turn(&[diagnostic("error E2")]).made_progress);
+        assert_eq!(guard.turns_without_progress, 0);
+    }
+
+    #[test]
+    fn todo_progress_requires_resolution_not_rewording_or_removal() {
+        let pending = TodoItem {
+            content: "fix the guard".to_string(),
+            status: crate::todo::TodoStatus::InProgress,
+        };
+        let completed = TodoItem {
+            status: crate::todo::TodoStatus::Completed,
+            ..pending.clone()
+        };
+        let reworded = TodoItem {
+            content: "work on something else".to_string(),
+            status: crate::todo::TodoStatus::Completed,
+        };
+
+        assert!(todo_resolution_made_progress(
+            std::slice::from_ref(&pending),
+            &[completed]
+        ));
+        assert!(!todo_resolution_made_progress(
+            std::slice::from_ref(&pending),
+            &[reworded]
+        ));
+        assert!(!todo_resolution_made_progress(
+            std::slice::from_ref(&pending),
+            &[]
+        ));
     }
 
     #[test]

@@ -1,15 +1,10 @@
-//! Integration coverage for the implementation-stall guard (session 84): a
-//! coding-persona run that only explores — distinct reads every turn, so the
-//! signature-based inspection guards never trip — must receive model-only
-//! nudges without being stopped, while progress, planning runs, and subagent
-//! lanes stay unguarded.
+//! Integration coverage for the semantic implementation-stall circuit breaker.
 
 use super::*;
 
 use super::super::ExecutionLane;
 use super::super::run_loop::{
-    IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS, IMPLEMENTATION_STALL_REPEATED_NUDGE_INTERVAL_TURNS,
-    IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS,
+    IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS, IMPLEMENTATION_STALL_TERMINAL_TURNS,
 };
 
 /// One exploration-only model turn: a single `read` call whose arguments are
@@ -69,6 +64,109 @@ impl Tool for OkBashTool {
     }
 }
 
+struct FailedBashTool {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Tool for FailedBashTool {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn description(&self) -> &str {
+        "mock failed bash"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        OkBashTool.parameters_schema()
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(ToolOutput::Command {
+            rendered: "same failure".to_string(),
+            stdout: String::new(),
+            stderr: "operation failed\n".to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+            truncation: None,
+        })
+    }
+}
+
+struct VolatileTerminalPollTool {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Tool for VolatileTerminalPollTool {
+    fn name(&self) -> &str {
+        "terminal"
+    }
+
+    fn description(&self) -> &str {
+        "mock terminal poll"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["title"],
+            "properties": {"title": {"type": "string"}},
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(ToolOutput::untrusted_context(
+            "terminal:pty-1",
+            &format!(
+                "ID: pty-1\nSemantic version: 3\nStatus: running\nOutput: {} chars\nNormalized screen:\nworking",
+                100 + call
+            ),
+        ))
+    }
+}
+
+struct VolatileTaskPollTool {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Tool for VolatileTaskPollTool {
+    fn name(&self) -> &str {
+        "tasks"
+    }
+
+    fn description(&self) -> &str {
+        "mock task poll"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["title"],
+            "properties": {"title": {"type": "string"}},
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(ToolOutput::Text(format!(
+            "ID     | Version | State     | Duration | Exit/timeout | Output | Command\n\
+             bg-1   |       2 | running   | {call}s | -            | 10 B   | cargo test"
+        )))
+    }
+}
+
 fn stall_notes_in(agent: &Agent) -> Vec<String> {
     // Harness notes carry provenance and may ride a system- or user-role
     // message depending on trust level; match on serialized content.
@@ -78,25 +176,23 @@ fn stall_notes_in(agent: &Agent) -> Vec<String> {
         .filter_map(|message| {
             let value = serde_json::to_value(message).ok()?;
             let content = value.get("content")?.as_str()?;
-            (content.starts_with("Harness note:") && content.contains("exploration"))
+            (content.starts_with("Harness note:") && content.contains("Implementation-stall"))
                 .then(|| content.to_string())
         })
         .collect()
 }
 
 #[tokio::test]
-async fn stall_guard_keeps_long_exploration_run_alive_with_persistent_nudges() {
+async fn stall_guard_terminates_unchanged_reads_with_typed_failure() {
     let fixture = TestFixture::new();
     let read_tool = Arc::new(MockTool::new("read", "read result"));
     let mut registry = ToolRegistry::new();
     registry.register(read_tool.clone());
 
-    let exploration_turns = IMPLEMENTATION_STALL_REPEATED_NUDGE_START_TURNS
-        + IMPLEMENTATION_STALL_REPEATED_NUDGE_INTERVAL_TURNS;
-    let responses = (0..exploration_turns)
-        .map(distinct_read_turn)
-        .chain([final_text_turn("finished after long research")])
-        .collect();
+    // The first successful read contributes one novel evidence frame. The
+    // provider-independent terminal bound then counts unchanged frames.
+    let exploration_turns = IMPLEMENTATION_STALL_TERMINAL_TURNS + 1;
+    let responses = (0..exploration_turns).map(distinct_read_turn).collect();
     let mut agent = Agent::new(
         Box::new(MockProvider::new(responses)),
         Arc::new(registry),
@@ -106,7 +202,7 @@ async fn stall_guard_keeps_long_exploration_run_alive_with_persistent_nudges() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = exploration_turns + 2;
+    agent.budget.max_iterations = exploration_turns + 1;
     let sink = Arc::new(CaptureSink::default());
 
     let result = agent
@@ -117,31 +213,149 @@ async fn stall_guard_keeps_long_exploration_run_alive_with_persistent_nudges() {
         )
         .await
         .unwrap();
+    let AgentRunResult::Incomplete { output, failure } = result else {
+        panic!("stall must be a typed incomplete result");
+    };
     assert_eq!(
-        result,
-        AgentRunResult::Completed("finished after long research".to_string())
+        failure.outcome,
+        crate::agent::CompletionFailureOutcome::Failed
     );
+    assert_eq!(
+        failure.gaps,
+        vec![crate::agent::CompletionGap::ImplementationStall(
+            IMPLEMENTATION_STALL_TERMINAL_TURNS
+        )]
+    );
+    assert!(output.contains("Partial workspace and conversation state were preserved"));
 
-    // The guard never rejects reads — every scripted turn still executed.
     assert_eq!(read_tool.calls.lock().await.len(), exploration_turns);
     let notes = stall_notes_in(&agent);
     assert_eq!(
         notes.len(),
-        4,
-        "initial, second, and recurring nudges should have been injected: {notes:#?}"
+        3,
+        "nudge, recovery, and terminal transitions must be persisted: {notes:#?}"
     );
-    assert!(notes[0].contains("read-only exploration"), "{}", notes[0]);
-    assert!(notes[0].contains("expected baseline"), "{}", notes[0]);
-    assert!(notes[1].contains("Second notice"), "{}", notes[1]);
+    assert!(notes[0].contains("guard:"), "{}", notes[0]);
+    assert!(notes[1].contains("recovery:"), "{}", notes[1]);
+    assert!(notes[2].contains("terminal:"), "{}", notes[2]);
     assert!(
-        notes[2..]
-            .iter()
-            .all(|note| note.contains("Persistent implementation nudge")),
-        "later nudges must keep steering without terminating: {notes:#?}"
+        notes[2].contains("equivalent file evidence"),
+        "{}",
+        notes[2]
     );
     assert!(
         sink.statuses().is_empty(),
         "implementation guard nudges must stay model-only"
+    );
+}
+
+#[tokio::test]
+async fn stall_guard_terminates_syntactically_varied_failed_calls() {
+    let fixture = TestFixture::new();
+    let bash = Arc::new(FailedBashTool {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(bash.clone());
+    let responses = (0..IMPLEMENTATION_STALL_TERMINAL_TURNS)
+        .map(|turn| {
+            Ok(StreamedResponse {
+                tool_calls: vec![test_tool_call(
+                    &format!("failed-{turn}"),
+                    "bash",
+                    &format!(r#"{{"command":"false # spelling {turn}"}}"#),
+                )],
+                ..StreamedResponse::default()
+            })
+        })
+        .collect();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.budget.max_iterations = IMPLEMENTATION_STALL_TERMINAL_TURNS + 1;
+
+    let result = agent
+        .run(
+            "repair the failure",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(result, AgentRunResult::Incomplete { .. }));
+    assert_eq!(
+        bash.calls.load(std::sync::atomic::Ordering::Relaxed),
+        IMPLEMENTATION_STALL_TERMINAL_TURNS
+    );
+}
+
+#[tokio::test]
+async fn stall_guard_terminates_equivalent_terminal_and_status_polls() {
+    let fixture = TestFixture::new();
+    let terminal = Arc::new(VolatileTerminalPollTool {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let tasks = Arc::new(VolatileTaskPollTool {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(terminal.clone());
+    registry.register(tasks.clone());
+    let poll_turns = IMPLEMENTATION_STALL_TERMINAL_TURNS + 1;
+    let responses = (0..poll_turns)
+        .map(|turn| {
+            Ok(StreamedResponse {
+                tool_calls: vec![
+                    test_tool_call(
+                        &format!("terminal-{turn}"),
+                        "terminal",
+                        &format!(r#"{{"title":"terminal poll {turn}"}}"#),
+                    ),
+                    test_tool_call(
+                        &format!("tasks-{turn}"),
+                        "tasks",
+                        &format!(r#"{{"title":"task poll {turn}"}}"#),
+                    ),
+                ],
+                ..StreamedResponse::default()
+            })
+        })
+        .collect();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.budget.max_iterations = poll_turns + 1;
+
+    let result = agent
+        .run(
+            "wait for the same state forever",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(result, AgentRunResult::Incomplete { .. }));
+    assert_eq!(
+        terminal.calls.load(std::sync::atomic::Ordering::Relaxed),
+        poll_turns
+    );
+    assert_eq!(
+        tasks.calls.load(std::sync::atomic::Ordering::Relaxed),
+        poll_turns
     );
 }
 

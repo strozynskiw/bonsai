@@ -64,7 +64,7 @@ impl TurnPolicies {
         self.repeated_failure.reset();
         self.single_call_streak = SingleCallStreakGuard::default();
         self.serial_delegation = SerialDelegationGuard::default();
-        self.implementation_stall.reset();
+        self.reset_implementation_stall_for_external_progress("user steering received");
         self.empty_response_nudges = 0;
     }
 
@@ -85,7 +85,24 @@ impl TurnPolicies {
             self.read_storm.reset();
             self.single_call_streak = SingleCallStreakGuard::default();
             self.serial_delegation = SerialDelegationGuard::default();
-            self.implementation_stall.reset();
+            self.reset_implementation_stall_for_external_progress(
+                "queued user steering interrupted the tool batch",
+            );
+        }
+    }
+
+    fn reset_implementation_stall_for_external_progress(&mut self, reason: &str) {
+        let stalled_turns = self.implementation_stall.turns_without_progress;
+        self.implementation_stall.reset();
+        if stalled_turns > 0 {
+            tracing::info!(
+                target: "bonsai::guard",
+                guard = "implementation_stall",
+                action = "reset",
+                reason,
+                stalled_turns,
+                "guard observed external semantic progress"
+            );
         }
     }
 }
@@ -171,8 +188,18 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         // Keep the volatile git state honest across round-trips: writes and
         // concurrent edits land mid-run and must be visible on the next turn.
         let volatile_changed = self.agent.refresh_volatile_project_state().await;
-        if self.agent.refresh_background_context(&self.sink).await || volatile_changed {
+        let background_changed = self.agent.refresh_background_context(&self.sink).await;
+        if background_changed || volatile_changed {
             self.agent.emit_context_updated(&self.sink);
+            let reason = match (volatile_changed, background_changed) {
+                (true, true) => "workspace and background state changed",
+                (true, false) => "workspace state changed",
+                (false, true) => "background state changed",
+                (false, false) => "external state changed",
+            };
+            self.state
+                .policies
+                .reset_implementation_stall_for_external_progress(reason);
         }
         let user_steered = self
             .agent
@@ -274,6 +301,11 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             return Ok(TurnOutcome::Continue);
         }
         if self.agent.refresh_background_context(&self.sink).await {
+            self.state
+                .policies
+                .reset_implementation_stall_for_external_progress(
+                    "pending background work completed",
+                );
             deferred_sink.flush();
             self.agent
                 .push_message(assistant_text_message(&response.content));
@@ -494,22 +526,36 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         }
         // A steered turn never counts toward the stall: its queued user
         // message reset the policy state before execution.
-        let implementation_stall_nudge =
+        let implementation_stall =
             if !tool_execution.reset_loop_guards && self.agent.implementation_stall_guarded() {
                 self.state
                     .policies
                     .implementation_stall
                     .observe_turn(&tool_execution.tool_observations)
             } else {
-                None
+                ImplementationStallDecision {
+                    made_progress: tool_execution
+                        .tool_observations
+                        .iter()
+                        .any(|observation| observation.makes_progress),
+                    ..ImplementationStallDecision::default()
+                }
             };
-        let turn_made_progress = tool_execution
-            .tool_observations
-            .iter()
-            .any(|observation| observation.makes_progress);
+        if let Some(reason) = implementation_stall.progress_reason.as_deref() {
+            tracing::info!(
+                target: "bonsai::guard",
+                guard = "implementation_stall",
+                action = "progress",
+                reason,
+                "guard observed semantic progress"
+            );
+        }
+        if implementation_stall.made_progress {
+            self.state.policies.empty_response_nudges = 0;
+        }
         self.agent.log_turn_line(
             &response.tool_calls,
-            Some(turn_made_progress),
+            Some(implementation_stall.made_progress),
             self.state
                 .policies
                 .implementation_stall
@@ -538,20 +584,30 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 
         // Harness notes are appended after tool results so they remain the
         // final model-visible message without invalidating the prompt prefix.
-        if let Some(nudge) = implementation_stall_nudge {
+        if let Some(transition) = implementation_stall.transition {
+            let turns = self
+                .state
+                .policies
+                .implementation_stall
+                .turns_without_progress;
             tracing::warn!(
                 target: "bonsai::guard",
                 guard = "implementation_stall",
-                action = "nudge",
-                turns = self
-                    .state
-                    .policies
-                    .implementation_stall
-                    .turns_without_progress,
-                "guard nudged model"
+                action = transition.phase.label(),
+                turns,
+                evidence = %transition.evidence,
+                "implementation stall guard transitioned"
             );
-            self.agent.push_harness_note(&nudge.note);
+            self.agent.push_harness_note(&transition.note);
             self.agent.emit_context_updated(&self.sink);
+            if transition.phase == ImplementationStallPhase::Stop {
+                let failure =
+                    CompletionGuardFailure::implementation_stall(turns, &transition.evidence);
+                return Ok(TurnOutcome::Finished(AgentRunResult::Incomplete {
+                    output: failure.detail.clone(),
+                    failure,
+                }));
+            }
         } else if let Some(hint) = serial_delegation_hint {
             tracing::info!(
                 target: "bonsai::guard",
@@ -618,6 +674,8 @@ mod tests {
                 tool_name: "read".to_string(),
                 status: crate::output::ToolExecutionStatus::Succeeded,
                 makes_progress: false,
+                progress_reason: None,
+                semantic_evidence: None,
                 leaves_pending_work: false,
             }],
             ..ToolExecutionOutcome::default()

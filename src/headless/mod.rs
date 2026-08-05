@@ -192,8 +192,11 @@ async fn finish_headless_task(
     status: HeadlessStatus,
     budget_exhaustion: Option<crate::run_budget::RunBudgetExhaustion>,
     report: &crate::completion_report::CompletionReport,
+    terminal_detail: Option<&str>,
 ) -> Result<crate::storage::TaskRun> {
     use crate::storage::{TaskOutcome, TaskTerminalReason, TaskTerminalReasonCode};
+    let report_detail = report.caveats.join(" ");
+    let completion_detail = terminal_detail.unwrap_or(&report_detail);
 
     let (outcome, reason) = match status {
         HeadlessStatus::Completed => (TaskOutcome::Succeeded, None),
@@ -201,7 +204,7 @@ async fn finish_headless_task(
             TaskOutcome::Blocked,
             Some(TaskTerminalReason::new(
                 TaskTerminalReasonCode::ExecutionFailure,
-                &report.caveats.join(" "),
+                completion_detail,
             )),
         ),
         HeadlessStatus::Failed => {
@@ -227,7 +230,7 @@ async fn finish_headless_task(
                 } else {
                     TaskOutcome::Failed
                 },
-                Some(TaskTerminalReason::new(code, &report.caveats.join(" "))),
+                Some(TaskTerminalReason::new(code, completion_detail)),
             )
         }
         HeadlessStatus::BudgetExhausted | HeadlessStatus::TimedOut => (
@@ -244,7 +247,7 @@ async fn finish_headless_task(
             TaskOutcome::Cancelled,
             Some(TaskTerminalReason::new(
                 TaskTerminalReasonCode::UserCancelled,
-                "The user interrupted the headless task.",
+                terminal_detail.unwrap_or("The user interrupted the headless task."),
             )),
         ),
         HeadlessStatus::Terminated => (
@@ -798,8 +801,8 @@ async fn run_inner_with_provider_runtime(
         );
     }
 
-    let (run_status, output, mut budget_exhaustion) = match run_result {
-        Ok(AgentRunResult::Completed(output)) => (HeadlessStatus::Completed, output, None),
+    let (run_status, output, mut budget_exhaustion, completion_failure) = match run_result {
+        Ok(AgentRunResult::Completed(output)) => (HeadlessStatus::Completed, output, None, None),
         Ok(AgentRunResult::Incomplete { output, failure }) => (
             match failure.outcome {
                 crate::agent::CompletionFailureOutcome::Blocked => HeadlessStatus::Blocked,
@@ -808,6 +811,7 @@ async fn run_inner_with_provider_runtime(
             },
             output,
             None,
+            Some(failure),
         ),
         Ok(AgentRunResult::Interrupted(output)) => match cancel_reason
             .get()
@@ -815,9 +819,9 @@ async fn run_inner_with_provider_runtime(
             .unwrap_or(CancelReason::Interrupted)
         {
             CancelReason::BudgetExhausted(reason) => {
-                (HeadlessStatus::BudgetExhausted, output, Some(reason))
+                (HeadlessStatus::BudgetExhausted, output, Some(reason), None)
             }
-            reason => (reason.status(), output, None),
+            reason => (reason.status(), output, None, None),
         },
         Ok(AgentRunResult::Waiting(reason)) => {
             let failure = format!("headless agent entered nonterminal wait state: {reason:?}");
@@ -863,7 +867,12 @@ async fn run_inner_with_provider_runtime(
                 .downcast_ref::<crate::run_budget::RunBudgetExhaustion>()
                 .copied()
             {
-                (HeadlessStatus::BudgetExhausted, String::new(), Some(reason))
+                (
+                    HeadlessStatus::BudgetExhausted,
+                    String::new(),
+                    Some(reason),
+                    None,
+                )
             } else {
                 let agent_failure = crate::provider::agent_failure_detail(&err);
                 let reason_code = if err
@@ -978,6 +987,9 @@ async fn run_inner_with_provider_runtime(
         status,
         budget_exhaustion,
         &completion_report,
+        completion_failure
+            .as_ref()
+            .map(crate::agent::CompletionGuardFailure::compact_detail),
     )
     .await?;
     let task_outcome = finished_task.outcome.ok_or_else(|| {
@@ -2335,6 +2347,7 @@ mod tests {
             HeadlessStatus::Terminated,
             None,
             &report,
+            None,
         )
         .await
         .unwrap();
@@ -2343,6 +2356,51 @@ mod tests {
         assert_eq!(
             finished.terminal_reason.as_ref().map(|reason| reason.code),
             Some(crate::storage::TaskTerminalReasonCode::ProcessInterrupted)
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_stall_detail_is_persisted_for_headless_failures() {
+        let fixture = TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let task = fixture
+            .storage
+            .start_task_run(session_id, None, "Avoid polling forever")
+            .await
+            .unwrap();
+        let report = crate::completion_report::CompletionReport::from_evidence(
+            crate::completion_report::CompletionStatus::Failed,
+            crate::completion_report::CompletionEvidenceSnapshot::default(),
+            crate::completion_report::CompletionSessionEvidence {
+                completion_guard: None,
+                verification: None,
+                review: None,
+                authorization_decisions: &[],
+                usage: crate::agent::UsageTotals::default(),
+                session_budget: crate::run_budget::SessionBudgetUsage::default(),
+                budget_exhaustion: None,
+            },
+        );
+        let detail = "Agent stopped after 18 stalled tool turns; state was preserved.";
+
+        let finished = finish_headless_task(
+            &fixture.storage,
+            task.id,
+            HeadlessStatus::Failed,
+            None,
+            &report,
+            Some(detail),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(finished.outcome, Some(crate::storage::TaskOutcome::Failed));
+        assert_eq!(
+            finished
+                .terminal_reason
+                .as_ref()
+                .map(|reason| reason.detail.as_str()),
+            Some(detail)
         );
     }
 

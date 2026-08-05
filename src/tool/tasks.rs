@@ -205,22 +205,26 @@ impl TasksTool {
             }
             TaskAction::Tail => {
                 let task_id = required_task_id(args.task_id.as_deref(), "tail")?;
-                let output = if is_subagent_id(task_id) {
-                    self.tail_subagent(task_id)?
+                if is_subagent_id(task_id) {
+                    ToolOutput::Text(self.tail_subagent(task_id)?)
                 } else if is_terminal_id(task_id) {
-                    self.tail_terminal(task_id).await?
+                    ToolOutput::untrusted_context(
+                        format!("terminal:{task_id}"),
+                        &self.tail_terminal(task_id).await?,
+                    )
                 } else {
-                    self.registry
-                        .snapshot(task_id)
-                        .await
-                        .with_context(|| format!("Unknown background task: {task_id}"))?
-                        .detail()
-                };
-                ToolOutput::Text(output)
+                    ToolOutput::Text(
+                        self.registry
+                            .snapshot(task_id)
+                            .await
+                            .with_context(|| format!("Unknown background task: {task_id}"))?
+                            .detail(),
+                    )
+                }
             }
             TaskAction::Stop => {
                 let task_id = required_task_id(args.task_id.as_deref(), "stop")?;
-                let output = if is_subagent_id(task_id) {
+                if is_subagent_id(task_id) {
                     bail!(
                         "tasks stop only supports background Bash tasks; subagent {task_id} can be inspected with tasks tail or /subagents and is cancelled when the parent run is interrupted."
                     );
@@ -228,11 +232,12 @@ impl TasksTool {
                     let Some(terminals) = &self.terminals else {
                         bail!("Unknown interactive terminal: {task_id}");
                     };
-                    terminals.stop(task_id).await?.detail()
+                    let snapshot = terminals.stop(task_id).await?;
+                    let (output, _) = snapshot.model_output();
+                    ToolOutput::untrusted_context(format!("terminal:{task_id}"), &output)
                 } else {
-                    self.registry.stop(task_id).await?.detail()
-                };
-                ToolOutput::Text(output)
+                    ToolOutput::Text(self.registry.stop(task_id).await?.detail())
+                }
             }
         };
 
@@ -305,7 +310,8 @@ impl TasksTool {
         let Some(terminals) = &self.terminals else {
             bail!("Unknown interactive terminal: {task_id}");
         };
-        Ok(terminals.wait_for_terminal(task_id, wait).await?.detail())
+        let snapshot = terminals.wait_for_terminal(task_id, wait).await?;
+        Ok(snapshot.model_output().0)
     }
 
     async fn wait_for_background_wakeable(
@@ -377,12 +383,12 @@ impl TasksTool {
             .as_ref()
             .context("Interactive terminals are unavailable")?;
         if !self.can_park {
-            return Ok(ToolOutput::Text(
-                self.wait_for_terminal(
-                    task_id,
-                    Duration::from_secs(args.wait_seconds.unwrap_or(1)),
-                )
-                .await?,
+            let output = self
+                .wait_for_terminal(task_id, Duration::from_secs(args.wait_seconds.unwrap_or(1)))
+                .await?;
+            return Ok(ToolOutput::untrusted_context(
+                format!("terminal:{task_id}"),
+                &output,
             ));
         }
         let coordinator = context
@@ -402,10 +408,13 @@ impl TasksTool {
             )
             .await?
         {
-            TerminalWaitRegistration::Ready(snapshot) => Ok(ToolOutput::untrusted_context(
-                format!("terminal:{task_id}"),
-                &snapshot.detail(),
-            )),
+            TerminalWaitRegistration::Ready(snapshot) => {
+                let (output, _) = snapshot.model_output();
+                Ok(ToolOutput::untrusted_context(
+                    format!("terminal:{task_id}"),
+                    &output,
+                ))
+            }
             TerminalWaitRegistration::Parked(wait) => Ok(ToolOutput::WaitStarted {
                 message: format!(
                     "Waiting for {task_id} from semantic version {}.",
@@ -420,11 +429,11 @@ impl TasksTool {
         let Some(terminals) = &self.terminals else {
             bail!("Unknown interactive terminal: {task_id}");
         };
-        Ok(terminals
+        let snapshot = terminals
             .snapshot(task_id)
             .await
-            .with_context(|| format!("Unknown interactive terminal: {task_id}"))?
-            .detail())
+            .with_context(|| format!("Unknown interactive terminal: {task_id}"))?;
+        Ok(snapshot.model_output().0)
     }
 
     fn append_subagents_if_present(&self, bash: String) -> String {
@@ -643,13 +652,36 @@ mod tests {
             .execute(serde_json::json!({"action": "tail", "task_id": terminal.id}))
             .await
             .expect("tail should succeed");
+        let waited = tool
+            .execute(serde_json::json!({
+                "action": "wait",
+                "task_id": terminal.id,
+                "wait_seconds": 0
+            }))
+            .await
+            .expect("wait should succeed");
         let stopped = tool
             .execute(serde_json::json!({"action": "stop", "task_id": terminal.id}))
             .await
             .expect("stop should succeed");
 
         assert!(matches!(listed, ToolOutput::Text(text) if text.contains("pty-1")));
-        assert!(matches!(tailed, ToolOutput::Text(text) if text.contains("terminal-output")));
-        assert!(matches!(stopped, ToolOutput::Text(text) if text.contains("Status: stopped")));
+        assert!(matches!(
+            tailed,
+            ToolOutput::UntrustedContext { content, .. }
+                if content.contains("terminal-output")
+                    && content.contains("Normalized screen:")
+                    && !content.contains("Output tail:")
+        ));
+        assert!(matches!(
+            waited,
+            ToolOutput::UntrustedContext { content, .. }
+                if content.contains("Semantic version:") && !content.contains("Output tail:")
+        ));
+        assert!(matches!(
+            stopped,
+            ToolOutput::UntrustedContext { content, .. }
+                if content.contains("Status: stopped") && !content.contains("Output tail:")
+        ));
     }
 }
