@@ -78,20 +78,6 @@ impl ProviderSession {
         metadata.normalize_reasoning_for_model(model, reasoning)
     }
 
-    pub fn set_model_reasoning(
-        &mut self,
-        metadata: &crate::provider::ProviderMetadata,
-        model: &str,
-        reasoning: ReasoningSelection,
-    ) -> ReasoningSelection {
-        let reasoning = metadata.normalize_reasoning_for_model(model, reasoning);
-        self.model_reasoning.insert(model.to_string(), reasoning);
-        if self.model == model {
-            self.reasoning = reasoning;
-        }
-        reasoning
-    }
-
     /// Store an already-resolved reasoning selection verbatim. Use when the
     /// caller validated it through the catalog-aware path
     /// (`model_resolution::normalize_reasoning_for_provider_model`): the

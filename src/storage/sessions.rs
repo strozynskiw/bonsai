@@ -327,6 +327,7 @@ impl Storage {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn switch_active_session(
         &self,
         current_session_id: SessionId,
@@ -334,7 +335,47 @@ impl Storage {
         project_path: &Path,
         current_status: SessionStatus,
     ) -> Result<ResumeSessionOutcome> {
+        self.switch_active_session_inner(
+            current_session_id,
+            next_session_id,
+            project_path,
+            current_status,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn switch_active_session_with_selection(
+        &self,
+        current_session_id: SessionId,
+        next_session_id: SessionId,
+        project_path: &Path,
+        current_status: SessionStatus,
+        next_selection: &SessionRunSelection,
+    ) -> Result<ResumeSessionOutcome> {
+        self.switch_active_session_inner(
+            current_session_id,
+            next_session_id,
+            project_path,
+            current_status,
+            Some(next_selection),
+        )
+        .await
+    }
+
+    async fn switch_active_session_inner(
+        &self,
+        current_session_id: SessionId,
+        next_session_id: SessionId,
+        project_path: &Path,
+        current_status: SessionStatus,
+        next_selection: Option<&SessionRunSelection>,
+    ) -> Result<ResumeSessionOutcome> {
         let project_path = canonical_project_path(project_path);
+        let reasoning_json = next_selection
+            .map(|selection| serde_json::to_string(&selection.reasoning))
+            .transpose()
+            .context("Failed to serialize resumed session reasoning")?;
         let mut tx = self
             .begin_write()
             .await
@@ -345,6 +386,9 @@ impl Storage {
             r#"
             UPDATE sessions
             SET status = ?, terminal_reason = NULL, updated_at_ms = ?, ended_at_ms = NULL,
+                provider_id = COALESCE(?, provider_id),
+                model = COALESCE(?, model),
+                reasoning_json = COALESCE(?, reasoning_json),
                 active_run_ms = active_run_ms + CASE
                   WHEN active_run_started_at_ms IS NOT NULL
                        AND last_heartbeat_ms IS NOT NULL
@@ -367,6 +411,9 @@ impl Storage {
         )
         .bind(SessionStatus::Active.as_db_str())
         .bind(now)
+        .bind(next_selection.map(|selection| selection.provider_id.as_str()))
+        .bind(next_selection.map(|selection| selection.model.as_str()))
+        .bind(reasoning_json.as_deref())
         .bind(now)
         .bind(next_session_id.as_i64())
         .bind(&project_path)
@@ -424,18 +471,46 @@ impl Storage {
         Ok(ResumeSessionOutcome::Resumed)
     }
 
+    #[cfg(test)]
     pub async fn claim_session_for_resume(
         &self,
         project_path: &Path,
         session_id: SessionId,
     ) -> Result<ResumeSessionOutcome> {
+        self.claim_session_for_resume_inner(project_path, session_id, None)
+            .await
+    }
+
+    pub(crate) async fn claim_session_for_resume_with_selection(
+        &self,
+        project_path: &Path,
+        session_id: SessionId,
+        selection: &SessionRunSelection,
+    ) -> Result<ResumeSessionOutcome> {
+        self.claim_session_for_resume_inner(project_path, session_id, Some(selection))
+            .await
+    }
+
+    async fn claim_session_for_resume_inner(
+        &self,
+        project_path: &Path,
+        session_id: SessionId,
+        selection: Option<&SessionRunSelection>,
+    ) -> Result<ResumeSessionOutcome> {
         let project_path = canonical_project_path(project_path);
+        let reasoning_json = selection
+            .map(|selection| serde_json::to_string(&selection.reasoning))
+            .transpose()
+            .context("Failed to serialize resumed session reasoning")?;
         let now = now_ms();
         let live_floor = now.saturating_sub(super::peers::PEER_LIVENESS_THRESHOLD_MS);
         let claimed: Option<i64> = sqlx::query_scalar(
             r#"
             UPDATE sessions
             SET status = ?, terminal_reason = NULL, updated_at_ms = ?, ended_at_ms = NULL,
+                provider_id = COALESCE(?, provider_id),
+                model = COALESCE(?, model),
+                reasoning_json = COALESCE(?, reasoning_json),
                 active_run_ms = active_run_ms + CASE
                   WHEN active_run_started_at_ms IS NOT NULL
                        AND last_heartbeat_ms IS NOT NULL
@@ -458,6 +533,9 @@ impl Storage {
         )
         .bind(SessionStatus::Active.as_db_str())
         .bind(now)
+        .bind(selection.map(|selection| selection.provider_id.as_str()))
+        .bind(selection.map(|selection| selection.model.as_str()))
+        .bind(reasoning_json.as_deref())
         .bind(now)
         .bind(session_id.as_i64())
         .bind(&project_path)

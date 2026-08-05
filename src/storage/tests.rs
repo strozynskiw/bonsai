@@ -4175,6 +4175,42 @@ async fn switch_active_session_claims_stale_target_and_stamps_heartbeat() {
 }
 
 #[tokio::test]
+async fn switch_active_session_installs_target_selection_in_claim_transaction() {
+    let fixture = TestStorage::new().await;
+    let current = fixture.start_session().await;
+    let target = fixture.start_session().await;
+    fixture
+        .storage
+        .mark_session_status(target, SessionStatus::Completed)
+        .await
+        .unwrap();
+    let selection = SessionRunSelection::new("codex", "openai/gpt-5.5", ReasoningSelection::High);
+
+    let outcome = fixture
+        .storage
+        .switch_active_session_with_selection(
+            current,
+            target,
+            fixture.project_path(),
+            SessionStatus::Completed,
+            &selection,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, ResumeSessionOutcome::Resumed);
+    let resumed = fixture
+        .storage
+        .session_summary(target)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.provider_id, "codex");
+    assert_eq!(resumed.model, "openai/gpt-5.5");
+    assert_eq!(resumed.reasoning, ReasoningSelection::High);
+}
+
+#[tokio::test]
 async fn switch_active_session_attaches_recovery_in_the_same_transaction() {
     let fixture = TestStorage::new().await;
     let current = fixture.start_session().await;
@@ -4220,6 +4256,12 @@ async fn recovery_attachment_failure_rolls_back_the_entire_session_switch() {
         .mark_session_status(target, SessionStatus::Completed)
         .await
         .unwrap();
+    let original_target = fixture
+        .storage
+        .session_summary(target)
+        .await
+        .unwrap()
+        .unwrap();
     insert_active_recovery(&fixture, "atomic-resume-failure").await;
     sqlx::query(
         "CREATE TRIGGER fail_recovery_attachment BEFORE UPDATE OF session_id ON recovery_points \
@@ -4231,11 +4273,12 @@ async fn recovery_attachment_failure_rolls_back_the_entire_session_switch() {
 
     let error = fixture
         .storage
-        .switch_active_session(
+        .switch_active_session_with_selection(
             current,
             target,
             fixture.project_path(),
             SessionStatus::Completed,
+            &SessionRunSelection::new("codex", "openai/gpt-5.5", ReasoningSelection::High),
         )
         .await
         .unwrap_err();
@@ -4261,6 +4304,9 @@ async fn recovery_attachment_failure_rolls_back_the_entire_session_switch() {
         .unwrap()
         .unwrap();
     assert_eq!(target_summary.status, SessionStatus::Completed);
+    assert_eq!(target_summary.provider_id, original_target.provider_id);
+    assert_eq!(target_summary.model, original_target.model);
+    assert_eq!(target_summary.reasoning, original_target.reasoning);
     assert!(!fixture.storage.is_session_live(target).await.unwrap());
 }
 
@@ -4290,6 +4336,35 @@ async fn claim_session_for_resume_has_one_live_owner() {
             .unwrap(),
         ResumeSessionOutcome::Live
     );
+}
+
+#[tokio::test]
+async fn claim_session_for_resume_installs_selection_before_ownership_is_visible() {
+    let fixture = TestStorage::new().await;
+    let target = fixture.start_session().await;
+    fixture
+        .storage
+        .mark_session_status(target, SessionStatus::Completed)
+        .await
+        .unwrap();
+    let selection = SessionRunSelection::new("codex", "openai/gpt-5.5", ReasoningSelection::XHigh);
+
+    let outcome = fixture
+        .storage
+        .claim_session_for_resume_with_selection(fixture.project_path(), target, &selection)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, ResumeSessionOutcome::Resumed);
+    let resumed = fixture
+        .storage
+        .session_summary(target)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.provider_id, "codex");
+    assert_eq!(resumed.model, "openai/gpt-5.5");
+    assert_eq!(resumed.reasoning, ReasoningSelection::XHigh);
 }
 
 /// The cross-project guard on explicit `-c <id>` resume: claiming a session

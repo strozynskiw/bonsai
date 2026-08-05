@@ -487,8 +487,18 @@ async fn run_inner_with_provider_runtime(
                 reasoning,
             )?;
         }
+        let installed_reasoning = session_store.session(&selection.provider).reasoning;
+        let durable_selection = crate::storage::SessionRunSelection::new(
+            &selection.provider,
+            &selection.model,
+            installed_reasoning,
+        );
         match storage
-            .claim_session_for_resume(&session_project_root, snapshot.summary.id)
+            .claim_session_for_resume_with_selection(
+                &session_project_root,
+                snapshot.summary.id,
+                &durable_selection,
+            )
             .await?
         {
             crate::storage::ResumeSessionOutcome::Resumed => {}
@@ -511,14 +521,17 @@ async fn run_inner_with_provider_runtime(
                 )));
             }
         }
-        storage
-            .set_session_run_selection(
-                snapshot.summary.id,
-                &selection.provider,
-                &selection.model,
-                session_store.session(&selection.provider).reasoning,
-            )
-            .await?;
+        tracing::info!(
+            target: "bonsai::session",
+            session_id = %snapshot.summary.id,
+            stored_provider = %snapshot.summary.provider_id,
+            stored_model = %snapshot.summary.model,
+            stored_reasoning = %snapshot.summary.reasoning.label(),
+            installed_provider = %selection.provider,
+            installed_model = %selection.model,
+            installed_reasoning = %installed_reasoning.label(),
+            "installed persisted session model for headless resume"
+        );
         transcript_prefix = snapshot.transcript.clone();
         (selection, snapshot.summary.id)
     } else {
@@ -1397,6 +1410,10 @@ fn select_resumed_provider(
             authorization_hint(metadata)
         )));
     }
+    // Resume owns the provider/model binding. Per-mode selections belong to
+    // the global defaults used for new sessions and must not be allowed to
+    // replace this target when shared runtime code dispatches a coding turn.
+    session_store.set_current_kind_id(&summary.provider_id);
     let resolved = crate::model_resolution::resolved_model_for_provider_model(
         Some(catalog),
         &summary.provider_id,
@@ -1409,9 +1426,16 @@ fn select_resumed_provider(
         &summary.model,
     );
     let current_model = session_store.session(&summary.provider_id).model.clone();
+    let reasoning = crate::model_resolution::normalize_reasoning_for_provider_model(
+        Some(catalog),
+        &summary.provider_id,
+        &current_model,
+        metadata,
+        summary.reasoning,
+    );
     session_store
         .session_mut(&summary.provider_id)
-        .set_model_reasoning(metadata, &current_model, summary.reasoning);
+        .store_model_reasoning(&current_model, reasoning);
     Ok(ProviderSelection {
         provider: summary.provider_id.clone(),
         model: current_model,
@@ -1977,6 +2001,31 @@ mod tests {
 
         assert_eq!(selection.provider, "provider-a");
         assert_eq!(selection.model, "retired-model");
+    }
+
+    #[tokio::test]
+    async fn resumed_session_replaces_global_provider_and_persona_defaults() {
+        let fixture = TestStorage::new().await;
+        let session_id = fixture.start_session_with("provider-b", "model-b").await;
+        let snapshot = fixture
+            .storage
+            .load_session_snapshot(session_id)
+            .await
+            .unwrap()
+            .expect("persisted session should load");
+        let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
+        let mut store = test_store();
+        store
+            .mode_models
+            .insert("coding".to_string(), "provider-a:model-a".to_string());
+
+        let selection =
+            select_resumed_provider(&test_registry(), &mut store, &catalog, &snapshot).unwrap();
+
+        assert_eq!(selection.provider, "provider-b");
+        assert_eq!(selection.model, "model-b");
+        assert_eq!(store.current_kind_id(), "provider-b");
+        assert!(store.mode_model("coding").is_none());
     }
 
     #[tokio::test]

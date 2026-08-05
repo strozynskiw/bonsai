@@ -51,6 +51,7 @@ e2e/
     04_completion.sh       # "/mod" + Tab -> "/model"  (slash-command completion)
     05_quit.sh             # /quit exits the process cleanly
     06_escape_steer.sh     # Esc replacement remains visibly active
+    07_resume_selection.sh # resumed request keeps its persisted model
   mock_streaming_provider.py # deterministic loopback SSE provider
 ```
 

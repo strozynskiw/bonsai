@@ -948,6 +948,7 @@ struct PreparedResume {
     snapshot: crate::storage::SessionSnapshot,
     conversation_cache_key: String,
     session_store: SessionStore,
+    selection: ProviderRunSelection,
     provider: Box<dyn crate::provider::Provider>,
     context_window: usize,
     prompt_estimator: crate::provider::PromptEstimator,
@@ -1030,6 +1031,11 @@ pub(in crate::tui) async fn resume_session(
             );
             return Ok(());
         }
+        // A persisted session owns its run selection. Global per-persona model
+        // bindings are defaults for new sessions; retaining them here lets the
+        // dispatch choke point silently replace the resumed model immediately
+        // before its first provider request.
+        session.set_current_kind_id(&summary.provider_id);
         let resolved = resolved_model_for_provider_model(
             Some(&deps.model_catalog),
             &summary.provider_id,
@@ -1042,9 +1048,16 @@ pub(in crate::tui) async fn resume_session(
             &summary.model,
         );
         let current_model = session.session(&summary.provider_id).model.clone();
+        let reasoning = crate::model_resolution::normalize_reasoning_for_provider_model(
+            Some(&deps.model_catalog),
+            &summary.provider_id,
+            &current_model,
+            metadata,
+            summary.reasoning,
+        );
         session
             .session_mut(&summary.provider_id)
-            .set_model_reasoning(metadata, &current_model, summary.reasoning);
+            .store_model_reasoning(&current_model, reasoning);
         let provider = build_provider(&deps.registry, &session, Some(&deps.model_catalog));
         let context_window = context_window_for_current_model_with_catalog(
             &deps.registry,
@@ -1075,6 +1088,11 @@ pub(in crate::tui) async fn resume_session(
         ),
         transcript: TranscriptModel::from(transcript_items),
         lost_terminal_ids,
+        selection: ProviderRunSelection {
+            provider: session_snapshot.current_kind_id().to_string(),
+            model: session_snapshot.current_session().model.clone(),
+            reasoning: session_snapshot.current_session().reasoning,
+        },
         snapshot,
         session_store: session_snapshot,
         provider,
@@ -1092,13 +1110,19 @@ pub(in crate::tui) async fn resume_session(
         state.signatures,
     )
     .await;
+    let durable_selection = crate::storage::SessionRunSelection::new(
+        &prepared.selection.provider,
+        &prepared.selection.model,
+        prepared.selection.reasoning,
+    );
     match deps
         .storage
-        .switch_active_session(
+        .switch_active_session_with_selection(
             *state.current_session_id,
             session_id,
             deps.project_root,
             outgoing_status,
+            &durable_selection,
         )
         .await?
     {
@@ -1134,6 +1158,7 @@ pub(in crate::tui) async fn resume_session(
         snapshot,
         conversation_cache_key,
         session_store,
+        selection,
         provider,
         context_window,
         prompt_estimator,
@@ -1180,9 +1205,9 @@ pub(in crate::tui) async fn resume_session(
     app.reset_next_execution_group_id();
     app.plan = plan;
     app.todo = todos;
-    app.provider = summary.provider_id;
-    app.model = summary.model;
-    app.reasoning = summary.reasoning;
+    app.provider = selection.provider.clone();
+    app.model = selection.model.clone();
+    app.reasoning = selection.reasoning;
     app.active_saved_plan_session_id = summary.source_plan_id;
     app.task_state = TaskState::Idle;
     app.focus = Focus::Input;
@@ -1214,6 +1239,13 @@ pub(in crate::tui) async fn resume_session(
     tracing::info!(
         target: "bonsai::session",
         session_id = %session_id,
+        stored_provider = %summary.provider_id,
+        stored_model = %summary.model,
+        stored_reasoning = %summary.reasoning.label(),
+        installed_provider = %selection.provider,
+        installed_model = %selection.model,
+        installed_reasoning = %selection.reasoning.label(),
+        context_window,
         "session attached to this process log"
     );
     refresh_session_completion_choices(app, deps.storage, deps.project_root, session_id).await;

@@ -62,11 +62,13 @@ e2e_done() {
 tui_start() {
   local cols="${1:-140}" rows="${2:-40}" ready="${3:-(Coding|Planning) ·}"
   local provider_base_url="${E2E_PROVIDER_BASE_URL:-http://127.0.0.1:9/v1}"
+  local opencode_api_key="${E2E_OPENCODE_API_KEY:-}"
+  local bonsai_args="${E2E_BONSAI_ARGS:-}"
   tx kill-server 2>/dev/null || true
   tx new-session -d -s "$E2E_SESSION" -x "$cols" -y "$rows"
   tx send-keys -t "$E2E_SESSION" \
     "exec env HOME='$E2E_HOME' BONSAI_HOME='$E2E_HOME' CODEX_HOME='$E2E_HOME/codex' \
-BONSAI_DISABLE_MODELS_FETCH=1 OPENCODE_API_KEY='' ANTHROPIC_API_KEY='' \
+BONSAI_DISABLE_MODELS_FETCH=1 OPENCODE_API_KEY='$opencode_api_key' ANTHROPIC_API_KEY='' \
 MINIMAX_API_KEY='' MINIMAX_CODING_PLAN_API_KEY='' ZAI_API_KEY='' \
 ZAI_CODING_PLAN_API_KEY='' MOONSHOT_API_KEY='' KIMI_CODING_PLAN_API_KEY='' \
 MIMO_API_KEY='' MIMO_CODING_PLAN_API_KEY='' OPENROUTER_API_KEY='' OPENAI_API_KEY='' \
@@ -75,7 +77,7 @@ DASHSCOPE_TOKEN_PLAN_API_KEY='' GEMINI_API_KEY='' XAI_API_KEY='' MISTRAL_API_KEY
 HUNYUAN_API_KEY='' \
 BONSAI_MEMORY_EMBEDDINGS=off OPENAI_COMPATIBLE_BASE_URL='$provider_base_url' \
 OPENAI_COMPATIBLE_MODEL='mock-model' OPENAI_COMPATIBLE_API_KEY='e2e-test' \
-'$BONSAI_BIN'" Enter
+'$BONSAI_BIN' $bonsai_args" Enter
   # A pristine state root opens onboarding. Surface tests exercise the chat,
   # so take its documented "later" path instead of seeding private state.
   if wait_for "Welcome to Bonsai|$ready" "$E2E_STARTUP_WAIT"; then

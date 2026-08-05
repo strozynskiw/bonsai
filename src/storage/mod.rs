@@ -303,6 +303,24 @@ pub struct SearchHit {
     pub updated_at_ms: i64,
 }
 
+/// Provider/model state installed while a persisted session is claimed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionRunSelection {
+    pub(crate) provider_id: String,
+    pub(crate) model: String,
+    pub(crate) reasoning: ReasoningSelection,
+}
+
+impl SessionRunSelection {
+    pub(crate) fn new(provider_id: &str, model: &str, reasoning: ReasoningSelection) -> Self {
+        Self {
+            provider_id: provider_id.to_string(),
+            model: model.to_string(),
+            reasoning,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub summary: SessionSummary,

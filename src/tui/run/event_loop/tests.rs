@@ -74,6 +74,106 @@ impl Provider for CompleteProvider {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedProviderRequest {
+    provider_id: String,
+    model: String,
+    reasoning: ReasoningSelection,
+    context_window: Option<u32>,
+    conversation_cache_key: String,
+}
+
+struct RecordingProviderFactory {
+    metadata: &'static ProviderMetadata,
+    requests: Arc<Mutex<Vec<RecordedProviderRequest>>>,
+}
+
+impl RecordingProviderFactory {
+    fn new(provider_id: &str, requests: Arc<Mutex<Vec<RecordedProviderRequest>>>) -> Self {
+        Self {
+            metadata: crate::provider::metadata_for(provider_id)
+                .expect("recording provider metadata should exist"),
+            requests,
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderFactory for RecordingProviderFactory {
+    fn metadata(&self) -> &ProviderMetadata {
+        self.metadata
+    }
+
+    fn build_target(
+        &self,
+        _session: &crate::session::ProviderSession,
+        target: &crate::model_catalog::RunTarget,
+    ) -> Box<dyn Provider> {
+        Box::new(RecordingProvider {
+            provider_id: self.metadata.id.to_string(),
+            model: target.remote_model_id.to_string(),
+            reasoning: target.reasoning,
+            context_window: target.context_window,
+            conversation_cache_key: String::new(),
+            requests: self.requests.clone(),
+        })
+    }
+
+    fn is_authorized(&self, _session: &crate::session::ProviderSession) -> bool {
+        true
+    }
+
+    async fn list_models(
+        &self,
+        _session: &crate::session::ProviderSession,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
+struct RecordingProvider {
+    provider_id: String,
+    model: String,
+    reasoning: ReasoningSelection,
+    context_window: Option<u32>,
+    conversation_cache_key: String,
+    requests: Arc<Mutex<Vec<RecordedProviderRequest>>>,
+}
+
+#[async_trait]
+impl Provider for RecordingProvider {
+    async fn chat_stream(
+        &self,
+        _messages: &[ChatCompletionRequestMessage],
+        _tools: &[ChatCompletionTool],
+        _cancellation_token: tokio_util::sync::CancellationToken,
+        _sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        self.requests.lock().await.push(RecordedProviderRequest {
+            provider_id: self.provider_id.clone(),
+            model: self.model.clone(),
+            reasoning: self.reasoning,
+            context_window: self.context_window,
+            conversation_cache_key: self.conversation_cache_key.clone(),
+        });
+        Ok(StreamedResponse {
+            content: "done".to_string(),
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::Stop,
+            ),
+            ..StreamedResponse::default()
+        })
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    fn set_conversation_cache_key(&mut self, key: &str) {
+        self.conversation_cache_key = key.to_string();
+    }
+}
+
 struct ModelListingCodexFactory {
     list_models_calls: Arc<AtomicUsize>,
 }
@@ -6506,6 +6606,172 @@ async fn resume_without_argument_restores_latest_prior_project_session() {
             } if text == &format!("Resumed session #{prior_id}.")
         )
     }));
+}
+
+#[tokio::test]
+async fn resume_uses_pinned_provider_for_first_coding_request() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))
+        .await
+        .unwrap();
+    let model_catalog = test_model_catalog();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(ProviderRegistry::new(vec![
+        Arc::new(RecordingProviderFactory::new("opencode", requests.clone())),
+        Arc::new(RecordingProviderFactory::new("codex", requests.clone())),
+    ]));
+
+    let target_id = storage
+        .start_session(
+            temp_dir.path(),
+            "codex",
+            "openai/gpt-5.5",
+            ReasoningSelection::High,
+        )
+        .await
+        .unwrap();
+    storage
+        .mark_session_status(target_id, SessionStatus::Completed)
+        .await
+        .unwrap();
+    let target_cache_key = storage.conversation_cache_key(target_id).await.unwrap();
+    let current_id = storage
+        .start_session(
+            temp_dir.path(),
+            "opencode",
+            "opencode/qwen3.7-max",
+            ReasoningSelection::Default,
+        )
+        .await
+        .unwrap();
+
+    let mut global_store =
+        SessionStore::load_with_storage_and_catalog(&storage, Some(&model_catalog))
+            .await
+            .unwrap();
+    global_store.ensure_provider("opencode");
+    global_store.ensure_provider("codex");
+    global_store.session_mut("opencode").model = "opencode/qwen3.7-max".to_string();
+    global_store.set_current_kind_id("opencode");
+    global_store
+        .mode_models
+        .insert("coding".to_string(), "opencode:qwen3.7-max".to_string());
+    global_store.save_async().await.unwrap();
+    let session_store = Arc::new(Mutex::new(global_store));
+    let agent = test_agent(Box::new(CompleteProvider));
+    let active_session_id = Arc::new(Mutex::new(Some(current_id)));
+    let mut current_session_id = current_id;
+    let mut signatures = PersistedSnapshotSignatures::default();
+    let mut state = PersistenceCommandState {
+        current_session_id: &mut current_session_id,
+        signatures: &mut signatures,
+    };
+    let mut app = AppState::new(
+        "opencode",
+        "opencode/qwen3.7-max".to_string(),
+        "workspace".to_string(),
+        None,
+    );
+
+    resume_session(
+        target_id,
+        &mut app,
+        PersistenceCommandDeps {
+            storage: &storage,
+            agent: agent.clone(),
+            memory: None,
+            session_store: session_store.clone(),
+            registry: registry.clone(),
+            model_catalog: model_catalog.clone(),
+            todo_store: Arc::new(Mutex::new(crate::todo::TodoStore::new())),
+            plan_store: Arc::new(Mutex::new(crate::plan::PlanDoc::default())),
+            project_root: temp_dir.path(),
+            active_session_id,
+        },
+        &mut state,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(app.provider, "codex");
+    assert_eq!(app.model, "openai/gpt-5.5");
+    assert_eq!(app.reasoning, ReasoningSelection::High);
+    let expected_context_window = {
+        let resumed_store = session_store.lock().await;
+        assert_eq!(resumed_store.current_kind_id(), "codex");
+        assert_eq!(resumed_store.current_session().model, "openai/gpt-5.5");
+        assert_eq!(
+            resumed_store.current_session().reasoning,
+            ReasoningSelection::High
+        );
+        assert!(resumed_store.mode_model("coding").is_none());
+        crate::model_resolution::context_window_for_current_model_with_catalog(
+            &registry,
+            &resumed_store,
+            Some(&model_catalog),
+        )
+    };
+    let resumed_report = agent.lock().await.context_report();
+    assert_eq!(
+        resumed_report.budget_tokens,
+        expected_context_window as usize
+    );
+
+    let (runtime_sender, _runtime_receiver) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_sender);
+    tasks.set_persona_model_deps(crate::tui::task::PersonaModelDeps {
+        agent: agent.clone(),
+        session_store: session_store.clone(),
+        registry,
+        model_catalog: model_catalog.clone(),
+        custom_agents: crate::resource::agent::shared_registry(
+            crate::resource::agent::AgentRegistry::empty(),
+        ),
+    });
+    tasks
+        .start_agent_run(
+            agent,
+            crate::agent::UserInput::from_text("continue the pinned session"),
+            Arc::new(NullSink),
+            crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if tasks.poll_finished().await.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("resumed turn should finish");
+
+    let first = requests
+        .lock()
+        .await
+        .first()
+        .cloned()
+        .expect("first provider request should run");
+    assert_eq!(first.provider_id, "codex");
+    assert_eq!(first.model, "gpt-5.5");
+    assert_eq!(first.reasoning, ReasoningSelection::High);
+    assert_eq!(first.context_window, Some(expected_context_window));
+    assert_eq!(first.conversation_cache_key, target_cache_key);
+
+    let persisted_target = storage
+        .session_summary(target_id)
+        .await
+        .unwrap()
+        .expect("resumed session should remain persisted");
+    assert_eq!(persisted_target.provider_id, "codex");
+    assert_eq!(persisted_target.model, "openai/gpt-5.5");
+    assert_eq!(persisted_target.reasoning, ReasoningSelection::High);
+    let global_default =
+        SessionStore::load_with_storage_and_catalog(&storage, Some(&model_catalog))
+            .await
+            .unwrap();
+    assert_eq!(global_default.current_kind_id(), "opencode");
 }
 
 #[tokio::test]

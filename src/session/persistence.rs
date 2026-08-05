@@ -1186,13 +1186,11 @@ mod tests {
         let metadata = crate::provider::metadata_for("codex").unwrap();
         let codex = store.session_mut("codex");
         codex.model = "gpt-5.5".to_string();
-        codex.set_model_reasoning(
-            metadata,
+        codex.store_model_reasoning(
             "gpt-5.5",
             ReasoningSelection::from_effort(crate::provider::ReasoningEffort::High),
         );
-        codex.set_model_reasoning(
-            metadata,
+        codex.store_model_reasoning(
             "gpt-5.4-mini",
             ReasoningSelection::from_effort(crate::provider::ReasoningEffort::Low),
         );
