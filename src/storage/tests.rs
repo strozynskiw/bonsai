@@ -1744,7 +1744,7 @@ async fn context_control_snapshot_roundtrips_controls_and_sources() {
     sources.insert("msg-2".to_string(), vec![source_message.clone()]);
 
     storage
-        .replace_context_control_snapshot(session_id, &controls, &sources)
+        .replace_context_control_snapshot(session_id, &controls, &sources, &HashMap::new())
         .await
         .unwrap();
 
@@ -1755,6 +1755,46 @@ async fn context_control_snapshot_roundtrips_controls_and_sources() {
         .unwrap();
     assert_eq!(snapshot.context_controls, controls);
     assert_eq!(snapshot.context_sources["msg-2"], vec![source_message]);
+}
+
+#[tokio::test]
+async fn malformed_context_source_stable_ids_do_not_block_resume() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let source_message = ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessageArgs::default()
+            .content("source message")
+            .build()
+            .unwrap(),
+    );
+    let sources = HashMap::from([("msg-2".to_string(), vec![source_message.clone()])]);
+    fixture
+        .storage
+        .replace_context_control_snapshot(
+            session_id,
+            &HashMap::new(),
+            &sources,
+            &HashMap::from([("msg-2".to_string(), vec!["msg-1".to_string()])]),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE context_sources SET stable_ids_json = 'not-json' \
+         WHERE session_id = ? AND node_id = 'msg-2'",
+    )
+    .bind(session_id.as_i64())
+    .execute(&fixture.storage.pool)
+    .await
+    .unwrap();
+
+    let snapshot = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.context_sources["msg-2"], vec![source_message]);
+    assert!(snapshot.context_source_stable_ids.is_empty());
 }
 
 #[tokio::test]
@@ -2166,7 +2206,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 5);
+    assert_eq!(migration_count, 6);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \

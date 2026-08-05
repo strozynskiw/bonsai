@@ -9,6 +9,7 @@ impl Agent {
         &mut self,
         controls: HashMap<String, ContextControlState>,
         summary_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
+        summary_source_stable_ids: HashMap<String, Vec<String>>,
     ) {
         self.context_controls = controls
             .into_iter()
@@ -18,6 +19,10 @@ impl Agent {
         self.summary_sources = summary_sources
             .into_iter()
             .map(|(id, messages)| (self.canonical_context_control_id_for(&id), messages))
+            .collect();
+        self.summary_source_stable_ids = summary_source_stable_ids
+            .into_iter()
+            .map(|(id, stable_ids)| (self.canonical_context_control_id_for(&id), stable_ids))
             .collect();
         self.prune_context_controls_to_current_messages();
     }
@@ -190,10 +195,14 @@ impl Agent {
         let Some(source) = self.summary_sources.remove(id) else {
             return false;
         };
+        let source_stable_ids = self
+            .summary_source_stable_ids
+            .remove(id)
+            .unwrap_or_default();
         let original_len = self.messages.len();
         let inserted_len = source.len();
         let inserted_ids = self.allocate_context_message_ids(inserted_len);
-        self.note_summary_source_restored(id, &source, &inserted_ids);
+        self.note_summary_source_restored(id, &source, &source_stable_ids, &inserted_ids);
         self.messages.splice(index..=index, source);
         self.message_ids.splice(index..=index, inserted_ids.clone());
         self.context_controls.remove(id);

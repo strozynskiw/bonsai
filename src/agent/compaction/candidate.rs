@@ -92,19 +92,25 @@ impl Agent {
         );
         let mut summary_sources =
             self.reindexed_sources_for_candidate(&old_to_new, &messages, &message_ids);
+        let mut summary_source_stable_ids =
+            self.reindexed_source_stable_ids_for_candidate(&old_to_new, &messages, &message_ids);
 
         if let Some(summary_index) = summary_index {
+            let summary_id = id_at_or_synthetic(&message_ids, summary_index);
             let originals = draft.omitted_originals().cloned().collect::<Vec<_>>();
             if !originals.is_empty() {
-                summary_sources.insert(id_at_or_synthetic(&message_ids, summary_index), originals);
+                summary_sources.insert(summary_id.clone(), originals);
+                summary_source_stable_ids
+                    .insert(summary_id, draft.omitted_stable_ids().cloned().collect());
             }
         }
         for stub in &draft.tool_outputs_to_stub {
-            summary_sources
-                .entry(stub.tool_id.clone())
-                .or_insert_with(|| {
-                    self.original_sources_for_message(stub.old_index, &stub.original)
-                });
+            if !summary_sources.contains_key(&stub.tool_id) {
+                let (messages, stable_ids) =
+                    self.original_source_snapshot_for_message(stub.old_index, &stub.original);
+                summary_sources.insert(stub.tool_id.clone(), messages);
+                summary_source_stable_ids.insert(stub.tool_id.clone(), stable_ids);
+            }
         }
 
         Ok(CompactionCandidate {
@@ -112,6 +118,7 @@ impl Agent {
             message_ids,
             controls,
             summary_sources,
+            summary_source_stable_ids,
             messages_omitted: draft.messages_omitted,
             tool_outputs_stubbed: draft.tool_outputs_to_stub.len(),
             summary_source_available: summary_index.is_some()
@@ -167,6 +174,30 @@ impl Agent {
                 }
             } else if valid_ids.contains(&canonical) {
                 reindexed.insert(canonical, source.clone());
+            }
+        }
+        reindexed
+    }
+
+    pub(super) fn reindexed_source_stable_ids_for_candidate(
+        &self,
+        old_to_new: &HashMap<usize, usize>,
+        messages: &[ChatCompletionRequestMessage],
+        message_ids: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        let valid_ids = valid_context_control_ids(messages, message_ids);
+        let mut reindexed = HashMap::new();
+        for (id, stable_ids) in &self.summary_source_stable_ids {
+            let canonical = canonical_context_control_id(id);
+            if let Some(old_index) = self.message_index_for_control_id(&canonical) {
+                if let Some(new_index) = old_to_new.get(&old_index).copied() {
+                    reindexed.insert(
+                        id_at_or_synthetic(message_ids, new_index),
+                        stable_ids.clone(),
+                    );
+                }
+            } else if valid_ids.contains(&canonical) {
+                reindexed.insert(canonical, stable_ids.clone());
             }
         }
         reindexed

@@ -2745,6 +2745,7 @@ async fn rolling_summary_updates_a_prior_summary_instead_of_resummarizing() {
 
     let omitted = |text: &str| CompactionOmittedMessage {
         originals: vec![test_user_message(text)],
+        stable_ids: Vec::new(),
     };
     let draft = CompactionDraft::with_omitted_for_test;
     let joined = |messages: Vec<ChatCompletionRequestMessage>| {

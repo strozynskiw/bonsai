@@ -786,6 +786,7 @@ impl Storage {
             context_message_ids: context_snapshot.ids,
             context_controls: self.load_context_controls(session_id).await?,
             context_sources: self.load_context_sources(session_id).await?,
+            context_source_stable_ids: self.load_context_source_stable_ids(session_id).await?,
             read_evidence: self.load_read_evidence(session_id).await?,
             inspection_events: self.load_inspection_events(session_id).await?,
             compaction_events: self.load_compaction_events(session_id).await?,

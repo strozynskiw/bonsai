@@ -49,6 +49,7 @@ impl Agent {
         self.read_evidence.delegated_overlap_advised.clear();
         self.context_controls.clear();
         self.summary_sources.clear();
+        self.summary_source_stable_ids.clear();
         self.pending_context_rewrite = PendingContextRewrite::default();
         self.completion = CompletionGuardState::default();
         self.verification.pending_verification_bindings.clear();

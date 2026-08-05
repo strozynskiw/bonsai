@@ -66,6 +66,7 @@ pub(crate) struct AgentStateSnapshot {
     usage: UsageTotals,
     controls: HashMap<String, ContextControlState>,
     sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
+    source_stable_ids: HashMap<String, Vec<String>>,
     compaction_events: Vec<CompactionEvent>,
     usage_turns: Vec<UsageTurn>,
     verification_runs: Vec<crate::verification::VerificationRunRecord>,
@@ -85,6 +86,7 @@ impl AgentStateSnapshot {
             usage: agent.usage_totals(),
             controls: agent.context_controls().clone(),
             sources: agent.summary_sources().clone(),
+            source_stable_ids: agent.summary_source_stable_ids().clone(),
             compaction_events: agent.compaction_events().to_vec(),
             usage_turns: agent.usage_turns().to_vec(),
             verification_runs: agent.verification_runs().to_vec(),
@@ -112,6 +114,10 @@ impl AgentStateSnapshot {
 
     pub(crate) fn sources(&self) -> &HashMap<String, Vec<ChatCompletionRequestMessage>> {
         &self.sources
+    }
+
+    pub(crate) fn source_stable_ids(&self) -> &HashMap<String, Vec<String>> {
+        &self.source_stable_ids
     }
 
     pub(crate) fn compaction_events(&self) -> &[CompactionEvent] {
@@ -153,6 +159,7 @@ pub(crate) fn agent_state_signatures(snapshot: &AgentStateSnapshot) -> AgentStat
         context_controls: context_control_signature(
             &snapshot.controls,
             &snapshot.sources,
+            &snapshot.source_stable_ids,
             &snapshot.compaction_events,
         ),
         usage: usage_signature(snapshot.usage, &snapshot.usage_turns),
@@ -362,6 +369,7 @@ impl<'a> SessionSnapshotWriter<'a> {
                                 session_id,
                                 agent.controls(),
                                 agent.sources(),
+                                agent.source_stable_ids(),
                                 now,
                             )
                             .await?;
@@ -483,7 +491,12 @@ pub(crate) async fn persist_agent_state(
     let context_control_signature = agent_signatures.context_controls;
     if context_control_signature != signatures.context_controls {
         match storage
-            .replace_context_control_snapshot(session_id, &snapshot.controls, &snapshot.sources)
+            .replace_context_control_snapshot(
+                session_id,
+                &snapshot.controls,
+                &snapshot.sources,
+                &snapshot.source_stable_ids,
+            )
             .await
         {
             Ok(()) => signatures.context_controls = context_control_signature,
@@ -594,6 +607,7 @@ pub(crate) async fn restore_agent_state(agent: &mut Agent, snapshot: &SessionSna
     agent.restore_context_controls(
         snapshot.context_controls.clone(),
         snapshot.context_sources.clone(),
+        snapshot.context_source_stable_ids.clone(),
     );
     agent
         .restore_read_evidence(snapshot.read_evidence.clone())
@@ -784,6 +798,7 @@ fn context_signature(
 fn context_control_signature(
     controls: &HashMap<String, ContextControlState>,
     sources: &HashMap<String, Vec<ChatCompletionRequestMessage>>,
+    source_stable_ids: &HashMap<String, Vec<String>>,
     compaction_events: &[CompactionEvent],
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -804,6 +819,12 @@ fn context_control_signature(
                 raw.hash(&mut hasher);
             }
         }
+    }
+    let mut source_id_keys = source_stable_ids.keys().collect::<Vec<_>>();
+    source_id_keys.sort();
+    for key in source_id_keys {
+        key.hash(&mut hasher);
+        source_stable_ids[key].hash(&mut hasher);
     }
     compaction_events.hash(&mut hasher);
     hasher.finish()
@@ -904,6 +925,7 @@ mod tests {
             usage: UsageTotals::default(),
             controls: HashMap::new(),
             sources: HashMap::new(),
+            source_stable_ids: HashMap::new(),
             compaction_events: Vec::new(),
             usage_turns: Vec::new(),
             verification_runs: Vec::new(),

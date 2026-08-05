@@ -204,7 +204,7 @@ impl Agent {
                     )
                     && !repaired_active.contains(&episode.seq())
                 {
-                    let span = live_positions
+                    let live_span = live_positions
                         .get(episode.start_stable_id())
                         .copied()
                         .zip(
@@ -213,7 +213,7 @@ impl Agent {
                                 .and_then(|id| live_positions.get(id).copied()),
                         )
                         .filter(|(start, end)| start <= end);
-                    match span {
+                    match live_span {
                         Some((start, end)) => closed_spans.push((start, end, episode.seq())),
                         None => return Some(episode.seq()),
                     }
@@ -227,16 +227,113 @@ impl Agent {
         for seq in overlapping_span_seqs(closed_spans) {
             restored.mark_episode_repaired(seq, now);
         }
-        let invalid_evicted = restored
+        let evicted = restored
             .episodes()
             .iter()
             .filter(|episode| episode.status() == EpisodeStatus::Evicted)
-            .filter_map(|episode| {
-                let marker_is_live = episode.marker_stable_id().is_some_and(|id| {
-                    live_positions.contains_key(id) && self.summary_sources.contains_key(id)
-                });
-                (!marker_is_live || episode.archive().is_empty()).then_some(episode.seq())
-            })
+            .collect::<Vec<_>>();
+        let mut valid_evicted = HashSet::new();
+        let live_sources = self
+            .summary_sources
+            .iter()
+            .filter(|(source_id, _source)| live_positions.contains_key(source_id.as_str()))
+            .map(|(source_id, source)| (source_id.as_str(), source))
+            .collect::<HashMap<_, _>>();
+        let mut claimed_by_source = HashMap::<&str, HashSet<usize>>::new();
+
+        // Direct markers own the entire source row. Accept only byte-exact
+        // archive payloads; occurrence matching would restore an oversized span.
+        for episode in &evicted {
+            let Some(marker_id) = episode.marker_stable_id() else {
+                continue;
+            };
+            let Some(source) = live_sources.get(&marker_id) else {
+                continue;
+            };
+            let claimed = claimed_by_source.entry(marker_id).or_default();
+            if claimed.is_empty() && episode_archive_equals_source(source, episode) {
+                claimed.extend(0..source.len());
+                valid_evicted.insert(episode.seq());
+            }
+        }
+
+        // Nested markers require one metadata owner. A live direct source is
+        // also an owner, even if malformed, so it cannot be masked by another
+        // source claiming the same marker through sidecar metadata.
+        for episode in &evicted {
+            if valid_evicted.contains(&episode.seq()) {
+                continue;
+            }
+            let Some(marker_id) = episode.marker_stable_id() else {
+                continue;
+            };
+            let direct_owner_is_live = live_sources.contains_key(marker_id);
+            let metadata_owners = live_sources
+                .keys()
+                .filter(|source_id| {
+                    self.summary_source_stable_ids
+                        .get(**source_id)
+                        .is_some_and(|stable_ids| {
+                            stable_ids.iter().any(|stable_id| stable_id == marker_id)
+                        })
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if direct_owner_is_live || metadata_owners.len() != 1 {
+                continue;
+            }
+            let source_id = metadata_owners[0];
+            let source = live_sources[source_id];
+            if claim_episode_archive_occurrence(
+                source,
+                episode,
+                claimed_by_source.entry(source_id).or_default(),
+            ) {
+                valid_evicted.insert(episode.seq());
+            }
+        }
+
+        // Older rows have no sidecar metadata. Preserve them only when exactly
+        // one live metadata-free source contains an unclaimed archive occurrence.
+        for episode in &evicted {
+            if valid_evicted.contains(&episode.seq()) {
+                continue;
+            }
+            let Some(marker_id) = episode.marker_stable_id() else {
+                continue;
+            };
+            if live_sources.contains_key(marker_id) {
+                continue;
+            }
+            let candidates = live_sources
+                .iter()
+                .filter(|(source_id, source)| {
+                    self.summary_source_stable_ids
+                        .get(**source_id)
+                        .is_none_or(Vec::is_empty)
+                        && episode_archive_occurrence_start(
+                            source,
+                            episode,
+                            claimed_by_source.get(*source_id).unwrap_or(&HashSet::new()),
+                        )
+                        .is_some()
+                })
+                .map(|(source_id, _source)| *source_id)
+                .collect::<Vec<_>>();
+            if let [source_id] = candidates.as_slice()
+                && claim_episode_archive_occurrence(
+                    live_sources[*source_id],
+                    episode,
+                    claimed_by_source.entry(source_id).or_default(),
+                )
+            {
+                valid_evicted.insert(episode.seq());
+            }
+        }
+        let invalid_evicted = evicted
+            .into_iter()
+            .filter(|episode| !valid_evicted.contains(&episode.seq()))
+            .map(Episode::seq)
             .collect::<Vec<_>>();
         for seq in invalid_evicted {
             restored.mark_episode_repaired(seq, now);
@@ -328,6 +425,7 @@ impl Agent {
         &mut self,
         restored_id: &str,
         source: &[ChatCompletionRequestMessage],
+        source_stable_ids: &[String],
         inserted_ids: &[String],
     ) {
         if self.episode_store.is_none() {
@@ -336,31 +434,84 @@ impl Agent {
         let (Some(first), Some(last)) = (inserted_ids.first(), inserted_ids.last()) else {
             return;
         };
-        let Some(mut ledger) = self.episode_ledger() else {
+        let Some(ledger) = self.episode_ledger() else {
             return;
         };
-        let direct_seq = ledger
-            .episodes()
+        let episodes = ledger.episodes().to_vec();
+        drop(ledger);
+        let mut sources = self
+            .summary_sources
+            .iter()
+            .filter(|(source_id, _source)| self.message_ids.iter().any(|id| id == *source_id))
+            .map(|(source_id, source)| (source_id.as_str(), source.as_slice()))
+            .collect::<HashMap<_, _>>();
+        sources.insert(restored_id, source);
+        let mut source_stable_ids_by_id = self
+            .summary_source_stable_ids
+            .iter()
+            .filter(|(source_id, _stable_ids)| sources.contains_key(source_id.as_str()))
+            .map(|(source_id, stable_ids)| (source_id.as_str(), stable_ids.as_slice()))
+            .collect::<HashMap<_, _>>();
+        source_stable_ids_by_id.insert(restored_id, source_stable_ids);
+
+        let direct_seq = episodes
             .iter()
             .find(|episode| {
                 episode.status() == EpisodeStatus::Evicted
                     && episode.marker_stable_id() == Some(restored_id)
+                    && episode_archive_equals_source(source, episode)
             })
             .map(Episode::seq);
+        let Some(mut ledger) = self.episode_ledger() else {
+            return;
+        };
+        let mut claimed = HashSet::new();
         if let Some(seq) = direct_seq {
             ledger.restore_episode_span(seq, first, last);
-            return;
+            claimed.extend(0..source.len());
         }
 
         // A later rolling compaction may fold an episode marker into its own
         // summary source. That rekeys the restore source onto the summary row,
         // so match each archived episode's exact message sequence inside the
         // restored originals and rewrite its span to the corresponding fresh ids.
-        let evicted = ledger
-            .episodes()
+        let evicted = episodes
             .iter()
             .filter(|episode| {
-                episode.status() == EpisodeStatus::Evicted && !episode.archive().is_empty()
+                episode.status() == EpisodeStatus::Evicted
+                    && Some(episode.seq()) != direct_seq
+                    && episode.marker_stable_id().is_some_and(|marker_id| {
+                        if sources.contains_key(marker_id) {
+                            return false;
+                        }
+                        let metadata_owners = source_stable_ids_by_id
+                            .iter()
+                            .filter(|(_source_id, stable_ids)| {
+                                stable_ids.iter().any(|stable_id| stable_id == marker_id)
+                            })
+                            .map(|(source_id, _stable_ids)| *source_id)
+                            .collect::<Vec<_>>();
+                        if source_stable_ids.is_empty() {
+                            metadata_owners.is_empty()
+                                && sources
+                                    .iter()
+                                    .filter(|(source_id, candidate)| {
+                                        source_stable_ids_by_id
+                                            .get(*source_id)
+                                            .is_none_or(|stable_ids| stable_ids.is_empty())
+                                            && episode_archive_occurrence_start(
+                                                candidate,
+                                                episode,
+                                                &HashSet::new(),
+                                            )
+                                            .is_some()
+                                    })
+                                    .count()
+                                    == 1
+                        } else {
+                            metadata_owners.as_slice() == [restored_id]
+                        }
+                    })
             })
             .map(|episode| {
                 (
@@ -373,7 +524,6 @@ impl Agent {
                 )
             })
             .collect::<Vec<_>>();
-        let mut claimed = HashSet::new();
         for (seq, archive) in evicted {
             let Some(start) =
                 source
@@ -486,4 +636,54 @@ impl Agent {
         }
         out
     }
+}
+
+fn claim_episode_archive_occurrence(
+    source: &[ChatCompletionRequestMessage],
+    episode: &Episode,
+    claimed: &mut HashSet<usize>,
+) -> bool {
+    let Some(start) = episode_archive_occurrence_start(source, episode, claimed) else {
+        return false;
+    };
+    claimed.extend(start..start + episode.archive().len());
+    true
+}
+
+fn episode_archive_equals_source(
+    source: &[ChatCompletionRequestMessage],
+    episode: &Episode,
+) -> bool {
+    source.len() == episode.archive().len()
+        && source
+            .iter()
+            .zip(episode.archive())
+            .all(|(message, archived)| message == &archived.message)
+}
+
+fn episode_archive_occurrence_start(
+    source: &[ChatCompletionRequestMessage],
+    episode: &Episode,
+    claimed: &HashSet<usize>,
+) -> Option<usize> {
+    let archive = episode
+        .archive()
+        .iter()
+        .map(|item| &item.message)
+        .collect::<Vec<_>>();
+    if archive.is_empty() {
+        return None;
+    }
+    source
+        .windows(archive.len())
+        .enumerate()
+        .find_map(|(start, window)| {
+            let end = start + archive.len();
+            (window
+                .iter()
+                .zip(&archive)
+                .all(|(message, archived)| message == *archived)
+                && (start..end).all(|index| !claimed.contains(&index)))
+            .then_some(start)
+        })
 }

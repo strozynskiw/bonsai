@@ -482,6 +482,10 @@ pub struct Agent {
     next_subagent_launch_group_id: u64,
     context_controls: HashMap<String, ContextControlState>,
     summary_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
+    /// Historical stable message ids reachable through each summary source.
+    /// Unlike `summary_sources`, this may include ids for nested source roots
+    /// whose marker bytes were folded into a later summary.
+    summary_source_stable_ids: HashMap<String, Vec<String>>,
     /// Per-session compaction history (oldest first); surfaced in `/ctx` and
     /// persisted. Recorded on each applied (non-preview) compaction.
     compaction_events: Vec<CompactionEvent>,

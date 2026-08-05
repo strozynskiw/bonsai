@@ -209,14 +209,17 @@ impl Agent {
         // Collect archives + restore sources from the immutable view.
         let mut archives = Vec::with_capacity(evictions.len());
         let mut restore_sources = Vec::with_capacity(evictions.len());
+        let mut restore_source_stable_ids = Vec::with_capacity(evictions.len());
         for eviction in &evictions {
             let mut archive = Vec::new();
             let mut sources = Vec::new();
+            let mut source_stable_ids = Vec::new();
             let span_rows = self.messages[eviction.start..=eviction.end]
                 .iter()
                 .zip(&message_ids[eviction.start..=eviction.end]);
             for (offset, (message, stable_id)) in span_rows.enumerate() {
-                let originals = self.original_sources_for_message(eviction.start + offset, message);
+                let (originals, stable_ids) =
+                    self.original_source_snapshot_for_message(eviction.start + offset, message);
                 // The archive keeps REAL bytes: a GC-stubbed row archives its
                 // single original. A row whose sources fan out (nested prior
                 // compaction) archives the live row itself — its originals
@@ -230,9 +233,11 @@ impl Agent {
                     message: archived,
                 });
                 sources.extend(originals);
+                source_stable_ids.extend(stable_ids);
             }
             archives.push(archive);
             restore_sources.push(sources);
+            restore_source_stable_ids.push(source_stable_ids);
         }
 
         // Allocate marker ids and atomically transition every ledger row before
@@ -313,6 +318,10 @@ impl Agent {
             if !sources.is_empty() {
                 self.summary_sources
                     .insert(marker_ids[index].clone(), sources);
+                self.summary_source_stable_ids.insert(
+                    marker_ids[index].clone(),
+                    std::mem::take(&mut restore_source_stable_ids[index]),
+                );
             }
         }
 

@@ -329,6 +329,7 @@ pub struct SessionSnapshot {
     pub context_message_ids: Vec<String>,
     pub context_controls: HashMap<String, ContextControlState>,
     pub context_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
+    pub context_source_stable_ids: HashMap<String, Vec<String>>,
     pub read_evidence: Vec<ReadEvidenceRecord>,
     pub inspection_events: Vec<InspectionEventRecord>,
     pub compaction_events: Vec<CompactionEvent>,

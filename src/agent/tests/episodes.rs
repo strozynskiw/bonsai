@@ -2,7 +2,7 @@
 //! agent hooks directly — user pushes, scripted title-call groups, preflight
 //! close application — and assert ledger state through the shared store.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::episode::{
@@ -628,6 +628,7 @@ async fn restore_episodes_keeps_resolvable_active_span() {
 async fn restore_episodes_repairs_invalid_closed_and_evicted_links() {
     let (mut agent, store, _fixture) = episode_agent();
     let live_id = push_user_turn(&mut agent, "live context");
+    let live_end = agent.push_message(assistant_text_message_for_tests("still live"));
     let archived = ArchivedEpisodeItem {
         stable_id: "archive-1".to_string(),
         message: test_user_message("preserved bytes"),
@@ -671,32 +672,228 @@ async fn restore_episodes_repairs_invalid_closed_and_evicted_links() {
             completable: false,
             archive: vec![archived],
         },
+        persisted_episode! {
+            seq: 3,
+            title: "valid closed".to_string(),
+            status: EpisodeStatus::Closed,
+            goal: String::new(),
+            card_md: String::new(),
+            close_reason: Some(EpisodeCloseReason::TitleChange),
+            start_stable_id: live_id,
+            end_stable_id: Some(live_end),
+            marker_stable_id: None,
+            files_touched: Vec::new(),
+            opened_at_ms: 1,
+            closed_at_ms: Some(2),
+            evicted_at_ms: None,
+            evicted_tokens: None,
+            recall_count: 0,
+            completable: false,
+            archive: Vec::new(),
+        },
     ];
 
     agent.restore_episodes(rows);
 
     let repaired = episodes_of(&store);
+    assert_eq!(repaired[0].status(), EpisodeStatus::Restored);
+    assert_eq!(repaired[1].status(), EpisodeStatus::Restored);
+    assert_eq!(repaired[2].status(), EpisodeStatus::Closed);
     assert!(
-        repaired
-            .iter()
-            .all(|episode| episode.status() == EpisodeStatus::Restored)
-    );
-    assert!(
-        repaired
+        repaired[..2]
             .iter()
             .all(|episode| episode.marker_stable_id().is_none())
     );
     assert!(
-        repaired
+        repaired[..2]
             .iter()
             .all(|episode| episode.evicted_at_ms().is_some())
     );
-    assert!(repaired.iter().all(|episode| !episode.archive().is_empty()));
+    assert!(
+        repaired[..2]
+            .iter()
+            .all(|episode| !episode.archive().is_empty())
+    );
     assert!(
         agent
             .episodes_command_report()
             .contains("repaired after resume skew")
     );
+}
+
+#[tokio::test]
+async fn restore_episodes_repairs_orphan_nested_marker_metadata() {
+    let (mut agent, store, _fixture) = episode_agent();
+    let source_id = push_user_turn(&mut agent, "live context");
+    agent.restore_context_controls(
+        HashMap::new(),
+        HashMap::from([(
+            source_id.clone(),
+            vec![test_user_message("unrelated source bytes")],
+        )]),
+        HashMap::from([(source_id, vec!["nested-marker".to_string()])]),
+    );
+    let episode = persisted_episode! {
+        seq: 1,
+        title: "orphan marker".to_string(),
+        status: EpisodeStatus::Evicted,
+        goal: String::new(),
+        card_md: "## Episode card".to_string(),
+        close_reason: Some(EpisodeCloseReason::TitleChange),
+        start_stable_id: "old-start".to_string(),
+        end_stable_id: Some("old-end".to_string()),
+        marker_stable_id: Some("nested-marker".to_string()),
+        files_touched: Vec::new(),
+        opened_at_ms: 1,
+        closed_at_ms: Some(2),
+        evicted_at_ms: Some(3),
+        evicted_tokens: Some(1_000),
+        recall_count: 0,
+        completable: false,
+        archive: vec![ArchivedEpisodeItem {
+            stable_id: "old-start".to_string(),
+            message: test_user_message("archived bytes"),
+        }],
+    };
+
+    agent.restore_episodes(vec![episode]);
+
+    let restored = episodes_of(&store);
+    assert_eq!(restored[0].status(), EpisodeStatus::Restored);
+    assert!(restored[0].marker_stable_id().is_none());
+    assert!(
+        restored[0]
+            .card_md()
+            .contains(crate::episode::EPISODE_REPAIR_NOTE)
+    );
+    assert!(!restored[0].archive().is_empty());
+}
+
+#[tokio::test]
+async fn restore_episodes_repairs_live_direct_marker_with_wrong_source_bytes() {
+    let (mut agent, store, _fixture) = episode_agent();
+    let marker_id = push_user_turn(&mut agent, "live marker");
+    agent.restore_context_controls(
+        HashMap::new(),
+        HashMap::from([(
+            marker_id.clone(),
+            vec![test_user_message("unrelated source bytes")],
+        )]),
+        HashMap::new(),
+    );
+    let episode = persisted_episode! {
+        seq: 1,
+        title: "wrong direct source".to_string(),
+        status: EpisodeStatus::Evicted,
+        goal: String::new(),
+        card_md: "## Episode card".to_string(),
+        close_reason: Some(EpisodeCloseReason::TitleChange),
+        start_stable_id: "old-start".to_string(),
+        end_stable_id: Some("old-end".to_string()),
+        marker_stable_id: Some(marker_id),
+        files_touched: Vec::new(),
+        opened_at_ms: 1,
+        closed_at_ms: Some(2),
+        evicted_at_ms: Some(3),
+        evicted_tokens: Some(1_000),
+        recall_count: 0,
+        completable: false,
+        archive: vec![ArchivedEpisodeItem {
+            stable_id: "old-start".to_string(),
+            message: test_user_message("archived bytes"),
+        }],
+    };
+
+    agent.restore_episodes(vec![episode]);
+
+    assert_eq!(episodes_of(&store)[0].status(), EpisodeStatus::Restored);
+}
+
+#[tokio::test]
+async fn restore_episodes_claims_duplicate_nested_archive_only_once() {
+    let (mut agent, store, _fixture) = episode_agent();
+    let source_id = push_user_turn(&mut agent, "live summary");
+    let archived = test_user_message("shared archived bytes");
+    agent.restore_context_controls(
+        HashMap::new(),
+        HashMap::from([(source_id.clone(), vec![archived.clone()])]),
+        HashMap::from([(
+            source_id,
+            vec!["marker-1".to_string(), "marker-2".to_string()],
+        )]),
+    );
+    let episode = |seq, marker: &str| {
+        persisted_episode! {
+            seq,
+            title: format!("nested {seq}"),
+            status: EpisodeStatus::Evicted,
+            goal: String::new(),
+            card_md: "## Episode card".to_string(),
+            close_reason: Some(EpisodeCloseReason::TitleChange),
+            start_stable_id: format!("old-start-{seq}"),
+            end_stable_id: Some(format!("old-end-{seq}")),
+            marker_stable_id: Some(marker.to_string()),
+            files_touched: Vec::new(),
+            opened_at_ms: seq as i64,
+            closed_at_ms: Some(seq as i64 + 1),
+            evicted_at_ms: Some(seq as i64 + 2),
+            evicted_tokens: Some(1_000),
+            recall_count: 0,
+            completable: false,
+            archive: vec![ArchivedEpisodeItem {
+                stable_id: format!("old-start-{seq}"),
+                message: archived.clone(),
+            }],
+        }
+    };
+
+    agent.restore_episodes(vec![episode(1, "marker-1"), episode(2, "marker-2")]);
+
+    let restored = episodes_of(&store);
+    assert_eq!(restored[0].status(), EpisodeStatus::Evicted);
+    assert_eq!(restored[1].status(), EpisodeStatus::Restored);
+}
+
+#[tokio::test]
+async fn restore_episodes_claims_duplicate_direct_source_only_once() {
+    let (mut agent, store, _fixture) = episode_agent();
+    let marker_id = push_user_turn(&mut agent, "live marker");
+    let archived = test_user_message("shared direct bytes");
+    agent.restore_context_controls(
+        HashMap::new(),
+        HashMap::from([(marker_id.clone(), vec![archived.clone()])]),
+        HashMap::new(),
+    );
+    let episode = |seq| {
+        persisted_episode! {
+            seq,
+            title: format!("direct {seq}"),
+            status: EpisodeStatus::Evicted,
+            goal: String::new(),
+            card_md: "## Episode card".to_string(),
+            close_reason: Some(EpisodeCloseReason::TitleChange),
+            start_stable_id: format!("old-start-{seq}"),
+            end_stable_id: Some(format!("old-end-{seq}")),
+            marker_stable_id: Some(marker_id.clone()),
+            files_touched: Vec::new(),
+            opened_at_ms: seq as i64,
+            closed_at_ms: Some(seq as i64 + 1),
+            evicted_at_ms: Some(seq as i64 + 2),
+            evicted_tokens: Some(1_000),
+            recall_count: 0,
+            completable: false,
+            archive: vec![ArchivedEpisodeItem {
+                stable_id: format!("old-start-{seq}"),
+                message: archived.clone(),
+            }],
+        }
+    };
+
+    agent.restore_episodes(vec![episode(1), episode(2)]);
+
+    let restored = episodes_of(&store);
+    assert_eq!(restored[0].status(), EpisodeStatus::Evicted);
+    assert_eq!(restored[1].status(), EpisodeStatus::Restored);
 }
 
 #[tokio::test]
@@ -1623,6 +1820,9 @@ async fn ctx_restore_recognizes_episode_folded_into_later_summary_source() {
     agent
         .summary_sources
         .insert(summary_id.clone(), nested_source);
+    agent
+        .summary_source_stable_ids
+        .insert("orphan-summary".to_string(), vec![marker_id.clone()]);
 
     assert!(agent.apply_context_control_action(
         &summary_id,
@@ -1643,6 +1843,58 @@ async fn ctx_restore_recognizes_episode_folded_into_later_summary_source() {
             .iter()
             .any(|id| Some(id.as_str()) == restored.end_stable_id())
     );
+}
+
+#[tokio::test]
+async fn ctx_restore_leaves_ambiguous_nested_episode_evicted() {
+    let (mut agent, store, _fixture) = episode_agent_with_responses(vec![card_response(
+        "## Episode card\n- Goal: A\n- Outcome: done\n- Decisions: -\n- Files touched: -\n- Gotchas: -",
+    )]);
+    close_bulky_episode(&mut agent, 20_000);
+    agent
+        .apply_episode_evictions(
+            &capture_sink(),
+            CancellationToken::new(),
+            EpisodeEvictionPass::CloseTime,
+        )
+        .await
+        .unwrap();
+    let episode = episodes_of(&store)[0].clone();
+    let marker_id = episode.marker_stable_id().unwrap().to_string();
+    let marker_index = agent
+        .message_ids
+        .iter()
+        .position(|id| id == &marker_id)
+        .unwrap();
+    let nested_source = episode
+        .archive()
+        .iter()
+        .map(|item| item.message.clone())
+        .collect::<Vec<_>>();
+    let first_id = "msg-first-summary".to_string();
+    agent.messages[marker_index] = test_user_message("# First summary");
+    agent.message_ids[marker_index] = first_id.clone();
+    let second_id = push_user_turn(&mut agent, "# Second summary");
+    agent.summary_sources.remove(&marker_id);
+    agent
+        .summary_sources
+        .insert(first_id.clone(), nested_source.clone());
+    agent
+        .summary_sources
+        .insert(second_id.clone(), nested_source);
+    agent
+        .summary_source_stable_ids
+        .insert(first_id.clone(), vec![marker_id.clone()]);
+    agent
+        .summary_source_stable_ids
+        .insert(second_id, vec![marker_id]);
+
+    assert!(agent.apply_context_control_action(
+        &first_id,
+        crate::agent::ContextControlAction::RestoreSummarySource,
+    ));
+
+    assert_eq!(episodes_of(&store)[0].status(), EpisodeStatus::Evicted);
 }
 
 #[tokio::test]
@@ -1675,6 +1927,162 @@ async fn evicted_episode_roundtrips_through_persistence() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.episodes, snapshot);
+}
+
+#[tokio::test]
+async fn clean_resume_preserves_lifecycle_links_and_closed_episode_evictability() {
+    let (mut agent, store, _fixture) = episode_agent_with_responses(Vec::new());
+    let messages = vec![
+        test_system_message("system"),
+        test_system_message("# Compacted Context Summary"),
+        test_user_message("closed task"),
+        assistant_text_message_for_tests(&format!("closed work {}", "x".repeat(40_000))),
+        test_user_message("active successor"),
+    ];
+    let message_ids = ["msg-0", "msg-20", "msg-30", "msg-31", "msg-40"]
+        .map(str::to_string)
+        .to_vec();
+    agent
+        .restore_context_messages_with_ids(messages, message_ids)
+        .await
+        .unwrap();
+
+    let archived_messages = vec![
+        test_user_message("evicted task"),
+        assistant_text_message_for_tests("evicted work"),
+    ];
+    let sources = HashMap::from([("msg-20".to_string(), archived_messages.clone())]);
+    let source_stable_ids = HashMap::from([(
+        "msg-20".to_string(),
+        vec![
+            "msg-15".to_string(),
+            "msg-10".to_string(),
+            "msg-11".to_string(),
+        ],
+    )]);
+    agent.restore_context_controls(HashMap::new(), sources, source_stable_ids.clone());
+
+    let episodes = vec![
+        persisted_episode! {
+            seq: 1,
+            title: "evicted task".to_string(),
+            status: EpisodeStatus::Evicted,
+            goal: "evicted task".to_string(),
+            card_md: "## Episode card".to_string(),
+            close_reason: Some(EpisodeCloseReason::TitleChange),
+            start_stable_id: "msg-10".to_string(),
+            end_stable_id: Some("msg-11".to_string()),
+            marker_stable_id: Some("msg-15".to_string()),
+            files_touched: vec!["src/old.rs".to_string()],
+            opened_at_ms: 1,
+            closed_at_ms: Some(2),
+            evicted_at_ms: Some(3),
+            evicted_tokens: Some(9_000),
+            recall_count: 2,
+            completable: false,
+            archive: vec![
+                ArchivedEpisodeItem {
+                    stable_id: "msg-10".to_string(),
+                    message: archived_messages[0].clone(),
+                },
+                ArchivedEpisodeItem {
+                    stable_id: "msg-11".to_string(),
+                    message: archived_messages[1].clone(),
+                },
+            ],
+        },
+        persisted_episode! {
+            seq: 2,
+            title: "closed task".to_string(),
+            status: EpisodeStatus::Closed,
+            goal: "closed task".to_string(),
+            card_md: String::new(),
+            close_reason: Some(EpisodeCloseReason::TitleChange),
+            start_stable_id: "msg-30".to_string(),
+            end_stable_id: Some("msg-31".to_string()),
+            marker_stable_id: None,
+            files_touched: vec!["src/current.rs".to_string()],
+            opened_at_ms: 4,
+            closed_at_ms: Some(5),
+            evicted_at_ms: None,
+            evicted_tokens: None,
+            recall_count: 0,
+            completable: false,
+            archive: Vec::new(),
+        },
+        persisted_episode! {
+            seq: 3,
+            title: "active successor".to_string(),
+            status: EpisodeStatus::Active,
+            goal: "active successor".to_string(),
+            card_md: String::new(),
+            close_reason: None,
+            start_stable_id: "msg-40".to_string(),
+            end_stable_id: None,
+            marker_stable_id: None,
+            files_touched: Vec::new(),
+            opened_at_ms: 6,
+            closed_at_ms: None,
+            evicted_at_ms: None,
+            evicted_tokens: None,
+            recall_count: 0,
+            completable: false,
+            archive: Vec::new(),
+        },
+    ];
+    agent.restore_episodes(episodes.clone());
+    assert_eq!(episodes_of(&store), episodes);
+
+    let fixture = crate::storage::test_utils::TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let snapshot = crate::session_persist::AgentStateSnapshot::capture(&agent);
+    let mut signatures = crate::session_persist::AgentStateSignatures::default();
+    crate::session_persist::persist_agent_state(
+        &fixture.storage,
+        session_id,
+        &snapshot,
+        &mut signatures,
+    )
+    .await;
+    let persisted = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.context_source_stable_ids, source_stable_ids);
+
+    let (mut resumed, resumed_store, _fixture) = episode_agent_with_responses(vec![card_response(
+        "## Episode card\n- Goal: closed task\n- Outcome: done\n- Decisions: -\n- Files touched: src/current.rs\n- Gotchas: -",
+    )]);
+    crate::session_persist::restore_agent_state(&mut resumed, &persisted).await;
+    let restored = episodes_of(&resumed_store);
+    assert_eq!(restored, episodes);
+    assert!(restored.iter().all(|episode| {
+        !episode
+            .card_md()
+            .contains(crate::episode::EPISODE_REPAIR_NOTE)
+    }));
+    assert_eq!(restored[0].evicted_at_ms(), Some(3));
+    assert_eq!(restored[0].evicted_tokens(), Some(9_000));
+    assert_eq!(restored[0].recall_count(), 2);
+    assert_eq!(restored[2].status(), EpisodeStatus::Active);
+
+    assert_eq!(
+        resumed
+            .apply_episode_evictions(
+                &capture_sink(),
+                CancellationToken::new(),
+                EpisodeEvictionPass::Pressure,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let after_pressure = episodes_of(&resumed_store);
+    assert_eq!(after_pressure[0], episodes[0]);
+    assert_eq!(after_pressure[1].status(), EpisodeStatus::Evicted);
+    assert_eq!(after_pressure[2].status(), EpisodeStatus::Active);
 }
 
 #[tokio::test]

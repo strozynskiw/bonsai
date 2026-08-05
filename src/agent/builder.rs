@@ -242,6 +242,7 @@ impl Agent {
             next_subagent_launch_group_id: 1,
             context_controls: HashMap::new(),
             summary_sources: HashMap::new(),
+            summary_source_stable_ids: HashMap::new(),
             compaction_events: Vec::new(),
             pending_context_rewrite: PendingContextRewrite::default(),
             yolo_mode: builder.yolo_mode,

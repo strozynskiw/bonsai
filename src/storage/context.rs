@@ -110,10 +110,18 @@ impl Storage {
         session_id: SessionId,
         controls: &HashMap<String, ContextControlState>,
         sources: &HashMap<String, Vec<ChatCompletionRequestMessage>>,
+        source_stable_ids: &HashMap<String, Vec<String>>,
     ) -> Result<()> {
         self.with_session_snapshot_tx("context control snapshot", async move |tx, now| {
-            self.replace_context_control_snapshot_in_tx(tx, session_id, controls, sources, now)
-                .await
+            self.replace_context_control_snapshot_in_tx(
+                tx,
+                session_id,
+                controls,
+                sources,
+                source_stable_ids,
+                now,
+            )
+            .await
         })
         .await
     }
@@ -124,6 +132,7 @@ impl Storage {
         session_id: SessionId,
         controls: &HashMap<String, ContextControlState>,
         sources: &HashMap<String, Vec<ChatCompletionRequestMessage>>,
+        source_stable_ids: &HashMap<String, Vec<String>>,
         now: i64,
     ) -> Result<()> {
         storage_op!(
@@ -163,17 +172,23 @@ impl Storage {
         for (node_id, messages) in sources {
             let messages_json = serde_json::to_string(messages)
                 .context("Failed to serialize context source messages")?;
+            let stable_ids_json = source_stable_ids
+                .get(node_id)
+                .map(serde_json::to_string)
+                .transpose()
+                .context("Failed to serialize context source stable ids")?;
             sqlx::query(
                 r#"
                 INSERT INTO context_sources (
-                  session_id, node_id, messages_json
+                  session_id, node_id, messages_json, stable_ids_json
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?)
                 "#,
             )
             .bind(session_id.as_i64())
             .bind(node_id)
             .bind(messages_json)
+            .bind(stable_ids_json)
             .execute(&mut **tx)
             .await?;
         }
@@ -721,6 +736,40 @@ impl Storage {
                 Ok((node_id, messages))
             })
             .collect()
+    }
+
+    pub(super) async fn load_context_source_stable_ids(
+        &self,
+        session_id: SessionId,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let rows = sqlx::query(
+            "SELECT node_id, stable_ids_json FROM context_sources \
+             WHERE session_id = ? AND stable_ids_json IS NOT NULL ORDER BY node_id",
+        )
+        .bind(session_id.as_i64())
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| {
+            format!("Failed to load context source stable ids for session {session_id}")
+        })?;
+
+        let mut stable_ids_by_source = HashMap::new();
+        for row in rows {
+            let node_id: String = row.try_get("node_id")?;
+            let stable_ids_json: String = row.try_get("stable_ids_json")?;
+            match serde_json::from_str(&stable_ids_json) {
+                Ok(stable_ids) => {
+                    stable_ids_by_source.insert(node_id, stable_ids);
+                }
+                Err(err) => tracing::warn!(
+                    session_id = %session_id,
+                    source_id = %node_id,
+                    error = %err,
+                    "ignoring malformed context source stable ids"
+                ),
+            }
+        }
+        Ok(stable_ids_by_source)
     }
 }
 

@@ -27,6 +27,10 @@ impl CompactionDraft {
         self.omitted.iter().flat_map(|item| item.originals.iter())
     }
 
+    pub(super) fn omitted_stable_ids(&self) -> impl Iterator<Item = &String> {
+        self.omitted.iter().flat_map(|item| item.stable_ids.iter())
+    }
+
     /// Minimal draft (only `omitted` set; empty kept/stubs) for unit-testing
     /// summary rendering without running a full compaction pass. Keeps the real
     /// fields private.
@@ -45,6 +49,7 @@ impl CompactionDraft {
 #[derive(Debug, Clone)]
 pub(in crate::agent) struct CompactionOmittedMessage {
     pub(in crate::agent) originals: Vec<ChatCompletionRequestMessage>,
+    pub(in crate::agent) stable_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +72,7 @@ pub(super) struct CompactionCandidate {
     pub(super) message_ids: Vec<String>,
     pub(super) controls: HashMap<String, ContextControlState>,
     pub(super) summary_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
+    pub(super) summary_source_stable_ids: HashMap<String, Vec<String>>,
     pub(super) messages_omitted: usize,
     pub(super) tool_outputs_stubbed: usize,
     pub(super) summary_source_available: bool,

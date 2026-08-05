@@ -12,6 +12,10 @@ impl Agent {
         &self.summary_sources
     }
 
+    pub(crate) fn summary_source_stable_ids(&self) -> &HashMap<String, Vec<String>> {
+        &self.summary_source_stable_ids
+    }
+
     pub fn compaction_events(&self) -> &[CompactionEvent] {
         &self.compaction_events
     }
@@ -28,6 +32,9 @@ impl Agent {
     pub(in crate::agent) fn reindex_summary_sources(&mut self, old_to_new: &HashMap<usize, usize>) {
         let sources = std::mem::take(&mut self.summary_sources);
         self.summary_sources = reindex_by_message_id(sources, old_to_new, &self.message_ids);
+        let source_ids = std::mem::take(&mut self.summary_source_stable_ids);
+        self.summary_source_stable_ids =
+            reindex_by_message_id(source_ids, old_to_new, &self.message_ids);
     }
 
     pub(in crate::agent) fn prune_context_controls_to_current_messages(&mut self) {

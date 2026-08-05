@@ -474,6 +474,7 @@ impl Agent {
         self.message_ids = candidate.message_ids;
         self.context_controls = candidate.controls;
         self.summary_sources = candidate.summary_sources;
+        self.summary_source_stable_ids = candidate.summary_source_stable_ids;
         self.caches.last_prompt_estimate = None;
         self.caches.last_sent_prompt_estimate = None;
 

@@ -148,8 +148,11 @@ impl Agent {
         // reference to gather their restore sources, so don't clone them.
         for (index, message) in self.messages.iter().enumerate() {
             if index != 0 && omitted_indices.contains(&index) {
+                let (originals, stable_ids) =
+                    self.original_source_snapshot_for_message(index, message);
                 omitted.push(CompactionOmittedMessage {
-                    originals: self.original_sources_for_message(index, message),
+                    originals,
+                    stable_ids,
                 });
             } else {
                 kept.push(CompactionKeptMessage {
@@ -236,23 +239,30 @@ impl Agent {
             .collect()
     }
 
-    pub(in crate::agent) fn original_sources_for_message(
+    pub(in crate::agent) fn original_source_snapshot_for_message(
         &self,
         index: usize,
         message: &ChatCompletionRequestMessage,
-    ) -> Vec<ChatCompletionRequestMessage> {
+    ) -> (Vec<ChatCompletionRequestMessage>, Vec<String>) {
         let message_id = self.message_id_or_synthetic(index);
         if let Some(source) = self.summary_sources.get(&message_id) {
-            return source.clone();
+            let mut stable_ids = vec![message_id.clone()];
+            if let Some(nested_ids) = self.summary_source_stable_ids.get(&message_id) {
+                stable_ids.extend(nested_ids.iter().cloned());
+            }
+            return (source.clone(), stable_ids);
         }
         if let Some(call_id) = tool_message_call_id(message)
-            && let Some(source) = self
-                .summary_sources
-                .get(&ContextNodeId::tool(&call_id).into_string())
+            && let tool_id = ContextNodeId::tool(&call_id).into_string()
+            && let Some(source) = self.summary_sources.get(&tool_id)
         {
-            return source.clone();
+            let mut stable_ids = vec![message_id];
+            if let Some(nested_ids) = self.summary_source_stable_ids.get(&tool_id) {
+                stable_ids.extend(nested_ids.iter().cloned());
+            }
+            return (source.clone(), stable_ids);
         }
-        vec![message.clone()]
+        (vec![message.clone()], vec![message_id])
     }
 
     pub(super) fn compaction_stub_for_message(
