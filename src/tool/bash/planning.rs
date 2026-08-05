@@ -10,8 +10,9 @@
 //! The collaboration clients (`gh`/`glab`) additionally resolve from fixed
 //! package-manager binary directories and validated absolute directories from
 //! `PATH`. Collaboration candidates must be owned by root or the current user,
-//! have no group/other-writable component in their protected directory chain,
-//! and never resolve inside the project root.
+//! stay on an owner-controlled directory chain, and never resolve inside the
+//! project root. Current-user-owned package-manager directories may be group
+//! writable (the standard Homebrew layout); root-owned directories may not.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,12 @@ pub(super) enum PlanningCommandKind {
     CollaborationRead,
     /// A GitHub or GitLab mutation such as closing or editing an issue.
     CollaborationWrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtectedDirectoryPolicy {
+    Strict,
+    CurrentOwnerGroupWritable,
 }
 
 /// Parsed and canonicalized planning command.
@@ -262,8 +269,9 @@ fn resolve_system_executable(program: &str, dirs: &[&str]) -> Option<PathBuf> {
 /// The candidate must be a regular executable file owned by root or the
 /// current user, have no group/other-writable bits, live inside `prefix`
 /// (canonicalized, so symlinks into a Cellar are accepted but escapes are
-/// not), have no writable component between `prefix` and the file, and never
-/// resolve inside the project root.
+/// not), have only root- or current-user-owned components between `prefix` and
+/// the file, and never resolve inside the project root. Owner-controlled group
+/// write is accepted for package-manager directories, but never for binaries.
 fn resolve_package_executable<S: AsRef<str>>(
     program: &str,
     dirs: &[S],
@@ -279,7 +287,12 @@ fn resolve_package_executable<S: AsRef<str>>(
         let Ok(canonical) = candidate.canonicalize() else {
             continue;
         };
-        if collaboration_executable_file(&canonical, &prefix, project_root) {
+        if collaboration_executable_file(
+            &canonical,
+            &prefix,
+            project_root,
+            ProtectedDirectoryPolicy::CurrentOwnerGroupWritable,
+        ) {
             return Some(canonical);
         }
     }
@@ -288,8 +301,8 @@ fn resolve_package_executable<S: AsRef<str>>(
 
 /// Resolve `program` from validated absolute `PATH` directories.
 ///
-/// Canonical targets must be protected all the way to the filesystem root, so
-/// entries below a group- or other-writable directory fail closed.
+/// Canonical targets must stay on a root- or current-user-owned chain with no
+/// group/other-writable components all the way to the filesystem root.
 fn resolve_path_executable_in(
     program: &str,
     dirs: &[PathBuf],
@@ -312,7 +325,12 @@ fn resolve_path_executable_in(
             continue;
         };
         if canonical.is_absolute()
-            && collaboration_executable_file(&canonical, protected_root, project_root)
+            && collaboration_executable_file(
+                &canonical,
+                protected_root,
+                project_root,
+                ProtectedDirectoryPolicy::Strict,
+            )
         {
             return Some(canonical);
         }
@@ -335,7 +353,7 @@ fn path_entry_is_project_controlled(directory: &Path, project_root: Option<&Path
 
 #[cfg(unix)]
 fn path_entry_is_protected(directory: &Path, protected_root: &Path) -> bool {
-    protected_dir_chain(directory, protected_root)
+    protected_dir_chain(directory, protected_root, ProtectedDirectoryPolicy::Strict)
 }
 
 #[cfg(not(unix))]
@@ -348,6 +366,7 @@ fn collaboration_executable_file(
     path: &Path,
     protected_root: &Path,
     project_root: Option<&Path>,
+    directory_policy: ProtectedDirectoryPolicy,
 ) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -378,7 +397,7 @@ fn collaboration_executable_file(
     let Some(parent) = path.parent() else {
         return false;
     };
-    protected_dir_chain(parent, protected_root)
+    protected_dir_chain(parent, protected_root, directory_policy)
 }
 
 #[cfg(unix)]
@@ -410,6 +429,7 @@ fn collaboration_executable_file(
     _path: &Path,
     _protected_root: &Path,
     _project_root: Option<&Path>,
+    _directory_policy: ProtectedDirectoryPolicy,
 ) -> bool {
     // The collaboration prefixes are unix paths; no candidate can exist on
     // other platforms, so fail closed rather than trusting any file.
@@ -417,18 +437,33 @@ fn collaboration_executable_file(
 }
 
 /// Require every directory from `start` up to and including `protected_root`
-/// to be a directory that is not group- or other-writable. Walking upward also
-/// enforces that the canonical target stays inside the protected root.
+/// to be owned by root or the current user. Root-owned directories must not be
+/// group/other-writable. The package-manager policy permits group write only
+/// on current-user-owned directories; the strict `PATH` policy does not.
+/// Neither permits other write. Walking upward also enforces that the
+/// canonical target stays inside the root.
 #[cfg(unix)]
-fn protected_dir_chain(start: &Path, protected_root: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+fn protected_dir_chain(
+    start: &Path,
+    protected_root: &Path,
+    policy: ProtectedDirectoryPolicy,
+) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    let current_uid = nix::unistd::geteuid().as_raw();
     let mut current = start;
     loop {
         let Ok(metadata) = current.metadata() else {
             return false;
         };
-        if !metadata.is_dir() || metadata.permissions().mode() & 0o022 != 0 {
+        if !metadata.is_dir()
+            || !protected_directory_metadata_is_trusted(
+                metadata.uid(),
+                metadata.permissions().mode(),
+                current_uid,
+                policy,
+            )
+        {
             return false;
         }
         if current == protected_root {
@@ -439,6 +474,22 @@ fn protected_dir_chain(start: &Path, protected_root: &Path) -> bool {
         };
         current = parent;
     }
+}
+
+#[cfg(unix)]
+fn protected_directory_metadata_is_trusted(
+    owner_uid: u32,
+    mode: u32,
+    current_uid: u32,
+    policy: ProtectedDirectoryPolicy,
+) -> bool {
+    if owner_uid == 0 {
+        return mode & 0o022 == 0;
+    }
+    if owner_uid != current_uid || mode & 0o002 != 0 {
+        return false;
+    }
+    policy == ProtectedDirectoryPolicy::CurrentOwnerGroupWritable || mode & 0o020 == 0
 }
 
 #[cfg(unix)]
@@ -1070,6 +1121,43 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn planning_command_accepts_owner_group_writable_cellar_chain() {
+        let prefix = temp_prefix("group-writable-cellar");
+        let cellar_bin = prefix.join("Cellar/gh/2.0/bin");
+        std::fs::create_dir_all(&cellar_bin).unwrap();
+        std::fs::set_permissions(
+            prefix.join("Cellar"),
+            std::fs::Permissions::from_mode(0o775),
+        )
+        .unwrap();
+        let target = cellar_bin.join("gh");
+        write_executable(&target, 0o755);
+        std::os::unix::fs::symlink(&target, prefix.join("bin/gh")).unwrap();
+        let dir = package_dir(&prefix);
+        let dirs = [dir.as_str()];
+
+        let command = classify_planning_command_with_paths(
+            "gh issue list --state open",
+            None,
+            &[],
+            &[],
+            &dirs,
+            &[],
+            Path::new("/"),
+        )
+        .unwrap();
+
+        let expected = target.canonicalize().unwrap();
+        assert_eq!(command.kind(), PlanningCommandKind::CollaborationRead);
+        assert!(
+            command
+                .command()
+                .starts_with(&shell_quote(expected.to_string_lossy().as_ref()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn package_executable_rejects_escaping_symlink_and_project_binaries() {
         let prefix = temp_prefix("escape");
         let project = temp_prefix("project");
@@ -1171,7 +1259,7 @@ mod tests {
         write_executable(&writable_directory.join("bin/gh"), 0o755);
         std::fs::set_permissions(
             writable_directory.join("bin"),
-            std::fs::Permissions::from_mode(0o777),
+            std::fs::Permissions::from_mode(0o775),
         )
         .unwrap();
         assert!(
@@ -1214,6 +1302,39 @@ mod tests {
         ));
         assert!(collaboration_metadata_is_trusted(
             0, 2000, 0o001, 1000, 1000
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_directory_accepts_current_owner_group_write() {
+        assert!(protected_directory_metadata_is_trusted(
+            1000,
+            0o775,
+            1000,
+            ProtectedDirectoryPolicy::CurrentOwnerGroupWritable,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_directory_rejects_root_group_write() {
+        assert!(!protected_directory_metadata_is_trusted(
+            0,
+            0o775,
+            1000,
+            ProtectedDirectoryPolicy::CurrentOwnerGroupWritable,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_directory_rejects_foreign_owner() {
+        assert!(!protected_directory_metadata_is_trusted(
+            2000,
+            0o755,
+            1000,
+            ProtectedDirectoryPolicy::CurrentOwnerGroupWritable,
         ));
     }
 
