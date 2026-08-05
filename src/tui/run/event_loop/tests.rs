@@ -459,6 +459,16 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
         .unwrap();
     let agent = test_agent(Box::new(CompleteProvider));
     let episode_store = crate::episode::SharedEpisodeStore::default();
+    let compaction_event = crate::agent::CompactionEvent {
+        seq: 1,
+        occurred_at_ms: 1_700_000_000_050,
+        before_tokens: 90_000,
+        after_tokens: 50_000,
+        messages_omitted: 12,
+        prefix_hash_before: Some("before-prefix".to_string()),
+        prefix_hash_after: Some("after-prefix".to_string()),
+        ..crate::agent::CompactionEvent::default()
+    };
     {
         let mut agent = agent.lock().await;
         agent.set_episode_store(episode_store);
@@ -475,6 +485,7 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
             "cargo test --locked",
         )]);
         agent.restore_self_review_runs(vec![sample_self_review_run(1_700_000_000_100, 4)]);
+        agent.restore_compaction_events(vec![compaction_event.clone()]);
         agent.clear_for_session_rotation().await;
     }
     let command = CommandOutcomeEvent::Applied {
@@ -523,6 +534,20 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
         .unwrap();
     assert_eq!(outgoing_snapshot.verification_runs.len(), 1);
     assert_eq!(outgoing_snapshot.self_review_runs.len(), 1);
+    assert_eq!(outgoing_snapshot.compaction_events, [compaction_event]);
+    let resumed_agent = test_agent(Box::new(CompleteProvider));
+    {
+        let mut resumed = resumed_agent.lock().await;
+        crate::session_persist::restore_agent_state(&mut resumed, &outgoing_snapshot).await;
+        assert_eq!(
+            resumed.compaction_events(),
+            outgoing_snapshot.compaction_events
+        );
+        assert_eq!(
+            resumed.context_report().compaction_events,
+            outgoing_snapshot.compaction_events
+        );
+    }
     assert!(
         agent
             .lock()
@@ -562,6 +587,7 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
         .unwrap();
     assert!(rotated.verification_runs.is_empty());
     assert!(rotated.self_review_runs.is_empty());
+    assert!(rotated.compaction_events.is_empty());
 }
 
 #[tokio::test]

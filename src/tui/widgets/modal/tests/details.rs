@@ -160,6 +160,26 @@ fn context_turns_view_renders_cache_story_with_interleaved_compaction() {
 }
 
 #[test]
+fn context_turns_view_reports_legacy_compaction_gaps_without_renumbering() {
+    let area = Rect::new(0, 0, 120, 44);
+    let mut report = context_report_with_usage_turns();
+    report.compaction_events[0].seq = 3;
+
+    let text = buffer_text(&render_context_to_buffer(
+        area,
+        report,
+        0,
+        ContextViewMode::Turns,
+    ));
+
+    assert!(
+        text.contains("compaction ledger gap: missing #1–#2 before #3"),
+        "{text}"
+    );
+    assert!(text.contains("── compaction #3"), "{text}");
+}
+
+#[test]
 fn episodes_view_owns_tracked_episode_details() {
     let area = Rect::new(0, 0, 120, 44);
     let mut report = context_report_with_usage_turns();

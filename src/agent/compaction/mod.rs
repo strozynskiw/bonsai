@@ -235,10 +235,8 @@ impl Agent {
             }
             let report = self.compact_context(request).await?;
             if report.has_changes() {
-                sink.compaction_status(&compaction_done_status(
-                    &report,
-                    self.compaction_events.len(),
-                ));
+                let session_count = self.compaction_events.last().map_or(0, |event| event.seq);
+                sink.compaction_status(&compaction_done_status(&report, session_count));
                 (request_messages, estimate) = self.reestimate_outgoing(tool_schema, perf).await;
             }
         }
@@ -441,7 +439,8 @@ impl Agent {
         // Captured before the fields below are moved out of `candidate`.
         let counts = candidate.report_counts();
         let after_messages = candidate.messages.len();
-        let event_seq = self.compaction_events.len() + 1;
+        let event_seq = crate::context_view::next_compaction_sequence(&self.compaction_events)
+            .context("Compaction event sequence is exhausted")?;
         let before_message_ids = self.message_ids_for_messages(self.messages.len());
         // Compute repack telemetry as one all-or-nothing unit so the six event
         // fields below can't be half-populated.

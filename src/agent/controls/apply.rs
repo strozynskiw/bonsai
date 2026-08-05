@@ -23,6 +23,14 @@ impl Agent {
     }
 
     pub fn restore_compaction_events(&mut self, events: Vec<CompactionEvent>) {
+        for diagnostic in crate::context_view::compaction_sequence_diagnostics(&events) {
+            tracing::warn!(
+                target: "bonsai::compaction",
+                expected_seq = diagnostic.expected_seq,
+                observed_seq = diagnostic.observed_seq,
+                "loaded legacy compaction ledger with a sequence discontinuity"
+            );
+        }
         self.compaction_events = events;
     }
 

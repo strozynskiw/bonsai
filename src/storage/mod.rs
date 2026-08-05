@@ -512,13 +512,16 @@ impl Storage {
     /// open transaction and a single `now` timestamp shared by all its writes;
     /// it is responsible for its own DELETE/INSERT statements and for calling
     /// [`touch_session`] where the session's `updated_at_ms` should advance.
-    pub(crate) async fn replace_quality_evidence_snapshot(
+    pub(crate) async fn persist_session_rotation_snapshot(
         &self,
         session_id: SessionId,
+        compaction_events: &[crate::context_view::CompactionEvent],
         verification_runs: &[crate::verification::VerificationRunRecord],
         self_review_runs: &[crate::self_review::SelfReviewRunRecord],
     ) -> Result<()> {
-        self.with_session_snapshot_tx("quality evidence snapshot", async move |tx, now| {
+        self.with_session_snapshot_tx("session rotation snapshot", async move |tx, now| {
+            self.sync_compaction_events_ledger_in_tx(tx, session_id, compaction_events, now)
+                .await?;
             self.replace_verification_runs_snapshot_in_tx(tx, session_id, verification_runs, now)
                 .await?;
             self.replace_self_review_runs_snapshot_in_tx(tx, session_id, self_review_runs, now)

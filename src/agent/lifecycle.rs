@@ -33,9 +33,9 @@ impl Agent {
     /// [`Self::implement_plan_from_with_context`], and [`Self::review_pending_changes`].
     ///
     /// Deliberately does **not** touch `messages` (each caller installs its own
-    /// system/user messages), the read tracker, the todo store, or the session
-    /// usage meter — those are reset selectively by each caller, so the reset
-    /// order relative to message installation does not matter.
+    /// system/user messages), the read tracker, the todo store, the session
+    /// usage meter, or the cumulative compaction ledger — those are owned by
+    /// the durable session and reset selectively by the new-session path.
     fn reset_transient_state(&mut self) {
         self.last_background_status_report = None;
         self.volatile_terminal_context = None;
@@ -49,7 +49,6 @@ impl Agent {
         self.read_evidence.delegated_overlap_advised.clear();
         self.context_controls.clear();
         self.summary_sources.clear();
-        self.compaction_events.clear();
         self.pending_context_rewrite = PendingContextRewrite::default();
         self.completion = CompletionGuardState::default();
         self.verification.pending_verification_bindings.clear();
@@ -85,6 +84,7 @@ impl Agent {
             memory.clear_recalled();
         }
         self.reset_transient_state();
+        self.compaction_events.clear();
         self.verification = VerificationState::default();
         self.self_review.reset_for_new_session();
         self.self_review_runs.clear();
@@ -95,25 +95,26 @@ impl Agent {
 
     /// Clear the current durable conversation and all of its owned evidence.
     pub async fn clear(&mut self) {
-        self.pending_session_quality_evidence = None;
+        self.pending_session_rotation_snapshot = None;
         self.reset_for_new_session().await;
     }
 
-    /// Clear the live conversation while retaining its quality evidence for
-    /// the outgoing durable-session flush performed by the TUI.
+    /// Clear the live conversation while retaining its durable ledgers for the
+    /// outgoing session flush performed by the TUI.
     pub(crate) async fn clear_for_session_rotation(&mut self) {
-        let snapshot = SessionQualityEvidenceSnapshot {
+        let snapshot = SessionRotationSnapshot {
+            compaction_events: std::mem::take(&mut self.compaction_events),
             verification_runs: std::mem::take(&mut self.verification.verification_runs),
             self_review_runs: std::mem::take(&mut self.self_review_runs),
         };
         self.reset_for_new_session().await;
-        self.pending_session_quality_evidence = Some(snapshot);
+        self.pending_session_rotation_snapshot = Some(snapshot);
     }
 
-    pub(crate) fn take_pending_session_quality_evidence(
+    pub(crate) fn take_pending_session_rotation_snapshot(
         &mut self,
-    ) -> Option<SessionQualityEvidenceSnapshot> {
-        self.pending_session_quality_evidence.take()
+    ) -> Option<SessionRotationSnapshot> {
+        self.pending_session_rotation_snapshot.take()
     }
 
     #[cfg(test)]

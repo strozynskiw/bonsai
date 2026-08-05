@@ -366,7 +366,7 @@ impl<'a> SessionSnapshotWriter<'a> {
                             )
                             .await?;
                         storage
-                            .replace_compaction_events_snapshot_in_tx(
+                            .sync_compaction_events_ledger_in_tx(
                                 tx,
                                 session_id,
                                 agent.compaction_events(),
@@ -494,7 +494,7 @@ pub(crate) async fn persist_agent_state(
             ),
         }
         if let Err(err) = storage
-            .replace_compaction_events_snapshot(session_id, &snapshot.compaction_events)
+            .sync_compaction_events_ledger(session_id, &snapshot.compaction_events)
             .await
         {
             tracing::warn!(

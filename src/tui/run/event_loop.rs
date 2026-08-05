@@ -1980,31 +1980,33 @@ async fn rotate_persisted_session_on_clear(
     // session, wiping it. Its agent context is already current from the periodic
     // flush.
     persist_changed_app_snapshots(storage, *current_session_id, &*app, persisted_signatures).await;
-    // `agent.clear_for_session_rotation()` has already closed the active episode as a hard boundary,
-    // but the app-only flush above intentionally does not read cleared agent
-    // context. Persist just the outgoing episode ledger, then empty the shared
-    // store before assigning a new session id. Otherwise the old session keeps
-    // an Active row and the new session can recall archives from its predecessor.
-    let (outgoing_episodes, outgoing_quality_evidence) = {
+    // `agent.clear_for_session_rotation()` has already closed the active
+    // episode and staged every durable ledger that would otherwise disappear
+    // with the cleared live agent. Persist those outgoing rows, then empty the
+    // shared episode store before assigning a new session id. Otherwise the old
+    // session keeps an Active row and the new session can recall archives from
+    // its predecessor.
+    let (outgoing_episodes, outgoing_session_snapshot) = {
         let mut agent = agent.lock().await;
         (
             agent.episodes_snapshot(),
-            agent.take_pending_session_quality_evidence(),
+            agent.take_pending_session_rotation_snapshot(),
         )
     };
-    if let Some(evidence) = outgoing_quality_evidence
+    if let Some(snapshot) = outgoing_session_snapshot
         && let Err(err) = storage
-            .replace_quality_evidence_snapshot(
+            .persist_session_rotation_snapshot(
                 *current_session_id,
-                &evidence.verification_runs,
-                &evidence.self_review_runs,
+                &snapshot.compaction_events,
+                &snapshot.verification_runs,
+                &snapshot.self_review_runs,
             )
             .await
     {
         tracing::warn!(
             session_id = %*current_session_id,
             error = %format!("{err:#}"),
-            "failed to persist outgoing quality evidence during session rotation"
+            "failed to persist outgoing session ledgers during session rotation"
         );
     }
     if let Some(episodes) = outgoing_episodes.as_deref()

@@ -8,7 +8,7 @@ use crate::context_view::cache_diagnosis::{
 use crate::context_view::telemetry::{
     CostTelemetry, compact_tokens, optional_cost_micros, turn_cache_percent,
 };
-use crate::context_view::{CompactionEvent, UsageTurnReport};
+use crate::context_view::{CompactionEvent, UsageTurnReport, compaction_sequence_diagnostics};
 
 use super::*;
 
@@ -105,11 +105,12 @@ pub(super) fn context_turns_layout(
 /// column caption (plus a cap note when older turns are hidden) or the empty
 /// notice.
 pub(super) fn context_turns_preamble_line_count(report: &ContextReport) -> usize {
+    let diagnostic_lines = usize::from(compaction_ledger_warning(report).is_some());
     if report.usage_turns.is_empty() {
-        return 3;
+        return 3 + diagnostic_lines;
     }
     let capped = report.usage_turns.len() > crate::tui::app::CONTEXT_TURNS_ROW_LIMIT;
-    3 + usize::from(capped)
+    3 + usize::from(capped) + diagnostic_lines
 }
 
 pub(super) fn context_turns_lines(app: &AppState, report: &ContextReport) -> Vec<Line<'static>> {
@@ -122,6 +123,9 @@ pub(super) fn context_turns_lines(app: &AppState, report: &ContextReport) -> Vec
         )),
         Line::from(""),
     ];
+    if let Some(warning) = compaction_ledger_warning(report) {
+        lines.push(Line::from(Span::styled(warning, theme::label(p.error))));
+    }
     if report.usage_turns.is_empty() {
         lines.push(Line::from(Span::styled(
             "(no provider turns recorded yet)",
@@ -179,6 +183,17 @@ pub(super) fn context_turns_lines(app: &AppState, report: &ContextReport) -> Vec
         }
     }
     lines
+}
+
+fn compaction_ledger_warning(report: &ContextReport) -> Option<String> {
+    let diagnostics = compaction_sequence_diagnostics(&report.compaction_events);
+    (!diagnostics.is_empty()).then(|| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
 }
 
 fn turn_row_count(layout: &[(ContextTurnRowKind, usize, usize)]) -> usize {

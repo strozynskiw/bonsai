@@ -1758,7 +1758,7 @@ async fn context_control_snapshot_roundtrips_controls_and_sources() {
 }
 
 #[tokio::test]
-async fn compaction_events_snapshot_roundtrips() {
+async fn compaction_events_ledger_is_append_only_and_byte_stable() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))
         .await
@@ -1801,7 +1801,13 @@ async fn compaction_events_snapshot_roundtrips() {
     ];
 
     storage
-        .replace_compaction_events_snapshot(session_id, &events)
+        .sync_compaction_events_ledger(session_id, &events)
+        .await
+        .unwrap();
+    let mut conflicting_first = events[0].clone();
+    conflicting_first.before_tokens = 999;
+    storage
+        .sync_compaction_events_ledger(session_id, &[conflicting_first])
         .await
         .unwrap();
 

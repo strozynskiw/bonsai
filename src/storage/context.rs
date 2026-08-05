@@ -238,34 +238,31 @@ impl Storage {
     }
 
     #[cfg(test)]
-    pub async fn replace_compaction_events_snapshot(
+    pub(crate) async fn sync_compaction_events_ledger(
         &self,
         session_id: SessionId,
         events: &[CompactionEvent],
     ) -> Result<()> {
-        self.with_session_snapshot_tx("compaction events snapshot", async move |tx, now| {
-            self.replace_compaction_events_snapshot_in_tx(tx, session_id, events, now)
+        self.with_session_snapshot_tx("compaction events ledger", async move |tx, now| {
+            self.sync_compaction_events_ledger_in_tx(tx, session_id, events, now)
                 .await
         })
         .await
     }
 
-    pub(crate) async fn replace_compaction_events_snapshot_in_tx(
+    /// Append unseen compaction events without rewriting durable history.
+    /// Existing ordinals are immutable even if a stale in-memory snapshot is
+    /// shorter or carries conflicting data for the same sequence number.
+    pub(crate) async fn sync_compaction_events_ledger_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         session_id: SessionId,
         events: &[CompactionEvent],
         now: i64,
     ) -> Result<()> {
-        storage_op!(
-            tx,
-            "delete compaction events",
-            sqlx::query("DELETE FROM compaction_events WHERE session_id = ?")
-                .bind(session_id.as_i64()),
-        )?;
-
+        let mut changed = false;
         for event in events {
-            sqlx::query(
+            let result = sqlx::query(
                 r#"
                 INSERT INTO compaction_events (
                   session_id, seq, occurred_at_ms, before_tokens, after_tokens,
@@ -274,6 +271,7 @@ impl Storage {
                   cacheable_prefix_tokens_before, cacheable_prefix_tokens_after
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, seq) DO NOTHING
                 "#,
             )
             .bind(session_id.as_i64())
@@ -300,9 +298,13 @@ impl Storage {
             )
             .execute(&mut **tx)
             .await?;
+            changed |= result.rows_affected() > 0;
         }
 
-        touch_session(tx, session_id, now).await
+        if changed {
+            touch_session(tx, session_id, now).await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn load_compaction_events(

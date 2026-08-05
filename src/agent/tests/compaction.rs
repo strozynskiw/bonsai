@@ -260,6 +260,73 @@ async fn compaction_records_history_event() {
 }
 
 #[tokio::test]
+async fn hard_boundary_preserves_compaction_ledger_and_counter() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![Ok(StreamedResponse {
+        content: "# Compacted Context Summary\n\n## Current goal\n- continue after boundary"
+            .to_string(),
+        ..StreamedResponse::default()
+    })]);
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .context_budget_tokens(120_000)
+    .build()
+    .unwrap();
+    agent.set_prompt_estimator(PromptEstimator::for_tests(
+        "test",
+        TokenCounterKind::Heuristic,
+        None,
+    ));
+    for index in 0..25 {
+        agent.push_user_message_raw(&format!("before boundary {index} {}", "x".repeat(4_000)));
+    }
+    agent
+        .compact_context(
+            CompactionRequest::manual(false, CancellationToken::new())
+                .with_target_tokens(1)
+                .with_summary_policy(CompactionSummaryPolicy::DeterministicOnly),
+        )
+        .await
+        .unwrap();
+
+    let mut plan = crate::plan::PlanDoc::default();
+    plan.edit().add_task("continue in a clean context");
+    assert!(agent.implement_plan_from(&plan, None).await);
+    for index in 0..30 {
+        agent.push_user_message_raw(&format!("after boundary {index} {}", "y".repeat(20_000)));
+    }
+    let capture = Arc::new(CaptureSink::default());
+    let sink: crate::output::SharedSink = capture.clone();
+    let tool_schema = agent.active_tool_schema();
+    let mut perf = PreflightPerfCapture::default();
+    agent
+        .prepare_context_for_model(&tool_schema, &sink, CancellationToken::new(), &mut perf)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        agent
+            .compaction_events()
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(agent.context_report().compaction_events.len(), 2);
+    assert!(
+        capture
+            .statuses()
+            .iter()
+            .any(|status| status.contains("Context compacted ×2 this session"))
+    );
+}
+
+#[tokio::test]
 async fn compaction_preserves_typed_self_review_outcome() {
     let fixture = TestFixture::new();
     let mut agent = Agent::new(

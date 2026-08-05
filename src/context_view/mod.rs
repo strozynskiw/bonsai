@@ -32,6 +32,60 @@ pub(crate) use types::{
     ToolContextResult, ToolImageContext,
 };
 
+/// One discontinuity in a persisted compaction event sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompactionSequenceDiagnostic {
+    pub(crate) expected_seq: usize,
+    pub(crate) observed_seq: usize,
+}
+
+impl CompactionSequenceDiagnostic {
+    pub(crate) fn message(self) -> String {
+        if self.observed_seq > self.expected_seq {
+            let missing_end = self.observed_seq.saturating_sub(1);
+            let missing = if missing_end == self.expected_seq {
+                format!("#{}", self.expected_seq)
+            } else {
+                format!("#{}–#{missing_end}", self.expected_seq)
+            };
+            format!(
+                "compaction ledger gap: missing {missing} before #{}; persisted ordinals were preserved",
+                self.observed_seq
+            )
+        } else {
+            format!(
+                "compaction ledger order anomaly: expected #{}, found #{}; persisted ordinals were preserved",
+                self.expected_seq, self.observed_seq
+            )
+        }
+    }
+}
+
+pub(crate) fn compaction_sequence_diagnostics(
+    events: &[CompactionEvent],
+) -> Vec<CompactionSequenceDiagnostic> {
+    let mut expected_seq = 1usize;
+    let mut diagnostics = Vec::new();
+    for event in events {
+        if event.seq != expected_seq {
+            diagnostics.push(CompactionSequenceDiagnostic {
+                expected_seq,
+                observed_seq: event.seq,
+            });
+        }
+        expected_seq = expected_seq.max(event.seq.saturating_add(1));
+    }
+    diagnostics
+}
+
+pub(crate) fn next_compaction_sequence(events: &[CompactionEvent]) -> Option<usize> {
+    events
+        .iter()
+        .map(|event| event.seq)
+        .max()
+        .map_or(Some(1), |seq| seq.checked_add(1))
+}
+
 /// A snapshot of everything that fills the context window — the actual entries
 /// the model sees (post-compaction), each with content readable in `/ctx`.
 /// Token figures are estimates (the same char/4 heuristic the agent loop uses
@@ -241,6 +295,51 @@ mod background_context_tests {
         assert!(is_background_context_text(status));
         assert_eq!(background_context_label(status), "Background task status");
         assert!(!is_background_context_text("ordinary human request"));
+    }
+}
+
+#[cfg(test)]
+mod compaction_sequence_tests {
+    use super::{CompactionEvent, compaction_sequence_diagnostics, next_compaction_sequence};
+
+    #[test]
+    fn legacy_gaps_are_diagnosed_without_renumbering_events() {
+        let events = vec![
+            CompactionEvent {
+                seq: 1,
+                ..CompactionEvent::default()
+            },
+            CompactionEvent {
+                seq: 3,
+                ..CompactionEvent::default()
+            },
+        ];
+
+        let diagnostics = compaction_sequence_diagnostics(&events);
+
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].expected_seq, 2);
+        assert_eq!(diagnostics[0].observed_seq, 3);
+    }
+
+    #[test]
+    fn next_sequence_advances_past_the_highest_legacy_ordinal() {
+        let events = vec![
+            CompactionEvent {
+                seq: 1,
+                ..CompactionEvent::default()
+            },
+            CompactionEvent {
+                seq: 4,
+                ..CompactionEvent::default()
+            },
+        ];
+
+        assert_eq!(next_compaction_sequence(&events), Some(5));
     }
 }
 

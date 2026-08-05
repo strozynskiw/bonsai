@@ -363,11 +363,13 @@ pub(crate) struct BackgroundVerificationCapture {
     pub(crate) command: String,
 }
 
-/// Quality evidence staged while `/clear` or `/new` rotates the durable
-/// session. The live agent starts empty, while the outgoing rows remain
-/// available for one final persistence flush.
+/// Durable ledgers staged while `/clear` or `/new` rotates the session.
+///
+/// The live agent starts empty before the TUI assigns the next session id, so
+/// the outgoing rows must remain available for one final persistence flush.
 #[derive(Debug)]
-pub(crate) struct SessionQualityEvidenceSnapshot {
+pub(crate) struct SessionRotationSnapshot {
+    pub(crate) compaction_events: Vec<CompactionEvent>,
     pub(crate) verification_runs: Vec<crate::verification::VerificationRunRecord>,
     pub(crate) self_review_runs: Vec<SelfReviewRunRecord>,
 }
@@ -533,7 +535,7 @@ pub struct Agent {
     /// in evals and most unit tests, where it never matches any hook.
     hooks: Arc<crate::hooks::HookEngine>,
     verification: VerificationState,
-    pending_session_quality_evidence: Option<SessionQualityEvidenceSnapshot>,
+    pending_session_rotation_snapshot: Option<SessionRotationSnapshot>,
     /// Whether this context contains a human-submitted turn that `/retry` may
     /// continue without replaying its prompt.
     last_retryable_turn: bool,
