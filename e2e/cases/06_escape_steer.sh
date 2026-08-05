@@ -31,6 +31,8 @@ expect_meta "mock model selected" "Coding · mock-model"
 
 tui_keys "initial request" Enter
 expect_meta "initial request is busy" "Coding · mock-model"
+expect_meta "running hint advertises Enter queue" "Enter queue"
+forbid_meta "running hint does not advertise Tab queue" "Tab queue"
 forbid_meta "initial request has no idle dot" "● Coding"
 
 tui_keys "urgent steering"
