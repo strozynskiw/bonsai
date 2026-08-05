@@ -38,7 +38,7 @@ impl Agent {
     /// order relative to message installation does not matter.
     fn reset_transient_state(&mut self) {
         self.last_background_status_report = None;
-        self.last_terminal_status_report = None;
+        self.volatile_terminal_context = None;
         self.pending_peer_delivery_receipts.clear();
         self.advisories.read_coverage_advisory.clear();
         self.advisories.subagent_status_advisory.clear();
@@ -269,7 +269,7 @@ impl Agent {
 
     pub(crate) fn set_terminals(&mut self, terminals: Arc<crate::terminal::TerminalRegistry>) {
         self.terminals = terminals;
-        self.last_terminal_status_report = None;
+        self.volatile_terminal_context = None;
     }
 
     pub(crate) fn set_background_wakes(

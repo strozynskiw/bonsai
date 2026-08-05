@@ -29,6 +29,13 @@ impl ContextProjection {
         self.estimate.as_ref()
     }
 
+    pub(in crate::agent) fn volatile_terminal_tokens(&self) -> usize {
+        self.items
+            .iter()
+            .find(|item| item.source == ContextProjectionSource::VolatileTerminal)
+            .map_or(0, |item| item.tokens)
+    }
+
     #[cfg(test)]
     pub(in crate::agent) fn items(&self) -> &[ContextProjectionItem] {
         &self.items
@@ -38,7 +45,11 @@ impl ContextProjection {
         self.items
             .iter()
             .filter_map(|item| {
-                if item.selection != ContextProjectionSelection::UserDropped {
+                if !matches!(
+                    item.selection,
+                    ContextProjectionSelection::UserDropped
+                        | ContextProjectionSelection::VolatileSuperseded
+                ) {
                     return None;
                 }
                 item.source
@@ -66,6 +77,7 @@ pub(in crate::agent) struct ContextProjectionItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::agent) enum ContextProjectionSource {
     Message(usize),
+    VolatileTerminal,
     ToolSchema,
 }
 
@@ -73,7 +85,7 @@ impl ContextProjectionSource {
     const fn message_index(self) -> Option<usize> {
         match self {
             Self::Message(index) => Some(index),
-            Self::ToolSchema => None,
+            Self::VolatileTerminal | Self::ToolSchema => None,
         }
     }
 }
@@ -103,12 +115,14 @@ pub(in crate::agent) enum ContextProjectionTrustClass {
 pub(in crate::agent) enum ContextProjectionSelection {
     Selected,
     UserDropped,
+    VolatileSuperseded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::agent) enum ContextProjectionTransform {
     None,
     ControlStubbed,
+    VolatileReplaced,
     SmolSummarized,
     SmolCapped,
 }
@@ -140,8 +154,8 @@ impl Agent {
         controls: &HashMap<String, ContextControlState>,
         tool_schema: Option<&ToolSchemaPayload>,
     ) -> ContextProjection {
-        let mut control_messages = Vec::with_capacity(messages.len());
-        let mut control_message_item_indices = Vec::with_capacity(messages.len());
+        let mut control_messages = Vec::with_capacity(messages.len().saturating_add(1));
+        let mut control_message_item_indices = Vec::with_capacity(messages.len().saturating_add(1));
         let mut source_message_tokens = vec![0; messages.len()];
         let mut items = Vec::with_capacity(messages.len());
 
@@ -165,8 +179,12 @@ impl Agent {
                 Some(&message_id),
                 |state| state.drop_next_turn,
             );
+            let volatile_superseded = is_volatile_terminal_message(message);
             let mut transform = ContextProjectionTransform::None;
-            let selected_message = if dropped {
+            let selected_message = if volatile_superseded {
+                transform = ContextProjectionTransform::VolatileReplaced;
+                None
+            } else if dropped {
                 None
             } else if let Some(stubbed) = self.stubbed_message_with_controls(message, controls) {
                 transform = ContextProjectionTransform::ControlStubbed;
@@ -174,7 +192,9 @@ impl Agent {
             } else {
                 Some(message.clone())
             };
-            let selection = if dropped {
+            let selection = if volatile_superseded {
+                ContextProjectionSelection::VolatileSuperseded
+            } else if dropped {
                 ContextProjectionSelection::UserDropped
             } else {
                 ContextProjectionSelection::Selected
@@ -194,6 +214,25 @@ impl Agent {
                 trust_class: projection_trust_class(message, role),
                 selection,
                 transform,
+                tokens: 0,
+            });
+        }
+
+        if let Some(message) = self.volatile_terminal_context_message() {
+            let (role, _text) = describe_message_full(&message);
+            let item_index = items.len();
+            control_message_item_indices.push(item_index);
+            control_messages.push(message);
+            items.push(ContextProjectionItem {
+                id: "terminal-live".to_string(),
+                source: ContextProjectionSource::VolatileTerminal,
+                source_index: messages.len(),
+                role,
+                lifecycle: ContextProjectionLifecycle::Recent,
+                cache_class: ContextProjectionCacheClass::VolatileTail,
+                trust_class: ContextProjectionTrustClass::UntrustedData,
+                selection: ContextProjectionSelection::Selected,
+                transform: ContextProjectionTransform::None,
                 tokens: 0,
             });
         }
@@ -353,6 +392,7 @@ mod trust_tests {
         for provenance in [
             MessageProvenance::Peer,
             MessageProvenance::Background,
+            MessageProvenance::Terminal,
             MessageProvenance::UntrustedData,
         ] {
             let message = crate::agent::messages::provenance_message(provenance, "external data");

@@ -214,9 +214,10 @@ impl TerminalTool {
                     .snapshot(id)
                     .await
                     .with_context(|| format!("Unknown interactive terminal: {id}"))?;
+                let (output, _) = snapshot.model_output();
                 Ok(ToolOutput::untrusted_context(
                     format!("terminal:{id}"),
-                    &snapshot.detail(),
+                    &output,
                 ))
             }
             TerminalAction::Send => {
@@ -267,25 +268,27 @@ impl TerminalTool {
             TerminalAction::Stop => {
                 let id = required_terminal_id(args.terminal_id.as_deref(), "stop")?;
                 let snapshot = self.registry.stop(id).await?;
+                let (output, _) = snapshot.model_output();
                 Ok(ToolOutput::untrusted_context(
                     format!("terminal:{id}"),
-                    &snapshot.detail(),
+                    &output,
                 ))
             }
             TerminalAction::Wait => {
                 let wait_seconds = normalize_wait_seconds(args.wait_seconds)?;
                 let id = required_terminal_id(args.terminal_id.as_deref(), "wait")?;
                 if !self.can_park {
+                    let snapshot = self
+                        .registry
+                        .wait_for_terminal(
+                            id,
+                            std::time::Duration::from_secs(wait_seconds.unwrap_or(1)),
+                        )
+                        .await?;
+                    let (output, _) = snapshot.model_output();
                     return Ok(ToolOutput::untrusted_context(
                         format!("terminal:{id}"),
-                        &self
-                            .registry
-                            .wait_for_terminal(
-                                id,
-                                std::time::Duration::from_secs(wait_seconds.unwrap_or(1)),
-                            )
-                            .await?
-                            .detail(),
+                        &output,
                     ));
                 }
                 let coordinator = context
@@ -306,10 +309,13 @@ impl TerminalTool {
                     )
                     .await?
                 {
-                    TerminalWaitRegistration::Ready(snapshot) => Ok(ToolOutput::untrusted_context(
-                        format!("terminal:{id}"),
-                        &snapshot.detail(),
-                    )),
+                    TerminalWaitRegistration::Ready(snapshot) => {
+                        let (output, _) = snapshot.model_output();
+                        Ok(ToolOutput::untrusted_context(
+                            format!("terminal:{id}"),
+                            &output,
+                        ))
+                    }
                     TerminalWaitRegistration::Parked(wait) => Ok(ToolOutput::WaitStarted {
                         message: format!(
                             "Waiting for {id} from semantic version {}.",
@@ -475,5 +481,69 @@ mod tests {
         let _ = registry
             .wait_for_terminal(&terminal.id, std::time::Duration::from_secs(2))
             .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_is_bounded_and_resize_returns_only_an_acknowledgement() {
+        let registry = Arc::new(TerminalRegistry::new());
+        let terminal = registry
+            .start(
+                "/bin/sh",
+                "yes terminal-output | head -c 100000; sleep 30",
+                std::path::Path::new("/"),
+                60,
+                None,
+            )
+            .await
+            .expect("PTY fixture should start");
+        let tool = TerminalTool::new(registry.clone(), ActionPolicy::testing(), None, false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let snapshot = registry
+                .snapshot(&terminal.id)
+                .await
+                .expect("PTY fixture should remain registered");
+            if snapshot.total_output_chars >= 100_000 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "PTY fixture did not produce its output"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let read_output = tool
+            .execute(json!({"action": "read", "terminal_id": terminal.id}))
+            .await
+            .expect("terminal read should succeed");
+        let read = read_output.rendered_summary();
+        assert!(
+            read.chars().count() < 9_000,
+            "{} chars",
+            read.chars().count()
+        );
+        assert!(read.contains("Normalized screen:"));
+        assert!(!read.contains("Output tail:"));
+
+        let resized = tool
+            .execute(json!({
+                "action": "resize",
+                "terminal_id": terminal.id,
+                "rows": 40,
+                "cols": 100
+            }))
+            .await
+            .expect("terminal resize should succeed");
+        assert_eq!(
+            resized.rendered_summary(),
+            format!("Resized {} to 100x40.", terminal.id)
+        );
+
+        registry
+            .stop(&terminal.id)
+            .await
+            .expect("PTY fixture should stop");
     }
 }

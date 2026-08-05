@@ -199,12 +199,13 @@ pub(crate) fn background_context_label(message: &str) -> String {
 }
 
 pub(crate) fn is_background_context_text(message: &str) -> bool {
-    const CANONICAL_SOURCES: [&str; 6] = [
+    const CANONICAL_SOURCES: [&str; 7] = [
         "source=\"background command completion\"",
         "source=\"background subagent completion\"",
         "source=\"interactive terminal update\"",
         "source=\"running background command status\"",
         "source=\"running interactive terminal status\"",
+        "source=\"live interactive terminal state\"",
         "source=\"running background subagent status\"",
     ];
 
@@ -220,6 +221,7 @@ pub(crate) fn is_background_context_text(message: &str) -> bool {
 fn is_background_status_text(message: &str) -> bool {
     message.contains("source=\"running background command status\"")
         || message.contains("source=\"running interactive terminal status\"")
+        || message.contains("source=\"live interactive terminal state\"")
         || message.contains("source=\"running background subagent status\"")
         || message.contains("[Untrusted background task status]")
 }

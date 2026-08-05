@@ -231,7 +231,7 @@ impl Agent {
                 cache_warning_lanes: HashSet::new(),
             },
             last_background_status_report: None,
-            last_terminal_status_report: None,
+            volatile_terminal_context: None,
             tool_context_details: HashMap::new(),
             read_evidence: ReadEvidenceMap {
                 inspection_events: HashMap::new(),

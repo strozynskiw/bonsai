@@ -105,6 +105,18 @@ pub(super) fn is_project_state_message(message: &ChatCompletionRequestMessage) -
     )
 }
 
+pub(super) fn is_volatile_terminal_message(message: &ChatCompletionRequestMessage) -> bool {
+    matches!(
+        message,
+        ChatCompletionRequestMessage::User(user)
+            if user.name.as_deref() == MessageProvenance::Terminal.wire_name()
+                || user.name.as_deref() == MessageProvenance::Background.wire_name()
+                    && try_message_content_string(message).is_some_and(|content| {
+                        content.contains("source=\"running interactive terminal status\"")
+                    })
+    )
+}
+
 /// Like [`system_message_from_prompt`], but appends a transition section so the
 /// model drops the old persona when switching personas mid-conversation.
 pub(super) fn system_message_from_prompt_with_transition(

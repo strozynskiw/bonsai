@@ -28,12 +28,12 @@ pub use crate::context_view::{
 };
 use crate::context_view::{
     ContextLedgerBuildInput, ContextTokenMetadata, PendingContextMessage, ToolContextDetail,
-    ToolContextResult, ToolImageContext, add_framing_adjustment, assistant_tool_calls,
-    background_context_label, canonical_context_control_id, command_status_text,
-    compact_tool_arguments_for_context, context_ledger_for_messages, context_preview,
-    describe_message_full, is_tool_context_id, message_content_text, message_control_ids,
-    message_index_from_context_id, prompt_cache_token_totals, tool_call_id_from_context_id,
-    tool_message_call_id, user_request_message,
+    ToolContextResult, ToolImageContext, add_framing_adjustment, aggregate_context_node,
+    assistant_tool_calls, background_context_label, canonical_context_control_id,
+    command_status_text, compact_tool_arguments_for_context, context_ledger_for_messages,
+    context_preview, describe_message_full, is_tool_context_id, message_content_text,
+    message_control_ids, message_index_from_context_id, prompt_cache_token_totals,
+    tool_call_id_from_context_id, tool_message_call_id, user_request_message,
 };
 use crate::interaction::{
     InteractionAnswer, InteractionOutcome, InteractionRequest, InteractionService, QuestionOption,
@@ -467,7 +467,9 @@ pub struct Agent {
     tool_schema_cache: StdMutex<HashMap<ToolSchemaCacheKey, ToolSchemaPayload>>,
     caches: PerfCaches,
     last_background_status_report: Option<String>,
-    last_terminal_status_report: Option<String>,
+    /// Latest semantic running-terminal frame. It is projected as one
+    /// replaceable volatile tail message and is never persisted in `messages`.
+    volatile_terminal_context: Option<crate::terminal::TerminalContextFrame>,
     tool_context_details: HashMap<String, ToolContextDetail>,
     read_evidence: ReadEvidenceMap,
     next_subagent_launch_group_id: u64,

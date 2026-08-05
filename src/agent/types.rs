@@ -108,6 +108,7 @@ pub(crate) enum MessageProvenance {
     ProjectState,
     Peer,
     Background,
+    Terminal,
     UntrustedData,
 }
 
@@ -119,6 +120,7 @@ impl MessageProvenance {
             Self::ProjectState => Some(crate::context::PROJECT_STATE_MESSAGE_NAME),
             Self::Peer => Some("bonsai_peer"),
             Self::Background => Some("bonsai_background"),
+            Self::Terminal => Some("bonsai_terminal"),
             Self::UntrustedData => Some("bonsai_untrusted"),
         }
     }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::{MessageProvenance, is_volatile_terminal_message};
 
 fn subagent_runner_with_registry(
     fixture: &TestFixture,
@@ -190,6 +191,164 @@ async fn interactive_terminal_prompt_is_added_as_untrusted_context() {
     assert!(update.contains(&terminal.id), "{update}");
     assert!(update.contains("Answer:"), "{update}");
     let _ = terminals.stop(&terminal.id).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn running_terminal_context_is_replaceable_deduplicated_and_not_persisted() {
+    let fixture = TestFixture::new();
+    let terminals = Arc::new(crate::terminal::TerminalRegistry::new());
+    let terminal = terminals
+        .start("/bin/sh", "sleep 30", &fixture.project_root, 60, None)
+        .await
+        .expect("PTY fixture should start");
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_terminals(terminals.clone());
+
+    terminals
+        .append_test_output(
+            &terminal.id,
+            "\u{1b}[2J\u{1b}[H⠋ bonsai\r\n⣾ read · 100ms\r\n⌂ bonsai   ⏱ 9s",
+        )
+        .await;
+    assert!(agent.sync_running_terminal_status().await);
+    let persisted = serde_json::to_vec(&agent.context_message_snapshot().messages).unwrap();
+    let first_outgoing = agent.outgoing_messages_for(agent.context_messages());
+    let first_terminal = first_outgoing
+        .iter()
+        .filter(|message| is_volatile_terminal_message(message))
+        .collect::<Vec<_>>();
+    assert_eq!(first_terminal.len(), 1);
+    let first_terminal_text = message_content(first_terminal[0]);
+    assert!(first_terminal_text.contains("<elapsed>"));
+
+    terminals
+        .append_test_output(
+            &terminal.id,
+            "\u{1b}[2J\u{1b}[H⠙ bonsai\r\n⣽ read · 8.4s\r\n⌂ bonsai   ⏱ 1m 5s",
+        )
+        .await;
+    assert!(!agent.sync_running_terminal_status().await);
+    assert_eq!(
+        serde_json::to_vec(&agent.context_message_snapshot().messages).unwrap(),
+        persisted
+    );
+    assert_eq!(
+        serde_json::to_vec(&agent.outgoing_messages_for(agent.context_messages())).unwrap(),
+        serde_json::to_vec(&first_outgoing).unwrap()
+    );
+
+    terminals
+        .append_test_output(
+            &terminal.id,
+            "\u{1b}[2J\u{1b}[H⠙ bonsai\r\n⣽ write · 8.4s\r\n⌂ bonsai   ⏱ 1m 5s",
+        )
+        .await;
+    assert!(agent.sync_running_terminal_status().await);
+    let changed_outgoing = agent.outgoing_messages_for(agent.context_messages());
+    let changed_terminal = changed_outgoing
+        .iter()
+        .filter(|message| is_volatile_terminal_message(message))
+        .collect::<Vec<_>>();
+    assert_eq!(changed_terminal.len(), 1);
+    assert!(message_content(changed_terminal[0]).contains("write"));
+    assert_eq!(
+        serde_json::to_vec(&agent.context_message_snapshot().messages).unwrap(),
+        persisted
+    );
+
+    let bounded_message_count = changed_outgoing.len();
+    for phase in 0..32 {
+        terminals
+            .append_test_output(
+                &terminal.id,
+                &format!("\u{1b}[2J\u{1b}[Hsemantic phase {phase}"),
+            )
+            .await;
+        assert!(agent.sync_running_terminal_status().await);
+        let outgoing = agent.outgoing_messages_for(agent.context_messages());
+        assert_eq!(outgoing.len(), bounded_message_count);
+        assert_eq!(
+            outgoing
+                .iter()
+                .filter(|message| is_volatile_terminal_message(message))
+                .count(),
+            1
+        );
+        assert_eq!(
+            serde_json::to_vec(&agent.context_message_snapshot().messages).unwrap(),
+            persisted
+        );
+    }
+
+    let report = agent.context_report();
+    let diagnostic = find_context_node(
+        &report.ledger,
+        ContextNodeKind::Background,
+        "Live terminal state",
+    )
+    .expect("live terminal state should be measured in /ctx");
+    assert!(diagnostic.tokens > 0);
+    assert!(diagnostic.bytes > 0);
+    assert_eq!(
+        counted_ledger_tokens(&report),
+        report.prompt_estimate_tokens
+    );
+
+    terminals
+        .stop(&terminal.id)
+        .await
+        .expect("PTY fixture should stop");
+    assert!(agent.sync_running_terminal_status().await);
+    assert!(
+        agent
+            .outgoing_messages_for(agent.context_messages())
+            .iter()
+            .all(|message| !is_volatile_terminal_message(message))
+    );
+}
+
+#[tokio::test]
+async fn restored_running_terminal_status_is_kept_locally_but_not_resent() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.push_untrusted_runtime_note(
+        MessageProvenance::Background,
+        "running interactive terminal status",
+        &"historical-screen ".repeat(2_000),
+    );
+
+    let snapshot = agent.context_message_snapshot();
+    assert_eq!(snapshot.messages.len(), 2);
+    assert!(message_content(&snapshot.messages[1]).contains("historical-screen"));
+    assert_eq!(agent.outgoing_messages_for(&snapshot.messages).len(), 1);
+
+    let report = agent.context_report();
+    let historical = find_context_node(
+        &report.ledger,
+        ContextNodeKind::Background,
+        "Background task status",
+    )
+    .expect("historical terminal evidence should remain inspectable");
+    assert_eq!(historical.inclusion, ContextInclusion::NotSent);
+    assert_eq!(historical.tokens, 0);
+    assert!(historical.bytes > 10_000);
 }
 
 #[tokio::test]

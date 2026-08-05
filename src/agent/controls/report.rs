@@ -99,6 +99,8 @@ impl Agent {
             &self.context_controls,
             &tool_schema,
         );
+        let volatile_terminal_message = self.volatile_terminal_context_message();
+        let volatile_terminal_tokens = projection.volatile_terminal_tokens();
         let message_tokens = projection.source_message_tokens().to_vec();
         let report_estimate = projection.estimate().cloned().unwrap_or_else(|| {
             PromptEstimate::heuristic(
@@ -134,6 +136,14 @@ impl Agent {
                 ContextEntry { role, tokens, text }
             })
             .collect::<Vec<_>>();
+        if let Some(message) = volatile_terminal_message.as_ref() {
+            let (role, text) = describe_message(message);
+            entries.push(ContextEntry {
+                role,
+                tokens: volatile_terminal_tokens,
+                text,
+            });
+        }
         if estimate.tool_schema_tokens > 0 {
             entries.push(ContextEntry {
                 role: ContextRole::ToolSchema,
@@ -163,6 +173,15 @@ impl Agent {
             summary_source_counts: &summary_source_counts,
             message_inclusions: &message_inclusions,
         });
+        if let Some(message) = volatile_terminal_message.as_ref() {
+            let (_role, text) = describe_message(message);
+            append_volatile_terminal_ledger_node(
+                &mut ledger,
+                &text,
+                volatile_terminal_tokens,
+                row_metadata,
+            );
+        }
         add_framing_adjustment(&mut ledger, estimate.input_tokens, &estimate);
         let payload_preview = self
             .caches
@@ -178,6 +197,7 @@ impl Agent {
             &self.prompt_estimator,
             estimate.tool_schema_tokens,
         );
+        let volatile_tail_tokens = volatile_tail_tokens.saturating_add(volatile_terminal_tokens);
         ContextReport {
             budget_tokens: self.budget.context_budget_tokens,
             entries,
@@ -221,4 +241,66 @@ impl Agent {
             estimate_confidence: estimate.confidence,
         })
     }
+}
+
+fn append_volatile_terminal_ledger_node(
+    ledger: &mut Vec<ContextNode>,
+    text: &str,
+    tokens: usize,
+    metadata: ContextTokenMetadata,
+) {
+    let node = ContextNode::leaf(
+        ContextNodeId::raw("terminal-live"),
+        ContextNodeKind::Background,
+        ContextInclusion::Included,
+        Some(ContextRole::User),
+        "Live terminal state",
+        tokens,
+        text,
+        metadata,
+    )
+    .with_source(ContextSourceRef::new(
+        crate::context_view::ContextSourceKind::BackgroundTask,
+        "terminal-live",
+        "replaceable live terminal state",
+    ));
+
+    if let Some(index) = ledger
+        .iter()
+        .position(|root| root.kind == ContextNodeKind::ChatRoot)
+    {
+        let root = ledger.remove(index);
+        let mut children = root.children;
+        children.push(node);
+        ledger.insert(
+            index,
+            aggregate_context_node(
+                root.id,
+                ContextNodeKind::ChatRoot,
+                ContextInclusion::Included,
+                None,
+                "Chat",
+                metadata,
+                children,
+            ),
+        );
+        return;
+    }
+
+    let index = ledger
+        .iter()
+        .position(|root| root.kind == ContextNodeKind::ToolsRoot)
+        .unwrap_or(ledger.len());
+    ledger.insert(
+        index,
+        aggregate_context_node(
+            ContextNodeId::raw("root-chat"),
+            ContextNodeKind::ChatRoot,
+            ContextInclusion::Included,
+            None,
+            "Chat",
+            metadata,
+            vec![node],
+        ),
+    );
 }

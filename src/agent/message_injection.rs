@@ -95,7 +95,7 @@ impl Agent {
         ))
     }
 
-    fn push_untrusted_runtime_note(
+    pub(super) fn push_untrusted_runtime_note(
         &mut self,
         provenance: MessageProvenance,
         source: &str,
@@ -412,20 +412,29 @@ impl Agent {
     }
 
     pub(super) async fn sync_running_terminal_status(&mut self) -> bool {
-        let Some(report) = self.terminals.running_status_report().await else {
-            self.last_terminal_status_report = None;
-            return false;
-        };
-        if self.last_terminal_status_report.as_deref() == Some(report.as_str()) {
+        let frame = self.terminals.running_context_frame().await;
+        if self
+            .volatile_terminal_context
+            .as_ref()
+            .map(crate::terminal::TerminalContextFrame::digest)
+            == frame
+                .as_ref()
+                .map(crate::terminal::TerminalContextFrame::digest)
+        {
             return false;
         }
-        self.last_terminal_status_report = Some(report.clone());
-        self.push_untrusted_runtime_note(
-            MessageProvenance::Background,
-            "running interactive terminal status",
-            &report,
-        );
+        self.volatile_terminal_context = frame;
+        self.caches.last_prompt_estimate = None;
         true
+    }
+
+    pub(super) fn volatile_terminal_context_message(&self) -> Option<ChatCompletionRequestMessage> {
+        self.volatile_terminal_context.as_ref().map(|frame| {
+            provenance_message(
+                MessageProvenance::Terminal,
+                &untrusted_runtime_note("live interactive terminal state", frame.content()),
+            )
+        })
     }
 
     pub(super) async fn sync_running_subagent_status(&mut self) -> bool {
@@ -476,19 +485,22 @@ impl Agent {
                 &terminal_update_message(&terminal_updates),
             ));
         }
-        if let Some(report) = self.terminals.running_status_report().await
-            && self.last_terminal_status_report.as_deref() != Some(report.as_str())
+        if let Some(frame) = self.terminals.running_context_frame().await
+            && self
+                .volatile_terminal_context
+                .as_ref()
+                .is_none_or(|current| current.digest() != frame.digest())
         {
             messages.push(untrusted_runtime_note(
-                "running interactive terminal status",
-                &report,
+                "live interactive terminal state",
+                frame.content(),
             ));
         }
         messages
     }
 }
 
-fn untrusted_runtime_note(source: &str, body: &str) -> String {
+pub(super) fn untrusted_runtime_note(source: &str, body: &str) -> String {
     let redacted = crate::redact::redact(body);
     crate::tool::wrap_untrusted_content(source, redacted.as_ref())
 }
