@@ -238,6 +238,115 @@ fn renders_nested_markdown_fence_inside_plain_code_block() {
 }
 
 #[test]
+fn ordered_list_marker_appears_once_per_item() {
+    let body = "1. **Title**\n\n   Continuation paragraph.\n\n   - nested bullet\n\n   > quoted line\n\n   ```rust\n   fn main() {}\n   ```\n\n2. Second item.\n";
+    let rendered = rendered_text(render_markdown(body, 60));
+
+    let numbered = rendered
+        .iter()
+        .filter(|line| line.contains("1. ") || line.contains("2. "))
+        .count();
+    assert_eq!(
+        numbered, 2,
+        "each ordered item should carry its number exactly once, got: {rendered:?}"
+    );
+
+    let title = rendered.iter().find(|l| l.contains("Title")).unwrap();
+    assert!(
+        title.contains("1. "),
+        "first item marker on title: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("Continuation"))
+            .is_some_and(|l| !l.contains("1. ")),
+        "continuation paragraph must not repeat the marker: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("nested bullet"))
+            .is_some_and(|l| l.contains("•") && !l.contains("1. ")),
+        "nested bullet must use its own marker, not the parent number: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("quoted line"))
+            .is_some_and(|l| l.contains("│") && !l.contains("1. ")),
+        "quote inside an item must not repeat the marker: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("fn main() {}"))
+            .is_some_and(|l| !l.contains("1. ")),
+        "code inside an item must not repeat the marker: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("Second item"))
+            .is_some_and(|l| l.contains("2. ")),
+        "second item advances the counter: {rendered:?}"
+    );
+}
+
+#[test]
+fn nested_ordered_list_keeps_parent_counter() {
+    let body = "1. first\n   - a\n   - b\n2. second\n";
+    let rendered = rendered_text(render_markdown(body, 40));
+
+    assert_eq!(
+        rendered.iter().filter(|l| l.contains("1. ")).count(),
+        1,
+        "parent '1.' marker exactly once: {rendered:?}"
+    );
+    assert_eq!(
+        rendered.iter().filter(|l| l.contains("2. ")).count(),
+        1,
+        "parent '2.' marker exactly once: {rendered:?}"
+    );
+    assert_eq!(
+        rendered
+            .iter()
+            .filter(|l| l.contains("•") && (l.contains("a") || l.contains("b")))
+            .count(),
+        2,
+        "nested bullets keep their own markers: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("a"))
+            .is_some_and(|l| !l.contains("1.")),
+        "nested content must not carry the parent number: {rendered:?}"
+    );
+}
+
+#[test]
+fn ordered_list_honors_explicit_start() {
+    let body = "3. three\n4. four\n";
+    let rendered = rendered_text(render_markdown(body, 40));
+
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("three"))
+            .is_some_and(|l| l.contains("3. ")),
+        "explicit start value honored: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .find(|l| l.contains("four"))
+            .is_some_and(|l| l.contains("4. ")),
+        "counter advances from start: {rendered:?}"
+    );
+}
+
+#[test]
 fn parses_tool_result_truncation_marker() {
     let preview = tool_result_preview("[Output truncated: 123 chars total]\nhello")
         .expect("truncation should be detected");

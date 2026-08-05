@@ -16,7 +16,7 @@ pub(super) fn render_markdown_with_depth(
     let mut code_lines: Vec<String> = Vec::new();
     let mut quote_depth: usize = 0;
     let mut list_stack: Vec<Option<u64>> = Vec::new();
-    let mut item_marker: Option<String> = None;
+    let mut pending_item_marker: Option<String> = None;
     let mut text_style = md(theme::palette().text);
     let mut style_stack: Vec<Style> = Vec::new();
     let mut link_url: Option<String> = None;
@@ -74,11 +74,11 @@ pub(super) fn render_markdown_with_depth(
             Event::End(TagEnd::List(_)) => {
                 push_paragraph(&mut blocks, &mut current);
                 list_stack.pop();
-                item_marker = None;
+                pending_item_marker = None;
             }
             Event::Start(Tag::Item) => {
                 push_paragraph(&mut blocks, &mut current);
-                item_marker = Some(match list_stack.last().copied().flatten() {
+                pending_item_marker = Some(match list_stack.last().copied().flatten() {
                     Some(next) => format!("{:>2}. ", next),
                     None => "•   ".to_string(),
                 });
@@ -88,7 +88,7 @@ pub(super) fn render_markdown_with_depth(
                 if let Some(Some(next)) = list_stack.last_mut() {
                     *next += 1;
                 }
-                item_marker = None;
+                pending_item_marker = None;
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 push_paragraph(&mut blocks, &mut current);
@@ -166,7 +166,7 @@ pub(super) fn render_markdown_with_depth(
                 } else if let Some(table) = table.as_mut() {
                     table.push_text(&text);
                 } else if let Block::Paragraph(spans) = &mut current {
-                    push_block_prefix(spans, quote_depth, item_marker.as_deref());
+                    push_block_prefix(spans, quote_depth, &mut pending_item_marker);
                     spans.push(Span::styled(text.to_string(), text_style));
                 }
             }
@@ -174,7 +174,7 @@ pub(super) fn render_markdown_with_depth(
                 if let Some(table) = table.as_mut() {
                     table.push_text(&code);
                 } else if let Block::Paragraph(spans) = &mut current {
-                    push_block_prefix(spans, quote_depth, item_marker.as_deref());
+                    push_block_prefix(spans, quote_depth, &mut pending_item_marker);
                     spans.push(Span::styled(
                         code.to_string(),
                         md_bold(theme::palette().command),
@@ -233,7 +233,7 @@ pub(super) fn render_markdown_with_depth(
             }
             Event::TaskListMarker(checked) => {
                 if let Block::Paragraph(spans) = &mut current {
-                    push_block_prefix(spans, quote_depth, item_marker.as_deref());
+                    push_block_prefix(spans, quote_depth, &mut pending_item_marker);
                     spans.push(Span::styled(
                         if checked { "[x] " } else { "[ ] " },
                         md(theme::palette().muted),
@@ -243,7 +243,7 @@ pub(super) fn render_markdown_with_depth(
             Event::FootnoteReference(_) => {}
             Event::InlineMath(math) | Event::DisplayMath(math) => {
                 if let Block::Paragraph(spans) = &mut current {
-                    push_block_prefix(spans, quote_depth, item_marker.as_deref());
+                    push_block_prefix(spans, quote_depth, &mut pending_item_marker);
                     spans.push(Span::styled(
                         math.to_string(),
                         md_bold(theme::palette().muted),
@@ -355,7 +355,7 @@ pub(super) enum Block {
 pub(super) fn push_block_prefix(
     spans: &mut Vec<Span<'static>>,
     quote_depth: usize,
-    marker: Option<&str>,
+    marker: &mut Option<String>,
 ) {
     if !spans.is_empty() {
         return;
@@ -366,8 +366,8 @@ pub(super) fn push_block_prefix(
             md(theme::palette().muted),
         ));
     }
-    if let Some(marker) = marker {
-        spans.push(Span::styled(marker.to_string(), md(theme::palette().muted)));
+    if let Some(marker) = marker.take() {
+        spans.push(Span::styled(marker, md(theme::palette().muted)));
     }
 }
 
