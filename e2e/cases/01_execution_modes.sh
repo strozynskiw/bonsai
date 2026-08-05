@@ -5,12 +5,12 @@
 # bug: yolo must render as `yolo`, never collapse to `auto-accept`.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
-e2e_begin "01_execution_modes: /autonomy, /yolo, Alt+M, Tab"
+e2e_begin "01_execution_modes: /autonomy, /yolo, Alt+M"
 
 tui_start 140 40 || e2e_done
 
 echo "fresh start (no auto-accept/yolo marker):"
-expect_meta "an agent is shown"           "Agent ·"
+expect_meta "an agent is shown"           "Coding ·"
 forbid_meta "no auto-accept marker"       "auto-accept"
 forbid_meta "no yolo marker"              "· yolo"
 
@@ -40,8 +40,9 @@ echo "Alt+M cycles the autonomy axis:"
 tui_keys M-m
 expect_meta "Alt+M -> conservative"       "· conservative"
 
-echo "Tab switches the agent axis (orthogonal to policy):"
+echo "Tab has no idle mode-switch side effect:"
 tui_keys Tab
-expect_meta "Tab -> Plan agent"           "Plan ·"
+expect_meta "Tab keeps the coding agent"  "Coding ·"
+expect_meta "Tab keeps autonomy"          "· conservative"
 
 e2e_done

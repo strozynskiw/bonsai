@@ -39,6 +39,7 @@ e2e_begin() {
 }
 
 e2e_cleanup() {
+  [ -n "${E2E_HELPER_PID:-}" ] && kill "$E2E_HELPER_PID" 2>/dev/null || true
   [ -n "${E2E_SOCK:-}" ] && tx kill-server 2>/dev/null || true
   [ -n "${E2E_HOME:-}" ] && rm -rf "$E2E_HOME" 2>/dev/null || true
 }
@@ -59,14 +60,29 @@ e2e_done() {
 # until `ready_regex` renders. The env is injected inline (proven to work) so
 # the pane process is bonsai itself — a clean /quit then kills the pane.
 tui_start() {
-  local cols="${1:-140}" rows="${2:-40}" ready="${3:-(Agent|Plan) ·}"
+  local cols="${1:-140}" rows="${2:-40}" ready="${3:-(Coding|Planning) ·}"
+  local provider_base_url="${E2E_PROVIDER_BASE_URL:-http://127.0.0.1:9/v1}"
   tx kill-server 2>/dev/null || true
   tx new-session -d -s "$E2E_SESSION" -x "$cols" -y "$rows"
   tx send-keys -t "$E2E_SESSION" \
-    "exec env BONSAI_HOME='$E2E_HOME' BONSAI_DISABLE_MODELS_FETCH=1 \
-OPENAI_COMPATIBLE_BASE_URL='http://127.0.0.1:9/v1' \
+    "exec env HOME='$E2E_HOME' BONSAI_HOME='$E2E_HOME' CODEX_HOME='$E2E_HOME/codex' \
+BONSAI_DISABLE_MODELS_FETCH=1 OPENCODE_API_KEY='' ANTHROPIC_API_KEY='' \
+MINIMAX_API_KEY='' MINIMAX_CODING_PLAN_API_KEY='' ZAI_API_KEY='' \
+ZAI_CODING_PLAN_API_KEY='' MOONSHOT_API_KEY='' KIMI_CODING_PLAN_API_KEY='' \
+MIMO_API_KEY='' MIMO_CODING_PLAN_API_KEY='' OPENROUTER_API_KEY='' OPENAI_API_KEY='' \
+ANTHROPIC_COMPATIBLE_API_KEY='' DEEPSEEK_API_KEY='' DASHSCOPE_API_KEY='' \
+DASHSCOPE_TOKEN_PLAN_API_KEY='' GEMINI_API_KEY='' XAI_API_KEY='' MISTRAL_API_KEY='' \
+HUNYUAN_API_KEY='' \
+BONSAI_MEMORY_EMBEDDINGS=off OPENAI_COMPATIBLE_BASE_URL='$provider_base_url' \
 OPENAI_COMPATIBLE_MODEL='mock-model' OPENAI_COMPATIBLE_API_KEY='e2e-test' \
 '$BONSAI_BIN'" Enter
+  # A pristine state root opens onboarding. Surface tests exercise the chat,
+  # so take its documented "later" path instead of seeding private state.
+  if wait_for "Welcome to Bonsai|$ready" "$E2E_STARTUP_WAIT"; then
+    if tui_text | grep -qaF "Welcome to Bonsai"; then
+      tx send-keys -t "$E2E_SESSION" Escape
+    fi
+  fi
   if ! wait_for "$ready" "$E2E_STARTUP_WAIT"; then
     echo "  ❌ startup: '$ready' never rendered within ${E2E_STARTUP_WAIT}s"
     echo "----- pane -----"; tui_text; echo "----------------"
@@ -78,10 +94,10 @@ OPENAI_COMPATIBLE_MODEL='mock-model' OPENAI_COMPATIBLE_API_KEY='e2e-test' \
 tui_keys() { tx send-keys -t "$E2E_SESSION" "$@"; sleep "$WAIT"; }
 tui_text() { tx capture-pane -t "$E2E_SESSION" -p 2>/dev/null; }
 tui_ansi() { tx capture-pane -t "$E2E_SESSION" -p -e 2>/dev/null; }
-tui_meta() { tui_text | grep -aE '(Agent|Plan) ·' | tail -1; }
-# The live composer input line. The completion popup also draws `│ > …` rows
-# above it, so the actual input is the LAST such line.
-tui_input() { tui_text | grep -aE '│ > ' | tail -1; }
+tui_meta() { tui_text | grep -aE '(Coding|Planning) ·' | tail -1; }
+# The live composer has a two-cell left inset; completion rows use one. Match
+# that structural difference so popup candidates can never masquerade as input.
+tui_input() { tui_text | grep -aE '│  > ' | tail -1; }
 tui_alive() { tx has-session -t "$E2E_SESSION" 2>/dev/null; }
 
 # wait_for <regex> [timeout_s]: poll the pane until the regex appears.

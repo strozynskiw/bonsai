@@ -14,13 +14,14 @@ expect "lists a known command"     "List commands"
 expect "lists a saved-session cmd" "Resume a saved session"
 tui_keys Escape
 
-echo "/theme switches theme and reports it:"
+echo "/theme opens the picker:"
 tui_keys "/theme" Enter
-expect "theme status message"      "Theme switched to"
+expect "theme picker renders"      "Themes"
+tui_keys Escape
 
 echo "unknown subcommand is a safe no-op (no crash, chat survives):"
 tui_keys "/help totally-bogus" Enter
 forbid      "no panic"             "panicked"
-expect_meta "chat still rendered"  "Agent ·"
+expect_meta "chat still rendered"  "Coding ·"
 
 e2e_done

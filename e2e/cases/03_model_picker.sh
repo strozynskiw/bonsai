@@ -14,8 +14,8 @@ expect "picker shows key hints"   "Esc cancel"
 
 echo "Esc closes the picker, back to chat:"
 tui_keys Escape
-wait_for '(Agent|Plan) ·' 5 || true
+wait_for '(Coding|Planning) ·' 5 || true
 forbid      "picker is gone"      "Esc cancel"
-expect_meta "back in chat"        "Agent ·"
+expect_meta "back in chat"        "Coding ·"
 
 e2e_done

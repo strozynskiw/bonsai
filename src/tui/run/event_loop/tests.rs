@@ -1674,6 +1674,74 @@ async fn running_escape_interrupts_and_stages_immediate_steer() {
 }
 
 #[tokio::test]
+async fn escape_steer_reduces_old_completion_before_starting_replacement() {
+    let (mut tasks, mut runtime_rx) = running_tasks().await;
+    let mut app = app();
+    app.task_state = TaskState::Running;
+    app.composer.set_text("do this now".to_string());
+
+    assert!(steer_active_run(
+        &mut app,
+        &tasks,
+        &crate::provider::ProviderRegistry::default_registry(),
+        &test_model_catalog(),
+    ));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if reap_finished_task(&mut app, &mut tasks).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("interrupted run should be reaped");
+
+    assert!(!tasks.is_busy());
+    assert!(matches!(
+        app.queued_inputs.as_slice(),
+        [QueuedInput {
+            delivery: FollowUpDelivery::Steer,
+            ..
+        }]
+    ));
+
+    let old_result = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(RuntimeEvent::AgentFinished(result)) = runtime_rx.recv().await {
+                break result;
+            }
+        }
+    })
+    .await
+    .expect("old completion event should be queued");
+    app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(old_result)));
+
+    let mut repo_map = empty_repo_map_injector();
+    assert!(
+        start_pending_queued_run_if_idle(
+            &mut app,
+            &mut tasks,
+            test_agent(Box::new(BlockingProvider)),
+            Arc::new(NullSink),
+            &mut repo_map,
+            &ProviderRegistry::default_registry(),
+            &test_model_catalog(),
+        )
+        .await
+    );
+
+    assert_eq!(app.task_state, TaskState::Running);
+    assert!(tasks.is_busy());
+    assert_ne!(
+        crate::tui::view::status_dot_spans(&app)[0].content.as_ref(),
+        "●",
+        "the replacement run must keep the active spinner"
+    );
+    tasks.abort();
+}
+
+#[tokio::test]
 async fn running_follow_up_does_not_accept_slash_commands() {
     let (mut tasks, _runtime_rx) = running_tasks().await;
     let mut app = app();

@@ -7,7 +7,8 @@ correctly in isolation but isn't actually hooked up in the running app (e.g. the
 idle-`/yolo` regression).
 
 Scope is **UI-surface only**: startup, slash commands, pickers, keybinds,
-execution modes. No messages are sent, so no network and no real API keys.
+execution modes, and deterministic turn handoffs. Turn tests use a loopback
+mock provider; no external network or real API keys are used.
 
 ## Run it
 
@@ -28,10 +29,12 @@ Each case runs against a throwaway, no-dependency environment (`e2e_begin` in
 | Lever | Effect |
 | --- | --- |
 | `BONSAI_HOME=$(mktemp -d)` | isolated SQLite state; your real `~/.bonsai` is never touched |
+| `HOME=$BONSAI_HOME` | isolates legacy config/session discovery too |
 | `BONSAI_DISABLE_MODELS_FETCH=1` | no models.dev network fetch; built-in catalog only |
-| `OPENAI_COMPATIBLE_BASE_URL` + `_MODEL` | seeds an *authorized* provider at load, so the TUI opens straight to chat (no wizard) — the base URL is a dead address since surface-only tests never send |
+| `OPENAI_COMPATIBLE_BASE_URL` + `_MODEL` | seeds an *authorized* provider; normally a dead address, overridden by turn tests with the loopback mock |
 
-The "chat is ready" signal is the composer meta line `● Agent · … ` (or `Plan ·`).
+The "chat is ready" signal is the composer meta line `● Coding · … ` (or
+`Planning ·`).
 `tui_start` blocks on it instead of sleeping a fixed interval.
 
 ## Layout
@@ -42,11 +45,13 @@ e2e/
   lib.sh        # isolated env, tmux driver, render-aware assertions
   cases/
     00_startup.sh          # boots to chat; compact header on a short terminal
-    01_execution_modes.sh  # /autonomy, /yolo, Alt+M, Tab  (idle-/yolo regression guard)
+    01_execution_modes.sh  # /autonomy, /yolo, Alt+M  (idle-/yolo regression guard)
     02_slash_commands.sh   # /help modal, /theme status, bad-arg no-op
     03_model_picker.sh     # /model opens picker, Esc returns to chat
     04_completion.sh       # "/mod" + Tab -> "/model"  (slash-command completion)
     05_quit.sh             # /quit exits the process cleanly
+    06_escape_steer.sh     # Esc replacement remains visibly active
+  mock_streaming_provider.py # deterministic loopback SSE provider
 ```
 
 ## Writing a new case

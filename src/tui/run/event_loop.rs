@@ -678,6 +678,24 @@ fn steer_active_run(
     true
 }
 
+/// Reap a completed task without dispatching its successor in the same frame.
+///
+/// `spawn_agent_task` sends `AgentFinished` before its join handle completes,
+/// but the event-loop can observe the completed handle before it drains that
+/// event. Starting queued work here would let the old completion event land on
+/// the replacement run and reset its UI state to idle. The next frame drains
+/// runtime events first and only then uses the normal idle dispatch path.
+async fn reap_finished_task(app: &mut AppState, tasks: &mut TaskController) -> bool {
+    if tasks.poll_finished().await.is_none() {
+        return false;
+    }
+    if matches!(app.task_state, TaskState::Cancelling) {
+        app.reduce(AppAction::Agent(UiEvent::Interrupted));
+    }
+    app.mark_run_finished(Instant::now());
+    true
+}
+
 /// The Ctrl+C state machine for one keypress: confirm-exit, cancel a running
 /// turn / background subagents / a command and arm the exit prompt, or just arm
 /// it. Returns `true` when the caller should break the run loop (confirmed
@@ -3503,69 +3521,11 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             }
         }
 
-        if tasks.poll_finished().await.is_some() {
+        if reap_finished_task(&mut app, &mut tasks).await {
             redraw_requested = true;
-            if matches!(app.task_state, TaskState::Cancelling) {
-                app.reduce(AppAction::Agent(UiEvent::Interrupted));
-            }
-            app.mark_run_finished(Instant::now());
-            // Starting a new plan protects and clears the previous canvas before
-            // any deferred command can act on it.
-            let started_new_plan = maybe_start_new_plan(
-                &mut app,
-                &mut tasks,
-                agent.clone(),
-                sink.clone(),
-                &mut repo_map,
-                &storage,
-                current_session_id,
-                plan_store.clone(),
-            )
-            .await;
-            redraw_requested |= started_new_plan;
-            if !started_new_plan {
-                let started_deferred = start_next_deferred_command_if_idle(
-                    &mut app,
-                    &mut tasks,
-                    agent.clone(),
-                    session_store.clone(),
-                    &project_root,
-                    DeferredCommandDeps {
-                        registry: registry.clone(),
-                        model_catalog: model_catalog.clone(),
-                        storage: Some(&storage),
-                    },
-                )
-                .await;
-                redraw_requested |= started_deferred;
-                // A finished phased-plan run auto-advances to the next phase. When it
-                // starts the next phase, skip the queued-run start so the two don't
-                // race for the idle slot.
-                let advanced = !started_deferred
-                    && maybe_advance_plan_phase(
-                        &mut app,
-                        &mut tasks,
-                        agent.clone(),
-                        sink.clone(),
-                        todo_store.clone(),
-                        plan_store.clone(),
-                        &mut repo_map,
-                    )
-                    .await;
-                redraw_requested |= advanced;
-                if !started_deferred && !advanced {
-                    redraw_requested |= start_pending_queued_run_if_idle(
-                        &mut app,
-                        &mut tasks,
-                        agent.clone(),
-                        sink.clone(),
-                        &mut repo_map,
-                        &registry,
-                        &model_catalog,
-                    )
-                    .await;
-                }
-            }
+            // Do not dispatch a replacement here. `AgentFinished` may still be
+            // queued; the next frame drains it before the unconditional idle
+            // dispatch site starts plans, commands, phases, or queued input.
             // A persona selected while the run was in flight was deliberately
             // not applied mid-run (the busy guard skipped it). Apply it now
             // that the run ended — completed, failed, or interrupted alike.
