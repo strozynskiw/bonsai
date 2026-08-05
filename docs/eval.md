@@ -39,8 +39,9 @@ regressions.
 
 ## Suites
 
-Suites are TOML files: an `id`, a `seed`, and `[[tasks]]` entries with a
-fixture directory, a prompt, a mock script, and graders. Beyond the simple
+Suites are TOML files: an `id`, a `seed`, optional suite-wide `repetitions`, and
+`[[tasks]]` entries with a fixture directory, a prompt, an optional mock script,
+and graders. Beyond the simple
 read/write shorthand, tasks can exercise release scenarios: raw tool-call
 batches with malformed arguments, deterministic cancellation and resumption,
 truncated provider responses, forced compaction with a mock context window,
@@ -48,13 +49,15 @@ prompt-cache simulation with forbidden request substrings, and
 shared-workspace tasks that run a second real agent session against the same
 worktree to verify the workspace lock and change attribution.
 
-Three grader types verify outcomes:
+Five grader types verify outcomes:
 
 | Grader | Checks |
 | --- | --- |
 | `test-pass` | A trusted command exits 0 in the copied worktree within `timeout_secs` |
 | `file-state` | A relative path's existence/absence, required/forbidden text, or exact equality with an expected file |
 | `assertion` | Required/forbidden text in the final assistant output |
+| `changed-files` | Exact, required, or forbidden paths observed changing during the agent run |
+| `tool-effects` | Required or forbidden successful tool-effect classes |
 
 Suite-level `[budgets]` (overridable per task) bound logical turns, provider
 attempts, duration, prompt/completion/uncached tokens, cost, per-turn
@@ -68,6 +71,8 @@ post-warmup cache percentage.
 - `eval/suites/language_acceptance.toml` — dependency-free Rust, TypeScript,
   Python, and Go repositories whose initial implementations fail their native
   tests; the agent must inspect, fix, and pass a clean re-run.
+- `eval/suites/intent_authority.toml` — repeated live-model checks that full
+  and SMOL prompts diagnose without mutation, then mutate and verify when asked.
 - `eval/suites/task_todo.toml` and `eval/suites/read_efficiency.toml` — the
   end-to-end efficiency benchmarks. Run both on Codex and at least one
   non-Codex transport before changing read reuse, cache shaping, retry, or

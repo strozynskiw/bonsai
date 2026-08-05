@@ -37,6 +37,7 @@ pub(crate) struct EvalReport {
 pub(crate) struct SuiteReport {
     pub(crate) id: String,
     pub(crate) path: String,
+    pub(crate) repetitions: usize,
 }
 
 /// Terminal state of a single task run.
@@ -73,6 +74,7 @@ impl TaskStatus {
 pub(crate) struct TaskReport {
     pub(crate) id: String,
     pub(crate) prompt: String,
+    pub(crate) profile: EvalAgentProfile,
     pub(crate) status: TaskStatus,
     pub(crate) expected_status: TaskStatus,
     pub(crate) passed: bool,
@@ -99,6 +101,8 @@ pub(crate) struct TaskReport {
     pub(crate) min_episode_evictions: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shared_workspace: Option<SharedWorkspaceReport>,
+    pub(crate) changed_files: Vec<String>,
+    pub(crate) tool_effects: Vec<EvalToolEffect>,
     pub(crate) worktree_path: String,
     pub(crate) graders: Vec<GraderResult>,
 }
@@ -228,6 +232,10 @@ pub(crate) fn format_eval_summary(report: &EvalReport) -> String {
     summary.push_str(&format!("- Reasoning: `{}`\n", report.reasoning));
     summary.push_str(&format!("- Seed: `{}`\n", report.seed));
     summary.push_str(&format!(
+        "- Repetitions per selected task: `{}`\n",
+        report.suite.repetitions
+    ));
+    summary.push_str(&format!(
         "- Score: {}/{} ({:.1}%)\n",
         report.score.passed, report.score.total, report.score.percent
     ));
@@ -345,6 +353,7 @@ mod tests {
         TaskReport {
             id: id.to_string(),
             prompt: String::new(),
+            profile: EvalAgentProfile::Full,
             status: TaskStatus::Completed,
             expected_status: TaskStatus::Completed,
             passed,
@@ -379,6 +388,8 @@ mod tests {
             episode_evictions: 0,
             min_episode_evictions: None,
             shared_workspace: None,
+            changed_files: Vec::new(),
+            tool_effects: Vec::new(),
             worktree_path: String::new(),
             graders: Vec::new(),
         }
@@ -411,6 +422,7 @@ mod tests {
             suite: SuiteReport {
                 id: "suite".to_string(),
                 path: "suite.toml".to_string(),
+                repetitions: 1,
             },
             mode: EvalMode::Mock,
             provider: MOCK_PROVIDER_ID.to_string(),

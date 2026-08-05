@@ -542,6 +542,7 @@ mod tests {
             suite: super::super::SuiteReport {
                 id: "suite".to_string(),
                 path: "suite.toml".to_string(),
+                repetitions: 1,
             },
             mode: super::super::EvalMode::Mock,
             provider: "provider".to_string(),

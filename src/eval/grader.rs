@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -10,6 +11,50 @@ use tokio::time::timeout;
 use super::*;
 
 const DEFAULT_GRADER_TIMEOUT_SECS: u64 = 30;
+
+/// Observable class of a successfully completed tool call during an eval task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EvalToolEffect {
+    Inspection,
+    WorkspaceMutation,
+    CommandExecution,
+    Interaction,
+    Delegation,
+    ExternalAccess,
+    LocalState,
+    Unknown,
+}
+
+impl EvalToolEffect {
+    /// Classify the effect boundary exposed by a tool name for eval evidence.
+    pub(crate) fn for_tool_name(name: &str) -> Self {
+        match name {
+            "read" | "read_region" | "read_symbol" | "glob" | "grep" | "symbol_search"
+            | "definition" | "references" | "hover" | "workspace_symbol" | "git"
+            | "diagnostics" | "project_info" | "recall" | "skill" | "image_view" => {
+                Self::Inspection
+            }
+            "write" | "edit" | "apply_patch" | "rename_symbol" => Self::WorkspaceMutation,
+            "bash" | "terminal" => Self::CommandExecution,
+            "question" => Self::Interaction,
+            "agent" | "task" => Self::Delegation,
+            "webfetch" | "websearch" | "imagegen" => Self::ExternalAccess,
+            "todowrite" | "set_session_title" | "start_new_plan" | "memory_write" | "peers"
+            | "tasks" => Self::LocalState,
+            name if name.starts_with("plan_") => Self::LocalState,
+            name if name.starts_with("mcp__") => Self::ExternalAccess,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Effects observed by the eval sink and available to outcome graders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EvalTaskEffects {
+    pub(crate) changed_files: Vec<String>,
+    pub(crate) tool_effects: Vec<EvalToolEffect>,
+}
 
 /// A single grader declaration parsed from a suite's `[[tasks.graders]]` table.
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +84,22 @@ pub(crate) enum GraderSpec {
         contains: Vec<String>,
         #[serde(default)]
         not_contains: Vec<String>,
+    },
+    /// Assert the exact, required, or forbidden paths changed by the task.
+    ChangedFiles {
+        #[serde(default)]
+        exact: Option<Vec<String>>,
+        #[serde(default)]
+        required: Vec<String>,
+        #[serde(default)]
+        forbidden: Vec<String>,
+    },
+    /// Assert successful tool-effect classes observed during the task.
+    ToolEffects {
+        #[serde(default)]
+        required: Vec<EvalToolEffect>,
+        #[serde(default)]
+        forbidden: Vec<EvalToolEffect>,
     },
 }
 
@@ -79,6 +140,40 @@ impl GraderSpec {
                     anyhow::bail!("Task '{task_id}' assertion grader has no checks");
                 }
             }
+            Self::ChangedFiles {
+                exact,
+                required,
+                forbidden,
+            } => {
+                if exact.is_none() && required.is_empty() && forbidden.is_empty() {
+                    anyhow::bail!("Task '{task_id}' changed-files grader has no checks");
+                }
+                for path in exact.iter().flatten().chain(required).chain(forbidden) {
+                    SafeRelativePath::parse(path, "changed-files path").with_context(|| {
+                        format!("Invalid changed-files path in task '{task_id}'")
+                    })?;
+                }
+                let required = required.iter().collect::<HashSet<_>>();
+                if let Some(path) = forbidden.iter().find(|path| required.contains(path)) {
+                    anyhow::bail!(
+                        "Task '{task_id}' changed-files path is both required and forbidden: {path}"
+                    );
+                }
+            }
+            Self::ToolEffects {
+                required,
+                forbidden,
+            } => {
+                if required.is_empty() && forbidden.is_empty() {
+                    anyhow::bail!("Task '{task_id}' tool-effects grader has no checks");
+                }
+                let required = required.iter().collect::<HashSet<_>>();
+                if let Some(effect) = forbidden.iter().find(|effect| required.contains(effect)) {
+                    anyhow::bail!(
+                        "Task '{task_id}' tool effect is both required and forbidden: {effect:?}"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -89,6 +184,7 @@ impl GraderSpec {
         worktree: &Path,
         suite_base_dir: &Path,
         assistant_output: &str,
+        effects: &EvalTaskEffects,
     ) -> GraderResult {
         let started = Instant::now();
         let (grader_type, passed, details) = match self {
@@ -125,6 +221,26 @@ impl GraderSpec {
                 let result = grade_assertion(assistant_output, contains, not_contains);
                 ("assertion", result.passed, result.details)
             }
+            Self::ChangedFiles {
+                exact,
+                required,
+                forbidden,
+            } => {
+                let result = grade_changed_files(
+                    &effects.changed_files,
+                    exact.as_deref(),
+                    required,
+                    forbidden,
+                );
+                ("changed-files", result.passed, result.details)
+            }
+            Self::ToolEffects {
+                required,
+                forbidden,
+            } => {
+                let result = grade_tool_effects(&effects.tool_effects, required, forbidden);
+                ("tool-effects", result.passed, result.details)
+            }
         };
         GraderResult {
             grader_type: grader_type.to_string(),
@@ -138,7 +254,7 @@ impl GraderSpec {
 /// Serialized outcome of running one grader against a finished task.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GraderResult {
-    /// Grader discriminant (`test-pass` / `file-state` / `assertion`).
+    /// Grader discriminant such as `test-pass`, `changed-files`, or `tool-effects`.
     #[serde(rename = "type")]
     pub(crate) grader_type: String,
     /// Whether the grader passed.
@@ -155,12 +271,13 @@ pub(crate) async fn grade_task(
     worktree: &Path,
     suite_base_dir: &Path,
     assistant_output: &str,
+    effects: &EvalTaskEffects,
 ) -> Vec<GraderResult> {
     let mut results = Vec::with_capacity(graders.len());
     for grader in graders {
         results.push(
             grader
-                .grade(worktree, suite_base_dir, assistant_output)
+                .grade(worktree, suite_base_dir, assistant_output, effects)
                 .await,
         );
     }
@@ -392,6 +509,59 @@ fn grade_assertion(
     .unwrap_or_else(|| GradeOutcome::pass("assistant output assertions passed"))
 }
 
+fn grade_changed_files(
+    observed: &[String],
+    exact: Option<&[String]>,
+    required: &[String],
+    forbidden: &[String],
+) -> GradeOutcome {
+    let observed = normalized_file_list(observed);
+    if let Some(exact) = exact {
+        let expected = normalized_file_list(exact);
+        if observed != expected {
+            return GradeOutcome::fail(format!(
+                "changed files differ: expected {expected:?}, observed {observed:?}"
+            ));
+        }
+    }
+    if let Some(path) = required.iter().find(|path| !observed.contains(path)) {
+        return GradeOutcome::fail(format!(
+            "required changed file was not observed: {path}; observed {observed:?}"
+        ));
+    }
+    if let Some(path) = forbidden.iter().find(|path| observed.contains(path)) {
+        return GradeOutcome::fail(format!(
+            "forbidden changed file was observed: {path}; observed {observed:?}"
+        ));
+    }
+    GradeOutcome::pass(format!("changed-files checks passed: {observed:?}"))
+}
+
+fn grade_tool_effects(
+    observed: &[EvalToolEffect],
+    required: &[EvalToolEffect],
+    forbidden: &[EvalToolEffect],
+) -> GradeOutcome {
+    if let Some(effect) = required.iter().find(|effect| !observed.contains(effect)) {
+        return GradeOutcome::fail(format!(
+            "required tool effect was not observed: {effect:?}; observed {observed:?}"
+        ));
+    }
+    if let Some(effect) = forbidden.iter().find(|effect| observed.contains(effect)) {
+        return GradeOutcome::fail(format!(
+            "forbidden tool effect was observed: {effect:?}; observed {observed:?}"
+        ));
+    }
+    GradeOutcome::pass(format!("tool-effects checks passed: {observed:?}"))
+}
+
+fn normalized_file_list(paths: &[String]) -> Vec<String> {
+    let mut normalized = paths.to_vec();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +664,61 @@ mod tests {
             &[String::from("error")],
         );
         assert!(!fail.passed);
+    }
+
+    #[test]
+    fn changed_files_grader_accepts_exact_empty_and_checks_paths() {
+        let empty = grade_changed_files(&[], Some(&[]), &[], &[]);
+        assert!(empty.passed);
+
+        let observed = vec!["src/lib.rs".to_string(), "tests/total.rs".to_string()];
+        let pass = grade_changed_files(
+            &observed,
+            None,
+            &["src/lib.rs".to_string()],
+            &["Cargo.toml".to_string()],
+        );
+        assert!(pass.passed);
+
+        let fail = grade_changed_files(&observed, Some(&["src/lib.rs".to_string()]), &[], &[]);
+        assert!(!fail.passed);
+        assert!(fail.details.contains("tests/total.rs"));
+    }
+
+    #[test]
+    fn tool_effects_grader_checks_required_and_forbidden_classes() {
+        let observed = [
+            EvalToolEffect::Inspection,
+            EvalToolEffect::WorkspaceMutation,
+        ];
+        let pass = grade_tool_effects(
+            &observed,
+            &[EvalToolEffect::Inspection],
+            &[EvalToolEffect::ExternalAccess],
+        );
+        assert!(pass.passed);
+
+        let fail = grade_tool_effects(&observed, &[], &[EvalToolEffect::WorkspaceMutation]);
+        assert!(!fail.passed);
+    }
+
+    #[test]
+    fn tool_effect_classification_covers_intent_eval_surfaces() {
+        assert_eq!(
+            EvalToolEffect::for_tool_name("read"),
+            EvalToolEffect::Inspection
+        );
+        assert_eq!(
+            EvalToolEffect::for_tool_name("apply_patch"),
+            EvalToolEffect::WorkspaceMutation
+        );
+        assert_eq!(
+            EvalToolEffect::for_tool_name("bash"),
+            EvalToolEffect::CommandExecution
+        );
+        assert_eq!(
+            EvalToolEffect::for_tool_name("mcp__github__create_issue"),
+            EvalToolEffect::ExternalAccess
+        );
     }
 }

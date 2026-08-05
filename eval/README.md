@@ -31,11 +31,13 @@ Suites are TOML files:
 ```toml
 id = "m2_10"
 seed = 210
+repetitions = 1
 
 [[tasks]]
 id = "t01_readme_agentic"
 fixture = "fixtures/tiny_project"
 prompt = "Update README.md."
+profile = "full"
 
 [tasks.mock]
 read = ["README.md"]
@@ -49,6 +51,12 @@ type = "file-state"
 path = "README.md"
 contains = ["new content"]
 ```
+
+`repetitions` runs every selected task in a fresh copied worktree, with stable
+`<task>-run-N` report ids when the value is greater than one. It defaults to 1.
+Tasks default to the `full` coding prompt; `profile = "smol"` exercises the
+compact prompt and tool profile. A suite with tasks that omit `tasks.mock` is
+live-only and must be run with `--mode live`.
 
 Release scenarios may emit raw tool-call batches so malformed argument strings
 and parallel calls traverse the normal agent path. A task can also declare an
@@ -162,6 +170,15 @@ cargo run --locked -- eval --mode mock \
   --baseline eval/baselines/release-v1.toml --fail-on-task-failure
 ```
 
+`intent_authority.toml` is a live-only suite. It repeats full and SMOL
+diagnosis/no-mutation and diagnosis/fix/verification tasks three times in fresh
+worktrees:
+
+```sh
+cargo run --locked -- eval --mode live --provider codex \
+  --suite eval/suites/intent_authority.toml --fail-on-task-failure
+```
+
 The tagged-release workflow pins Node 22.18, Python 3.12, and Go 1.23 for this
 suite; Rust uses the repository's stable toolchain. The TypeScript fixture uses
 Node's built-in erasable-type support and has no npm dependencies.
@@ -241,6 +258,27 @@ contains = ["Updated README.md"]
 not_contains = ["failed"]
 ```
 
+`changed-files` checks the paths Bonsai observed the agent mutate. `exact = []`
+is an explicit no-mutation assertion; `required` and `forbidden` provide subset
+checks.
+
+```toml
+[[tasks.graders]]
+type = "changed-files"
+exact = ["src/lib.rs"]
+```
+
+`tool-effects` checks successful effect classes: `inspection`,
+`workspace-mutation`, `command-execution`, `interaction`, `delegation`,
+`external-access`, `local-state`, and the conservative `unknown` fallback.
+
+```toml
+[[tasks.graders]]
+type = "tool-effects"
+required = ["workspace-mutation", "command-execution"]
+forbidden = ["external-access"]
+```
+
 Task failures are reported in JSON and do not make `bonsai eval` exit nonzero
 unless `--fail-on-task-failure` is set. Harness, suite, CLI, fixture, or
 auth/config errors always exit nonzero.
@@ -249,14 +287,15 @@ auth/config errors always exit nonzero.
 
 Each run writes `target/eval/<run-id>/report.json` and
 `target/eval/<run-id>/summary.md` by default. The JSON report includes suite
-id/path, mode, provider/model, seed, score, per-task grader details, token
+id/path, repetitions, mode, provider/model, seed, score, per-task grader details, token
 totals, cost when pricing is known, tokens per dollar, duration, and each
 copied worktree path. It also includes suite-level cache reuse, verification
 repair turns, and an optional versioned baseline comparison. The Markdown
 summary is the CI-friendly scorecard: overall score, token/cost/latency/cache/
 repair totals and deltas, reasoning selection, and per-task
 score/budget/tokens/tokens-per-dollar. Each JSON task includes lane-aware usage
-turns, finish reasons, reasoning size, inspection counters, and budget metrics.
+turns, finish reasons, reasoning size, inspection counters, changed files,
+successful tool-effect classes, and budget metrics.
 
 Use `--json` to also print the report JSON to stdout for CI ingestion.
 

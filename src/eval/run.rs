@@ -32,6 +32,7 @@ use crate::tool::{ProjectInfoProviderState, ReadTracker, SharedActiveSessionId};
 use super::*;
 
 const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_EVAL_REPETITIONS: usize = 1;
 
 /// Paths and pass/fail totals returned to the CLI after a completed eval run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,11 +104,27 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
             &reasoning,
         )?;
     }
-    let mut task_reports = Vec::with_capacity(selected_tasks.len());
+    let mut task_reports =
+        Vec::with_capacity(selected_tasks.len().saturating_mul(suite.repetitions));
     let started = Instant::now();
 
     for task in selected_tasks {
-        task_reports.push(run_task(&suite, task, seed, &run_dir, &storage, &provider_setup).await?);
+        for repetition in 1..=suite.repetitions {
+            let task_run_id = repeated_task_id(&task.id, repetition, suite.repetitions);
+            let repetition_offset = u64::try_from(repetition.saturating_sub(1)).unwrap_or(u64::MAX);
+            task_reports.push(
+                run_task(
+                    &suite,
+                    task,
+                    &task_run_id,
+                    seed.saturating_add(repetition_offset),
+                    &run_dir,
+                    &storage,
+                    &provider_setup,
+                )
+                .await?,
+            );
+        }
     }
 
     let usage = UsageReport::sum(task_reports.iter().map(|task| task.usage));
@@ -123,6 +140,7 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
         suite: SuiteReport {
             id: suite.id.clone(),
             path: suite.path.display().to_string(),
+            repetitions: suite.repetitions,
         },
         mode: config.mode,
         provider: provider_setup.provider_id().to_string(),
@@ -196,6 +214,14 @@ fn select_tasks<'a>(suite: &'a EvalSuite, task_id: Option<&str>) -> Result<Vec<&
         return Ok(vec![task]);
     }
     Ok(suite.tasks.iter().collect())
+}
+
+fn repeated_task_id(task_id: &str, repetition: usize, repetitions: usize) -> String {
+    if repetitions == 1 {
+        task_id.to_string()
+    } else {
+        format!("{task_id}-run-{repetition}")
+    }
 }
 
 /// Provider backend for an eval run, resolved once before tasks execute.
@@ -442,6 +468,7 @@ struct EvalAgentBuild<'a> {
     /// Force the episode store on even when the explicit environment kill
     /// switch is set, so episode-specific tasks stay deterministic in CI.
     enable_episodes: bool,
+    profile: EvalAgentProfile,
     session_title: &'a str,
 }
 
@@ -569,6 +596,9 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
     if let Some(max_turns) = config.max_logical_turns {
         agent_builder = agent_builder.max_iterations(max_turns);
     }
+    if config.profile == EvalAgentProfile::Smol {
+        agent_builder = agent_builder.smol_preference(crate::smol::SmolPreference::On);
+    }
     if let Some(episode_store) = episode_store {
         agent_builder = agent_builder.episode_store(episode_store);
     }
@@ -626,6 +656,7 @@ async fn run_shared_workspace_peer(
         mock_context_window_tokens: None,
         enable_peer_context: true,
         enable_episodes: false,
+        profile: EvalAgentProfile::Full,
         session_title: &session_title,
     })
     .await?;
@@ -667,6 +698,7 @@ async fn run_shared_workspace_peer(
 async fn run_task(
     suite: &EvalSuite,
     task: &EvalTask,
+    task_run_id: &str,
     seed: u64,
     run_dir: &Path,
     storage: &Storage,
@@ -674,11 +706,11 @@ async fn run_task(
 ) -> Result<TaskReport> {
     let started = Instant::now();
     let budgets = suite.budgets.overlay(task.budgets);
-    let worktree_path = run_dir.join("worktrees").join(&task.id);
+    let worktree_path = run_dir.join("worktrees").join(task_run_id);
     let fixture_path = SafeRelativePath::parse(&task.fixture, "fixture")?.join(&suite.base_dir);
     copy_dir_all(&fixture_path, &worktree_path)?;
 
-    let session_title = format!("eval primary: {}", task.id);
+    let session_title = format!("eval primary: {task_run_id}");
     let mut harness = build_eval_agent(EvalAgentBuild {
         worktree_path: &worktree_path,
         storage,
@@ -690,6 +722,7 @@ async fn run_task(
         mock_context_window_tokens: task.mock_context_window_tokens,
         enable_peer_context: task.shared_workspace_peer.is_some(),
         enable_episodes: task.min_episode_evictions.is_some(),
+        profile: task.profile,
         session_title: &session_title,
     })
     .await?;
@@ -744,7 +777,7 @@ async fn run_task(
         peer_outcome = Some(
             run_shared_workspace_peer(
                 peer,
-                &task.id,
+                task_run_id,
                 &worktree_path,
                 storage,
                 provider_setup,
@@ -824,7 +857,16 @@ async fn run_task(
         budgets.cache_warmup_turns.unwrap_or(1),
     );
     let budget = EvalBudgetReport::evaluate(budgets, budget_metrics, usage);
-    let grader_results = grade_task(&task.graders, &worktree_path, &suite.base_dir, &output).await;
+    let task_effects = eval_sink.task_effects();
+    let primary_changed_files = task_effects.changed_files.clone();
+    let grader_results = grade_task(
+        &task.graders,
+        &worktree_path,
+        &suite.base_dir,
+        &output,
+        &task_effects,
+    )
+    .await;
     let compactions = agent.compaction_events().len();
     // Episodes that left live context as a card marker. A later `/ctx` restore
     // flips Evicted to Restored without undoing the fact of the eviction, so
@@ -834,7 +876,6 @@ async fn run_task(
         .iter()
         .filter(|episode| matches!(episode.status_label.as_str(), "evicted" | "restored"))
         .count();
-    let primary_changed_files = eval_sink.changed_paths();
     storage
         .record_session_file_changes(session_id, &primary_changed_files)
         .await?;
@@ -916,8 +957,9 @@ async fn run_task(
     }
 
     Ok(TaskReport {
-        id: task.id.clone(),
+        id: task_run_id.to_string(),
         prompt: task.prompt.clone(),
+        profile: task.profile,
         status,
         expected_status: task.expected_status,
         passed,
@@ -938,6 +980,8 @@ async fn run_task(
         episode_evictions,
         min_episode_evictions: task.min_episode_evictions,
         shared_workspace,
+        changed_files: primary_changed_files,
+        tool_effects: task_effects.tool_effects,
         worktree_path: worktree_path.display().to_string(),
         graders: grader_results,
     })
@@ -954,6 +998,7 @@ struct EvalSuite {
     base_dir: PathBuf,
     id: String,
     seed: u64,
+    repetitions: usize,
     budgets: EvalBudgets,
     tasks: Vec<EvalTask>,
 }
@@ -973,6 +1018,7 @@ impl EvalSuite {
             base_dir,
             id: raw.id,
             seed: raw.seed,
+            repetitions: raw.repetitions,
             budgets: raw.budgets,
             tasks: raw.tasks,
         };
@@ -986,6 +1032,12 @@ impl EvalSuite {
         }
         if self.tasks.is_empty() {
             anyhow::bail!("Eval suite '{}' has no tasks", self.id);
+        }
+        if self.repetitions == 0 {
+            anyhow::bail!(
+                "Eval suite '{}' repetitions must be greater than zero",
+                self.id
+            );
         }
 
         let mut ids = HashSet::new();
@@ -1008,9 +1060,24 @@ impl EvalSuite {
 struct SuiteFile {
     id: String,
     seed: u64,
+    #[serde(default = "default_eval_repetitions")]
+    repetitions: usize,
     #[serde(default)]
     budgets: EvalBudgets,
     tasks: Vec<EvalTask>,
+}
+
+const fn default_eval_repetitions() -> usize {
+    DEFAULT_EVAL_REPETITIONS
+}
+
+/// Prompt/tool profile used for an eval task.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EvalAgentProfile {
+    #[default]
+    Full,
+    Smol,
 }
 
 /// A single eval task: a fixture to copy, a prompt to run, and its graders.
@@ -1020,6 +1087,8 @@ struct EvalTask {
     id: String,
     fixture: String,
     prompt: String,
+    #[serde(default)]
+    profile: EvalAgentProfile,
     #[serde(default)]
     mock: Option<MockScript>,
     #[serde(default)]
@@ -1476,6 +1545,8 @@ struct EvalSink {
 #[derive(Debug, Default)]
 struct EvalSinkState {
     pending: HashMap<String, EvalToolAction>,
+    pending_effects: HashMap<String, EvalToolEffect>,
+    observed_tool_effects: HashSet<EvalToolEffect>,
     read_calls: HashMap<String, EvalReadCall>,
     path_generations: HashMap<String, usize>,
     global_generation: usize,
@@ -1506,14 +1577,27 @@ enum EvalReadOutcome {
 }
 
 impl EvalSink {
-    fn changed_paths(&self) -> Vec<String> {
+    fn task_effects(&self) -> EvalTaskEffects {
         let state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut paths = state.path_generations.keys().cloned().collect::<Vec<_>>();
-        paths.sort();
-        paths
+        let mut changed_files = state.path_generations.keys().cloned().collect::<Vec<_>>();
+        changed_files.sort();
+        let mut tool_effects = state
+            .observed_tool_effects
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        tool_effects.sort();
+        EvalTaskEffects {
+            changed_files,
+            tool_effects,
+        }
+    }
+
+    fn changed_paths(&self) -> Vec<String> {
+        self.task_effects().changed_files
     }
 
     fn max_reads_per_unchanged_path(&self) -> usize {
@@ -1569,6 +1653,67 @@ impl EvalSink {
         reports.sort_by(|left, right| left.path.cmp(&right.path));
         reports
     }
+
+    fn finish_tool(
+        &self,
+        id: &str,
+        result: &str,
+        status: crate::output::ToolExecutionStatus,
+        diff_paths: &[String],
+    ) {
+        let success = status.is_success();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(effect) = state.pending_effects.remove(id)
+            && success
+        {
+            state.observed_tool_effects.insert(effect);
+        }
+        if let Some(call) = state.read_calls.get_mut(id) {
+            call.outcome = if result.starts_with(crate::agent::REUSED_READ_MARKER)
+                || result.starts_with(crate::agent::REUSED_INSPECTION_MARKER)
+            {
+                EvalReadOutcome::Reused
+            } else if result.starts_with("Error: this exact read was already answered")
+                || result.starts_with("Error: repeated unchanged inspection blocked")
+            {
+                EvalReadOutcome::Rejected
+            } else if success {
+                EvalReadOutcome::Executed
+            } else {
+                EvalReadOutcome::Failed
+            };
+            return;
+        }
+        let Some(action) = state.pending.remove(id) else {
+            if success {
+                record_changed_paths(&mut state, diff_paths);
+            }
+            return;
+        };
+        if !success {
+            return;
+        }
+        match action {
+            EvalToolAction::Mutate(path) if diff_paths.is_empty() => {
+                record_changed_paths(&mut state, &[path]);
+            }
+            EvalToolAction::Mutate(_) => record_changed_paths(&mut state, diff_paths),
+            EvalToolAction::GlobalMutate => {
+                state.global_generation = state.global_generation.saturating_add(1);
+                record_changed_paths(&mut state, diff_paths);
+            }
+        }
+    }
+}
+
+fn record_changed_paths(state: &mut EvalSinkState, paths: &[String]) {
+    for path in paths {
+        let generation = state.path_generations.entry(path.clone()).or_default();
+        *generation = generation.saturating_add(1);
+    }
 }
 
 impl OutputSink for EvalSink {
@@ -1578,6 +1723,8 @@ impl OutputSink for EvalSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for call in calls {
+            let effect = EvalToolEffect::for_tool_name(&call.name);
+            state.pending_effects.insert(call.id.clone(), effect);
             let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
             let path = arguments
                 .as_ref()
@@ -1612,7 +1759,12 @@ impl OutputSink for EvalSink {
                             .insert(call.id.clone(), EvalToolAction::Mutate(path));
                     }
                 }
-                "apply_patch" | "bash" => {
+                "bash" => {
+                    state
+                        .pending
+                        .insert(call.id.clone(), EvalToolAction::GlobalMutate);
+                }
+                _ if effect == EvalToolEffect::WorkspaceMutation => {
                     state
                         .pending
                         .insert(call.id.clone(), EvalToolAction::GlobalMutate);
@@ -1623,42 +1775,7 @@ impl OutputSink for EvalSink {
     }
 
     fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
-        let success = status.is_success();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(call) = state.read_calls.get_mut(id) {
-            call.outcome = if result.starts_with(crate::agent::REUSED_READ_MARKER)
-                || result.starts_with(crate::agent::REUSED_INSPECTION_MARKER)
-            {
-                EvalReadOutcome::Reused
-            } else if result.starts_with("Error: this exact read was already answered")
-                || result.starts_with("Error: repeated unchanged inspection blocked")
-            {
-                EvalReadOutcome::Rejected
-            } else if success {
-                EvalReadOutcome::Executed
-            } else {
-                EvalReadOutcome::Failed
-            };
-            return;
-        }
-        let Some(action) = state.pending.remove(id) else {
-            return;
-        };
-        if !success {
-            return;
-        }
-        match action {
-            EvalToolAction::Mutate(path) => {
-                let generation = state.path_generations.entry(path).or_default();
-                *generation = generation.saturating_add(1);
-            }
-            EvalToolAction::GlobalMutate => {
-                state.global_generation = state.global_generation.saturating_add(1);
-            }
-        }
+        self.finish_tool(id, result, status, &[]);
     }
 
     fn tool_finished_with_diff(
@@ -1666,9 +1783,26 @@ impl OutputSink for EvalSink {
         id: &str,
         result: &str,
         status: crate::output::ToolExecutionStatus,
-        _diff: crate::diff::FileDiff,
+        diff: crate::diff::FileDiff,
     ) {
-        self.tool_finished(id, result, status);
+        let paths = diff
+            .files()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        self.finish_tool(id, result, status, &paths);
+    }
+
+    fn workspace_changed(&self, paths: &[String], _intent: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !paths.is_empty() {
+            state
+                .observed_tool_effects
+                .insert(EvalToolEffect::WorkspaceMutation);
+        }
+        record_changed_paths(&mut state, paths);
     }
 }
 
@@ -1806,6 +1940,13 @@ mod tests {
             crate::output::ToolExecutionStatus::Succeeded,
         );
         assert_eq!(sink.changed_paths(), vec!["src/lib.rs"]);
+        assert_eq!(
+            sink.task_effects().tool_effects,
+            vec![
+                EvalToolEffect::Inspection,
+                EvalToolEffect::WorkspaceMutation
+            ]
+        );
         sink.tool_calls_started(&[tool_start("read-5", "read", "src/lib.rs")]);
         sink.tool_finished(
             "read-5",
@@ -1813,6 +1954,46 @@ mod tests {
             crate::output::ToolExecutionStatus::Succeeded,
         );
         assert_eq!(sink.max_reads_per_unchanged_path(), 2);
+    }
+
+    #[test]
+    fn eval_sink_records_multi_file_diffs_and_shell_workspace_changes() {
+        let sink = EvalSink::default();
+        sink.tool_calls_started(&[ToolCallStart::new(
+            "patch-1",
+            "apply_patch",
+            serde_json::json!({ "patch": "synthetic" }).to_string(),
+        )]);
+        let primary =
+            crate::diff::build_file_diff("src/lib.rs".to_string(), Some("old\n"), "new\n");
+        let secondary =
+            crate::diff::build_file_diff("tests/total.rs".to_string(), Some("old\n"), "new\n");
+        sink.tool_finished_with_diff(
+            "patch-1",
+            "patched",
+            crate::output::ToolExecutionStatus::Succeeded,
+            primary.with_additional_files(vec![secondary]),
+        );
+
+        sink.tool_calls_started(&[ToolCallStart::new(
+            "bash-1",
+            "bash",
+            serde_json::json!({ "command": "touch generated.txt" }).to_string(),
+        )]);
+        sink.tool_finished("bash-1", "", crate::output::ToolExecutionStatus::Succeeded);
+        sink.workspace_changed(&["generated.txt".to_string()], "synthetic shell mutation");
+
+        assert_eq!(
+            sink.changed_paths(),
+            vec!["generated.txt", "src/lib.rs", "tests/total.rs"]
+        );
+        assert_eq!(
+            sink.task_effects().tool_effects,
+            vec![
+                EvalToolEffect::WorkspaceMutation,
+                EvalToolEffect::CommandExecution
+            ]
+        );
     }
 
     fn write_file(path: &Path, content: &str) {
@@ -1831,12 +2012,14 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             id: "test".to_string(),
             seed: 1,
+            repetitions: 1,
             budgets: EvalBudgets::default(),
             tasks: vec![
                 EvalTask {
                     id: "same".to_string(),
                     fixture: "fixture".to_string(),
                     prompt: "do it".to_string(),
+                    profile: EvalAgentProfile::Full,
                     mock: Some(MockScript {
                         read: Vec::new(),
                         write: Vec::new(),
@@ -1874,6 +2057,7 @@ mod tests {
                     id: "same".to_string(),
                     fixture: "fixture".to_string(),
                     prompt: "do it again".to_string(),
+                    profile: EvalAgentProfile::Full,
                     mock: Some(MockScript {
                         read: Vec::new(),
                         write: Vec::new(),
@@ -1923,11 +2107,13 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             id: "test".to_string(),
             seed: 1,
+            repetitions: 1,
             budgets: EvalBudgets::default(),
             tasks: vec![EvalTask {
                 id: "no-graders".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "do it".to_string(),
+                profile: EvalAgentProfile::Full,
                 mock: Some(MockScript {
                     read: Vec::new(),
                     write: Vec::new(),
@@ -1973,11 +2159,13 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             id: "test".to_string(),
             seed: 1,
+            repetitions: 1,
             budgets: EvalBudgets::default(),
             tasks: vec![EvalTask {
                 id: "missing-read".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "read missing file".to_string(),
+                profile: EvalAgentProfile::Full,
                 mock: Some(MockScript {
                     read: vec!["missing.txt".to_string()],
                     write: Vec::new(),
@@ -2029,11 +2217,13 @@ mod tests {
             base_dir: temp.path().to_path_buf(),
             id: "test".to_string(),
             seed: 7,
+            repetitions: 1,
             budgets: EvalBudgets::default(),
             tasks: vec![EvalTask {
                 id: "mock-task".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "update readme".to_string(),
+                profile: EvalAgentProfile::Full,
                 mock: Some(MockScript {
                     read: vec!["README.md".to_string()],
                     write: vec![MockWrite {
@@ -2080,6 +2270,7 @@ mod tests {
         let report = run_task(
             &suite,
             &suite.tasks[0],
+            "mock-task",
             suite.seed,
             &run_dir,
             &storage,
@@ -2136,6 +2327,31 @@ mod tests {
                 "go_inspect_edit_verify",
             ]
         );
+    }
+
+    #[test]
+    fn intent_authority_suite_repeats_live_tasks_for_full_and_smol_profiles() {
+        let suite =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/intent_authority.toml");
+        let suite = EvalSuite::load(&suite).unwrap();
+
+        assert_eq!(suite.repetitions, 3);
+        assert!(suite.tasks.iter().all(|task| task.mock.is_none()));
+        assert_eq!(
+            suite
+                .tasks
+                .iter()
+                .map(|task| task.profile)
+                .collect::<Vec<_>>(),
+            [
+                EvalAgentProfile::Full,
+                EvalAgentProfile::Full,
+                EvalAgentProfile::Smol,
+                EvalAgentProfile::Smol,
+            ]
+        );
+        assert_eq!(repeated_task_id("diagnose", 2, 3), "diagnose-run-2");
+        assert_eq!(repeated_task_id("diagnose", 1, 1), "diagnose");
     }
 
     #[tokio::test]
@@ -2200,5 +2416,55 @@ contains = ["not present"]
         assert_eq!(outcome.passed_tasks, 1);
         assert!(outcome.report_path.exists());
         assert!(outcome.summary_path.exists());
+    }
+
+    #[tokio::test]
+    async fn runner_repeats_tasks_in_isolated_worktrees() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fixture = temp.path().join("fixture");
+        fs::create_dir_all(&fixture).unwrap();
+        write_file(&fixture.join("README.md"), "fixture\n");
+        let suite_path = temp.path().join("suite.toml");
+        write_file(
+            &suite_path,
+            r#"
+id = "repeated"
+seed = 9
+repetitions = 2
+
+[[tasks]]
+id = "observe"
+fixture = "fixture"
+prompt = "Explain the fixture."
+
+[tasks.mock]
+final_response = "Done."
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["Done"]
+"#,
+        );
+        let outcome = run(EvalCliConfig {
+            suite: suite_path,
+            out_dir: temp.path().join("out"),
+            fail_on_task_failure: true,
+            ..EvalCliConfig::default()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!((outcome.passed_tasks, outcome.total_tasks), (2, 2));
+        for repetition in 1..=2 {
+            assert!(
+                outcome
+                    .run_dir
+                    .join(format!("worktrees/observe-run-{repetition}/README.md"))
+                    .is_file()
+            );
+        }
+        let report = fs::read_to_string(&outcome.report_path).unwrap();
+        assert!(report.contains("\"id\": \"observe-run-1\""));
+        assert!(report.contains("\"id\": \"observe-run-2\""));
     }
 }

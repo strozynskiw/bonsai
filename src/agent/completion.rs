@@ -8,6 +8,48 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
+/// Semantic purpose of the current human task.
+///
+/// This is descriptive evidence for traces and steering merges. It never
+/// grants tool authority; permissions and observable completion effects remain
+/// separate enforcement boundaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TaskIntent {
+    #[default]
+    Informational,
+    Diagnosis,
+    Review,
+    Mutation,
+    Verification,
+    Monitoring,
+}
+
+impl TaskIntent {
+    const fn requires_action(self) -> bool {
+        !matches!(self, Self::Informational)
+    }
+
+    const fn merge(self, other: Self) -> Self {
+        if other.precedence() > self.precedence() {
+            other
+        } else {
+            self
+        }
+    }
+
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Informational => 0,
+            Self::Diagnosis => 1,
+            Self::Review => 2,
+            Self::Monitoring => 3,
+            Self::Verification => 4,
+            Self::Mutation => 5,
+        }
+    }
+}
+
 /// Broad kind of work the current human turn requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +70,9 @@ pub(crate) enum CompletionEffectRequirement {
 /// Structured contract inferred or explicitly installed for one task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TaskCompletionContract {
+    /// What the user is asking Bonsai to accomplish, independent of effects.
+    #[serde(default)]
+    pub(crate) intent: TaskIntent,
     pub(crate) goal_kind: CompletionGoalKind,
     pub(crate) effect: CompletionEffectRequirement,
     pub(crate) verification_required: bool,
@@ -42,6 +87,7 @@ impl Default for TaskCompletionContract {
 impl TaskCompletionContract {
     pub(crate) const fn informational() -> Self {
         Self {
+            intent: TaskIntent::Informational,
             goal_kind: CompletionGoalKind::Informational,
             effect: CompletionEffectRequirement::None,
             verification_required: false,
@@ -50,6 +96,7 @@ impl TaskCompletionContract {
 
     pub(crate) const fn workspace_action() -> Self {
         Self {
+            intent: TaskIntent::Mutation,
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::WorkspaceMutation,
             verification_required: false,
@@ -58,6 +105,7 @@ impl TaskCompletionContract {
 
     pub(crate) const fn action() -> Self {
         Self {
+            intent: TaskIntent::Mutation,
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: false,
@@ -66,6 +114,7 @@ impl TaskCompletionContract {
 
     pub(crate) const fn verification_action() -> Self {
         Self {
+            intent: TaskIntent::Verification,
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: true,
@@ -75,23 +124,7 @@ impl TaskCompletionContract {
     fn inferred(prompt: &str) -> Self {
         let normalized = normalized_words(prompt);
         let directive = action_directive(&normalized);
-        if directive.starts_with("run tests")
-            || directive.starts_with("run the tests")
-            || directive.starts_with("run checks")
-            || directive.starts_with("test ")
-            || directive == "test"
-            || directive.starts_with("verify ")
-            || directive == "verify"
-            || directive.starts_with("build ")
-            || directive == "build"
-            || contains_any_phrase(
-                directive,
-                &["sprawdz testy", "sprawdź testy", "uruchom testy"],
-            )
-        {
-            return Self::verification_action();
-        }
-        if first_word_is(
+        let workspace_mutation = contains_directive_clause(
             directive,
             &[
                 "fix",
@@ -118,56 +151,117 @@ impl TaskCompletionContract {
                 "przemianuj",
                 "zrefaktoryzuj",
             ],
-        ) {
-            return Self::workspace_action();
-        }
-        if first_word_is(
-            directive,
-            &[
-                "close",
-                "commit",
-                "deploy",
-                "merge",
-                "move",
-                "open",
-                "publish",
-                "push",
-                "pozamykaj",
-                "przenies",
-                "przenieś",
-                "zmerguj",
-            ],
-        ) || directive == "zacznij"
-            || directive.starts_with("zacznij ")
-            || directive.starts_with("work on ")
-            || directive.starts_with("start working on")
-            || directive.starts_with("continue working on")
-            || directive.starts_with("zacznij pracowac nad")
-            || directive.starts_with("zacznij pracować nad")
-            || first_word_is(
+        );
+        let mutation = workspace_mutation
+            || contains_directive_clause(
                 directive,
                 &[
-                    "analyze",
-                    "audit",
-                    "check",
-                    "inspect",
-                    "investigate",
-                    "research",
-                    "review",
-                    "run",
-                    "trace",
-                    "sprawdz",
-                    "sprawdź",
-                    "przeanalizuj",
-                    "przejrzyj",
-                    "zbadaj",
-                    "uruchom",
+                    "build",
+                    "close",
+                    "commit",
+                    "deploy",
+                    "merge",
+                    "move",
+                    "open",
+                    "publish",
+                    "push",
+                    "work on",
+                    "start working on",
+                    "continue working on",
+                    "pozamykaj",
+                    "przenies",
+                    "przenieś",
+                    "zmerguj",
+                    "zacznij",
+                    "zacznij pracowac nad",
+                    "zacznij pracować nad",
                 ],
-            )
-        {
-            return Self::action();
+            );
+        let verification = contains_directive_clause(
+            directive,
+            &[
+                "run tests",
+                "run the tests",
+                "run checks",
+                "run cargo test",
+                "run cargo check",
+                "run cargo build",
+                "cargo test",
+                "cargo check",
+                "cargo build",
+                "test",
+                "verify",
+                "build",
+                "sprawdz testy",
+                "sprawdź testy",
+                "uruchom testy",
+            ],
+        );
+        let generic_action = contains_directive_clause(directive, &["run", "uruchom"]);
+        let monitoring = contains_directive_clause(
+            directive,
+            &[
+                "monitor",
+                "watch",
+                "wait",
+                "keep watching",
+                "follow",
+                "obserwuj",
+                "poczekaj",
+                "czekaj",
+            ],
+        );
+        let review =
+            contains_directive_clause(directive, &["audit", "review", "przejrzyj", "zrecenzuj"]);
+        let diagnosis = contains_directive_clause(
+            directive,
+            &[
+                "analyze",
+                "check",
+                "diagnose",
+                "inspect",
+                "investigate",
+                "research",
+                "trace",
+                "sprawdz",
+                "sprawdź",
+                "przeanalizuj",
+                "zbadaj",
+            ],
+        );
+
+        let intent = if mutation {
+            TaskIntent::Mutation
+        } else if verification {
+            TaskIntent::Verification
+        } else if monitoring {
+            TaskIntent::Monitoring
+        } else if review {
+            TaskIntent::Review
+        } else if diagnosis {
+            TaskIntent::Diagnosis
+        } else if generic_action {
+            TaskIntent::Mutation
+        } else {
+            TaskIntent::Informational
+        };
+        let effect = if workspace_mutation {
+            CompletionEffectRequirement::WorkspaceMutation
+        } else if mutation || verification || monitoring || review || diagnosis || generic_action {
+            CompletionEffectRequirement::AnyAction
+        } else {
+            CompletionEffectRequirement::None
+        };
+        Self {
+            intent,
+            goal_kind: if effect == CompletionEffectRequirement::None {
+                CompletionGoalKind::Informational
+            } else {
+                CompletionGoalKind::Action
+            },
+            effect,
+            verification_required: verification,
         }
-        Self::informational()
     }
 
     fn merge(self, other: Self) -> Self {
@@ -181,6 +275,7 @@ impl TaskCompletionContract {
             _ => CompletionEffectRequirement::None,
         };
         Self {
+            intent: self.intent.merge(other.intent),
             goal_kind: if effect == CompletionEffectRequirement::None {
                 CompletionGoalKind::Informational
             } else {
@@ -775,6 +870,7 @@ fn completion_gaps(evidence: &CompletionDecisionEvidence) -> Vec<CompletionGap> 
     push_check_gap(&mut gaps, &evidence.verification, true);
     push_check_gap(&mut gaps, &evidence.review, false);
     let structured_work = evidence.contract.goal_kind == CompletionGoalKind::Action
+        || evidence.contract.intent.requires_action()
         || evidence.pending_work_started
         || evidence.todos.pending > 0
         || evidence.todos.in_progress > 0;
@@ -909,10 +1005,38 @@ fn normalized_words(text: &str) -> String {
     normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn first_word_is(text: &str, words: &[&str]) -> bool {
-    text.split_whitespace()
-        .next()
-        .is_some_and(|candidate| words.contains(&candidate))
+fn contains_directive_clause(text: &str, commands: &[&str]) -> bool {
+    if starts_with_command(text, commands) {
+        return true;
+    }
+    [
+        " and ",
+        " then ",
+        " also ",
+        " oraz ",
+        " potem ",
+        " następnie ",
+    ]
+    .iter()
+    .any(|connector| {
+        let mut remainder = text;
+        while let Some((_, tail)) = remainder.split_once(connector) {
+            if starts_with_command(tail, commands) {
+                return true;
+            }
+            remainder = tail;
+        }
+        false
+    })
+}
+
+fn starts_with_command(text: &str, commands: &[&str]) -> bool {
+    commands.iter().any(|command| {
+        text == *command
+            || text
+                .strip_prefix(command)
+                .is_some_and(|remainder| remainder.starts_with(' '))
+    })
 }
 
 fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
@@ -1083,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn inference_is_conservative_but_recognizes_mutation_and_verification() {
+    fn inference_separates_semantic_intent_from_required_effects() {
         assert_eq!(
             TaskCompletionContract::inferred("Explain how this module works"),
             TaskCompletionContract::informational()
@@ -1100,10 +1224,68 @@ mod tests {
             TaskCompletionContract::inferred("NO to zacznij 139"),
             TaskCompletionContract::action()
         );
-        assert_eq!(
-            TaskCompletionContract::inferred("Check the parser state"),
-            TaskCompletionContract::action()
+        let diagnosis = TaskCompletionContract::inferred("Check the parser state");
+        assert_eq!(diagnosis.intent, TaskIntent::Diagnosis);
+        assert_eq!(diagnosis.effect, CompletionEffectRequirement::AnyAction);
+        assert!(!diagnosis.verification_required);
+
+        let review = TaskCompletionContract::inferred("Review the parser module");
+        assert_eq!(review.intent, TaskIntent::Review);
+        assert_eq!(review.effect, CompletionEffectRequirement::AnyAction);
+
+        let monitoring = TaskCompletionContract::inferred("Monitor the deployment");
+        assert_eq!(monitoring.intent, TaskIntent::Monitoring);
+        assert_eq!(monitoring.effect, CompletionEffectRequirement::AnyAction);
+
+        let execution = TaskCompletionContract::inferred("Run pwd and report the output");
+        assert_eq!(execution.intent, TaskIntent::Mutation);
+        assert_eq!(execution.effect, CompletionEffectRequirement::AnyAction);
+        assert!(!execution.verification_required);
+    }
+
+    #[test]
+    fn compound_requests_keep_mutation_intent_and_verification_evidence() {
+        let contract = TaskCompletionContract::inferred(
+            "Analyze why the parser fails, then fix it and run tests",
         );
+
+        assert_eq!(contract.intent, TaskIntent::Mutation);
+        assert_eq!(
+            contract.effect,
+            CompletionEffectRequirement::WorkspaceMutation
+        );
+        assert!(contract.verification_required);
+
+        let build = TaskCompletionContract::inferred("Build the requested integration");
+        assert_eq!(build.intent, TaskIntent::Mutation);
+        assert_eq!(build.effect, CompletionEffectRequirement::AnyAction);
+        assert!(build.verification_required);
+    }
+
+    #[test]
+    fn steering_merges_intent_without_deriving_it_from_effect_strength() {
+        let merged = TaskCompletionContract::workspace_action()
+            .merge(TaskCompletionContract::verification_action());
+
+        assert_eq!(merged.intent, TaskIntent::Mutation);
+        assert_eq!(
+            merged.effect,
+            CompletionEffectRequirement::WorkspaceMutation
+        );
+        assert!(merged.verification_required);
+    }
+
+    #[test]
+    fn legacy_completion_contracts_default_the_new_intent_field() {
+        let contract: TaskCompletionContract = serde_json::from_value(serde_json::json!({
+            "goal_kind": "action",
+            "effect": "any_action",
+            "verification_required": false
+        }))
+        .unwrap();
+
+        assert_eq!(contract.intent, TaskIntent::Informational);
+        assert_eq!(contract.goal_kind, CompletionGoalKind::Action);
     }
 
     #[test]
