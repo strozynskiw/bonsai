@@ -7,7 +7,7 @@ use crate::tui::pickers::ModelSelection;
 /// Whether a busy-state composer message joins the active turn or waits for
 /// the next foreground run.
 pub enum FollowUpDelivery {
-    /// Inject the message into the active turn at its next safe boundary.
+    /// Replace the active foreground turn and open the next one immediately.
     Steer,
     /// Hold the message until the active foreground run finishes.
     Queue,

@@ -637,6 +637,47 @@ fn handle_paste_event(
     }
 }
 
+/// Replace the active foreground turn with the current draft. Validation runs
+/// before cancellation so an unsupported image or slash command leaves both
+/// the turn and composer intact. An empty draft is an explicit foreground
+/// stop. Detached subagents use their separate cancellation channel and keep
+/// running in either case.
+fn steer_active_run(
+    app: &mut AppState,
+    tasks: &TaskController,
+    registry: &ProviderRegistry,
+    model_catalog: &crate::model_catalog::ModelCatalog,
+) -> bool {
+    if !matches!(app.task_state, TaskState::Running) {
+        return false;
+    }
+
+    let has_draft = !app.composer.submission().display_text.trim().is_empty();
+    if has_draft
+        && !enqueue_running_follow_up(
+            app,
+            tasks,
+            FollowUpDelivery::Steer,
+            registry,
+            Some(model_catalog),
+        )
+    {
+        return false;
+    }
+
+    tasks.interrupt_foreground();
+    app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
+    push_transient_notice(
+        app,
+        if has_draft {
+            "Steering foreground agent; background subagents continue"
+        } else {
+            "Stopping foreground agent; background subagents continue"
+        },
+    );
+    true
+}
+
 /// The Ctrl+C state machine for one keypress: confirm-exit, cancel a running
 /// turn / background subagents / a command and arm the exit prompt, or just arm
 /// it. Returns `true` when the caller should break the run loop (confirmed
@@ -843,7 +884,6 @@ fn take_safe_plan_start_confirmation(app: &mut AppState, input: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn handle_toplevel_submit_command(
     input: &str,
-    intent: KeyIntent,
     app: &mut AppState,
     tasks: &mut TaskController,
     deps: RuntimeActionDeps<'_>,
@@ -999,16 +1039,10 @@ async fn handle_toplevel_submit_command(
         {
             return true;
         }
-        let delivery = if matches!(intent, KeyIntent::Queue) {
-            FollowUpDelivery::Queue
-        } else {
-            FollowUpDelivery::Steer
-        };
-        submit_running_follow_up(
+        enqueue_running_follow_up(
             app,
             &*tasks,
-            intent,
-            delivery,
+            FollowUpDelivery::Queue,
             &deps.registry,
             Some(&deps.model_catalog),
         );
@@ -3351,9 +3385,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                     break 'run Ok(());
                                 }
                             }
-                            intent @ (KeyIntent::Submit
-                            | KeyIntent::SubmitReplacement(_)
-                            | KeyIntent::Queue) => {
+                            KeyIntent::Steer => {
+                                steer_active_run(&mut app, &tasks, &registry, &model_catalog);
+                            }
+                            intent @ (KeyIntent::Submit | KeyIntent::SubmitReplacement(_)) => {
                                 if let KeyIntent::SubmitReplacement(replacement) = &intent {
                                     app.reduce(AppAction::CompleteInputTo(replacement.clone()));
                                 }
@@ -3373,7 +3408,6 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 };
                                 if handle_toplevel_submit_command(
                                     &input,
-                                    intent,
                                     &mut app,
                                     &mut tasks,
                                     runtime_action_deps!(),
@@ -4588,9 +4622,19 @@ async fn start_pending_queued_run_if_idle(
         return false;
     }
 
+    // A steer replaces the just-interrupted foreground turn and therefore has
+    // priority over older Enter-queued work. Keep those older messages pending
+    // for the turn after the steer instead of appending them behind the urgent
+    // instruction in the same model request.
+    let steer_id = app
+        .queued_inputs
+        .iter()
+        .find(|queued| matches!(queued.delivery, FollowUpDelivery::Steer))
+        .map(|queued| queued.id);
     let mut queued_messages = app
         .queued_inputs
         .iter()
+        .filter(|queued| steer_id.is_none_or(|steer_id| queued.id == steer_id))
         .map(|queued| {
             let submission = queued.content.submission();
             // An empty snapshot (defensive: content should always mirror the
@@ -4627,7 +4671,7 @@ async fn start_pending_queued_run_if_idle(
             push_command_message(
                 app,
                 CommandOutputKind::Error,
-                "This model can't see images — queued image message not sent.",
+                "This model can't see images — pending image message not sent.",
             );
             queued_messages.retain(|message| !blocked_ids.contains(&message.id));
         }

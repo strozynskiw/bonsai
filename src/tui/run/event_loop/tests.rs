@@ -1601,19 +1601,18 @@ async fn running_tasks() -> (TaskController, mpsc::UnboundedReceiver<RuntimeEven
 }
 
 #[tokio::test]
-async fn running_enter_steers_normal_text() {
+async fn running_enter_queues_normal_text_for_next_turn() {
     let (mut tasks, _runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
     app.composer.set_text("follow up".to_string());
-    submit_running_follow_up(
+    assert!(enqueue_running_follow_up(
         &mut app,
         &tasks,
-        KeyIntent::Submit,
-        FollowUpDelivery::Steer,
+        FollowUpDelivery::Queue,
         &crate::provider::ProviderRegistry::default_registry(),
         None,
-    );
+    ));
 
     assert_eq!(app.input(), "");
     assert_eq!(app.composer.text, "");
@@ -1623,7 +1622,7 @@ async fn running_enter_steers_normal_text() {
             id: 1,
             text,
             mode: AgentMode::Coding,
-            delivery: FollowUpDelivery::Steer,
+            delivery: FollowUpDelivery::Queue,
             ..
         }] if text == "follow up"
     ));
@@ -1635,29 +1634,43 @@ async fn running_enter_steers_normal_text() {
 }
 
 #[tokio::test]
-async fn running_tab_queues_normal_text_for_next_turn() {
-    let (mut tasks, _runtime_rx) = running_tasks().await;
+async fn running_escape_interrupts_and_stages_immediate_steer() {
+    let (mut tasks, mut runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
-    app.composer.set_text("follow up later".to_string());
-    submit_running_follow_up(
+    app.composer.set_text("do this now".to_string());
+
+    assert!(steer_active_run(
         &mut app,
         &tasks,
-        KeyIntent::Queue,
-        FollowUpDelivery::Queue,
         &crate::provider::ProviderRegistry::default_registry(),
-        None,
-    );
+        &test_model_catalog(),
+    ));
 
+    assert_eq!(app.task_state, TaskState::Cancelling);
     assert!(matches!(
         app.queued_inputs.as_slice(),
         [QueuedInput {
             text,
-            delivery: FollowUpDelivery::Queue,
+            delivery: FollowUpDelivery::Steer,
             ..
-        }] if text == "follow up later"
+        }] if text == "do this now"
     ));
-    tasks.abort();
+    let finished = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(RuntimeEvent::AgentFinished(result)) = runtime_rx.recv().await {
+                break result;
+            }
+        }
+    })
+    .await
+    .expect("Esc should promptly stop the foreground run")
+    .expect("foreground interruption should be a normal run outcome");
+    assert!(matches!(
+        finished,
+        crate::tui::event::AgentRunOutcome::Interrupted
+    ));
+    assert!(tasks.poll_finished().await.is_some());
 }
 
 #[tokio::test]
@@ -1666,14 +1679,13 @@ async fn running_follow_up_does_not_accept_slash_commands() {
     let mut app = app();
     app.task_state = TaskState::Running;
     app.composer.set_text("/clear".to_string());
-    submit_running_follow_up(
+    assert!(!enqueue_running_follow_up(
         &mut app,
         &tasks,
-        KeyIntent::Submit,
         FollowUpDelivery::Steer,
         &crate::provider::ProviderRegistry::default_registry(),
         None,
-    );
+    ));
 
     assert_eq!(app.input(), "/clear");
     assert_eq!(app.composer.text, "/clear");
@@ -5184,7 +5196,7 @@ async fn pending_queued_run_does_not_resend_primary_message() {
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
     for (id, text) in [(1, "primary"), (2, "follow-up")] {
-        app.reduce(AppAction::SteerInput {
+        app.reduce(AppAction::QueueNextInput {
             id,
             text: text.to_string(),
             content: crate::tui::app::ComposerContent {
@@ -5234,6 +5246,71 @@ async fn pending_queued_run_does_not_resend_primary_message() {
 }
 
 #[tokio::test]
+async fn pending_steer_runs_before_and_separately_from_enter_queue() {
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.reduce(AppAction::QueueNextInput {
+        id: 1,
+        text: "later work".to_string(),
+        content: crate::tui::app::ComposerContent {
+            text: "later work".to_string(),
+            chips: Vec::new(),
+        },
+        mode: AgentMode::Coding,
+    });
+    app.reduce(AppAction::SteerInput {
+        id: 2,
+        text: "urgent correction".to_string(),
+        content: crate::tui::app::ComposerContent {
+            text: "urgent correction".to_string(),
+            chips: Vec::new(),
+        },
+        mode: AgentMode::Coding,
+    });
+    app.reduce(AppAction::SetTaskState(TaskState::Idle));
+    let mut repo_map = empty_repo_map_injector();
+    let (provider, requests) = CapturingProvider::new();
+
+    assert!(
+        start_pending_queued_run_if_idle(
+            &mut app,
+            &mut tasks,
+            test_agent(Box::new(provider)),
+            Arc::new(NullSink),
+            &mut repo_map,
+            &ProviderRegistry::default_registry(),
+            &test_model_catalog(),
+        )
+        .await
+    );
+
+    assert!(matches!(
+        app.queued_inputs.as_slice(),
+        [QueuedInput {
+            id: 1,
+            text,
+            delivery: FollowUpDelivery::Queue,
+            ..
+        }] if text == "later work"
+    ));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if tasks.poll_finished().await.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("steer run should finish");
+    assert_eq!(
+        requests.lock().await.as_slice(),
+        &[vec!["urgent correction".to_string()]]
+    );
+}
+
+#[tokio::test]
 async fn pending_queued_image_is_rechecked_before_idle_run() {
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
@@ -5277,7 +5354,7 @@ async fn pending_queued_image_is_rechecked_before_idle_run() {
     assert!(matches!(
         app.transcript.as_slice(),
         [TranscriptItem::CommandOutput { kind: CommandOutputKind::Error, text }]
-            if text == "This model can't see images — queued image message not sent."
+            if text == "This model can't see images — pending image message not sent."
     ));
 }
 

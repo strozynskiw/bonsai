@@ -21,7 +21,7 @@ pub enum KeyIntent {
     Action(AppAction),
     Submit,
     SubmitReplacement(String),
-    Queue,
+    Steer,
     CancelOrQuit,
     Quit,
     Insert(char),
@@ -517,9 +517,7 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         }
         KeyEvent {
             code: KeyCode::Esc, ..
-        } if matches!(app.task_state, crate::tui::event::TaskState::Running) => {
-            KeyIntent::Action(AppAction::SetFocus(Focus::Input))
-        }
+        } if matches!(app.task_state, crate::tui::event::TaskState::Running) => KeyIntent::Steer,
         // Esc progressively clears: selection first, then the draft.
         KeyEvent {
             code: KeyCode::Esc, ..
@@ -637,14 +635,6 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
                 return KeyIntent::Action(AppAction::CompleteInputTo(replacement));
             }
             KeyIntent::Noop
-        }
-        KeyEvent {
-            code: KeyCode::Tab, ..
-        } if matches!(app.focus, Focus::Input)
-            && matches!(app.task_state, crate::tui::event::TaskState::Running)
-            && !app.input().trim().is_empty() =>
-        {
-            KeyIntent::Queue
         }
         KeyEvent {
             code: KeyCode::Tab, ..
@@ -3106,26 +3096,36 @@ mod tests {
     }
 
     #[test]
-    fn esc_steers_running_agent_without_clearing_draft() {
+    fn esc_requests_immediate_steer_while_agent_runs() {
         let mut app = input_app_with_text("keep this draft");
         app.task_state = crate::tui::event::TaskState::Running;
 
         let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
 
-        assert!(matches!(
-            intent,
-            KeyIntent::Action(AppAction::SetFocus(Focus::Input))
-        ));
+        assert!(matches!(intent, KeyIntent::Steer));
     }
 
     #[test]
-    fn tab_queues_non_empty_draft_while_agent_runs() {
+    fn enter_submits_draft_for_running_state_queue() {
+        let mut app = input_app_with_text("follow up later");
+        app.task_state = crate::tui::event::TaskState::Running;
+
+        let intent = map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app);
+
+        assert!(matches!(intent, KeyIntent::Submit));
+    }
+
+    #[test]
+    fn tab_keeps_cycling_focus_while_agent_runs() {
         let mut app = input_app_with_text("follow up later");
         app.task_state = crate::tui::event::TaskState::Running;
 
         let intent = map_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &app);
 
-        assert!(matches!(intent, KeyIntent::Queue));
+        assert!(matches!(
+            intent,
+            KeyIntent::Action(AppAction::SetFocus(Focus::Transcript))
+        ));
     }
 
     #[test]

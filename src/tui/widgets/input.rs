@@ -633,7 +633,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Esc", " dismiss"),
         ]
     } else if matches!(app.task_state, crate::tui::event::TaskState::Running) {
-        vec![("[esc to steer]", "  "), ("Tab", " queue")]
+        vec![("Enter", " queue  "), ("Esc", " steer")]
     } else {
         // Trailing version tag keeps the running build visible at a glance; a
         // self-update notice takes its place for the rest of the session.
@@ -1088,10 +1088,10 @@ mod tests {
         let text = line_text(&meta_line(&app, 120, false));
 
         assert!(
-            text.contains("[esc to steer]") && text.contains("Tab queue"),
+            text.contains("Enter queue") && text.contains("Esc steer"),
             "{text}"
         );
-        assert!(!text.contains("Enter steer"), "{text}");
+        assert!(!text.contains("Tab queue"), "{text}");
     }
 
     #[test]

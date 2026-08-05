@@ -1323,30 +1323,21 @@ fn submit_running_command(app: &mut AppState, input: &str) {
     app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
 }
 
-pub(in crate::tui::run) fn submit_running_follow_up(
+pub(in crate::tui::run) fn enqueue_running_follow_up(
     app: &mut AppState,
     tasks: &TaskController,
-    intent: KeyIntent,
     delivery: FollowUpDelivery,
     registry: &crate::provider::ProviderRegistry,
     catalog: Option<&crate::model_catalog::ModelCatalog>,
-) {
+) -> bool {
     // Snapshot the composer: `display` is what the transcript shows and what the
-    // slash-command guards test; `submission.input` is the expanded model
-    // payload delivered to the running agent.
+    // slash-command guards test; the retained content rebuilds the expanded
+    // model payload when the pending foreground turn starts.
     let submission = app.composer.submission();
     let display = submission.display_text.trim().to_string();
 
-    if matches!(intent, KeyIntent::SubmitReplacement(_)) && display.starts_with('/') {
-        push_command_message(
-            app,
-            CommandOutputKind::Error,
-            "Slash commands cannot be sent as a busy-state follow-up.",
-        );
-        return;
-    }
     if display.is_empty() {
-        return;
+        return false;
     }
     if display.starts_with('/') {
         push_command_message(
@@ -1354,7 +1345,7 @@ pub(in crate::tui::run) fn submit_running_follow_up(
             CommandOutputKind::Error,
             "Slash commands cannot be sent as a busy-state follow-up.",
         );
-        return;
+        return false;
     }
     // Vision gate against the running model, so a queued image can't reach a
     // model that can't see it.
@@ -1371,7 +1362,7 @@ pub(in crate::tui::run) fn submit_running_follow_up(
             CommandOutputKind::Error,
             "This model can't see images — remove the [Image N] chip or switch models.",
         );
-        return;
+        return false;
     }
 
     let content = app.composer.content();
@@ -1379,24 +1370,12 @@ pub(in crate::tui::run) fn submit_running_follow_up(
     let mode = tasks
         .active_agent_mode()
         .unwrap_or_else(|| app.active_mode());
-    let message = QueuedUserMessage {
-        id,
-        display_text: display.clone(),
-        transcript_text: submission.transcript_text.trim().to_string(),
-        input: submission.input,
-    };
     let action = match delivery {
-        FollowUpDelivery::Steer => match tasks.queue_agent_message(message) {
-            Ok(()) => AppAction::SteerInput {
-                id,
-                text: display,
-                content,
-                mode,
-            },
-            Err(err) => {
-                app.reduce(AppAction::Agent(UiEvent::Error(err)));
-                return;
-            }
+        FollowUpDelivery::Steer => AppAction::SteerInput {
+            id,
+            text: display,
+            content,
+            mode,
         },
         FollowUpDelivery::Queue => AppAction::QueueNextInput {
             id,
@@ -1406,6 +1385,7 @@ pub(in crate::tui::run) fn submit_running_follow_up(
         },
     };
     app.reduce(action);
+    true
 }
 
 pub(in crate::tui) fn push_command_message(
