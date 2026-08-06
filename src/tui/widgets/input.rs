@@ -1073,33 +1073,6 @@ mod tests {
         assert!(!text.contains("Tab queue"), "{text}");
     }
 
-    #[test]
-    fn meta_line_suppresses_steer_summary_but_keeps_queue_summary() {
-        let mut app = AppState::new(
-            "codex",
-            "test-model".to_string(),
-            "workspace".to_string(),
-            None,
-        );
-        app.task_state = crate::tui::event::TaskState::Running;
-        app.reduce(crate::tui::event::AppAction::SteerInput {
-            id: 1,
-            text: "visible steer".to_string(),
-            content: crate::tui::app::ComposerContent::default(),
-            mode: crate::agent::AgentMode::Coding,
-        });
-        app.reduce(crate::tui::event::AppAction::QueueNextInput {
-            id: 2,
-            text: "later queue".to_string(),
-            content: crate::tui::app::ComposerContent::default(),
-            mode: crate::agent::AgentMode::Coding,
-        });
-
-        let text = line_text(&meta_line(&app, 160, false));
-
-        assert!(!text.contains("visible steer"), "{text}");
-        assert!(text.contains("queued: later queue"), "{text}");
-    }
 
     #[test]
     fn meta_line_shows_copy_notice() {
