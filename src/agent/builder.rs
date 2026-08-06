@@ -176,6 +176,7 @@ impl Agent {
             },
             background_tasks: Arc::new(BackgroundTaskRegistry::new()),
             terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            auto_background_verification: builder.auto_background_verification,
             background_wakes: None,
             peer_bus: None,
             pending_peer_delivery_receipts: BTreeMap::new(),
@@ -302,6 +303,9 @@ pub(crate) struct AgentBuilder {
     pub(super) context_budget_tokens: usize,
     pub(super) context_gc_trigger_percent: usize,
     pub(super) smol_preference: crate::smol::SmolPreference,
+    /// Off in eval harnesses so scripted mock bash calls stay foreground and
+    /// deterministic (a mock cannot wait on a dynamically-assigned task id).
+    pub(super) auto_background_verification: bool,
     pub(super) max_generation_duration: Option<Duration>,
     pub(super) max_streamed_chars: Option<usize>,
     pub(super) max_tool_duration: Option<Duration>,
@@ -356,6 +360,7 @@ impl AgentBuilder {
             context_budget_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS as usize,
             context_gc_trigger_percent: configured_context_gc_trigger_percent(),
             smol_preference: crate::smol::SmolPreference::Off,
+            auto_background_verification: true,
             max_generation_duration: None,
             max_streamed_chars: None,
             max_tool_duration: None,
@@ -433,6 +438,15 @@ impl AgentBuilder {
 
     pub(crate) fn smol_preference(mut self, smol_preference: crate::smol::SmolPreference) -> Self {
         self.smol_preference = smol_preference;
+        self
+    }
+
+    /// Disable auto-backgrounding of known-slow verification commands. Eval
+    /// harnesses turn this off so scripted mock tool turns run foreground and
+    /// stay deterministic: a mock script cannot wait on a dynamic task id, and
+    /// the completion guard rejects completion while background tasks run.
+    pub(crate) fn auto_background_verification(mut self, enabled: bool) -> Self {
+        self.auto_background_verification = enabled;
         self
     }
 

@@ -440,6 +440,12 @@ pub struct Agent {
     registries: ToolRegistrySet,
     background_tasks: Arc<BackgroundTaskRegistry>,
     terminals: Arc<TerminalRegistry>,
+    /// Auto-promote known-slow verification bash calls (`cargo test`, release
+    /// builds) to background execution so a long compile never blocks the
+    /// agent turn. Disabled in eval harnesses: mock scripts execute tool calls
+    /// deterministically and cannot wait on a dynamic task id, so a promoted
+    /// call would trip the completion guard's background-task gate forever.
+    auto_background_verification: bool,
     background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
     /// Inter-agent communication bus (peers P2); `None` outside interactive/
     /// headless runs, so evals never observe peer traffic.

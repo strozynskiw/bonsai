@@ -1445,7 +1445,7 @@ struct DelegatedReadOverlap {
 
 impl Agent {
     fn auto_background_verification_calls(&self, tool_calls: &[ToolCall]) -> HashSet<String> {
-        if self.verification.active_verification.is_some() {
+        if !self.auto_background_verification || self.verification.active_verification.is_some() {
             return HashSet::new();
         }
         tool_calls

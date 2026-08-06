@@ -632,7 +632,10 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
     .project_info_runtime(project_info_runtime)
     .lsp_hub(lsp_hub)
     .yolo_mode(yolo_mode)
-    .self_review_mode(crate::self_review::SelfReviewMode::Off);
+    .self_review_mode(crate::self_review::SelfReviewMode::Off)
+    // Scripted mock turns cannot wait on a dynamic background-task id, so
+    // keep known-slow verification bash calls foreground and deterministic.
+    .auto_background_verification(false);
     if let Some(max_turns) = config.max_logical_turns {
         agent_builder = agent_builder.max_iterations(max_turns);
     }
