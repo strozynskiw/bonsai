@@ -1,53 +1,13 @@
 #!/usr/bin/env bash
-#
-# bonsai pre-commit hook — mirrors the fast, deterministic half of CI
-# (.github/workflows/rust.yml) so a commit can't land formatting or lint
-# violations that the pipeline would later reject.
-#
-#   1. cargo fmt   — auto-format the *staged* Rust files, then re-stage them.
-#   2. cargo clippy --all-targets --all-features -- -D warnings  (the "rules").
-#
-# Tests and the release build are intentionally left to CI: too slow to run on
-# every commit. Bypass this hook with `git commit --no-verify` when needed.
-#
-# Installed via `git config core.hooksPath .githooks` (tracked in the repo).
-# Kept POSIX/bash-3.2 friendly (macOS ships bash 3.2) — no `mapfile`/arrays.
-
+# Pre-commit hook: existing migration files are immutable.
+# Adding new migration files is allowed; modifying or deleting existing ones is not.
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
-
-# NUL-delimited list of staged Rust files (handles odd paths; survives the fact
-# that bash variables cannot hold NUL bytes by going through a temp file).
-staged_rs="$(mktemp)"
-trap 'rm -f "$staged_rs"' EXIT
-git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' > "$staged_rs"
-
-# Other staged inputs that change what clippy sees.
-has_build_inputs="$(git diff --cached --name-only --diff-filter=ACMR -- \
-  'Cargo.toml' 'Cargo.lock' 'build.rs' '**/Cargo.toml')"
-
-# Nothing Rust-relevant in this commit: skip the (slow) checks entirely.
-if [ ! -s "$staged_rs" ] && [ -z "$has_build_inputs" ]; then
-  exit 0
+CHANGED=$(git diff --cached --diff-filter=MD --name-only -- migrations/ 2>/dev/null || true)
+if [ -n "$CHANGED" ]; then
+  echo "error: existing migration files were modified or deleted:"
+  echo "$CHANGED" | sed 's/^/  /'
+  echo ""
+  echo "Migrations are immutable once committed. Create a new migration instead."
+  exit 1
 fi
-
-# 1. Format staged Rust files in place, then re-stage so the commit captures the
-#    formatting. Scoped to staged files so unrelated working-tree edits are left
-#    untouched. The `-s` guard ensures xargs never runs rustfmt on empty input
-#    (BSD xargs would otherwise invoke it once with no args, reading stdin).
-if [ -s "$staged_rs" ]; then
-  if ! command -v rustfmt >/dev/null 2>&1; then
-    echo "pre-commit: rustfmt not found (install with: rustup component add rustfmt)" >&2
-    exit 1
-  fi
-  echo "pre-commit: formatting staged Rust file(s)…"
-  xargs -0 rustfmt --edition 2024 < "$staged_rs"
-  xargs -0 git add -- < "$staged_rs"
-fi
-
-# 2. Enforce the lint rules exactly as CI does (warnings are errors).
-echo "pre-commit: running clippy (-D warnings)…"
-cargo clippy --all-targets --all-features -- -D warnings
-
-echo "pre-commit: OK"

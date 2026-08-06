@@ -18,5 +18,17 @@ jobs:
     - uses: actions/checkout@v7
     - name: Check
       run: cargo check --locked --all-targets
+    - name: Verify migrations are immutable
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          CHANGED=$(git diff --diff-filter=M --name-only ${{ github.event.pull_request.base.sha }}...HEAD -- migrations/)
+        else
+          CHANGED=$(git diff --diff-filter=M --name-only HEAD~1...HEAD -- migrations/)
+        fi
+        if [ -n "$CHANGED" ]; then
+          echo "::error::Existing migration files were modified: $CHANGED"
+          echo "Migrations are immutable once committed. Create a new migration instead."
+          exit 1
+        fi
     - name: Run tests
       run: cargo test --locked
