@@ -589,28 +589,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
         left.push(view::sandbox_marker_span(sandbox));
     }
     left.extend(composer_chip_meta_spans(app));
-    if let Some(queued) = app
-        .queued_inputs
-        .iter()
-        .find(|queued| matches!(queued.delivery, crate::tui::app::FollowUpDelivery::Queue))
-    {
-        push_sep(&mut left, "  |  ");
-        let extra = app
-            .queued_inputs
-            .iter()
-            .filter(|queued| matches!(queued.delivery, crate::tui::app::FollowUpDelivery::Queue))
-            .count()
-            .saturating_sub(1);
-        let suffix = if extra == 0 {
-            String::new()
-        } else {
-            format!(" +{extra}")
-        };
-        left.push(Span::styled(
-            format!("queued: {}{suffix}", view::truncate_phase(&queued.text, 40)),
-            theme::dim(),
-        ));
-    }
+
     if app.pending_peer_inbox > 0 {
         // Parked peer messages waiting for the next turn (peers). Blue to match
         // the peer conversation lane; self-heals to 0 once a turn drains them.
