@@ -1,6 +1,6 @@
 [package]
 name = "bonsai"
-version = "0.3.1"
+version = "0.3.2"
 description = "A TUI coding agent with multiple LLM provider backends."
 readme = "README.md"
 license = "MIT"
