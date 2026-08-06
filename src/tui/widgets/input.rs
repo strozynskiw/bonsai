@@ -1073,7 +1073,6 @@ mod tests {
         assert!(!text.contains("Tab queue"), "{text}");
     }
 
-
     #[test]
     fn meta_line_shows_copy_notice() {
         let mut app = AppState::new(
