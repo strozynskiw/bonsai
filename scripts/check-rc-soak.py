@@ -372,7 +372,9 @@ def _run_git(repo: Path, args: Sequence[str], *, text: bool = True) -> str | byt
     except OSError as error:
         _fail("git_unavailable", f"could not execute Git: {error}")
     if completed.returncode != 0:
-        _fail("invalid_git_history", f"Git rejected {' '.join(args[:2])}")
+        stderr = (completed.stderr or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        _fail("invalid_git_history", f"Git rejected {' '.join(args[:2])}{detail}")
     return completed.stdout
 
 
