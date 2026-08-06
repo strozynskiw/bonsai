@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import copy
 from datetime import datetime, timedelta, timezone
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -122,7 +123,18 @@ class EvidenceFixture:
             self.binary_sizes[target] = len(binary)
             self.binary_hashes[target] = hashlib.sha256(binary).hexdigest()
             archive_path = self.root / f"bonsai-{TAG}-{target}.tar.gz"
-            with tarfile.open(archive_path, "w:gz") as archive:
+            # Deterministic archives: the default gzip header embeds the
+            # wall-clock mtime and the temp path, which would make the
+            # manifest hashes (and every fixture commit) differ between runs
+            # and platforms. Pin mtime=0 and omit the FNAME field so the
+            # evidence bytes — and thus the whole fixture git history — are
+            # reproducible.
+            with (
+                gzip.GzipFile(
+                    filename="", mode="wb", mtime=0, fileobj=open(archive_path, "wb")
+                ) as gz,
+                tarfile.open(fileobj=gz, mode="w") as archive,
+            ):
                 info = tarfile.TarInfo("bonsai")
                 info.size = len(binary)
                 info.mode = 0o644 if target == archive_non_executable_target else 0o755

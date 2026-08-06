@@ -413,16 +413,20 @@ def _history_versions(
 
     additions = _run_git(
         repo,
-        ("log", "--format=%H", "--diff-filter=A", "--", relative),
+        ("log", "--no-renames", "--format=%H", "--diff-filter=A", "--", relative),
     )
     assert isinstance(additions, str)
     add_commits = [line for line in additions.splitlines() if line]
     if len(add_commits) != 1:
         _fail("invalid_git_history", "active record must have exactly one creation commit")
 
+    # --no-renames keeps the walk on the exact path. `git log -- <path>`
+    # follows renames by default, which can surface commits whose tree does
+    # not contain <path>; the `git show`/`cat-file` below would then reject
+    # the <commit>:<path> spec and fail the whole validation on a quirk.
     log_output = _run_git(
         repo,
-        ("log", "--reverse", "--format=%H%x00%cI", "--", relative),
+        ("log", "--no-renames", "--reverse", "--format=%H%x00%cI", "--", relative),
     )
     assert isinstance(log_output, str)
     entries: list[tuple[str, datetime]] = []
@@ -442,7 +446,7 @@ def _history_versions(
     first_seen_observations: dict[str, datetime] = {}
     historical_blocking_ids: set[str] = set()
     for commit, commit_time in entries:
-        raw = _run_git(repo, ("show", f"{commit}:{relative}"), text=False)
+        raw = _run_git(repo, ("cat-file", "blob", f"{commit}:{relative}"), text=False)
         assert isinstance(raw, bytes)
         if len(raw) > MAX_RECORD_BYTES:
             _fail("evidence_too_large", "a historical active record exceeds the size limit")
