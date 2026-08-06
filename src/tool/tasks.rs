@@ -115,7 +115,7 @@ impl Tool for TasksTool {
                 (
                     "wait_seconds",
                     bounded_integer_property(
-                        "Optional deadline in seconds for a parked concrete wait (max: 60); it wakes without stopping the process",
+                        "Optional headless wait or interactive-terminal deadline in seconds (max: 60); interactive bg-N waits park until completion instead of polling",
                         Some(0),
                         Some(MAX_WAIT_SECONDS as i64),
                     ),
@@ -123,7 +123,7 @@ impl Tool for TasksTool {
                 (
                     "observed_version",
                     bounded_integer_property(
-                        "Version from a preceding list or tail; required for bg-N and optional for atomic pty-N waits",
+                        "Optional version from a preceding list or tail; concrete interactive waits atomically use the current version when omitted",
                         Some(1),
                         None,
                     ),
@@ -325,17 +325,18 @@ impl TasksTool {
             .snapshot(task_id)
             .await
             .with_context(|| format!("Unknown background task: {task_id}"))?;
-        let Some(observed_version) = args.observed_version else {
+        if snapshot.status.is_finished() {
+            return Ok(ToolOutput::Text(snapshot.detail()));
+        }
+        if !self.can_park {
             return Ok(ToolOutput::Text(
                 self.registry
                     .wait_for_task(task_id, Duration::from_secs(args.wait_seconds.unwrap_or(1)))
                     .await?
                     .detail(),
             ));
-        };
-        if !self.can_park {
-            bail!("Wakeable waits require the interactive TUI; use wait_seconds in headless mode");
         }
+        let observed_version = args.observed_version.unwrap_or(snapshot.version);
         if observed_version != snapshot.version {
             bail!(
                 "Background task {task_id} is at version {}; tail it before waiting",
@@ -363,8 +364,10 @@ impl TasksTool {
                 operation_key,
                 observed_version,
                 args.output_threshold,
-                args.wait_seconds
-                    .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),
+                // Background-process progress is already streamed to the TUI.
+                // Do not wake the model on fixed intervals; completion or an
+                // explicit semantic output threshold is the wake event.
+                None,
             )
             .await?;
         Ok(ToolOutput::WaitStarted {
@@ -485,6 +488,9 @@ fn append_terminal_section(mut output: String, terminals: &[TerminalSnapshot]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
+
+    use crate::storage::test_utils::TestStorage;
 
     fn shell() -> String {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
@@ -537,6 +543,85 @@ mod tests {
             .unwrap();
 
         assert!(matches!(waited, ToolOutput::Text(text) if text.contains("done")));
+    }
+
+    #[tokio::test]
+    async fn interactive_background_wait_parks_from_current_version_and_wakes_once() {
+        let storage = TestStorage::new().await;
+        let session_id = storage.start_session().await;
+        let active_session_id = Arc::new(Mutex::new(None));
+        crate::storage::activate_session_heartbeat(
+            &storage.storage,
+            &active_session_id,
+            session_id,
+        )
+        .await
+        .expect("test session should become live");
+        let registry = Arc::new(BackgroundTaskRegistry::new());
+        let terminals = Arc::new(TerminalRegistry::new());
+        let coordinator = Arc::new(crate::background_wake::BackgroundWakeCoordinator::new(
+            storage.storage.clone(),
+            active_session_id,
+            registry.clone(),
+            terminals.clone(),
+        ));
+        let tool = TasksTool::with_subagents_and_terminals(
+            registry.clone(),
+            Arc::new(SubagentRegistry::new()),
+            terminals,
+            Some(coordinator.clone()),
+            true,
+        );
+        let task = registry
+            .start(
+                &shell(),
+                "sleep 0.05; printf progress; sleep 0.3",
+                storage.project_path(),
+                60,
+            )
+            .await
+            .expect("background fixture should start");
+        let baseline = registry
+            .snapshot(&task.id)
+            .await
+            .expect("background fixture should be registered");
+
+        let parked = tool
+            .execute(serde_json::json!({
+                "action": "wait",
+                "task_id": task.id,
+                "wait_seconds": 1
+            }))
+            .await
+            .expect("interactive wait should park");
+        let ToolOutput::WaitStarted {
+            reason: crate::agent::WaitReason::BackgroundWork(wait),
+            ..
+        } = parked
+        else {
+            panic!("interactive wait should return a durable wait");
+        };
+        assert_eq!(wait.observed_version, baseline.version);
+
+        let mut wakes = coordinator.subscribe();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), wakes.recv())
+                .await
+                .is_err(),
+            "ordinary background progress must update the TUI without waking the model"
+        );
+        let wake = tokio::time::timeout(Duration::from_secs(2), wakes.recv())
+            .await
+            .expect("completion should wake promptly")
+            .expect("wake channel should remain open");
+        assert_eq!(wake.wait.target_id, task.id);
+        assert_eq!(wake.reason, "succeeded");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), wakes.recv())
+                .await
+                .is_err(),
+            "a parked background wait must wake the model only once"
+        );
     }
 
     #[tokio::test]

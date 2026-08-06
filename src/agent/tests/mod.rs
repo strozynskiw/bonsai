@@ -26,7 +26,8 @@ use super::{
     ContextPreviewUserInput, ContextReport, ContextRewriteKind, ContextRole, ContextStubReason,
     PLANNING_RESEARCH_TURN_LIMIT, PreflightPerfCapture, QueuedUserMessage,
     QueuedUserMessageCommand, ReadAdmission, ReviewScope, ToolContextDetail, ToolContextResult,
-    ToolImageContext, compact_tool_arguments_for_context, diff_context_preview, system_message,
+    ToolImageContext, compact_tool_arguments_for_context, diff_context_preview,
+    parse_context_gc_trigger_percent, system_message,
 };
 
 use super::controls::projection::{ContextProjectionSelection, ContextProjectionTransform};

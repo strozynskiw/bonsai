@@ -52,6 +52,7 @@ impl Agent {
         self.summary_source_stable_ids.clear();
         self.pending_context_rewrite = PendingContextRewrite::default();
         self.completion = CompletionGuardState::default();
+        self.finalization = FinalizationState::default();
         self.verification.pending_verification_bindings.clear();
         self.verification.suppressed_verification_calls.clear();
         self.begin_verification_observation_window();

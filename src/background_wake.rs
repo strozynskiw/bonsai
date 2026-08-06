@@ -396,10 +396,20 @@ impl BackgroundWakeCoordinator {
         if observation.version <= wait.observed_version && !threshold_reached {
             return Ok(false);
         }
-        let is_relevant = observation.finished
-            || observation.input_required
-            || output_threshold.is_none()
-            || threshold_reached;
+        let is_relevant = match wait.target_kind {
+            // Background output is already delivered to the TUI. Keep the
+            // provider asleep until the process finishes unless the caller
+            // explicitly requested an output threshold.
+            BackgroundWakeTargetKind::BackgroundTask => observation.finished || threshold_reached,
+            // PTYs additionally wake for semantic screen changes and input
+            // prompts because those can require a model response.
+            BackgroundWakeTargetKind::Terminal => {
+                observation.finished
+                    || observation.input_required
+                    || output_threshold.is_none()
+                    || threshold_reached
+            }
+        };
         if !is_relevant {
             return Ok(false);
         }

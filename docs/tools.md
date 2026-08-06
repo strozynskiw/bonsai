@@ -176,7 +176,12 @@ pretending to reattach.
 
 ### `tasks`
 List/wait/tail/stop background work: `bg-N` bash tasks, `pty-N` terminals,
-and `sub-N` background subagents. `wait_seconds` ≤60 per call.
+and `sub-N` background subagents. In the interactive TUI, waiting on a
+concrete `bg-N` parks atomically at its current semantic version and wakes the
+model once when the process finishes; output progress continues in the TUI
+without provider turns. `output_threshold` can request an earlier semantic
+wake. Headless waits and interactive-terminal deadlines accept
+`wait_seconds` ≤60 per call.
 
 ### `diagnostics`
 Run the project's type-checker in check mode and return structured

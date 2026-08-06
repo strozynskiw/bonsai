@@ -140,6 +140,37 @@ impl From<CancellationToken> for RunCancellation {
     }
 }
 
+fn parse_context_gc_trigger_percent(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok().filter(|percent| {
+        (MIN_CONTEXT_GC_TRIGGER_PERCENT..=MAX_CONTEXT_GC_TRIGGER_PERCENT).contains(percent)
+    })
+}
+
+fn configured_context_gc_trigger_percent() -> usize {
+    let Ok(value) = std::env::var(CONTEXT_GC_TRIGGER_PERCENT_ENV) else {
+        return DEFAULT_CONTEXT_GC_TRIGGER_PERCENT;
+    };
+    let Some(percent) = parse_context_gc_trigger_percent(&value) else {
+        tracing::warn!(
+            variable = CONTEXT_GC_TRIGGER_PERCENT_ENV,
+            value,
+            minimum = MIN_CONTEXT_GC_TRIGGER_PERCENT,
+            maximum = MAX_CONTEXT_GC_TRIGGER_PERCENT,
+            fallback = DEFAULT_CONTEXT_GC_TRIGGER_PERCENT,
+            "ignoring invalid context GC experiment setting"
+        );
+        return DEFAULT_CONTEXT_GC_TRIGGER_PERCENT;
+    };
+    if percent != DEFAULT_CONTEXT_GC_TRIGGER_PERCENT {
+        tracing::info!(
+            variable = CONTEXT_GC_TRIGGER_PERCENT_ENV,
+            percent,
+            "context GC experiment enabled"
+        );
+    }
+    percent
+}
+
 const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 16_000;
 /// Small context windows cannot afford the full default reserve. Keeping the
 /// reserve at or below one quarter of the window leaves the 50% compaction
@@ -159,7 +190,13 @@ const AUTO_COMPACTION_TRIGGER_PERCENT: usize = 95;
 /// single batched GC pass reclaims space — one cache-cold turn that then runs
 /// warm again until the next pass. Set between the compaction target (50%) and
 /// trigger (95%) so GC reclaims *before* full compaction is needed.
-const CONTEXT_GC_TRIGGER_PERCENT: usize = 75;
+const DEFAULT_CONTEXT_GC_TRIGGER_PERCENT: usize = 75;
+/// Guardrails for the private context-GC A/B experiment. Keeping the range
+/// narrow prevents an accidental environment setting from turning continuous
+/// GC into per-turn history churn or colliding with automatic compaction.
+const MIN_CONTEXT_GC_TRIGGER_PERCENT: usize = 55;
+const MAX_CONTEXT_GC_TRIGGER_PERCENT: usize = 90;
+const CONTEXT_GC_TRIGGER_PERCENT_ENV: &str = "BONSAI_CONTEXT_GC_TRIGGER_PERCENT";
 const CONTEXT_REWRITE_MIN_SAVED_TOKENS: usize = 8_000;
 const CONTEXT_REWRITE_MIN_SAVED_PERCENT: usize = 8;
 /// A title-change boundary only closes an episode that has accumulated at
@@ -429,8 +466,13 @@ pub struct Agent {
     lsp_hub: Option<Arc<LspHub>>,
     todo_store: Option<SharedTodoStore>,
     completion: CompletionGuardState,
+    /// Runtime-owned review/repair/final-gate sequence for the active task.
+    finalization: FinalizationState,
     messages: Vec<ChatCompletionRequestMessage>,
     budget: SessionBudget,
+    /// Full-persona pressure threshold. Defaults to the cache-preserving 75%; a
+    /// guarded environment override exists only to make paired A/B runs possible.
+    context_gc_trigger_percent: usize,
     cached_models: Vec<String>,
     transcript_logger: Option<Arc<TranscriptLogger>>,
     /// Project-context block (cwd, git, steering files) appended to the persona
@@ -1818,6 +1860,7 @@ mod compaction;
 mod completion;
 mod controls;
 mod episodes;
+mod finalization;
 mod lifecycle;
 mod memory_recall;
 mod message_injection;
@@ -1842,6 +1885,7 @@ use compaction::*;
 pub use completion::{CompletionFailureOutcome, CompletionGap, CompletionGuardFailure};
 use completion::{CompletionGuardState, CompletionGuardVerdict};
 pub(crate) use completion::{CompletionGuardTrace, TaskCompletionContract};
+use finalization::{FinalizationState, FinalizationStep};
 use messages::*;
 use output::*;
 use perf::*;

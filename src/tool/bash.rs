@@ -4,7 +4,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -361,6 +361,51 @@ impl BashTool {
         tool.capability = BashCapability::Planning;
         tool
     }
+
+    fn cache_background_verification(
+        &self,
+        task_id: String,
+        key: VerificationCacheKey,
+        timeout_secs: u64,
+    ) {
+        let background_tasks = self.background_tasks.clone();
+        let verification_cache = self.verification_cache.clone();
+        let project_root = self.canonical_project_root.clone();
+        tokio::spawn(async move {
+            let snapshot = match background_tasks
+                .wait_for_task(
+                    &task_id,
+                    Duration::from_secs(timeout_secs.saturating_add(5)),
+                )
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracing::debug!(%error, %task_id, "background verification cache watcher stopped");
+                    return;
+                }
+            };
+            if !snapshot.status.is_success() || snapshot.exit_code != Some(0) || snapshot.timed_out
+            {
+                return;
+            }
+            if workspace_fingerprint(&project_root) != key.workspace_fingerprint {
+                tracing::debug!(%task_id, "background verification changed inputs; skipping cache");
+                return;
+            }
+            verification_cache.lock().await.insert(
+                key,
+                CachedVerificationOutput {
+                    rendered: snapshot.completion_report(),
+                    stdout: snapshot.tail,
+                    stderr: String::new(),
+                    exit_code: snapshot.exit_code,
+                    timed_out: snapshot.timed_out,
+                    truncation: None,
+                },
+            );
+        });
+    }
 }
 
 fn bounded_output_base(command: &str) -> Option<&str> {
@@ -438,7 +483,7 @@ fn canonical_check_command(command: &str) -> Option<String> {
 /// filter is redundant for verification commands. Running the direct command
 /// also preserves Cargo's exit status instead of reporting the filter's zero.
 fn verification_command_without_output_filter(command: &str) -> Option<String> {
-    let base = command_without_stderr_merge(bounded_output_base(command)?);
+    let base = command_without_stderr_merge(bounded_output_base(command).unwrap_or(command));
     if has_shell_control_operator(base) {
         return None;
     }
@@ -454,6 +499,20 @@ fn verification_command_without_output_filter(command: &str) -> Option<String> {
     Some(base.to_string())
 }
 
+fn direct_verification_is_cacheable(command: &str) -> bool {
+    let mut tokens = command.split_whitespace();
+    if tokens.next() != Some("cargo") {
+        return false;
+    }
+    match tokens.next() {
+        Some("test" | "build" | "bench" | "doc") => true,
+        // Plain `cargo fmt` writes the workspace. Only its read-only check mode
+        // can be reused as verification evidence.
+        Some("fmt") => tokens.any(|token| token == "--check"),
+        _ => false,
+    }
+}
+
 fn structured_cargo_command(canonical: &str) -> String {
     if let Some((cargo_args, rustc_args)) = canonical.split_once(" -- ") {
         format!("{cargo_args} --message-format=json --quiet -- {rustc_args}")
@@ -463,22 +522,20 @@ fn structured_cargo_command(canonical: &str) -> String {
 }
 
 fn workspace_fingerprint(root: &Path) -> u64 {
-    let mut paths = ["Cargo.toml", "Cargo.lock", "build.rs"]
+    // Cargo inputs are not confined to `src/`: tests, workspace members,
+    // build scripts, and `include_*` data can all change a check result. Walk
+    // the project while excluding only VCS/build-output trees; hashing file
+    // metadata keeps this cheap enough for each verification lookup.
+    let mut paths = walkdir::WalkDir::new(root)
+        .follow_links(false)
         .into_iter()
-        .map(|path| root.join(path))
-        .filter(|path| path.is_file())
+        .filter_entry(|entry| {
+            entry.path() == root || !matches!(entry.file_name().to_str(), Some(".git" | "target"))
+        })
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
         .collect::<Vec<_>>();
-    let src = root.join("src");
-    if src.is_dir() {
-        paths.extend(
-            walkdir::WalkDir::new(&src)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().is_file())
-                .map(|entry| entry.into_path()),
-        );
-    }
     paths.sort_unstable();
     let mut hasher = DefaultHasher::new();
     for path in paths {
@@ -645,7 +702,7 @@ impl BashTool {
             .as_ref()
             .map(|command| command.command().to_string())
             .or_else(|| canonical_check.as_deref().map(structured_cargo_command))
-            .or(direct_verification)
+            .or(direct_verification.clone())
             .unwrap_or_else(|| requested_command.clone());
         let analysis = analyze_command(&command);
 
@@ -696,16 +753,19 @@ impl BashTool {
             anyhow::bail!(reason);
         }
 
-        let verification_cache_key =
-            canonical_check
-                .as_ref()
-                .map(|canonical| VerificationCacheKey {
-                    cwd: cwd.clone(),
-                    command: canonical.clone(),
-                    workspace_fingerprint: workspace_fingerprint(&self.canonical_project_root),
-                });
+        let verification_cache_key = canonical_check
+            .as_ref()
+            .or_else(|| {
+                direct_verification
+                    .as_ref()
+                    .filter(|command| direct_verification_is_cacheable(command))
+            })
+            .map(|canonical| VerificationCacheKey {
+                cwd: cwd.clone(),
+                command: canonical.clone(),
+                workspace_fingerprint: workspace_fingerprint(&self.canonical_project_root),
+            });
         if !escape_sandbox
-            && !run_in_background
             && !interactive
             && let Some(key) = verification_cache_key.as_ref()
             && let Some(cached) = self.verification_cache.lock().await.get(key).cloned()
@@ -765,6 +825,9 @@ impl BashTool {
                 .background_tasks
                 .start(&self.shell, &command, &cwd, timeout_secs)
                 .await?;
+            if let Some(key) = verification_cache_key {
+                self.cache_background_verification(task.id.clone(), key, timeout_secs);
+            }
             let message = format!(
                 "Started background task {} (timeout {}s) in {}",
                 task.id,
@@ -869,25 +932,28 @@ impl BashTool {
             );
         }
 
-        if let Some(key) = verification_cache_key {
-            // Cargo may legitimately rewrite Cargo.lock while checking. Cache
-            // the state that produced the result, not the pre-execution state,
-            // so the immediately following equivalent check can reuse it.
-            let key = VerificationCacheKey {
-                workspace_fingerprint: workspace_fingerprint(&self.canonical_project_root),
-                ..key
-            };
-            self.verification_cache.lock().await.insert(
-                key,
-                CachedVerificationOutput {
-                    rendered: rendered.clone(),
-                    stdout: stdout.clone(),
-                    stderr: stderr.clone(),
-                    exit_code,
-                    timed_out,
-                    truncation: truncation.clone(),
-                },
-            );
+        if !escape_sandbox
+            && matches!(exit_code, Some(0))
+            && !timed_out
+            && let Some(key) = verification_cache_key
+        {
+            // Associate a success only with the exact inputs it observed.
+            // Cargo.lock rewrites or concurrent editor changes conservatively
+            // invalidate this run instead of caching old evidence under the
+            // post-command workspace.
+            if workspace_fingerprint(&self.canonical_project_root) == key.workspace_fingerprint {
+                self.verification_cache.lock().await.insert(
+                    key,
+                    CachedVerificationOutput {
+                        rendered: rendered.clone(),
+                        stdout: stdout.clone(),
+                        stderr: stderr.clone(),
+                        exit_code,
+                        timed_out,
+                        truncation: truncation.clone(),
+                    },
+                );
+            }
         }
 
         if planning_command
@@ -1308,6 +1374,15 @@ mod tests {
             Some("cargo build --release")
         );
         assert_eq!(
+            verification_command_without_output_filter("cargo test --locked").as_deref(),
+            Some("cargo test --locked")
+        );
+        assert!(direct_verification_is_cacheable("cargo test --locked"));
+        assert!(direct_verification_is_cacheable(
+            "cargo fmt --all -- --check"
+        ));
+        assert!(!direct_verification_is_cacheable("cargo fmt --all"));
+        assert_eq!(
             verification_command_without_output_filter("rg refresh src | tail -40"),
             None
         );
@@ -1346,6 +1421,31 @@ mod tests {
             .expect("change source");
 
         assert_ne!(workspace_fingerprint(root.path()), before);
+    }
+
+    #[test]
+    fn verification_fingerprint_includes_tests_and_workspace_members() {
+        let root = tempfile::tempdir().expect("temp project");
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        let before = workspace_fingerprint(root.path());
+        let nested = root.path().join("member/tests");
+        std::fs::create_dir_all(&nested).expect("create member tests");
+        std::fs::write(nested.join("behavior.rs"), "#[test] fn behavior() {}")
+            .expect("write member test");
+
+        assert_ne!(workspace_fingerprint(root.path()), before);
+    }
+
+    #[test]
+    fn verification_fingerprint_ignores_cargo_build_outputs() {
+        let root = tempfile::tempdir().expect("temp project");
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("write manifest");
+        let before = workspace_fingerprint(root.path());
+        let target = root.path().join("target/debug");
+        std::fs::create_dir_all(&target).expect("create target output");
+        std::fs::write(target.join("artifact"), "generated").expect("write target output");
+
+        assert_eq!(workspace_fingerprint(root.path()), before);
     }
 
     fn command_body(rendered: &str) -> &str {
@@ -2287,7 +2387,14 @@ mod tests {
         .unwrap();
         std::fs::write(
             fixture.project_root.join("Cargo.lock"),
-            "# This file is automatically @generated by Cargo.\nversion = 4\n",
+            concat!(
+                "# This file is automatically @generated by Cargo.\n",
+                "# It is not intended for manual editing.\n",
+                "version = 4\n\n",
+                "[[package]]\n",
+                "name = \"cache-fixture\"\n",
+                "version = \"0.1.0\"\n",
+            ),
         )
         .unwrap();
         let source = fixture.project_root.join("src/lib.rs");
@@ -2324,6 +2431,89 @@ mod tests {
             "{invalidated}"
         );
         assert!(invalidated.contains("src/lib.rs:1:"), "{invalidated}");
+        let failed_key = VerificationCacheKey {
+            cwd: fixture.project_root.clone(),
+            command: "cargo check --offline".to_string(),
+            workspace_fingerprint: workspace_fingerprint(&fixture.project_root),
+        };
+        assert!(
+            !tool
+                .verification_cache
+                .lock()
+                .await
+                .contains_key(&failed_key),
+            "failed checks must not populate the success cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_background_check_populates_the_shared_verification_cache() {
+        let fixture = TestFixture::new();
+        std::fs::create_dir_all(fixture.project_root.join("src")).unwrap();
+        std::fs::write(
+            fixture.project_root.join("Cargo.toml"),
+            "[package]\nname = \"background-cache-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.project_root.join("Cargo.lock"),
+            concat!(
+                "# This file is automatically @generated by Cargo.\n",
+                "# It is not intended for manual editing.\n",
+                "version = 4\n\n",
+                "[[package]]\n",
+                "name = \"background-cache-fixture\"\n",
+                "version = \"0.1.0\"\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.project_root.join("src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        let registry = Arc::new(BackgroundTaskRegistry::new());
+        let tool = BashTool::with_background_tasks(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+            registry.clone(),
+        );
+
+        let started = tool
+            .execute(json!({
+                "command": "cargo check --offline",
+                "run_in_background": true
+            }))
+            .await
+            .unwrap();
+        let ToolOutput::BackgroundTaskStarted { task_id, .. } = started else {
+            panic!("expected background verification task");
+        };
+        let completed = registry
+            .wait_for_task(&task_id, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(completed.status.is_success(), "{completed:?}");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !tool.verification_cache.lock().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background verification cache watcher should finish");
+
+        let cached = rendered_command_output(
+            tool.execute(json!({"command": "cargo check --offline"}))
+                .await
+                .unwrap(),
+        );
+
+        assert!(cached.contains("verification cache hit"), "{cached}");
     }
 
     #[tokio::test]

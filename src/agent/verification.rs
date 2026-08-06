@@ -67,6 +67,21 @@ impl VerificationRecoveryEvent {
 }
 
 impl Agent {
+    pub(super) fn verification_is_active(&self) -> bool {
+        self.verification.active_verification.is_some()
+    }
+
+    pub(super) fn verification_reasoning_for_request(&self) -> Option<ReasoningSelection> {
+        let active = self.verification.active_verification.as_ref()?;
+        active.reasoning_override.or_else(|| {
+            if active.last_failure_signature.is_some() {
+                None
+            } else {
+                self.provider.reasoning().lower_for_mechanical_turn()
+            }
+        })
+    }
+
     pub(super) fn begin_verification_observation_window(&mut self) {
         self.verification.observed_verification_run_indices.clear();
     }
@@ -172,7 +187,7 @@ impl Agent {
         self.verification.after_edit_verification_pending = true;
     }
 
-    fn mark_latest_verification_stale(&mut self, paths: &[String]) {
+    pub(super) fn mark_latest_verification_stale(&mut self, paths: &[String]) {
         if let Some(record_index) = self
             .verification
             .active_verification
@@ -375,7 +390,7 @@ impl Agent {
         &self.verification.verification_runs
     }
 
-    fn verification_kind_for_command(&self, command: &str) -> Option<VerificationKind> {
+    pub(super) fn verification_kind_for_command(&self, command: &str) -> Option<VerificationKind> {
         let normalized = normalize_verification_command(command);
         let active_kind = self
             .verification
@@ -843,6 +858,10 @@ impl Agent {
                 record.terminal_reason_kind = Some(reason);
                 active.pending_blocker = Some(message);
             } else if check_status == VerificationCheckStatus::Passed {
+                // Escalation is repair-local. Once the failed check is green,
+                // subsequent verification bookkeeping returns to the user's
+                // configured effort (or the bounded mechanical downgrade).
+                active.reasoning_override = None;
                 if active.last_failure_signature.take().is_some() && !workspace_changed {
                     active.unstable_observed = true;
                     recovery_event = Some(VerificationRecoveryEvent::UnstablePass {
@@ -1195,6 +1214,8 @@ impl Agent {
             return;
         }
         let Some(active) = self.verification.active_verification.take() else {
+            self.finalization
+                .finish_final_gate(VerificationRunStatus::Incomplete);
             return;
         };
 
@@ -1316,6 +1337,7 @@ impl Agent {
             }
             _ => {}
         }
+        self.finalization.finish_final_gate(record.status);
     }
 }
 
@@ -1396,12 +1418,14 @@ fn observed_verification_kind(command: &str) -> Option<VerificationKind> {
             | ("npm", ["test", ..])
             | ("npm", ["run", "test", ..])
             | ("pnpm" | "yarn" | "bun", ["test", ..])
-            | ("deno", ["test", ..]) => VerificationKind::Test,
-            ("cargo", ["build" | "check" | "clippy", ..])
+            | ("deno", ["test", ..])
+            | ("cargo", ["bench", ..]) => VerificationKind::Test,
+            ("cargo", ["build" | "check" | "clippy" | "doc", ..])
             | ("go", ["build" | "vet", ..])
             | ("npm" | "pnpm" | "yarn" | "bun", ["run", "build" | "lint", ..])
             | ("deno", ["check" | "lint", ..])
             | ("python" | "python3", ["-m", "build" | "compileall", ..]) => VerificationKind::Build,
+            ("cargo", ["fmt", args @ ..]) if args.contains(&"--check") => VerificationKind::Build,
             _ => continue,
         };
         if kind == VerificationKind::Test {
@@ -1495,7 +1519,7 @@ fn normalize_failure_diagnostic(diagnostic: &str) -> String {
     normalized.trim().to_string()
 }
 
-fn bash_command(arguments: &str) -> Option<String> {
+pub(super) fn bash_command(arguments: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
     value
         .get("command")?
@@ -1576,6 +1600,11 @@ mod tests {
             observed_verification_kind("RUSTFLAGS=-Dwarnings cargo clippy --all-targets"),
             Some(VerificationKind::Build)
         );
+        assert_eq!(
+            observed_verification_kind("cargo fmt --all -- --check"),
+            Some(VerificationKind::Build)
+        );
+        assert_eq!(observed_verification_kind("cargo fmt --all"), None);
         assert_eq!(observed_verification_kind("echo 'cargo test'"), None);
         assert_eq!(
             observed_verification_kind("echo 'skip && cargo test'"),

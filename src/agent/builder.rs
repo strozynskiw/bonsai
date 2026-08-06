@@ -188,6 +188,7 @@ impl Agent {
             lsp_hub: builder.lsp_hub,
             todo_store: None,
             completion: CompletionGuardState::default(),
+            finalization: FinalizationState::default(),
             messages: vec![system_message],
             budget: SessionBudget {
                 max_iterations: builder.max_iterations,
@@ -200,6 +201,7 @@ impl Agent {
                 max_session_cost_micros: builder.max_session_cost_micros,
                 context_budget_tokens: builder.context_budget_tokens.max(1),
             },
+            context_gc_trigger_percent: builder.context_gc_trigger_percent,
             cached_models: Vec::new(),
             transcript_logger: TranscriptLogger::from_env().map(Arc::new),
             system_context: builder.system_context,
@@ -298,6 +300,7 @@ pub(crate) struct AgentBuilder {
     pub(super) active_model_identity: Option<ActiveModelIdentity>,
     pub(super) execution_lane: ExecutionLane,
     pub(super) context_budget_tokens: usize,
+    pub(super) context_gc_trigger_percent: usize,
     pub(super) smol_preference: crate::smol::SmolPreference,
     pub(super) max_generation_duration: Option<Duration>,
     pub(super) max_streamed_chars: Option<usize>,
@@ -351,6 +354,7 @@ impl AgentBuilder {
             active_model_identity: None,
             execution_lane: ExecutionLane::default(),
             context_budget_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS as usize,
+            context_gc_trigger_percent: configured_context_gc_trigger_percent(),
             smol_preference: crate::smol::SmolPreference::Off,
             max_generation_duration: None,
             max_streamed_chars: None,
@@ -415,6 +419,15 @@ impl AgentBuilder {
 
     pub(crate) fn context_budget_tokens(mut self, context_budget_tokens: usize) -> Self {
         self.context_budget_tokens = context_budget_tokens;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn context_gc_trigger_percent(mut self, percent: usize) -> Self {
+        debug_assert!(
+            (MIN_CONTEXT_GC_TRIGGER_PERCENT..=MAX_CONTEXT_GC_TRIGGER_PERCENT).contains(&percent)
+        );
+        self.context_gc_trigger_percent = percent;
         self
     }
 

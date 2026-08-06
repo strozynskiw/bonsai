@@ -82,6 +82,35 @@ async fn pure_12k_window_keeps_pressure_thresholds_above_half() {
     assert_eq!(agent.automatic_compaction_trigger_tokens(), 8_550);
 }
 
+#[test]
+fn context_gc_experiment_rejects_unsafe_percentages() {
+    assert_eq!(parse_context_gc_trigger_percent("55"), Some(55));
+    assert_eq!(parse_context_gc_trigger_percent("90"), Some(90));
+    assert_eq!(parse_context_gc_trigger_percent("54"), None);
+    assert_eq!(parse_context_gc_trigger_percent("91"), None);
+    assert_eq!(parse_context_gc_trigger_percent("early"), None);
+}
+
+#[tokio::test]
+async fn context_gc_experiment_preserves_pressure_ordering() {
+    let fixture = TestFixture::new();
+    let agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .context_budget_tokens(12_000)
+    .context_gc_trigger_percent(55)
+    .build()
+    .unwrap();
+
+    assert_eq!(agent.default_compaction_target_tokens(), 6_000);
+    assert_eq!(agent.context_gc_trigger_tokens(), 6_001);
+    assert!(agent.context_gc_trigger_tokens() < agent.automatic_compaction_trigger_tokens());
+}
+
 #[tokio::test]
 async fn emits_context_update_after_compaction() {
     let fixture = TestFixture::new();

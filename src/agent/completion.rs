@@ -579,12 +579,14 @@ impl Agent {
             self.verification.verification_runs.len(),
             self.self_review_runs.len(),
         );
+        self.finalization.begin_task();
     }
 
     pub(super) fn retry_completion_task(&mut self) {
         self.completion.continuation_used = false;
         self.completion.attempts.clear();
         self.completion.disposition = None;
+        self.finalization.begin_task();
     }
 
     pub(super) fn merge_completion_steering(&mut self, prompt: &str) {
@@ -593,6 +595,10 @@ impl Agent {
             self.verification.verification_runs.len(),
             self.self_review_runs.len(),
         );
+        // Queued human steering is explicit authority for more work. It must
+        // reopen finalization so a prior green gate blocks only unsolicited
+        // model activity, never a newly requested review or verification.
+        self.finalization.begin_task();
     }
 
     pub(super) fn note_completion_action(&mut self) {
@@ -602,6 +608,7 @@ impl Agent {
     pub(super) fn note_completion_workspace_mutation(&mut self) {
         self.completion.action_observed = true;
         self.completion.workspace_mutated = true;
+        self.finalization.note_workspace_change();
     }
 
     pub(super) fn note_completion_pending_work_started(&mut self) {
@@ -619,6 +626,19 @@ impl Agent {
     ) -> CompletionGuardVerdict {
         self.revalidate_verification_for_delivery(self.completion.verification_baseline)
             .await;
+        let delivered_gate_became_stale = self
+            .verification
+            .verification_runs
+            .get(self.completion.verification_baseline..)
+            .and_then(|runs| runs.last())
+            .is_some_and(|run| run.status == crate::verification::VerificationRunStatus::Stale);
+        if delivered_gate_became_stale {
+            // Keep the finalization phase aligned with the typed delivery
+            // binding. This also covers headless runs and repository-state
+            // changes that do not surface through the interactive volatile
+            // context refresh.
+            self.note_external_finalization_workspace_change();
+        }
         let signals = response_signals(response);
         let evidence = self.completion_decision_evidence(signals).await;
         let gaps = completion_gaps(&evidence);

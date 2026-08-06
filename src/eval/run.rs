@@ -33,6 +33,30 @@ use super::*;
 
 const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_EVAL_REPETITIONS: usize = 1;
+const EVAL_CONTEXT_WINDOW_TOKENS_ENV: &str = "BONSAI_EVAL_CONTEXT_WINDOW_TOKENS";
+const MIN_EVAL_CONTEXT_WINDOW_TOKENS: usize = 32_768;
+
+fn parse_eval_context_window_tokens(value: &str) -> Result<usize> {
+    let tokens = value.parse::<usize>().with_context(|| {
+        format!("{EVAL_CONTEXT_WINDOW_TOKENS_ENV} must be an integer number of tokens")
+    })?;
+    if tokens < MIN_EVAL_CONTEXT_WINDOW_TOKENS {
+        anyhow::bail!(
+            "{EVAL_CONTEXT_WINDOW_TOKENS_ENV} must be at least {MIN_EVAL_CONTEXT_WINDOW_TOKENS}"
+        );
+    }
+    Ok(tokens)
+}
+
+fn configured_eval_context_window_tokens() -> Result<Option<usize>> {
+    let Some(value) = std::env::var_os(EVAL_CONTEXT_WINDOW_TOKENS_ENV) else {
+        return Ok(None);
+    };
+    let value = value.to_str().ok_or_else(|| {
+        anyhow::anyhow!("{EVAL_CONTEXT_WINDOW_TOKENS_ENV} must contain UTF-8 digits")
+    })?;
+    parse_eval_context_window_tokens(value).map(Some)
+}
 
 /// Paths and pass/fail totals returned to the CLI after a completed eval run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,13 +431,29 @@ impl ProviderSetup {
                 model_catalog,
                 ..
             } => {
-                agent.set_context_budget_tokens(
+                let catalog_tokens =
                     crate::model_resolution::context_window_for_current_model_with_catalog(
                         registry,
                         session_store.as_ref(),
                         Some(model_catalog.as_ref()),
-                    ) as usize,
-                );
+                    ) as usize;
+                let context_budget_tokens = configured_eval_context_window_tokens()?
+                    .map(|tokens| {
+                        if tokens > catalog_tokens {
+                            anyhow::bail!(
+                                "{EVAL_CONTEXT_WINDOW_TOKENS_ENV} ({tokens}) cannot exceed the selected model's catalog window ({catalog_tokens})"
+                            );
+                        }
+                        tracing::info!(
+                            tokens,
+                            catalog_tokens,
+                            "live eval context-window override enabled"
+                        );
+                        Ok(tokens)
+                    })
+                    .transpose()?
+                    .unwrap_or(catalog_tokens);
+                agent.set_context_budget_tokens(context_budget_tokens);
                 agent.set_prompt_estimator(
                     crate::model_resolution::prompt_estimator_for_current_model_with_catalog(
                         registry,
@@ -1829,6 +1869,13 @@ pub(crate) fn millis_u64(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eval_context_window_override_is_guarded() {
+        assert_eq!(parse_eval_context_window_tokens("32768").unwrap(), 32_768);
+        assert!(parse_eval_context_window_tokens("32767").is_err());
+        assert!(parse_eval_context_window_tokens("large").is_err());
+    }
 
     #[test]
     fn evals_auto_approve_routine_development_commands_without_dropping_guardrails() {

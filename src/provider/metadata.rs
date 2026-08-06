@@ -120,6 +120,24 @@ impl ReasoningSelection {
         }
     }
 
+    /// One bounded downgrade for deterministic, mechanical continuation turns.
+    /// Unspecified/toggle/token-budget modes are left untouched because they do
+    /// not reveal a portable lower effort.
+    pub(crate) const fn lower_for_mechanical_turn(self) -> Option<Self> {
+        match self {
+            Self::Ultra => Some(Self::Max),
+            Self::Max | Self::XHigh => Some(Self::High),
+            Self::High => Some(Self::Medium),
+            Self::Default
+            | Self::Off
+            | Self::On
+            | Self::Minimal
+            | Self::Low
+            | Self::Medium
+            | Self::BudgetTokens(_) => None,
+        }
+    }
+
     /// The nearest stronger explicit effort advertised by the active model.
     /// Non-effort selections are deliberately not guessed: `Default`, toggles,
     /// and token budgets do not reveal a portable effective effort.
@@ -620,6 +638,23 @@ mod tests {
         );
         assert_eq!(ReasoningSelection::Off.lower_for_retry(), None);
         assert_eq!(ReasoningSelection::Medium.lower_for_retry(), None);
+    }
+
+    #[test]
+    fn mechanical_turns_only_downgrade_explicit_high_effort() {
+        assert_eq!(
+            ReasoningSelection::XHigh.lower_for_mechanical_turn(),
+            Some(ReasoningSelection::High)
+        );
+        assert_eq!(
+            ReasoningSelection::High.lower_for_mechanical_turn(),
+            Some(ReasoningSelection::Medium)
+        );
+        assert_eq!(
+            ReasoningSelection::Default.lower_for_mechanical_turn(),
+            None
+        );
+        assert_eq!(ReasoningSelection::Medium.lower_for_mechanical_turn(), None);
     }
 
     #[test]

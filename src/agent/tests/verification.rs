@@ -229,6 +229,8 @@ struct ScriptedVerificationBashTool {
 struct RecoveryReasoningProvider {
     responses: Mutex<VecDeque<crate::provider::ProviderResult<StreamedResponse>>>,
     options: Arc<Mutex<Vec<crate::provider::ProviderRequestOptions>>>,
+    reasoning: ReasoningSelection,
+    reasoning_escalation: Option<ReasoningSelection>,
 }
 
 impl RecoveryReasoningProvider {
@@ -236,6 +238,20 @@ impl RecoveryReasoningProvider {
         Self {
             responses: Mutex::new(responses.into()),
             options: Arc::new(Mutex::new(Vec::new())),
+            reasoning: ReasoningSelection::Medium,
+            reasoning_escalation: Some(ReasoningSelection::High),
+        }
+    }
+
+    fn with_reasoning(
+        responses: Vec<crate::provider::ProviderResult<StreamedResponse>>,
+        reasoning: ReasoningSelection,
+    ) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            options: Arc::new(Mutex::new(Vec::new())),
+            reasoning,
+            reasoning_escalation: None,
         }
     }
 
@@ -247,11 +263,11 @@ impl RecoveryReasoningProvider {
 #[async_trait]
 impl Provider for RecoveryReasoningProvider {
     fn reasoning(&self) -> ReasoningSelection {
-        ReasoningSelection::Medium
+        self.reasoning
     }
 
     fn reasoning_escalation(&self) -> Option<ReasoningSelection> {
-        Some(ReasoningSelection::High)
+        self.reasoning_escalation
     }
 
     async fn chat_stream(
@@ -295,6 +311,55 @@ impl Provider for RecoveryReasoningProvider {
 struct RepairingWriteTool {
     project_root: PathBuf,
     repair_count: StdMutex<u32>,
+}
+
+struct ReviewableWriteTool {
+    project_root: PathBuf,
+    writes: StdMutex<u32>,
+}
+
+#[async_trait]
+impl Tool for ReviewableWriteTool {
+    fn name(&self) -> &str {
+        "write"
+    }
+
+    fn description(&self) -> &str {
+        "scripted reviewable mutation"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        let write = {
+            let mut writes = self
+                .writes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reviewable write count lock poisoned"))?;
+            *writes = writes.saturating_add(1);
+            *writes
+        };
+        let path = self.project_root.join("src.rs");
+        let old = tokio::fs::read_to_string(&path).await?;
+        let mut new = (0..20)
+            .map(|index| format!("fn changed_{index}() {{}}\n"))
+            .collect::<String>();
+        if write > 1 {
+            new.push_str("fn repaired_after_review() {}\n");
+        }
+        tokio::fs::write(&path, &new).await?;
+        Ok(ToolOutput::Edit {
+            summary: "wrote reviewable change".to_string(),
+            diff: crate::diff::build_file_diff("src.rs".to_string(), Some(&old), &new),
+        })
+    }
 }
 
 #[async_trait]
@@ -370,6 +435,16 @@ impl Tool for ScriptedVerificationBashTool {
 fn mutation_and_verification_registry() -> Arc<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(MockTool::new("write", "ok")));
+    registry.register(Arc::new(VerificationBashTool));
+    Arc::new(registry)
+}
+
+fn review_and_verification_registry(project_root: PathBuf) -> Arc<ToolRegistry> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReviewableWriteTool {
+        project_root,
+        writes: StdMutex::new(0),
+    }));
     registry.register(Arc::new(VerificationBashTool));
     Arc::new(registry)
 }
@@ -1244,10 +1319,11 @@ async fn failed_repair_escalates_reasoning_then_verifies_the_final_workspace() {
             .all(|options| options.reasoning.is_none())
     );
     assert!(
-        options[3..]
+        options[3..5]
             .iter()
             .all(|options| { options.reasoning == Some(ReasoningSelection::High) })
     );
+    assert_eq!(options[5].reasoning, None);
     let run = agent.verification_runs().last().unwrap();
     assert_eq!(run.status, VerificationRunStatus::Passed);
     assert_eq!(run.repair_attempts, 2);
@@ -1259,6 +1335,51 @@ async fn failed_repair_escalates_reasoning_then_verifies_the_final_workspace() {
     );
     assert_eq!(run.reasoning_escalations[0].to, ReasoningSelection::High);
     assert_eq!(run.reasoning_escalations[0].repair_attempt, 2);
+}
+
+#[tokio::test]
+async fn mechanical_verification_turns_use_one_lower_request_local_effort() {
+    let fixture = TestFixture::new();
+    let provider = RecoveryReasoningProvider::with_reasoning(
+        vec![
+            model_tool_response("call-test", "bash", r#"{"command":"cargo test"}"#),
+            model_finished_response("verified"),
+        ],
+        ReasoningSelection::High,
+    );
+    let options = provider.options();
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        mutation_and_verification_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .system_context(String::new())
+    .build()
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    let checks = vec![VerificationCheck {
+        name: "Rust tests".to_string(),
+        command: "cargo test".to_string(),
+    }];
+    agent
+        .begin_verification_run(VerificationKind::Test, &checks, "verify")
+        .await;
+
+    let result = agent
+        .run_current_context(CancellationToken::new(), Arc::new(StdoutSink))
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Completed("verified".to_string()));
+    let options = options.lock().await;
+    assert_eq!(options.len(), 2);
+    assert!(
+        options
+            .iter()
+            .all(|options| { options.reasoning == Some(ReasoningSelection::Medium) })
+    );
 }
 
 #[tokio::test]
@@ -1501,4 +1622,69 @@ async fn coding_run_executes_post_edit_verification_before_completing() {
     let run = agent.verification_runs().last().unwrap();
     assert_eq!(run.status, VerificationRunStatus::Passed);
     assert_eq!(run.checks[0].tool_call_id.as_deref(), Some("call-test"));
+}
+
+#[tokio::test]
+async fn coding_run_finishes_review_repairs_before_starting_one_final_gate() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(
+        &fixture.project_root,
+        "Cargo.toml",
+        "[package]\nname='verify'\nversion='0.1.0'\n",
+        "baseline manifest",
+    );
+    commit_file(
+        &fixture.project_root,
+        "src.rs",
+        "fn baseline() {}\n",
+        "baseline source",
+    );
+    let provider = MockProvider::new(vec![
+        model_tool_response("call-write", "write", r#"{"path":"src.rs"}"#),
+        model_finished_response("implementation complete"),
+        model_tool_response("call-repair", "write", r#"{"path":"src.rs"}"#),
+        model_finished_response("Fixed the invariant violation from review."),
+        model_tool_response("call-test", "bash", r#"{"command":"cargo test"}"#),
+        model_finished_response("verified"),
+    ]);
+    let requests = provider.requests();
+    let mut config = crate::config::Config::empty();
+    config.verification.after_edit = VerifyAfterEdit::On;
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        review_and_verification_registry(fixture.project_root.clone()),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .system_context(String::new())
+    .config(Arc::new(config))
+    .build()
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+    let (_queue_sender, queue_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let result = agent
+        .run_with_queue(
+            crate::agent::UserInput::from_text("make a reviewable change"),
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+            queue_receiver,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Completed("verified".to_string()));
+    assert_eq!(requests.lock().await.len(), 6);
+    assert_eq!(agent.self_review_runs().len(), 1);
+    assert_eq!(
+        agent.self_review_runs()[0].disposition,
+        Some(crate::self_review::SelfReviewDisposition::Fixed)
+    );
+    assert_eq!(agent.verification_runs().len(), 1);
+    assert_eq!(
+        agent.verification_runs()[0].status,
+        VerificationRunStatus::Passed
+    );
 }

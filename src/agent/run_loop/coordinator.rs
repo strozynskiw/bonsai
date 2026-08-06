@@ -188,6 +188,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         // Keep the volatile git state honest across round-trips: writes and
         // concurrent edits land mid-run and must be visible on the next turn.
         let volatile_changed = self.agent.refresh_volatile_project_state().await;
+        if volatile_changed {
+            self.agent.note_external_finalization_workspace_change();
+        }
         let background_changed = self.agent.refresh_background_context(&self.sink).await;
         if background_changed || volatile_changed {
             self.agent.emit_context_updated(&self.sink);
@@ -312,30 +315,26 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             self.agent.emit_context_updated(&self.sink);
             return Ok(TurnOutcome::Continue);
         }
-        if self
-            .agent
-            .maybe_self_review(&self.sink, self.cancellation_token.clone())
-            .await
-        {
-            deferred_sink.discard();
-            self.agent.emit_context_updated(&self.sink);
-            return Ok(TurnOutcome::Continue);
-        }
-        // Verification must observe any repair prompted by self-review.
-        if self.cancellation_token.is_cancelled() {
-            deferred_sink.discard();
-            return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
-                String::new(),
-            )));
-        }
-        if self
-            .agent
-            .maybe_verify_after_edit(&self.sink, self.cancellation_token.clone())
-            .await
-        {
-            deferred_sink.discard();
-            self.agent.emit_context_updated(&self.sink);
-            return Ok(TurnOutcome::Continue);
+        match self.agent.finalization_step() {
+            FinalizationStep::Review => {
+                let injected = self
+                    .agent
+                    .maybe_self_review(&self.sink, self.cancellation_token.clone())
+                    .await;
+                self.agent.resolve_finalization_review(injected);
+                if injected {
+                    deferred_sink.discard();
+                    self.agent.emit_context_updated(&self.sink);
+                    return Ok(TurnOutcome::Continue);
+                }
+            }
+            FinalizationStep::FinishRepairs => {
+                self.agent.finalize_pending_self_review(&response.content);
+                self.agent.finish_finalization_review_repairs();
+            }
+            FinalizationStep::FinalGate
+            | FinalizationStep::FinishFinalGate
+            | FinalizationStep::Complete => {}
         }
         if self.cancellation_token.is_cancelled() {
             deferred_sink.discard();
@@ -344,13 +343,35 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )));
         }
 
-        self.agent.finalize_pending_self_review(&response.content);
+        if self.agent.finalization_step() == FinalizationStep::FinalGate {
+            let already_running = self.agent.verification_is_active();
+            let injected = already_running
+                || self
+                    .agent
+                    .maybe_verify_after_edit(&self.sink, self.cancellation_token.clone())
+                    .await;
+            self.agent.resolve_finalization_gate(injected);
+            if injected && !already_running {
+                deferred_sink.discard();
+                self.agent.emit_context_updated(&self.sink);
+                return Ok(TurnOutcome::Continue);
+            }
+        }
+
         // A focused verification run is terminalized by the run wrapper, but
         // the completion decision must see that final typed record before it
         // can accept the candidate response. Terminalize it here with the same
         // candidate result; the wrapper's later call is then a no-op.
         let candidate_result = Ok(AgentRunResult::Completed(response.content.clone()));
-        self.agent.finish_verification_run(&candidate_result).await;
+        if self.agent.finalization_step() == FinalizationStep::FinishFinalGate {
+            self.agent.finish_verification_run(&candidate_result).await;
+        }
+        if self.cancellation_token.is_cancelled() {
+            deferred_sink.discard();
+            return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
+                String::new(),
+            )));
+        }
 
         match self.agent.completion_guard_verdict(&response.content).await {
             CompletionGuardVerdict::Accept => {}
@@ -475,6 +496,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         let auto_background = self
             .agent
             .auto_background_verification_calls(&response.tool_calls);
+        let finalization = self.agent.finalization_rejections(&response.tool_calls);
 
         self.agent.push_message(build_assistant_message(&response)?);
         self.agent.emit_context_updated(&self.sink);
@@ -494,6 +516,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     repeated_inspection: repeated_inspection_rejection,
                     read_storm: read_storm_rejection,
                     repeated_failure: repeated_failure_rejection.unwrap_or_default(),
+                    finalization,
                 },
                 &self.sink,
                 self.cancellation_token.clone(),

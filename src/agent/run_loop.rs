@@ -378,11 +378,7 @@ impl Agent {
         self.log_request(&request_messages, tool_schema.tools());
         let provider_started_at = std::time::Instant::now();
         let (provider_sink, first_output) = PerfSink::shared(sink.clone());
-        let verification_reasoning = self
-            .verification
-            .active_verification
-            .as_ref()
-            .and_then(|active| active.reasoning_override);
+        let verification_reasoning = self.verification_reasoning_for_request();
         let request_options = verification_reasoning
             .map(crate::provider::ProviderRequestOptions::with_reasoning)
             .unwrap_or_default();
@@ -1389,6 +1385,9 @@ struct ToolRejections {
     /// Identical calls that already failed twice. Keyed by call id so a fresh
     /// sibling in the same batch still executes.
     repeated_failure: HashMap<String, String>,
+    /// Serial reviewer calls after automatic review, plus verification calls
+    /// after the unchanged workspace passed its final gate.
+    finalization: HashMap<String, String>,
 }
 
 impl ToolRejections {
@@ -1411,6 +1410,10 @@ impl ToolRejections {
         }
 
         if let Some(message) = self.repeated_failure.get(&tool_call.id) {
+            return Some(message.clone());
+        }
+
+        if let Some(message) = self.finalization.get(&tool_call.id) {
             return Some(message.clone());
         }
 

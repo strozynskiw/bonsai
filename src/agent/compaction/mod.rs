@@ -284,14 +284,27 @@ impl Agent {
 
     /// Prompt size at which continuous GC starts reclaiming old tool outputs.
     /// Below it, history is left byte-stable so the provider prompt cache stays
-    /// warm; see [`CONTEXT_GC_TRIGGER_PERCENT`].
+    /// warm; see [`DEFAULT_CONTEXT_GC_TRIGGER_PERCENT`].
     pub(super) fn context_gc_trigger_tokens(&self) -> usize {
         let percent = if self.smol_applies_to_active_persona() {
             35
         } else {
-            CONTEXT_GC_TRIGGER_PERCENT
+            self.context_gc_trigger_percent
         };
-        self.usable_window_fraction_tokens(percent)
+        let configured = self.usable_window_fraction_tokens(percent);
+        if self.smol_applies_to_active_persona() {
+            return configured;
+        }
+
+        // Preserve the pressure-ordering invariant even when an experiment is
+        // run against a small context window whose output reserve is 25%.
+        let floor = self.default_compaction_target_tokens().saturating_add(1);
+        let ceiling = self.automatic_compaction_trigger_tokens().saturating_sub(1);
+        if floor <= ceiling {
+            configured.clamp(floor, ceiling)
+        } else {
+            configured
+        }
     }
 
     /// `percent` of the usable input window (the context budget minus the output
