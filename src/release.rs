@@ -20,7 +20,11 @@ const RELEASE_BY_TAG_API: &str = "https://api.github.com/repos/strozynskiw/bonsa
 const MANIFEST_ASSET: &str = "release-manifest.json";
 const SIGNATURE_ASSET: &str = "release-manifest.json.sig";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const RELEASE_LIST_LIMIT: usize = 512 * 1024;
+// One GitHub releases page (per_page=30) with every release's embedded
+// assets runs ~600 KB today and grows with each release; the bound must stay
+// comfortably above a full page so a legitimately large listing cannot
+// masquerade as invalid metadata.
+const RELEASE_LIST_LIMIT: usize = 2 * 1024 * 1024;
 const MANIFEST_LIMIT: usize = 64 * 1024;
 const SIGNATURE_LIMIT: usize = 512;
 /// Streamed download cap for a release archive (self-update). Archives are
@@ -598,5 +602,19 @@ mod tests {
             }],
         };
         assert!(release_asset_url(&attacker, MANIFEST_ASSET).is_err());
+    }
+
+    #[test]
+    fn release_list_limit_clears_a_full_releases_page() {
+        // A GitHub releases page (per_page=30, embedded asset metadata)
+        // measured 595_476 bytes at 14 releases (2026-08-07) and grows with
+        // every release; a full 30-release page projects to ~1.2 MiB. The
+        // bound must clear it, or a legitimate listing fails the update as
+        // invalid metadata instead of reporting the newer release. Const
+        // assert so a shrink of the bound fails the build.
+        const _: () = assert!(
+            RELEASE_LIST_LIMIT > 595_476,
+            "releases page exceeded RELEASE_LIST_LIMIT; raise the bound"
+        );
     }
 }
