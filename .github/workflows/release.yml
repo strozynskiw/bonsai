@@ -18,6 +18,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Test migration immutability guard
+        run: bash scripts/test_check_migrations_immutable.sh
+      - name: Verify released migrations are immutable
+        run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null || true)
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "::notice::No previous release tag; skipping migration history check."
+            exit 0
+          fi
+          bash scripts/check-migrations-immutable.sh --history "$PREVIOUS_TAG" HEAD
       - name: Set up Node.js for TypeScript acceptance
         uses: actions/setup-node@v7
         with:
