@@ -566,12 +566,20 @@ async fn automatic_compaction_uses_deterministic_fallback_on_summary_error() {
     assert_eq!(result, AgentRunResult::Completed("done".to_string()));
     let requests = requests.lock().await;
     assert_eq!(requests.len(), 2);
-    assert!(
-        requests[1]
-            .iter()
-            .any(|message| message_content(message).contains("Deterministic fallback")),
-        "actual request should include deterministic fallback summary"
-    );
+    let summary = requests[1]
+        .iter()
+        .map(message_content)
+        .find(|content| content.contains("Deterministic fallback"))
+        .expect("actual request should include deterministic fallback summary");
+    for signal in [
+        "## Completed work",
+        "## Work in progress",
+        "## Next step",
+        "## Evidence freshness",
+        "## Tool findings",
+    ] {
+        assert!(summary.contains(signal), "missing {signal}: {summary}");
+    }
 }
 
 #[tokio::test]
@@ -2796,6 +2804,22 @@ async fn rolling_summary_updates_a_prior_summary_instead_of_resummarizing() {
     assert!(
         text.contains("Ship the parser"),
         "the prior summary must be carried in as the base to update: {text}"
+    );
+    for signal in [
+        "## Completed work",
+        "## Work in progress",
+        "## Next step",
+        "## Evidence freshness",
+        "## Tool findings",
+    ] {
+        assert!(
+            text.contains(signal),
+            "missing continuity signal {signal}: {text}"
+        );
+    }
+    assert!(
+        text.contains("remove details made stale by newer context"),
+        "{text}"
     );
 
     // No prior summary → summarize from scratch.

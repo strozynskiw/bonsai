@@ -1079,6 +1079,7 @@ fn action_directive(normalized: &str) -> &str {
             "let us ",
             "ok ",
             "okay ",
+            "also ",
             "no to ",
             "dobra ",
             "prosze ",
@@ -1100,14 +1101,20 @@ fn action_directive(normalized: &str) -> &str {
 
 fn supersedes_goal(prompt: &str) -> bool {
     let normalized = normalized_words(prompt);
-    contains_any_phrase(
-        &normalized,
+    let directive = action_directive(&normalized);
+    starts_with_command(
+        directive,
         &[
             "instead do",
             "do this instead",
             "new goal",
             "stop that",
             "actually do",
+            "scratch that",
+            "forget that instead",
+            "forget that do",
+            "do not do that",
+            "don t do that",
             "zamiast tego",
             "nowy cel",
             "przestan robic",
@@ -1306,6 +1313,47 @@ mod tests {
 
         assert_eq!(contract.intent, TaskIntent::Informational);
         assert_eq!(contract.goal_kind, CompletionGoalKind::Action);
+    }
+
+    #[test]
+    fn additive_and_status_steering_preserve_active_work_and_evidence() {
+        let mut state = CompletionGuardState::default();
+        state.begin(TaskCompletionContract::workspace_action(), 2, 3);
+        state.action_observed = true;
+        state.workspace_mutated = true;
+
+        state.merge_steering(
+            "Don't forget that we also need docs, and run the tests",
+            4,
+            5,
+        );
+        assert_eq!(state.contract.intent, TaskIntent::Mutation);
+        assert_eq!(
+            state.contract.effect,
+            CompletionEffectRequirement::WorkspaceMutation
+        );
+        assert!(state.contract.verification_required);
+        assert!(state.action_observed);
+        assert!(state.workspace_mutated);
+
+        state.merge_steering("What is the status?", 6, 7);
+        assert_eq!(state.contract.intent, TaskIntent::Mutation);
+        assert!(state.contract.verification_required);
+        assert!(state.action_observed);
+        assert!(state.workspace_mutated);
+        assert_eq!(state.superseded_goals, 0);
+    }
+
+    #[test]
+    fn contradictory_steering_replaces_the_prior_contract() {
+        let mut state = CompletionGuardState::default();
+        state.begin(TaskCompletionContract::workspace_action(), 2, 3);
+        state.pending_work_started = true;
+        state.merge_steering("Do not do that; explain the API instead", 4, 5);
+
+        assert_eq!(state.contract, TaskCompletionContract::informational());
+        assert!(!state.pending_work_started);
+        assert_eq!(state.superseded_goals, 1);
     }
 
     #[test]
