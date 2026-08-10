@@ -67,6 +67,26 @@ pub(super) fn trusted_context_message(text: &str) -> ChatCompletionRequestMessag
     system_message_from_content(text.to_string())
 }
 
+const SCOPED_STEERING_MESSAGE_NAME: &str = "bonsai_scoped_steering";
+
+/// A trusted path-scoped steering update with durable provenance. The name is
+/// checked when restoring a persisted conversation so user-authored content can
+/// never impersonate instruction coverage.
+pub(super) fn scoped_steering_message(text: &str) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+        content: text.to_string().into(),
+        name: Some(SCOPED_STEERING_MESSAGE_NAME.to_string()),
+    })
+}
+
+pub(super) fn is_scoped_steering_message(message: &ChatCompletionRequestMessage) -> bool {
+    matches!(
+        message,
+        ChatCompletionRequestMessage::System(system)
+            if system.name.as_deref() == Some(SCOPED_STEERING_MESSAGE_NAME)
+    )
+}
+
 /// Build an injected context message with role- and name-level provenance.
 /// Peer/external content remains user-role data even though its source is
 /// structured; only trusted harness/background notes receive system authority.

@@ -499,7 +499,7 @@ fn verification_command_without_output_filter(command: &str) -> Option<String> {
     Some(base.to_string())
 }
 
-fn direct_verification_is_cacheable(command: &str) -> bool {
+pub(crate) fn direct_verification_is_cacheable(command: &str) -> bool {
     let mut tokens = command.split_whitespace();
     if tokens.next() != Some("cargo") {
         return false;

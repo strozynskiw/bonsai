@@ -176,6 +176,14 @@ impl Agent {
             return;
         }
         self.restore_context_messages_with_ids_inner(messages, ids);
+        self.scoped_steering.reset();
+        for message in &self.messages {
+            if is_scoped_steering_message(message)
+                && let Some(text) = try_message_content_string(message)
+            {
+                self.scoped_steering.restore_rendered_update(&text);
+            }
+        }
         self.normalize_project_state_cache_strategy(ProjectStateNormalization::RestoredHistory);
         self.rebuild_recalled_memory_from_messages();
     }

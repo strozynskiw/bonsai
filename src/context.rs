@@ -4,7 +4,7 @@
 //! working directory upward. Built once at startup in `main.rs` and handed to
 //! the `Agent`, which appends it to its persona prompt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -250,6 +250,333 @@ impl SteeringFileContext {
             self.directory.display(),
             truncate_chars(&self.body, SMOL_STEERING_BYTES, "\n…(truncated for SMOL)")
         )
+    }
+}
+
+/// Per-directory steering coverage for paths beneath one project root.
+///
+/// A directory contributes at most one non-empty file. Formats are mutually
+/// exclusive within that directory and use [`STEERING_FILES`] precedence.
+/// Coverage records both present and absent instructions so unchanged scopes
+/// are not repeatedly injected. A content or precedence change advances that
+/// scope's version.
+#[derive(Debug)]
+pub(crate) struct ScopedSteeringState {
+    canonical_root: PathBuf,
+    enabled: bool,
+    scopes: BTreeMap<PathBuf, ScopedSteeringCoverage>,
+}
+
+#[derive(Debug)]
+struct ScopedSteeringCoverage {
+    fingerprint: Option<String>,
+    version: u64,
+}
+
+#[derive(Debug)]
+struct ScopedSteeringSnapshot {
+    name: String,
+    body: String,
+    hash: String,
+}
+
+/// One newly activated, changed, or removed path-scoped steering file.
+#[derive(Debug)]
+pub(crate) struct ScopedSteeringUpdate {
+    scope: PathBuf,
+    source: Option<PathBuf>,
+    body: Option<String>,
+    hash: Option<String>,
+    version: u64,
+}
+
+impl ScopedSteeringState {
+    pub(crate) fn new(root: &Path, enabled: bool) -> Self {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let mut state = Self {
+            canonical_root,
+            enabled,
+            scopes: BTreeMap::new(),
+        };
+        if enabled {
+            // Root steering is already present in the startup system prefix.
+            // Seed its fingerprint so the first path access does not inject it
+            // again, while a later change still produces an append-only update.
+            let snapshot = state.read_scope(Path::new(""));
+            state.scopes.insert(
+                PathBuf::new(),
+                ScopedSteeringCoverage {
+                    fingerprint: scoped_fingerprint(snapshot.as_ref()),
+                    version: 1,
+                },
+            );
+        }
+        state
+    }
+
+    /// Refresh every directory from the project root through `target_dir`.
+    /// `target_dir` must be canonical root-relative path data produced by the
+    /// project path resolver.
+    pub(crate) fn refresh_target_dir(&mut self, target_dir: &Path) -> Vec<ScopedSteeringUpdate> {
+        if !self.enabled || !crate::tool::is_safe_relative_path(target_dir) {
+            return Vec::new();
+        }
+
+        let mut updates = Vec::new();
+        let mut scope = PathBuf::new();
+        if let Some(update) = self.refresh_scope(&scope) {
+            updates.push(update);
+        }
+        for component in target_dir.components() {
+            if let std::path::Component::Normal(part) = component {
+                scope.push(part);
+                if let Some(update) = self.refresh_scope(&scope) {
+                    updates.push(update);
+                }
+            }
+        }
+        updates
+    }
+
+    /// Refresh the target chain and every steering-bearing directory beneath
+    /// it. Recursive grep/glob/symbol inspections explicitly select this whole
+    /// tree, so these nested rules are related target context rather than an
+    /// unrelated repository-wide promotion.
+    pub(crate) fn reset(&mut self) {
+        self.scopes.clear();
+        if self.enabled {
+            let snapshot = self.read_scope(Path::new(""));
+            self.scopes.insert(
+                PathBuf::new(),
+                ScopedSteeringCoverage {
+                    fingerprint: scoped_fingerprint(snapshot.as_ref()),
+                    version: 1,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn refresh_subtree(
+        &mut self,
+        target_dir: &Path,
+    ) -> anyhow::Result<Vec<ScopedSteeringUpdate>> {
+        if !self.enabled || !crate::tool::is_safe_relative_path(target_dir) {
+            return Ok(Vec::new());
+        }
+
+        let subtree = self.canonical_root.join(target_dir);
+        let mut scopes = BTreeSet::new();
+        for entry in walkdir::WalkDir::new(subtree)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| entry.depth() == 0 || entry.file_name().to_str() != Some(".git"))
+        {
+            let entry = entry.map_err(|error| {
+                anyhow::anyhow!(
+                    "could not establish scoped instruction coverage under {}: {error}",
+                    target_dir.display()
+                )
+            })?;
+            if !entry.file_type().is_file()
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| STEERING_FILES.contains(&name))
+            {
+                continue;
+            }
+            let Some(directory) = entry.path().parent() else {
+                continue;
+            };
+            let relative = directory.strip_prefix(&self.canonical_root).map_err(|_| {
+                anyhow::anyhow!(
+                    "scoped instruction path escaped the project root: {}",
+                    directory.display()
+                )
+            })?;
+            scopes.insert(relative.to_path_buf());
+        }
+        let mut scopes = scopes.into_iter().collect::<Vec<_>>();
+        scopes.sort_by(|left, right| {
+            left.components()
+                .count()
+                .cmp(&right.components().count())
+                .then_with(|| left.cmp(right))
+        });
+        let mut updates = self.refresh_target_dir(target_dir);
+        for scope in scopes {
+            if let Some(update) = self.refresh_scope(&scope) {
+                updates.push(update);
+            }
+        }
+        Ok(updates)
+    }
+
+    /// Rehydrate active scope fingerprints from persisted append-only messages.
+    /// Freshness is still checked against disk on the next path access; this
+    /// only prevents unchanged instructions from being injected twice after
+    /// session resume.
+    pub(crate) fn restore_rendered_update(&mut self, text: &str) {
+        if !self.enabled
+            || (!text.starts_with("# Path-scoped project instructions\n")
+                && !text.starts_with("# Path-scoped project instructions removed\n"))
+        {
+            return;
+        }
+        let Some(scope) = scoped_rendered_field(text, "- scope: `") else {
+            return;
+        };
+        let scope = if scope == "." {
+            PathBuf::new()
+        } else {
+            PathBuf::from(scope)
+        };
+        if !crate::tool::is_safe_relative_path(&scope) {
+            return;
+        }
+        let version = scoped_rendered_field(text, "- version: ")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1);
+        let fingerprint = match (
+            scoped_rendered_field(text, "- source: `"),
+            scoped_rendered_field(text, "- hash: `"),
+        ) {
+            (Some(source), Some(hash)) => Path::new(&source)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| format!("{name}:{hash}")),
+            _ => None,
+        };
+        self.scopes.insert(
+            scope,
+            ScopedSteeringCoverage {
+                fingerprint,
+                version,
+            },
+        );
+    }
+
+    fn refresh_scope(&mut self, scope: &Path) -> Option<ScopedSteeringUpdate> {
+        let snapshot = self.read_scope(scope);
+        let fingerprint = scoped_fingerprint(snapshot.as_ref());
+        let version = match self.scopes.get_mut(scope) {
+            Some(coverage) if coverage.fingerprint == fingerprint => return None,
+            Some(coverage) => {
+                coverage.fingerprint = fingerprint;
+                coverage.version = coverage.version.saturating_add(1);
+                coverage.version
+            }
+            None => {
+                self.scopes.insert(
+                    scope.to_path_buf(),
+                    ScopedSteeringCoverage {
+                        fingerprint,
+                        version: 1,
+                    },
+                );
+                // Recording first-time absence establishes coverage but does
+                // not need a model-facing instruction update.
+                snapshot.as_ref()?;
+                1
+            }
+        };
+
+        let (source, body, hash) = match snapshot {
+            Some(snapshot) => (
+                Some(scope.join(&snapshot.name)),
+                Some(snapshot.body),
+                Some(snapshot.hash),
+            ),
+            None => (None, None, None),
+        };
+        Some(ScopedSteeringUpdate {
+            scope: scope.to_path_buf(),
+            source,
+            body,
+            hash,
+            version,
+        })
+    }
+
+    fn read_scope(&self, scope: &Path) -> Option<ScopedSteeringSnapshot> {
+        let directory = self.canonical_root.join(scope);
+        for name in STEERING_FILES {
+            let path = directory.join(name);
+            let Ok(canonical_path) = path.canonicalize() else {
+                continue;
+            };
+            // A repository steering symlink must not promote content from a
+            // sibling tree or outside the trusted worktree.
+            if canonical_path.parent() != Some(directory.as_path()) {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(canonical_path) else {
+                continue;
+            };
+            let text = raw.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let (body, _) = truncate_steering(text);
+            return Some(ScopedSteeringSnapshot {
+                name: (*name).to_string(),
+                body,
+                hash: blake3::hash(raw.as_bytes()).to_hex().to_string(),
+            });
+        }
+        None
+    }
+}
+
+impl ScopedSteeringUpdate {
+    pub(crate) fn scope(&self) -> &Path {
+        &self.scope
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let scope = normalized_scope_label(&self.scope);
+        match (&self.source, &self.body, &self.hash) {
+            (Some(source), Some(body), Some(hash)) => format!(
+                "# Path-scoped project instructions\n\
+                 - scope: `{scope}` (apply only to this directory tree)\n\
+                 - source: `{}`\n\
+                 - version: {}\n\
+                 - hash: `{hash}`\n\
+                 - precedence: deeper scopes override conflicts; within one directory AGENTS.md > CLAUDE.md > .cursorrules and only the first non-empty file applies\n\n\
+                 This version supersedes every earlier scoped-instruction message for `{scope}`.\n\n\
+                 {body}",
+                source.display(),
+                self.version,
+            ),
+            _ => format!(
+                "# Path-scoped project instructions removed\n\
+                 - scope: `{scope}`\n\
+                 - version: {}\n\n\
+                 No steering file currently applies at this exact scope. Ignore every earlier scoped-instruction message for `{scope}`; instructions from ancestor scopes still apply.",
+                self.version,
+            ),
+        }
+    }
+}
+
+fn scoped_fingerprint(snapshot: Option<&ScopedSteeringSnapshot>) -> Option<String> {
+    snapshot.map(|snapshot| format!("{}:{}", snapshot.name, snapshot.hash))
+}
+
+fn scoped_rendered_field(text: &str, prefix: &str) -> Option<String> {
+    let value = text.lines().find_map(|line| line.strip_prefix(prefix))?;
+    if prefix.ends_with('`') {
+        value.split('`').next().map(str::to_string)
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn normalized_scope_label(scope: &Path) -> String {
+    if scope.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        scope.to_string_lossy().replace('\\', "/")
     }
 }
 
@@ -972,6 +1299,128 @@ mod tests {
         assert!(snapshot.steering_files.is_empty());
         assert!(!rendered.contains("run project instructions"));
         assert!(rendered.contains("workspace trust: restricted"));
+    }
+
+    #[test]
+    fn scoped_steering_is_nested_precedence_limited_and_versioned() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let frontend = dir.path().join("frontend/src");
+        let backend = dir.path().join("backend/src");
+        std::fs::create_dir_all(&frontend).unwrap();
+        std::fs::create_dir_all(&backend).unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "root rules").unwrap();
+        std::fs::write(dir.path().join("frontend/AGENTS.md"), "frontend rules v1").unwrap();
+        std::fs::write(dir.path().join("frontend/CLAUDE.md"), "ignored rules").unwrap();
+        std::fs::write(dir.path().join("backend/.cursorrules"), "backend rules").unwrap();
+
+        let mut state = ScopedSteeringState::new(dir.path(), true);
+        let frontend_updates = state.refresh_target_dir(Path::new("frontend/src"));
+        assert_eq!(frontend_updates.len(), 1);
+        let frontend_rendered = frontend_updates[0].render();
+        assert!(frontend_rendered.contains("frontend rules v1"));
+        assert!(!frontend_rendered.contains("ignored rules"));
+        assert!(frontend_rendered.contains("scope: `frontend`"));
+        assert!(
+            state
+                .refresh_target_dir(Path::new("frontend/src"))
+                .is_empty()
+        );
+
+        let backend_updates = state.refresh_target_dir(Path::new("backend/src"));
+        assert_eq!(backend_updates.len(), 1);
+        assert!(backend_updates[0].render().contains("backend rules"));
+        assert!(!backend_updates[0].render().contains("frontend rules"));
+
+        std::fs::write(dir.path().join("frontend/AGENTS.md"), "frontend rules v2").unwrap();
+        let changed = state.refresh_target_dir(Path::new("frontend/src"));
+        assert_eq!(changed.len(), 1);
+        assert!(changed[0].render().contains("version: 2"));
+        assert!(changed[0].render().contains("frontend rules v2"));
+
+        std::fs::remove_file(dir.path().join("frontend/AGENTS.md")).unwrap();
+        let precedence_changed = state.refresh_target_dir(Path::new("frontend/src"));
+        assert_eq!(precedence_changed.len(), 1);
+        assert!(precedence_changed[0].render().contains("ignored rules"));
+        assert!(precedence_changed[0].render().contains("version: 3"));
+    }
+
+    #[test]
+    fn scoped_steering_restore_preserves_version_and_detects_later_change() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+        let steering_path = dir.path().join("nested/AGENTS.md");
+        std::fs::write(&steering_path, "version one").unwrap();
+        let mut original = ScopedSteeringState::new(dir.path(), true);
+        let rendered = original.refresh_target_dir(Path::new("nested"))[0].render();
+
+        let mut restored = ScopedSteeringState::new(dir.path(), true);
+        restored.restore_rendered_update(&rendered);
+        assert!(restored.refresh_target_dir(Path::new("nested")).is_empty());
+
+        std::fs::write(steering_path, "version two").unwrap();
+        let changed = restored.refresh_target_dir(Path::new("nested"));
+        assert_eq!(changed.len(), 1);
+        assert!(changed[0].render().contains("version: 2"));
+        assert!(changed[0].render().contains("version two"));
+    }
+
+    #[test]
+    fn scoped_steering_is_inert_for_untrusted_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/AGENTS.md"), "must stay data").unwrap();
+
+        let mut state = ScopedSteeringState::new(dir.path(), false);
+
+        assert!(state.refresh_target_dir(Path::new("nested")).is_empty());
+        assert!(state.refresh_subtree(Path::new("")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scoped_steering_subtree_discovers_deeper_rules_without_symlink_escape() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("packages/app/src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("packages/api/src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("packages/ignored/src")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "packages/ignored/\n").unwrap();
+        std::fs::write(dir.path().join("packages/app/AGENTS.md"), "app rules").unwrap();
+        std::fs::write(dir.path().join("packages/api/CLAUDE.md"), "api rules").unwrap();
+        std::fs::write(
+            dir.path().join("packages/ignored/AGENTS.md"),
+            "ignored tree rules",
+        )
+        .unwrap();
+        std::fs::write(outside.path().join("AGENTS.md"), "outside rules").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            outside.path().join("AGENTS.md"),
+            dir.path().join("packages/AGENTS.md"),
+        )
+        .unwrap();
+
+        let mut state = ScopedSteeringState::new(dir.path(), true);
+        let rendered = state
+            .refresh_subtree(Path::new("packages"))
+            .unwrap()
+            .iter()
+            .map(ScopedSteeringUpdate::render)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("app rules"));
+        assert!(rendered.contains("api rules"));
+        assert!(rendered.contains("ignored tree rules"));
+        assert!(!rendered.contains("outside rules"));
+    }
+
+    #[test]
+    fn restricted_scoped_steering_never_promotes_repository_content() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/AGENTS.md"), "untrusted rules").unwrap();
+
+        let mut state = ScopedSteeringState::new(dir.path(), false);
+        assert!(state.refresh_subtree(Path::new(".")).unwrap().is_empty());
     }
 
     #[test]

@@ -161,6 +161,10 @@ impl Agent {
         builder
             .provider
             .set_conversation_cache_key(&conversation_cache_key);
+        let scoped_steering = crate::context::ScopedSteeringState::new(
+            &builder.project_root,
+            builder.workspace_trust == crate::workspace_trust::WorkspaceTrust::Trusted,
+        );
         let mut agent = Self {
             provider: builder.provider,
             provider_fallback: None,
@@ -208,6 +212,7 @@ impl Agent {
             system_context: builder.system_context,
             system_prompt_suffix: builder.system_prompt_suffix,
             project_context: builder.project_context,
+            scoped_steering,
             advisories: Advisories {
                 repair_advisory: String::new(),
                 read_coverage_advisory: String::new(),

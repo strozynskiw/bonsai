@@ -54,10 +54,11 @@ pub(crate) use agent::{
     SubagentToolRegistryFactory, agents_index_section_with_settings, builtin_agents,
     builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
 };
-pub(crate) use apply_patch::patched_paths_from_arguments;
+pub(crate) use apply_patch::{patch_target_paths_from_arguments, patched_paths_from_arguments};
 pub use bash::BashTool;
 pub(crate) use bash::command::analyze_command as analyze_bash_command;
 pub(crate) use bash::command::single_read_path;
+pub(crate) use bash::direct_verification_is_cacheable;
 pub(crate) use bash::{BashExecutionPolicy, BashOutputBudget, BashRuntimeDeps};
 pub use edit::EditTool;
 pub use project_info::ProjectInfoTool;
@@ -68,7 +69,7 @@ pub use read_evidence::{ReadCoverage, ReadEvidence, ReadWindow};
 pub use read_region::{ReadRegionTool, ReadSymbolTool};
 pub use read_tracker::ReadTracker;
 pub(crate) use repo_map::build_repo_map;
-pub(crate) use risk::{ApprovalLevel, RiskTier};
+pub(crate) use risk::{ApprovalLevel, RiskTier, classify_bash};
 pub use set_session_title::SharedActiveSessionId;
 pub(crate) use set_session_title::normalize_session_title;
 pub use webfetch::WebFetchTool;

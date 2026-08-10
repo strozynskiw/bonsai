@@ -508,6 +508,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 &response.tool_calls,
                 &self.tool_registry,
                 ToolRejections {
+                    scoped_steering: HashMap::new(),
                     precomputed_read,
                     precomputed_read_delta,
                     auto_background,

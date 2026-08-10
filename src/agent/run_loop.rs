@@ -561,6 +561,8 @@ impl Agent {
         );
         let mut batches = planned_batches.into_iter().peekable();
         let mut trusted_contexts = Vec::new();
+        let mut scoped_contexts = Vec::new();
+        let mut changed_scoped_steering = HashSet::new();
         let launch_group_id = tool_calls
             .iter()
             .any(|tool_call| {
@@ -575,6 +577,84 @@ impl Agent {
                 id
             });
         while let Some(batch) = batches.next() {
+            let mut scoped_target_dirs = HashMap::<String, Vec<PathBuf>>::new();
+            for tool_call in &batch {
+                for raw_path in scoped_instruction_paths(tool_call) {
+                    let target_dir = if tool_call.name == "bash" {
+                        let Ok(args) =
+                            serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+                        else {
+                            continue;
+                        };
+                        let Some(tool) = tool_registry.get("bash") else {
+                            continue;
+                        };
+                        let Some(cwd) = tool.execution_cwd(&args).await else {
+                            continue;
+                        };
+                        let canonical_root = self
+                            .project_root
+                            .canonicalize()
+                            .unwrap_or_else(|_| self.project_root.clone());
+                        let Ok(relative) = cwd.strip_prefix(&canonical_root) else {
+                            continue;
+                        };
+                        relative.to_path_buf()
+                    } else {
+                        let Some(target_dir) = scoped_target_dir(&self.project_root, &raw_path)
+                        else {
+                            continue;
+                        };
+                        target_dir
+                    };
+                    let updates = if scoped_instruction_recurses(tool_call) {
+                        match self.scoped_steering.refresh_subtree(&target_dir) {
+                            Ok(updates) => updates,
+                            Err(error) => {
+                                tool_rejections.scoped_steering.insert(
+                                    tool_call.id.clone(),
+                                    format!(
+                                        "Tool rejected because scoped project instruction coverage could not be established: {error}"
+                                    ),
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        self.scoped_steering.refresh_target_dir(&target_dir)
+                    };
+                    for update in updates {
+                        changed_scoped_steering.insert(update.scope().to_path_buf());
+                        scoped_contexts.push(update.render());
+                    }
+                    scoped_target_dirs
+                        .entry(tool_call.id.clone())
+                        .or_default()
+                        .push(target_dir);
+                }
+            }
+            for tool_call in &batch {
+                if !tool_call_may_mutate_workspace(tool_call) {
+                    continue;
+                }
+                let recursive_scope = scoped_instruction_recurses(tool_call);
+                let affected = scoped_target_dirs
+                    .get(&tool_call.id)
+                    .is_some_and(|targets| {
+                        targets.iter().any(|target| {
+                            changed_scoped_steering.iter().any(|scope| {
+                                target.starts_with(scope)
+                                    || (recursive_scope && scope.starts_with(target))
+                            })
+                        })
+                    });
+                if affected {
+                    tool_rejections.scoped_steering.insert(
+                        tool_call.id.clone(),
+                        "Scoped project instructions for this path were loaded or changed before mutation. Review the newly injected system instruction, then retry the mutation so it is planned under fresh steering coverage.".to_string(),
+                    );
+                }
+            }
             tool_rejections
                 .repeated_failure
                 .extend(self.capture_pending_verification_bindings(&batch).await);
@@ -788,9 +868,12 @@ impl Agent {
                 }
             }
         }
-        if !trusted_contexts.is_empty() {
+        if !trusted_contexts.is_empty() || !scoped_contexts.is_empty() {
             for content in trusted_contexts {
                 self.push_message(trusted_context_message(&content));
+            }
+            for content in scoped_contexts {
+                self.push_message(scoped_steering_message(&content));
             }
             self.emit_context_updated(sink);
         }
@@ -914,6 +997,102 @@ fn mutation_paths(tool_call: &ToolCall) -> Vec<String> {
         return Vec::new();
     };
     path_arg(&args).map(str::to_string).into_iter().collect()
+}
+
+pub(super) fn tool_call_may_mutate_workspace(tool_call: &ToolCall) -> bool {
+    if is_mutation_tool(&tool_call.name) {
+        return true;
+    }
+    if tool_call.name != "bash" {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments) else {
+        return true;
+    };
+    let Some(command) = args.get("command").and_then(serde_json::Value::as_str) else {
+        return true;
+    };
+    if crate::tool::direct_verification_is_cacheable(command) {
+        return false;
+    }
+    let analysis = crate::tool::analyze_bash_command(command);
+    crate::tool::classify_bash(&analysis) != crate::tool::RiskTier::ReadOnly
+}
+
+pub(super) fn scoped_instruction_paths(tool_call: &ToolCall) -> Vec<String> {
+    if tool_call.name == "apply_patch" {
+        return crate::tool::patch_target_paths_from_arguments(&tool_call.arguments);
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments) else {
+        return Vec::new();
+    };
+    match tool_call.name.as_str() {
+        "read" | "read_region" | "read_symbol" | "hover" | "write" | "edit" => {
+            path_arg(&args).map(str::to_string).into_iter().collect()
+        }
+        "glob" | "symbol_search" => vec![path_arg(&args).unwrap_or(".").to_string()],
+        // These operations may inspect or mutate files outside the source
+        // path. Resolve the entire explicit workspace before they run.
+        "definition" | "references" | "workspace_symbol" | "diagnostics" | "rename_symbol" => {
+            vec![".".to_string()]
+        }
+        "grep" => path_arg(&args)
+            .unwrap_or(".")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        "git" => vec![path_arg(&args).unwrap_or(".").to_string()],
+        // Shell effects are intentionally unscoped. `workdir` is the narrowest
+        // trustworthy bound; without one the full project may be inspected or
+        // mutated, so steering coverage must conservatively match that scope.
+        "bash" => vec![
+            args.get("workdir")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(".")
+                .to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn scoped_instruction_recurses(tool_call: &ToolCall) -> bool {
+    if tool_call.name == "read" {
+        return serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+            .ok()
+            .and_then(|args| args.get("depth").and_then(serde_json::Value::as_u64))
+            .is_some();
+    }
+    matches!(
+        tool_call.name.as_str(),
+        "glob"
+            | "grep"
+            | "symbol_search"
+            | "definition"
+            | "references"
+            | "workspace_symbol"
+            | "diagnostics"
+            | "rename_symbol"
+            | "git"
+            | "bash"
+    )
+}
+
+fn scoped_target_dir(project_root: &Path, raw_path: &str) -> Option<PathBuf> {
+    let resolved = crate::tool::ProjectPathResolver::new(project_root)
+        .action("resolve scoped project instructions for")
+        .resolve(raw_path)
+        .ok()?;
+    let relative = resolved.project_relative_path?;
+    if resolved.canonical_path.as_deref().is_some_and(Path::is_dir) {
+        Some(relative)
+    } else {
+        Some(
+            relative
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf(),
+        )
+    }
 }
 
 fn path_has_extension(path: &str, extension: &str) -> bool {
@@ -1368,6 +1547,9 @@ type PlanningResearchAction = GuardAction<String>;
 
 #[derive(Debug, Clone, Default)]
 struct ToolRejections {
+    /// Mutations planned before newly discovered or changed scoped steering was
+    /// active. The update is injected and the model must re-plan the write.
+    scoped_steering: HashMap<String, String>,
     /// Fresh interval coverage resolved before execution. These calls return a
     /// successful compact pointer without touching the filesystem again.
     precomputed_read: HashMap<String, PrecomputedReadReuse>,
@@ -1400,6 +1582,10 @@ impl ToolRejections {
         }
 
         if let Some(message) = self.delegated_read.get(&tool_call.id) {
+            return Some(message.clone());
+        }
+
+        if let Some(message) = self.scoped_steering.get(&tool_call.id) {
             return Some(message.clone());
         }
 

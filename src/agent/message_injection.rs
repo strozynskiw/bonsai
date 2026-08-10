@@ -28,6 +28,29 @@ impl Agent {
             &input.text,
         )
         .await?;
+        let target_dirs = expansion
+            .read_evidence
+            .iter()
+            .filter_map(|evidence| {
+                let canonical = evidence.observation().canonical_path();
+                let relative = canonical.strip_prefix(&self.project_root).ok()?;
+                Some(if canonical.is_dir() {
+                    relative.to_path_buf()
+                } else {
+                    relative
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf()
+                })
+            })
+            .collect::<Vec<_>>();
+        let scoped_updates = target_dirs
+            .iter()
+            .flat_map(|target_dir| self.scoped_steering.refresh_target_dir(target_dir))
+            .collect::<Vec<_>>();
+        for update in scoped_updates {
+            self.push_message(scoped_steering_message(&update.render()));
+        }
         let message_id = if input.images.is_empty() {
             self.push_user_message_raw(&expansion.text)
         } else {

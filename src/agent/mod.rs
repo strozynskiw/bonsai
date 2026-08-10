@@ -490,6 +490,9 @@ pub struct Agent {
     system_prompt_suffix: Option<String>,
     /// Structured version of `system_context`, when constructed by runtime.
     project_context: Option<ProjectContextSnapshot>,
+    /// Fresh, canonical path-scoped steering coverage. Updates are appended as
+    /// trusted system rows; they never rewrite the provider's cached prefix.
+    scoped_steering: crate::context::ScopedSteeringState,
     advisories: Advisories,
     /// Workspace root used to validate and expand live `@path` mentions.
     project_root: PathBuf,
