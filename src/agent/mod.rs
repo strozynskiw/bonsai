@@ -361,7 +361,7 @@ pub(crate) struct SessionBudget {
 }
 
 /// Volatile advisory strings rendered into the uncached project-context tail.
-/// Five fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+/// Grouped into a sub-struct following the `ToolRegistrySet` pattern.
 #[derive(Debug, Clone)]
 pub(crate) struct Advisories {
     pub(crate) repair_advisory: String,
@@ -369,6 +369,7 @@ pub(crate) struct Advisories {
     pub(crate) planning_advisory: String,
     pub(crate) subagent_status_advisory: String,
     pub(crate) last_volatile_context_message: Option<String>,
+    pub(crate) last_execution_policy_snapshot: Option<String>,
 }
 
 /// Cached prompt estimates, performance snapshots, and provider-cache warnings
@@ -542,6 +543,7 @@ pub struct Agent {
     pending_context_rewrite: PendingContextRewrite,
     yolo_mode: YoloMode,
     sandbox: CommandSandbox,
+    workspace_trust: crate::workspace_trust::WorkspaceTrust,
     project_info_runtime: Option<Arc<ProjectInfoRuntime>>,
     /// Self-review-before-done policy and per-turn arming state.
     self_review: SelfReviewState,
@@ -1204,6 +1206,21 @@ impl Agent {
         id
     }
 
+    fn refresh_execution_policy_snapshot(&mut self) -> bool {
+        let snapshot = policy_snapshot::ExecutionPolicySnapshot::from_runtime(
+            &self.yolo_mode,
+            &self.sandbox,
+            self.workspace_trust,
+            self.interaction.as_deref(),
+        );
+        if self.advisories.last_execution_policy_snapshot.as_deref() == Some(snapshot.content()) {
+            return false;
+        }
+        self.advisories.last_execution_policy_snapshot = Some(snapshot.content().to_string());
+        self.push_message(execution_policy_message(snapshot.content()));
+        true
+    }
+
     fn next_context_message_id(&mut self) -> String {
         let id = format_context_message_id(self.next_message_id);
         self.next_message_id = self.next_message_id.saturating_add(1);
@@ -1221,6 +1238,7 @@ impl Agent {
         self.message_ids = vec![format_context_message_id(0)];
         self.next_message_id = 1;
         self.advisories.last_volatile_context_message = None;
+        self.advisories.last_execution_policy_snapshot = None;
         self.read_evidence.inspection_events.clear();
         self.read_evidence.mention_read_evidence.clear();
         self.last_retryable_turn = false;
@@ -1296,6 +1314,7 @@ impl Agent {
         self.messages = messages;
         self.message_ids = message_ids;
         self.next_message_id = next_message_id;
+        self.advisories.last_execution_policy_snapshot = None;
         self.advisories.last_volatile_context_message = self
             .messages
             .iter()
@@ -1874,6 +1893,7 @@ mod messages;
 mod output;
 mod perf;
 mod persona;
+mod policy_snapshot;
 mod prompts;
 mod read_persistence;
 mod retry;

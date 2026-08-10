@@ -429,6 +429,7 @@ impl RuntimeBuilder {
         .run_budget(run_budget)
         .yolo_mode(yolo_mode)
         .sandbox(sandbox)
+        .workspace_trust(workspace_trust.state())
         .self_review_mode(crate::self_review::SelfReviewMode::from_env().unwrap_or_default())
         .skills(skills)
         .memory(memory)

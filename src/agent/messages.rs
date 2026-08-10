@@ -97,6 +97,15 @@ pub(super) fn project_state_message(text: &str) -> ChatCompletionRequestMessage 
     provenance_message(MessageProvenance::ProjectState, text)
 }
 
+/// Append-only trusted runtime-policy note. A newer note explicitly supersedes
+/// older ones without changing the stable system-message prefix.
+pub(super) fn execution_policy_message(content: &str) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+        content: content.to_string().into(),
+        name: Some("bonsai_execution_policy".to_string()),
+    })
+}
+
 pub(super) fn is_project_state_message(message: &ChatCompletionRequestMessage) -> bool {
     matches!(
         message,

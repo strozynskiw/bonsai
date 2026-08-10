@@ -18,6 +18,55 @@ fn cache_strategy_test_context() -> crate::context::ProjectContextSnapshot {
 }
 
 #[tokio::test]
+async fn execution_policy_snapshots_are_append_only_and_supersede_changes() {
+    let fixture = TestFixture::new();
+    let yolo = crate::yolo::YoloMode::with_level(crate::tool::ApprovalLevel::Balanced);
+    let mut agent = Agent::builder(
+        MockProvider::empty_append_only(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker,
+        fixture.project_root,
+    )
+    .yolo_mode(yolo.clone())
+    .build()
+    .unwrap();
+    let stable_system = message_content(&agent.context_messages()[0]);
+
+    assert!(agent.refresh_execution_policy_snapshot());
+    assert!(!agent.refresh_execution_policy_snapshot());
+    yolo.set_level(crate::tool::ApprovalLevel::Yolo);
+    assert!(agent.refresh_execution_policy_snapshot());
+
+    assert_eq!(message_content(&agent.context_messages()[0]), stable_system);
+    let snapshots = agent
+        .context_messages()
+        .iter()
+        .filter_map(|message| match message {
+            ChatCompletionRequestMessage::System(system)
+                if system.name.as_deref() == Some("bonsai_execution_policy") =>
+            {
+                Some(message_content(message))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert!(snapshots[0].contains("autonomy: balanced"));
+    assert!(snapshots[1].contains("autonomy: yolo"));
+    assert!(snapshots[1].contains("older snapshots are superseded"));
+
+    agent
+        .restore_context_messages(vec![system_message(AgentMode::Coding, "restored")])
+        .await
+        .unwrap();
+    assert!(agent.refresh_execution_policy_snapshot());
+    let restored = agent.context_messages();
+    assert_eq!(restored.len(), 2);
+    assert!(message_content(&restored[1]).contains("autonomy: yolo"));
+}
+
+#[tokio::test]
 async fn mutable_cache_strategy_preserves_the_verified_legacy_system_tail() {
     let fixture = TestFixture::new();
     let mut agent = Agent::builder(

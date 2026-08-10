@@ -197,6 +197,7 @@ impl Agent {
             bus.begin_turn(crate::peer::TurnOrigin::Human);
         }
         self.begin_verification_observation_window();
+        self.refresh_execution_policy_snapshot();
         self.set_planning_advisory(None);
         self.begin_inferred_completion_task(&input.text);
         // Volatile project state (git status) refreshes at the top of every

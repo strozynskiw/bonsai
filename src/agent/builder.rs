@@ -214,6 +214,7 @@ impl Agent {
                 planning_advisory: String::new(),
                 subagent_status_advisory: String::new(),
                 last_volatile_context_message: None,
+                last_execution_policy_snapshot: None,
             },
             project_root: builder.project_root,
             refresh_volatile: false,
@@ -250,6 +251,7 @@ impl Agent {
             pending_context_rewrite: PendingContextRewrite::default(),
             yolo_mode: builder.yolo_mode,
             sandbox: builder.sandbox,
+            workspace_trust: builder.workspace_trust,
             project_info_runtime: builder.project_info_runtime,
             self_review: SelfReviewState::with_mode(builder.self_review),
             self_review_runs: Vec::new(),
@@ -315,6 +317,7 @@ pub(crate) struct AgentBuilder {
     pub(super) max_session_cost_micros: Option<u64>,
     pub(super) yolo_mode: YoloMode,
     pub(super) sandbox: CommandSandbox,
+    pub(super) workspace_trust: crate::workspace_trust::WorkspaceTrust,
     pub(super) project_info_runtime: Option<Arc<ProjectInfoRuntime>>,
     pub(super) self_review: SelfReviewMode,
     pub(super) interaction: Option<Arc<InteractionService>>,
@@ -370,6 +373,7 @@ impl AgentBuilder {
             max_session_cost_micros: None,
             yolo_mode: YoloMode::new(),
             sandbox: CommandSandbox::disabled(),
+            workspace_trust: crate::workspace_trust::WorkspaceTrust::Trusted,
             project_info_runtime: None,
             self_review: SelfReviewMode::default(),
             interaction: None,
@@ -489,6 +493,14 @@ impl AgentBuilder {
 
     pub(crate) fn sandbox(mut self, sandbox: CommandSandbox) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    pub(crate) fn workspace_trust(
+        mut self,
+        workspace_trust: crate::workspace_trust::WorkspaceTrust,
+    ) -> Self {
+        self.workspace_trust = workspace_trust;
         self
     }
 
