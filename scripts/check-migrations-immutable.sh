@@ -74,7 +74,7 @@ check_history() {
   require_commit "$head"
 
   tree_changes=$(git diff --no-renames --diff-filter=MDT --name-only "$base" "$head" -- migrations/)
-  history_changes=$(git log --no-renames --format= --diff-filter=MDT --name-only \
+  history_changes=$(git log -m --no-renames --format= --diff-filter=MDT --name-only \
     "${base}..${head}" -- migrations/)
   changed=$(printf '%s\n%s\n' "$tree_changes" "$history_changes" | sed '/^$/d' | sort -u)
   report_changes "$changed"

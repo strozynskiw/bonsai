@@ -81,6 +81,29 @@ assert_guard_rejects "a migration added and then modified in release history" \
   bash "$CHECK_SCRIPT" --history "$INITIAL" "$MODIFIED"
 
 git reset --hard --quiet "$ADDED"
+git switch --quiet -c merge-side-one
+printf '%s\n' 'side one' > side-one.txt
+commit_all "add first merge side"
+
+git switch --quiet -c merge-side-two "$ADDED"
+printf '%s\n' 'side two' > side-two.txt
+commit_all "add second merge side"
+
+git switch --quiet -c merge-main "$ADDED"
+git merge --quiet --no-ff --no-commit merge-side-one
+printf '%s\n' 'CREATE TABLE merge_changed (id INTEGER);' > migrations/0002_second.sql
+commit_all "modify migration in merge"
+git merge --quiet --no-ff --no-commit merge-side-two
+printf '%s\n' 'CREATE TABLE second (id INTEGER);' > migrations/0002_second.sql
+commit_all "restore migration in merge"
+MERGE_RESTORED=$(git rev-parse HEAD)
+
+assert_passes "merge-only mutation restored in the endpoint tree" \
+  bash "$CHECK_SCRIPT" --range "$ADDED" "$MERGE_RESTORED"
+assert_guard_rejects "merge-only mutation restored later in merge history" \
+  bash "$CHECK_SCRIPT" --history "$ADDED" "$MERGE_RESTORED"
+
+git reset --hard --quiet "$ADDED"
 git mv migrations/0001_initial.sql migrations/0001_renamed.sql
 assert_guard_rejects "a staged rename" bash "$CHECK_SCRIPT" --staged
 
