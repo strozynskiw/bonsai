@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 const SETTINGS_COLUMN_GAP: u16 = 3;
 const SETTINGS_DESCRIPTION_GAP: usize = 3;
+const SETTINGS_HORIZONTAL_PADDING: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlDisplay {
@@ -30,14 +31,21 @@ pub(super) fn render_settings(f: &mut Frame, area: Rect, rows: &[SettingsRow], c
     if inner.height == 0 || inner.width == 0 {
         return;
     }
+    let content = inner.inner(Margin {
+        vertical: 0,
+        horizontal: SETTINGS_HORIZONTAL_PADDING,
+    });
+    if content.height == 0 || content.width == 0 {
+        return;
+    }
     let cursor = cursor.min(rows.len().saturating_sub(1));
 
     let footer = settings_footer();
-    let footer_height = (footer.len() as u16).min(inner.height);
+    let footer_height = (footer.len() as u16).min(content.height);
     let regions = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(footer_height)])
-        .split(inner);
+        .split(content);
     let body_area = regions[0];
 
     if settings_columns_fit(body_area, rows) {
@@ -98,11 +106,16 @@ fn settings_section_boundaries(rows: &[SettingsRow]) -> Vec<usize> {
 }
 
 fn settings_rendered_height(rows: &[SettingsRow]) -> usize {
-    rows.iter().map(settings_row_height).sum()
+    rows.len()
 }
 
-fn settings_row_height(_row: &SettingsRow) -> usize {
-    1
+fn settings_spacious_height(rows: &[SettingsRow]) -> usize {
+    settings_rendered_height(rows)
+        + rows
+            .iter()
+            .skip(1)
+            .filter(|row| matches!(row, SettingsRow::Header(_)))
+            .count()
 }
 
 fn render_settings_column(
@@ -121,10 +134,19 @@ fn render_settings_column(
         .checked_sub(base_index)
         .filter(|index| *index < rows.len())
         .unwrap_or(0);
+    let spacious = settings_spacious_height(rows) <= area.height as usize;
     let visible = visible_settings_rows(rows, local_cursor, area.height as usize);
     let lines = visible
         .into_iter()
-        .map(|index| settings_row_line(&rows[index], base_index + index == cursor, table))
+        .flat_map(|index| {
+            let gap = (spacious && index > 0 && matches!(rows[index], SettingsRow::Header(_)))
+                .then(Line::default);
+            gap.into_iter().chain(std::iter::once(settings_row_line(
+                &rows[index],
+                base_index + index == cursor,
+                table,
+            )))
+        })
         .collect::<Vec<_>>();
     f.render_widget(Paragraph::new(lines).style(theme::panel()), area);
 }
@@ -357,6 +379,20 @@ mod tests {
         ];
 
         assert_eq!(settings_column_split(&rows), 5);
+    }
+
+    #[test]
+    fn spacious_height_includes_gaps_between_sections() {
+        let rows = vec![
+            SettingsRow::Header("One"),
+            action("one"),
+            SettingsRow::Header("Two"),
+            action("two"),
+            SettingsRow::Header("Three"),
+        ];
+
+        assert_eq!(settings_rendered_height(&rows), 5);
+        assert_eq!(settings_spacious_height(&rows), 7);
     }
 
     #[test]
