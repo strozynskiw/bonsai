@@ -177,6 +177,7 @@ fn tool_card_summarizes_todowrite_in_progress_item() {
             name: "todowrite".to_string(),
             arguments: r#"{"todos":[{"content":"Inspect uncommitted changes","status":"in_progress"},{"content":"Run tests","status":"pending"}]}"#
                 .to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -203,6 +204,7 @@ fn tool_card_summarizes_todowrite_count_when_no_in_progress() {
             name: "todowrite".to_string(),
             arguments: r#"{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"completed"}]}"#
                 .to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -238,6 +240,7 @@ fn tool_card_summarizes_question_options_without_raw_json() {
             ]
         })
         .to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
@@ -534,6 +537,7 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
                     id: "read-1".to_string(),
                     name: "read".to_string(),
                     arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("file contents".to_string()),
                     diff: None,
@@ -544,6 +548,7 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
                     id: "bash-1".to_string(),
                     name: "bash".to_string(),
                     arguments: r#"{"command":"cargo test"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Running,
                     result: None,
                     diff: None,
@@ -562,7 +567,7 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
     );
     assert!(rendered.contains("file contents"), "{rendered}");
     assert!(
-        rendered.contains("Tool bash (running): command=cargo test"),
+        rendered.contains("Tool test (running): command=cargo test"),
         "{rendered}"
     );
     assert!(!rendered.contains('┃'), "{rendered}");

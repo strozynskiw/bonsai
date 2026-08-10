@@ -288,9 +288,11 @@ pub struct ToolActivity {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Canonical provider/model identity for a delegated `agent` run.
+    pub delegated_model: Option<String>,
     pub status: ToolStatus,
     pub result: Option<String>,
-    pub diff: Option<crate::diff::FileDiff>,
+    pub diff: Option<Box<crate::diff::FileDiff>>,
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
 }
@@ -301,6 +303,7 @@ impl ToolActivity {
             id,
             name,
             arguments,
+            delegated_model: None,
             status: ToolStatus::Running,
             result: None,
             diff: None,
@@ -313,6 +316,13 @@ impl ToolActivity {
         self.finished_at
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(self.started_at)
+    }
+
+    /// Compact model-only label used by delegated-agent transcript surfaces.
+    pub fn delegated_model_name(&self) -> Option<&str> {
+        let model = self.delegated_model.as_deref()?;
+        let model = model.split_once(':').map_or(model, |(_, model)| model);
+        Some(model.rsplit('/').next().unwrap_or(model))
     }
 }
 

@@ -168,6 +168,7 @@ impl Agent {
         let mut agent = Self {
             provider: builder.provider,
             provider_fallback: None,
+            provider_fallback_model_observer: None,
             conversation_cache_key,
             tool_registry: builder.coding_registry.clone(),
             registries: ToolRegistrySet {

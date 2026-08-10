@@ -339,11 +339,9 @@ pub struct AppState {
     /// Cached snapshot of subagent runs, refreshed from the registry by
     /// the run loop so the `/subagents` modal renders without an async lock.
     pub(crate) subtasks: Vec<crate::subagent::SubagentSnapshot>,
-    /// The model each subagent run actually uses, keyed by the `agent` tool
-    /// call that launched it, adopted from the registry as runs mint their
-    /// providers. Read by the tool-detail modal; kept out of `ToolActivity`
-    /// so the transcript enum stays small.
-    pub(crate) subagent_models: std::collections::HashMap<String, String>,
+    /// Latest effective delegated model by launching `agent` call id. Retained
+    /// when registry publication races ahead of the tool-start UI event.
+    pub(crate) delegated_models: std::collections::HashMap<String, String>,
     /// Mirror of the shared plan store, refreshed each tick by the run loop
     /// so rendering never has to take the async lock.
     pub(crate) plan: crate::plan::PlanDoc,
@@ -603,7 +601,7 @@ impl AppState {
             todo: Vec::new(),
             background_tasks: Vec::new(),
             subtasks: Vec::new(),
-            subagent_models: std::collections::HashMap::new(),
+            delegated_models: std::collections::HashMap::new(),
             plan: crate::plan::PlanDoc::default(),
             task_state: TaskState::Idle,
             plan_execution: None,
@@ -2090,6 +2088,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: "{}".to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -4296,6 +4295,7 @@ mod tests {
                 id: "call-1".to_string(),
                 name: "bash".to_string(),
                 arguments: "{\"command\":\"date\"}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,
@@ -4320,6 +4320,7 @@ mod tests {
                 id: "call-7".to_string(),
                 name: "read".to_string(),
                 arguments: "{}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,
@@ -4569,6 +4570,26 @@ mod tests {
     #[test]
     fn adopt_subagent_models_keys_by_launching_call() {
         let mut app = app();
+        let started_at = Instant::now();
+        app.transcript
+            .push(TranscriptItem::ExecutionGroup(ExecutionGroup {
+                id: 1,
+                finished_at: None,
+                tools: vec![
+                    ToolActivity::new(
+                        "call-1".to_string(),
+                        "read".to_string(),
+                        "{}".to_string(),
+                        started_at,
+                    ),
+                    ToolActivity::new(
+                        "call-2".to_string(),
+                        "agent".to_string(),
+                        r#"{"agent":"explore"}"#.to_string(),
+                        started_at,
+                    ),
+                ],
+            }));
 
         let assignments = vec![("call-2".to_string(), "openrouter:glm-4.7".to_string())];
         assert!(app.adopt_subagent_models(&assignments));
@@ -4580,6 +4601,52 @@ mod tests {
         assert!(!app.adopt_subagent_models(&assignments));
         assert!(app.adopt_subagent_models(&[("call-2".to_string(), "codex:gpt-5.6".to_string())]));
         assert_eq!(app.subagent_model_for("call-2"), Some("codex:gpt-5.6"));
+        assert_eq!(app.tool_activity("call-1").unwrap().delegated_model, None);
+    }
+
+    #[test]
+    fn delegated_models_update_duplicates_and_survive_early_publication() {
+        let mut app = app();
+        let started_at = Instant::now();
+        let agent = || {
+            ToolActivity::new(
+                "call-agent".to_string(),
+                "agent".to_string(),
+                r#"{"agent":"explore"}"#.to_string(),
+                started_at,
+            )
+        };
+        app.transcript.push(TranscriptItem::ToolActivity(agent()));
+        app.transcript
+            .push(TranscriptItem::ExecutionGroup(ExecutionGroup {
+                id: 1,
+                finished_at: None,
+                tools: vec![agent()],
+            }));
+
+        let assignment = [("call-agent".to_string(), "codex:gpt-5.6".to_string())];
+        assert!(app.adopt_subagent_models(&assignment));
+        for item in &app.transcript {
+            let activity = match item {
+                TranscriptItem::ToolActivity(activity) => activity,
+                TranscriptItem::ExecutionGroup(group) => &group.tools[0],
+                _ => continue,
+            };
+            assert_eq!(activity.delegated_model.as_deref(), Some("codex:gpt-5.6"));
+        }
+
+        let mut early = AppState::new("test", "test".to_string(), ".".to_string(), None);
+        assert!(!early.adopt_subagent_models(&assignment));
+        early.record_tool_started(
+            "call-agent".to_string(),
+            "agent".to_string(),
+            r#"{"agent":"explore"}"#.to_string(),
+            started_at,
+        );
+        assert_eq!(
+            early.subagent_model_for("call-agent"),
+            Some("codex:gpt-5.6")
+        );
     }
 
     #[test]

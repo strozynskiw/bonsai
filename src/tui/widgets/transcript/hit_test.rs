@@ -184,6 +184,7 @@ mod tests {
             id: id.to_string(),
             name: "read".to_string(),
             arguments: "{}".to_string(),
+            delegated_model: None,
             status: ToolStatus::Running,
             result: None,
             diff: None,
@@ -197,6 +198,7 @@ mod tests {
             id: id.to_string(),
             name: "read".to_string(),
             arguments: format!(r#"{{"file_path":"{path}"}}"#),
+            delegated_model: None,
             status,
             result: Some(
                 if matches!(status, ToolStatus::Failed) {

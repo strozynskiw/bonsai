@@ -82,7 +82,9 @@ impl AppState {
             .into_iter()
             .map(|call| {
                 let arguments = display_tool_arguments(&call.arguments, &self.project_root);
-                ToolActivity::new(call.id, call.name, arguments, started_at)
+                let mut activity = ToolActivity::new(call.id, call.name, arguments, started_at);
+                self.adopt_pending_subagent_model(&mut activity);
+                activity
             })
             .collect::<Vec<_>>();
         if activities.is_empty() {

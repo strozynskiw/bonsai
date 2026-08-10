@@ -428,12 +428,17 @@ pub(crate) struct ReadEvidenceMap {
     pub(crate) delegated_overlap_advised: HashSet<String>,
 }
 
+type ProviderFallbackModelObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     /// One-shot delegated-run backup. Present only for subagents with a
     /// persisted fallback assignment and consumed on the first provider failure
     /// after the primary exhausts its normal retries.
     provider_fallback: Option<crate::tool::SubagentProviderConfig>,
+    /// Delegated-run hook that keeps external run metadata aligned when a
+    /// provider fallback changes the model that actually executes the task.
+    provider_fallback_model_observer: Option<ProviderFallbackModelObserver>,
     /// Persisted provider cache-routing identity for this conversation. Kept
     /// outside the concrete provider so model/provider rebuilds reuse it.
     conversation_cache_key: String,

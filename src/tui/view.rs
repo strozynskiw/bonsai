@@ -752,6 +752,7 @@ mod tests {
                 id: "sample-read".to_string(),
                 name: "read".to_string(),
                 arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("120 lines read".to_string()),
                 diff: None,
@@ -762,9 +763,10 @@ mod tests {
                 id: "sample-edit".to_string(),
                 name: "edit".to_string(),
                 arguments: r#"{"file_path":"src/lib.rs"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("Edited src/lib.rs (+2 / -1)".to_string()),
-                diff: Some(FileDiff {
+                diff: Some(Box::new(FileDiff {
                     path: "src/lib.rs".to_string(),
                     status: DiffStatus::Modified,
                     hunks: vec![DiffHunk {
@@ -797,7 +799,7 @@ mod tests {
                     added_lines: 2,
                     removed_lines: 1,
                     additional_files: Box::default(),
-                }),
+                })),
                 started_at: started,
                 finished_at: Some(now),
             }),
@@ -805,6 +807,7 @@ mod tests {
                 id: "sample-bash".to_string(),
                 name: "bash".to_string(),
                 arguments: r#"{"command":"cargo test"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Running,
                 result: None,
                 diff: None,

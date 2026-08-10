@@ -538,6 +538,11 @@ impl SubagentRunner {
         };
         subagent.set_prompt_estimator(prompt_estimator);
         if let Some(backup) = backup {
+            let subagents = self.subagents.clone();
+            let observed_subtask_id = subtask_id.clone();
+            subagent.set_provider_fallback_model_observer(Arc::new(move |model| {
+                subagents.set_model(&observed_subtask_id, model.to_string());
+            }));
             subagent.set_provider_fallback(*backup);
         }
 

@@ -249,7 +249,8 @@ impl Storage {
     ) -> Result<HashMap<String, ToolCallRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT call_id, name, args_json, result_json, diff_json, duration_ms, status
+            SELECT call_id, name, args_json, result_json, diff_json, delegated_model,
+                   duration_ms, status
             FROM tool_calls
             WHERE session_id = ?
             ORDER BY seq
@@ -269,6 +270,7 @@ impl Storage {
                     call_id,
                     name: row.try_get("name")?,
                     arguments: row.try_get("args_json")?,
+                    delegated_model: row.try_get("delegated_model")?,
                     result: parse_tool_result(row.try_get("result_json")?)?,
                     diff: parse_tool_diff(row.try_get("diff_json")?)?,
                     duration_ms: row.try_get("duration_ms")?,
@@ -294,6 +296,7 @@ struct ToolCallRecord {
     call_id: String,
     name: String,
     arguments: String,
+    delegated_model: Option<String>,
     result: Option<String>,
     diff: Option<crate::diff::FileDiff>,
     duration_ms: Option<i64>,
@@ -374,13 +377,12 @@ fn tool_activity_from_record(record: &ToolCallRecord) -> ToolActivity {
         id: record.call_id.clone(),
         name: record.name.clone(),
         arguments: record.arguments.clone(),
+        delegated_model: record.delegated_model.clone(),
         status: record.status,
         result: record.result.clone(),
-        diff: record.diff.clone(),
+        diff: record.diff.clone().map(Box::new),
         started_at: now.checked_sub(duration).unwrap_or(now),
         finished_at,
-        // Not a persisted column; a restored `agent` call falls back to the
-        // "Model:" line already inside its completion-report result text.
     }
 }
 
@@ -436,9 +438,9 @@ async fn insert_tool_call(
         r#"
         INSERT INTO tool_calls (
           session_id, call_id, seq, name, args_json, result_json, diff_json,
-          duration_ms, status, started_at_ms, finished_at_ms
+          delegated_model, duration_ms, status, started_at_ms, finished_at_ms
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         -- A call_id can legitimately appear twice in one snapshot (standalone
         -- plus inside an ExecutionGroup, or re-emitted); last write wins rather
         -- than violating UNIQUE(session_id, call_id) and rolling back the whole
@@ -449,6 +451,7 @@ async fn insert_tool_call(
           args_json = excluded.args_json,
           result_json = excluded.result_json,
           diff_json = excluded.diff_json,
+          delegated_model = excluded.delegated_model,
           duration_ms = excluded.duration_ms,
           status = excluded.status,
           started_at_ms = excluded.started_at_ms,
@@ -462,6 +465,7 @@ async fn insert_tool_call(
     .bind(json_text_or_wrapped(&activity.arguments))
     .bind(result_json)
     .bind(diff_json)
+    .bind(&activity.delegated_model)
     .bind(duration_ms)
     .bind(activity.status.as_db_str())
     .bind(started_at_ms)

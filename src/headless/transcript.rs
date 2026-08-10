@@ -133,7 +133,7 @@ fn finish_tool_activity(
 ) {
     activity.status = ToolStatus::from_execution_status(status);
     activity.result = Some(result.to_string());
-    activity.diff = diff;
+    activity.diff = diff.map(Box::new);
     activity.finished_at.get_or_insert(now);
 }
 

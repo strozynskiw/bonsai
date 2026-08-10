@@ -126,25 +126,46 @@ impl AppState {
     }
 
     /// Adopt each subagent run's model, keyed by the `agent` tool call that
-    /// launched it, so the call's detail view shows what the run actually
-    /// uses (not the parent turn's model). Returns whether anything changed,
-    /// so the caller can skip a redraw on the common no-op refresh.
+    /// launched it, so every transcript surface shows what the run actually
+    /// uses (not the parent turn's model). Mutating through the transcript model
+    /// also invalidates the matching item's cached layout.
     pub(crate) fn adopt_subagent_models(&mut self, assignments: &[(String, String)]) -> bool {
         let mut changed = false;
         for (tool_call_id, model) in assignments {
-            if self.subagent_models.get(tool_call_id) != Some(model) {
-                self.subagent_models
-                    .insert(tool_call_id.clone(), model.clone());
-                changed = true;
+            self.delegated_models
+                .insert(tool_call_id.clone(), model.clone());
+            for item in &mut self.transcript {
+                let tools = match item {
+                    TranscriptItem::ToolActivity(activity) => std::slice::from_mut(activity),
+                    TranscriptItem::ExecutionGroup(group) => group.tools.as_mut_slice(),
+                    _ => continue,
+                };
+                for activity in tools {
+                    if activity.id == *tool_call_id
+                        && activity.name == "agent"
+                        && activity.delegated_model.as_deref() != Some(model)
+                    {
+                        activity.delegated_model = Some(model.clone());
+                        changed = true;
+                    }
+                }
             }
         }
         changed
     }
 
+    pub(super) fn adopt_pending_subagent_model(&self, activity: &mut ToolActivity) {
+        if activity.name == "agent"
+            && let Some(model) = self.delegated_models.get(&activity.id)
+        {
+            activity.delegated_model = Some(model.clone());
+        }
+    }
+
     /// The model the subagent run launched by this `agent` tool call uses,
     /// once adopted from the registry. `None` for every other tool.
     pub fn subagent_model_for(&self, tool_id: &str) -> Option<&str> {
-        self.subagent_models.get(tool_id).map(String::as_str)
+        self.tool_activity(tool_id)?.delegated_model.as_deref()
     }
 
     pub fn tool_activity(&self, tool_id: &str) -> Option<&ToolActivity> {
@@ -268,7 +289,7 @@ impl AppState {
                 activity.result.as_deref(),
                 &result,
             ));
-            activity.diff = Some(diff);
+            activity.diff = Some(Box::new(diff));
             activity.finished_at = Some(finished_at);
             self.current_phase = Some(format!("Finished {}", activity.name));
             return;

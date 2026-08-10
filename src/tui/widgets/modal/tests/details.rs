@@ -626,16 +626,17 @@ fn tool_detail_caps_rendered_diff_rows() {
             "content": new
         })
         .to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some("done".to_string()),
-        diff: Some(crate::diff::build_file_diff(
+        diff: Some(Box::new(crate::diff::build_file_diff(
             "large.txt".to_string(),
             None,
             &(1..=200)
                 .map(|line| format!("new-{line}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
-        )),
+        ))),
         started_at: now,
         finished_at: Some(now),
     };
@@ -705,6 +706,7 @@ fn tool_detail_extracts_authorization_into_its_own_section() {
         id: "call-1".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+            delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(
             "[authorization] allow · high · network,code-execution · built-in-default · \
@@ -763,6 +765,7 @@ fn agent_tool_detail_sections_subagent_report() {
         id: "call-1".to_string(),
         name: "agent".to_string(),
         arguments: r#"{"agent":"review","background":true}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(result.to_string()),
         diff: None,
@@ -830,6 +833,7 @@ fn agent_tool_detail_shows_adopted_subagent_model_while_running() {
         id: "call-1".to_string(),
         name: "agent".to_string(),
         arguments: r#"{"agent":"research"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
@@ -858,6 +862,7 @@ fn tool_detail_has_no_model_row_without_a_subagent_run() {
         id: "call-1".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
@@ -880,6 +885,7 @@ fn agent_tool_detail_shows_placeholder_while_subagent_runs() {
         id: "call-1".to_string(),
         name: "agent".to_string(),
         arguments: r#"{"agent":"review"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: Some("[authorization] allow · high · network · built-in-default".to_string()),
         diff: None,

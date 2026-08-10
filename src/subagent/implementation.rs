@@ -1221,6 +1221,13 @@ mod tests {
             reg.tool_call_models(),
             vec![("call-1".to_string(), "openrouter:glm-4.7".to_string())],
         );
+
+        reg.set_model(&linked, "codex:gpt-5.6".to_string());
+        assert_eq!(
+            reg.tool_call_models(),
+            vec![("call-1".to_string(), "codex:gpt-5.6".to_string())],
+            "runtime fallback must replace the launching call's effective model",
+        );
     }
 
     #[test]

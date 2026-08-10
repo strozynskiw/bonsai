@@ -41,9 +41,10 @@ fn diff_tool_activity_renders_comparison_view() {
             id: "tool-1".to_string(),
             name: "write".to_string(),
             arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("Wrote src/main.rs".to_string()),
-            diff: Some(FileDiff {
+            diff: Some(Box::new(FileDiff {
                 path: "src/main.rs".to_string(),
                 status: DiffStatus::Modified,
                 hunks: vec![DiffHunk {
@@ -70,7 +71,7 @@ fn diff_tool_activity_renders_comparison_view() {
                 added_lines: 1,
                 removed_lines: 1,
                 additional_files: Box::default(),
-            }),
+            })),
             started_at: std::time::Instant::now(),
             finished_at: Some(std::time::Instant::now()),
         }));
@@ -102,6 +103,7 @@ fn wrapped_tool_card_paints_every_row_with_block_background() {
         name: "read".to_string(),
         arguments: r#"{"file_path":"/Users/wojtek/code/bonsai/src/tui/widgets/transcript.rs"}"#
             .to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some("ok".to_string()),
         diff: None,
@@ -253,6 +255,7 @@ fn execution_group_summary_reports_running_count_only() {
                 id: "call-1".to_string(),
                 name: "read".to_string(),
                 arguments: "{}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Running,
                 result: None,
                 diff: None,
@@ -263,6 +266,7 @@ fn execution_group_summary_reports_running_count_only() {
                 id: "call-2".to_string(),
                 name: "bash".to_string(),
                 arguments: "{}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Running,
                 result: None,
                 diff: None,
@@ -286,6 +290,7 @@ fn execution_group_summary_uses_tool_card_style() {
                 id: "call-1".to_string(),
                 name: "write".to_string(),
                 arguments: "{}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,
@@ -296,6 +301,7 @@ fn execution_group_summary_uses_tool_card_style() {
                 id: "call-2".to_string(),
                 name: "read".to_string(),
                 arguments: "{}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Failed,
                 result: Some("nope".to_string()),
                 diff: None,
@@ -324,6 +330,7 @@ fn execution_group_summary_reports_summarize_phase() {
             id: "call-1".to_string(),
             name: "todo_write".to_string(),
             arguments: r#"{"todos":[]}"#.to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("updated".to_string()),
             diff: None,
@@ -349,9 +356,10 @@ fn execution_group_summary_reports_duration_and_edit_summary() {
                 id: "call-1".to_string(),
                 name: "bash".to_string(),
                 arguments: "{}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
-                diff: Some(FileDiff {
+                diff: Some(Box::new(FileDiff {
                     path: "src/main.rs".to_string(),
                     status: DiffStatus::Modified,
                     hunks: vec![DiffHunk {
@@ -378,7 +386,7 @@ fn execution_group_summary_reports_duration_and_edit_summary() {
                     added_lines: 1,
                     removed_lines: 1,
                     additional_files: Box::default(),
-                }),
+                })),
                 started_at,
                 finished_at: Some(started_at + std::time::Duration::from_millis(750)),
             },
@@ -386,6 +394,7 @@ fn execution_group_summary_reports_duration_and_edit_summary() {
                 id: "call-2".to_string(),
                 name: "read".to_string(),
                 arguments: "{}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,
@@ -416,6 +425,7 @@ fn execution_group_renders_summary_and_nested_tool_rows() {
                     id: "call-success".to_string(),
                     name: "read".to_string(),
                     arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
@@ -426,6 +436,7 @@ fn execution_group_renders_summary_and_nested_tool_rows() {
                     id: "call-failed".to_string(),
                     name: "bash".to_string(),
                     arguments: r#"{"command":"cargo test"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Failed,
                     result: Some("tests failed\nnext line".to_string()),
                     diff: None,
@@ -480,6 +491,7 @@ fn serenity_execution_group_keeps_authorization_out_of_the_transcript() {
                     id: "call-read-1".to_string(),
                     name: "read".to_string(),
                     arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+            delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
@@ -490,6 +502,7 @@ fn serenity_execution_group_keeps_authorization_out_of_the_transcript() {
                     id: "call-bash".to_string(),
                     name: "bash".to_string(),
                     arguments: r#"{"command":"bash check_task_ray.sh"}"#.to_string(),
+            delegated_model: None,
                     status: ToolStatus::Failed,
                     result: Some(
                         "[authorization] allow · read-only · code-execution · fallback\n\nprocess exited with status 1"
@@ -503,6 +516,7 @@ fn serenity_execution_group_keeps_authorization_out_of_the_transcript() {
                     id: "call-read-2".to_string(),
                     name: "read".to_string(),
                     arguments: r#"{"file_path":"Cargo.toml"}"#.to_string(),
+            delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
@@ -535,6 +549,7 @@ fn failed_bash_row_omits_warning_suffix() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Failed,
         result: Some(bash_result_with_summary(
             "warning: unused import: Foo\ntest failed",
@@ -568,6 +583,7 @@ fn failed_tool_row_hides_reason_and_authorization() {
         id: "call-edit".to_string(),
         name: "edit".to_string(),
         arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Failed,
         result: Some(format!(
             "[authorization] allow · medium · workspace-write · fallback\n\n{long_reason}"
@@ -593,6 +609,7 @@ fn large_successful_execution_group_shows_nested_rows() {
             id: format!("call-{index}"),
             name: "read".to_string(),
             arguments: format!(r#"{{"file_path":"src/file_{index}.rs"}}"#),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -633,6 +650,7 @@ fn serenity_execution_group_collapses_nested_rows_by_default() {
             id: format!("call-{index}"),
             name: "read".to_string(),
             arguments: format!(r#"{{"file_path":"src/file_{index}.rs"}}"#),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -668,6 +686,7 @@ fn serenity_expanded_execution_group_shows_nested_rows() {
             id: format!("call-{index}"),
             name: "read".to_string(),
             arguments: format!(r#"{{"file_path":"src/file_{index}.rs"}}"#),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -824,6 +843,7 @@ fn selected_large_execution_group_expands_nested_rows() {
             id: format!("call-{index}"),
             name: "read".to_string(),
             arguments: format!(r#"{{"file_path":"src/file_{index}.rs"}}"#),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -865,6 +885,7 @@ fn large_failed_execution_group_keeps_failed_row_visible() {
             id: format!("call-{index}"),
             name: "read".to_string(),
             arguments: format!(r#"{{"file_path":"src/file_{index}.rs"}}"#),
+            delegated_model: None,
             status: if index == 5 {
                 ToolStatus::Failed
             } else {
@@ -916,6 +937,7 @@ fn execution_group_running_tool_renders_after_existing_rows() {
                     id: "call-read".to_string(),
                     name: "read".to_string(),
                     arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
@@ -926,6 +948,7 @@ fn execution_group_running_tool_renders_after_existing_rows() {
                     id: "call-bash".to_string(),
                     name: "bash".to_string(),
                     arguments: r#"{"command":"sleep 5"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Running,
                     result: None,
                     diff: None,
@@ -964,6 +987,7 @@ fn running_bash_row_surfaces_live_output_preview() {
                 id: "call-bash".to_string(),
                 name: "bash".to_string(),
                 arguments: r#"{"command":"gh auth login"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Running,
                 result: Some("warning: browser auth unavailable\ncopy this code".to_string()),
                 diff: None,
@@ -992,6 +1016,7 @@ fn running_bash_row_skips_live_truncation_footer() {
                 id: "call-bash".to_string(),
                 name: "bash".to_string(),
                 arguments: r#"{"command":"long-running"}"#.to_string(),
+            delegated_model: None,
                 status: ToolStatus::Running,
                 result: Some(
                     "first line\n\n[Live output truncated: 12000 chars shown, 14000 chars total so far]"
@@ -1024,6 +1049,7 @@ fn finished_successful_bash_row_shows_command_summary() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(bash_result_with_summary(
             "ok",
@@ -1058,6 +1084,7 @@ fn cargo_fmt_bash_row_shows_format_workflow() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: format!(r#"{{"command":"{command}"}}"#),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(bash_result_with_command_summary(
             command,
@@ -1092,6 +1119,7 @@ fn cargo_clippy_bash_row_shows_lint_failure() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: format!(r#"{{"command":"{command}"}}"#),
+        delegated_model: None,
         status: ToolStatus::Failed,
         result: Some(bash_result_with_command_summary(
             command,
@@ -1126,6 +1154,7 @@ fn failed_bash_row_shows_exit_summary_instead_of_first_output_line() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Failed,
         result: Some(bash_result_with_summary(
             "compiler failed loudly",
@@ -1160,6 +1189,7 @@ fn running_cargo_test_row_keeps_live_output_with_typed_label() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: Some("running 14 tests\nlatest test still running".to_string()),
         diff: None,
@@ -1192,6 +1222,7 @@ fn generic_bash_command_keeps_bash_label() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"printf ok"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(bash_result_with_command_summary(
             "printf ok",
@@ -1225,6 +1256,7 @@ fn compound_raw_bash_command_overrides_compact_footer_workflow() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test && cargo fmt"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(bash_result_with_command_summary(
             "cargo test",
@@ -1262,6 +1294,7 @@ fn timed_out_saved_bash_row_shows_distinct_summary() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Failed,
         result: Some(bash_result_with_summary(
             "",
@@ -1289,6 +1322,7 @@ fn git_tool_row_promotes_operation_argument() {
         id: "call-git".to_string(),
         name: "git".to_string(),
         arguments: r#"{"op":"status","path":"src/main.rs"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some("## master".to_string()),
         diff: None,
@@ -1312,6 +1346,7 @@ fn signal_bash_row_shows_signal_summary() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Failed,
         result: Some(result),
         diff: None,
@@ -1330,6 +1365,7 @@ fn warning_bash_row_keeps_warning_suffix_with_command_summary() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(bash_result_with_summary(
             "warning: unused import: Foo\nfinished",
@@ -1359,6 +1395,7 @@ fn bash_row_ignores_command_summary_marker_in_last_output() {
         id: "call-bash".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"printf marker"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(bash_result_with_command_summary(
             "printf marker",
@@ -1393,6 +1430,7 @@ fn successful_bash_row_surfaces_warning_output() {
                 id: "call-bash".to_string(),
                 name: "bash".to_string(),
                 arguments: r#"{"command":"cargo check"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("warning: unused import: Foo\nfinished".to_string()),
                 diff: None,
@@ -1423,6 +1461,7 @@ fn successful_bash_row_ignores_warning_substrings() {
                 id: "call-bash".to_string(),
                 name: "bash".to_string(),
                 arguments: r#"{"command":"echo"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("completed without warning: all good\nfinished".to_string()),
                 diff: None,
@@ -1454,6 +1493,7 @@ fn inline_group_selection_highlights_only_selected_nested_tool_row() {
                     id: "call-1".to_string(),
                     name: "read".to_string(),
                     arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
@@ -1464,6 +1504,7 @@ fn inline_group_selection_highlights_only_selected_nested_tool_row() {
                     id: "call-2".to_string(),
                     name: "bash".to_string(),
                     arguments: r#"{"command":"cargo test"}"#.to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
@@ -1541,6 +1582,7 @@ fn running_bash_waiting_for_permission_uses_stable_pending_text() {
                 id: "call-1".to_string(),
                 name: "bash".to_string(),
                 arguments: r#"{"command":"sleep 5"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Running,
                 result: None,
                 diff: None,
@@ -1566,6 +1608,7 @@ fn running_websearch_marks_only_an_active_domain_prompt_as_pending() {
         id: "call-search".to_string(),
         name: "websearch".to_string(),
         arguments: r#"{"query":"official Rust docs"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
@@ -1613,6 +1656,7 @@ fn denied_permission_renders_as_failed_tool_row() {
                 id: "call-1".to_string(),
                 name: "bash".to_string(),
                 arguments: r#"{"command":"sleep 5"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Failed,
                 result: Some("Error: Permission denied by user for command: sleep 5".to_string()),
                 diff: None,
@@ -1640,6 +1684,7 @@ fn agent_tool_activity_shows_subagent_type() {
             id: "tool-1".to_string(),
             name: "agent".to_string(),
             arguments: r#"{"agent":"explore","prompt":"Explore the agent module"}"#.to_string(),
+            delegated_model: Some("openrouter:z-ai/glm-4.7".to_string()),
             status: ToolStatus::Running,
             result: None,
             diff: None,
@@ -1652,8 +1697,56 @@ fn agent_tool_activity_shows_subagent_type() {
         rendered.contains("agent:explore"),
         "agent row should show the subagent type: {rendered}"
     );
+    assert!(rendered.contains("glm-4.7"), "got: {rendered}");
+    assert!(!rendered.contains("openrouter"), "got: {rendered}");
+    assert!(!rendered.contains("z-ai/"), "got: {rendered}");
     assert!(
         rendered.contains("Explore the agent module"),
         "agent row should still show the prompt summary: {rendered}"
     );
+}
+
+#[test]
+fn delegated_agent_model_renders_in_nested_collapsed_and_linear_rows() {
+    let now = std::time::Instant::now();
+    let activity = ToolActivity {
+        id: "agent-1".to_string(),
+        name: "agent".to_string(),
+        arguments: r#"{"agent":"self-review"}"#.to_string(),
+        delegated_model: Some("codex:openai/gpt-5.6".to_string()),
+        status: ToolStatus::Succeeded,
+        result: Some("No findings".to_string()),
+        diff: None,
+        started_at: now,
+        finished_at: Some(now),
+    };
+    let item = TranscriptItem::ExecutionGroup(execution_group(1, now, vec![activity], Some(now)));
+    let options = |serenity_mode, linear_output| TranscriptRenderOptions {
+        selected: ItemSelection::None,
+        focused: false,
+        active_group_tool_selection: None,
+        serenity_mode,
+        linear_output,
+        execution_group_expanded: false,
+        reasoning_active: false,
+        permission_command: None,
+        tick: 0,
+    };
+
+    for (serenity_mode, linear_output, label) in [
+        (false, false, "nested"),
+        (true, false, "collapsed"),
+        (false, true, "linear"),
+    ] {
+        let text = rendered_text(render_transcript_item(
+            &item,
+            30,
+            options(serenity_mode, linear_output),
+        ))
+        .join("\n");
+        assert!(text.contains("agent:self-review"), "{label}: {text}");
+        assert!(text.contains("gpt-5.6"), "{label}: {text}");
+        assert!(!text.contains("codex"), "{label}: {text}");
+        assert!(!text.contains("openai/"), "{label}: {text}");
+    }
 }

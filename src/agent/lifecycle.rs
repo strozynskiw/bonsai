@@ -525,6 +525,14 @@ impl Agent {
         self.provider_fallback = Some(fallback);
     }
 
+    /// Observe the effective delegated model whenever runtime fallback changes it.
+    pub(crate) fn set_provider_fallback_model_observer(
+        &mut self,
+        observer: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    ) {
+        self.provider_fallback_model_observer = Some(observer);
+    }
+
     /// Switch permanently to the configured backup for the rest of this run.
     /// Returns its display label when a backup was available.
     pub(super) fn activate_provider_fallback(&mut self) -> Option<String> {
@@ -547,6 +555,9 @@ impl Agent {
                 self.set_context_budget_tokens(fallback.context_budget_tokens);
                 self.set_prompt_estimator(fallback.prompt_estimator);
             }
+        }
+        if let Some(observer) = &self.provider_fallback_model_observer {
+            observer(&label);
         }
         Some(label)
     }

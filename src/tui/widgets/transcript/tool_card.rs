@@ -129,6 +129,17 @@ pub(super) fn render_execution_group_summary_row(
     let mut text = Span::styled(summary, Style::default().fg(theme::palette().muted));
     text.style = Style::default().fg(theme::palette().text);
     spans.push(text);
+    if options.serenity_mode && !options.execution_group_expanded {
+        for activity in &group.tools {
+            let Some(model) = delegated_agent_model(activity) else {
+                continue;
+            };
+            spans.push(Span::styled(
+                format!("  · {}  {model}", tool_activity_display_name(activity)),
+                Style::default().fg(theme::palette().muted),
+            ));
+        }
+    }
 
     let inner_width = width.saturating_sub(4).max(8);
     let is_selected = !matches!(options.selected, ItemSelection::None);
@@ -339,6 +350,13 @@ pub(super) fn tool_activity_summary_spans(
         ),
     ];
 
+    if let Some(model) = delegated_agent_model(activity) {
+        spans.push(Span::styled(
+            format!("  {model}"),
+            Style::default().fg(theme::palette().muted),
+        ));
+    }
+
     if activity.name == "question" {
         spans.extend(question_summary_spans(&activity.arguments));
     } else if let Some((key, text)) = primary_arg_value(&activity.arguments) {
@@ -545,7 +563,7 @@ impl CommandWorkflow {
     }
 }
 
-fn tool_activity_display_name(activity: &ToolActivity) -> String {
+pub(super) fn tool_activity_display_name(activity: &ToolActivity) -> String {
     if activity.name == "bash"
         && let Some(command) = bash_command_from_args(&activity.arguments)
         && let Some(workflow) = classify_command_workflow(&command)
@@ -560,6 +578,12 @@ fn tool_activity_display_name(activity: &ToolActivity) -> String {
         return format!("agent:{subagent}");
     }
     activity.name.clone()
+}
+
+fn delegated_agent_model(activity: &ToolActivity) -> Option<&str> {
+    (activity.name == "agent")
+        .then(|| activity.delegated_model_name())
+        .flatten()
 }
 
 /// Extract a string-valued argument from a tool call's JSON arguments.

@@ -1531,6 +1531,7 @@ async fn duplicate_tool_call_id_does_not_abort_transcript_snapshot() {
         id: "dup-call".to_string(),
         name: "read".to_string(),
         arguments: r#"{"path":"a.rs"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some(result.to_string()),
         diff: None,
@@ -2206,7 +2207,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 6);
+    assert_eq!(migration_count, 7);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \
@@ -2683,6 +2684,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
         id: id.to_string(),
         name: name.to_string(),
         arguments: "{}".to_string(),
+        delegated_model: None,
         status,
         result: Some("done".to_string()),
         diff: None,
@@ -5572,6 +5574,7 @@ async fn transcript_snapshot_rehydrates_execution_group_tools() {
             id: "call-1".to_string(),
             name: "bash".to_string(),
             arguments: r#"{"cmd":"cargo test"}"#.to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -5604,6 +5607,52 @@ async fn transcript_snapshot_rehydrates_execution_group_tools() {
 }
 
 #[tokio::test]
+async fn transcript_snapshot_round_trips_delegated_agent_model() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let started_at = Instant::now();
+    let activity = ToolActivity {
+        id: "agent-1".to_string(),
+        name: "agent".to_string(),
+        arguments: r#"{"agent":"explore"}"#.to_string(),
+        delegated_model: Some("openrouter:z-ai/glm-4.7".to_string()),
+        status: ToolStatus::Succeeded,
+        result: Some("done".to_string()),
+        diff: None,
+        started_at,
+        finished_at: Some(started_at),
+    };
+    let transcript = vec![
+        TranscriptItem::ToolActivity(activity.clone()),
+        TranscriptItem::ExecutionGroup(ExecutionGroup {
+            id: 1,
+            tools: vec![activity],
+            finished_at: Some(started_at),
+        }),
+    ];
+
+    fixture
+        .storage
+        .replace_transcript_snapshot(session_id, &transcript)
+        .await
+        .unwrap();
+    let snapshot = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let TranscriptItem::ToolActivity(activity) = &snapshot.transcript[0] else {
+        panic!("expected restored tool activity");
+    };
+    assert_eq!(
+        activity.delegated_model.as_deref(),
+        Some("openrouter:z-ai/glm-4.7")
+    );
+}
+
+#[tokio::test]
 async fn self_review_tool_block_metadata_contains_structured_findings() {
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;
@@ -5612,6 +5661,7 @@ async fn self_review_tool_block_metadata_contains_structured_findings() {
         id: "self-review-1".to_string(),
         name: "agent".to_string(),
         arguments: r#"{"agent":"self-review","prompt":"review"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some("Major: src/lib.rs:1 is wrong.\nNit: rename it.".to_string()),
         diff: None,
@@ -5660,6 +5710,7 @@ async fn tool_call_snapshot_records_real_start_and_finish_timestamps() {
             id: "call-1".to_string(),
             name: "bash".to_string(),
             arguments: r#"{"cmd":"cargo test"}"#.to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
