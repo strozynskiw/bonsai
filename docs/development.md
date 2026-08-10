@@ -140,6 +140,6 @@ secret; the workflow refuses to publish on a mismatch. See
 ## Documentation map
 
 These docs live in `docs/` and are split by topic — start at the
-[index](README.md). Keep `README.md` (quick tour), `AGENTS.md` (agent
-conventions), and `ROADMAP.md` (unfinished work only) in their existing
-roles; release notes live in `ROADMAP.md`, not a changelog.
+[index](README.md). Keep `README.md` (quick tour) and `AGENTS.md` (agent
+conventions) in their existing roles. GitHub milestones and issues track
+unfinished work, while GitHub Releases contain release notes.

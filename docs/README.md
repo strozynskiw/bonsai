@@ -79,4 +79,6 @@ split by topic.
 
 The top-level [`README.md`](../README.md) remains the quick tour;
 [`AGENTS.md`](../AGENTS.md) is the working guide for coding agents in this
-repository; [`ROADMAP.md`](../ROADMAP.md) tracks unfinished work only.
+repository; GitHub
+[milestones](https://github.com/strozynskiw/bonsai/milestones) and issues track
+unfinished work.

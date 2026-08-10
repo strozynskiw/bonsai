@@ -11,7 +11,7 @@ Add or update a Bonsai provider from docs to working integration. Keep changes a
 
 ## Workflow
 
-1. Read `AGENTS.md`, `ROADMAP.md`, and the current provider files before editing. Use the repository's Rust skill/style rules when touching Rust code.
+1. Read `AGENTS.md`, the relevant GitHub milestone/issues, and the current provider files before editing. Use the repository's Rust skill/style rules when touching Rust code.
 2. Read [references/provider-integration.md](references/provider-integration.md) for the implementation checklist and file touchpoints.
 3. Research only authoritative provider docs for current models, API protocol, auth, model-listing endpoint, streaming shape, tool-call support, usage reporting, prompt caching, and reasoning/effort controls. Browse because this information changes. When live `/models` output exists, preserve raw model ids as availability and do not infer capabilities from names unless official docs describe the model family.
 4. Search the codebase for the provider name, id, env vars, model slugs, and base URL. If any integration already exists, update it in place and preserve compatibility unless the user explicitly wants a replacement.

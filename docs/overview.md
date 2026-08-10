@@ -84,6 +84,6 @@ See [Configuration](configuration.md), [MCP](mcp.md), [Hooks](hooks.md),
 ## What bonsai is not (yet)
 
 A server API, browser/desktop UI, Windows support, an SDK, a plugin
-marketplace, and hosted agents are explicitly post-1.0. See
-[`ROADMAP.md`](../ROADMAP.md) for the live plan; it tracks unfinished work
-only — shipped behavior is documented here and in the top-level README.
+marketplace, and hosted agents are explicitly post-1.0. See the GitHub
+[milestones](https://github.com/strozynskiw/bonsai/milestones) for the live
+plan; shipped behavior is documented here and in the top-level README.

@@ -16,9 +16,10 @@ declarative entry in `models/builtin/connections.toml` bound to one of three wir
 transports (`openai-chat`, `anthropic-messages`, `codex-responses`), with model
 definitions (context windows, pricing, reasoning support) sourced from
 **models.dev** (`https://models.dev/api.json`, cached). The long-term goal is breadth:
-adding a provider should be a config entry, not a code change. `ROADMAP.md` is the
-source for mission, differentiators, current shipped state, and delivery plan. Skim it
-before proposing work.
+adding a provider should be a config entry, not a code change. `README.md` and
+`docs/overview.md` describe the product; GitHub milestones and issues are the
+source for unfinished delivery work. Check the relevant milestone before
+proposing work.
 
 ## Build, test, lint
 
@@ -199,8 +200,8 @@ mixed — older commits use bare prose (`Harden agent execution…`) or
 - **One logical change per commit.** Don't mix a refactor with a behavior
   change; keep pure formatting churn out of feature commits.
 - **Body explains *why*, not *what*** — the diff already shows what. Blank line
-  after the subject, wrap at ~72 cols. Reference the plan or `ROADMAP.md`
-  milestone when the change implements one.
+  after the subject, wrap at ~72 cols. Reference the relevant plan or GitHub
+  issue when the change implements one.
 - **Green tree before you commit.** `cargo fmt`, `cargo clippy --all-targets
   --all-features -- -D warnings`, and `cargo test --locked` must pass — the
   subject claims the change works, so it has to.
@@ -255,8 +256,7 @@ next agent doesn't have to relearn them:
   `estimate_text_tokens` is the budget check; compaction drops everything
   between the system message and the last 20 messages, replacing it with
   a single system message that says "X messages were omitted". Counting is
-  provider-*family* estimation today; exact local tokenizers are planned in
-  M4.1a (see `ROADMAP.md`).
+  provider-*family* estimation today; exact local tokenizers remain future work.
 - **The `ReadTracker` enforces read-before-edit.** `WriteTool` and `EditTool`
   reject paths the model hasn't read this session, with an mtime staleness
   check. If a tool writes to disk, it should respect the same boundary
@@ -300,14 +300,13 @@ next agent doesn't have to relearn them:
   malformed-arguments test in `src/agent/` is the bar: the model gets
   tool name, required fields, the bad payload, and the parse error.
 - Don't add a `MIGRATION.md`, `CHANGELOG.md`, or similar without asking.
-  Release notes live in `ROADMAP.md`.
+  Release notes live in GitHub Releases.
 - Don't modify `Cargo.lock` by hand. The CI build is `--locked`; if a
   dep needs updating, run `cargo update -p <crate>` and commit the diff.
 
 ## References
 
-- `ROADMAP.md` — current milestone plan, exit bars, what's shipped, and the
-  command surface.
+- GitHub milestones and issues — current delivery plan and exit bars.
 - `.agents/skills/rust-code-writer/SKILL.md` — full Rust style guide.
 - `models/builtin/connections.toml` — declarative provider registry; the place
   to add a provider on an existing transport.
