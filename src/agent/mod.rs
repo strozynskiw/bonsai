@@ -1229,6 +1229,10 @@ impl Agent {
         true
     }
 
+    pub(crate) fn execution_policy_snapshot(&self) -> Option<&str> {
+        self.advisories.last_execution_policy_snapshot.as_deref()
+    }
+
     fn next_context_message_id(&mut self) -> String {
         let id = format_context_message_id(self.next_message_id);
         self.next_message_id = self.next_message_id.saturating_add(1);

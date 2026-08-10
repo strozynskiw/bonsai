@@ -9,10 +9,12 @@ use anyhow::{Context, Result};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool};
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{AgentMode, AgentRunResult};
+use crate::agent::{
+    AgentMode, AgentRunResult, QueuedUserMessage, QueuedUserMessageCommand, UserInput,
+};
 use crate::background::BackgroundTaskRegistry;
 use crate::context;
 use crate::headless::{ProviderSelection, select_provider};
@@ -508,6 +510,9 @@ struct EvalAgentBuild<'a> {
     /// Force the episode store on even when the explicit environment kill
     /// switch is set, so episode-specific tasks stay deterministic in CI.
     enable_episodes: bool,
+    /// Force the episode store off so pressure-compaction scenarios cannot be
+    /// satisfied by relevance-driven episode eviction instead.
+    disable_episodes: bool,
     profile: EvalAgentProfile,
     session_title: &'a str,
 }
@@ -571,8 +576,9 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
     };
     // One shared store backs the recall tool and the agent ledger; enabled by
     // default or forced on for episode-asserting eval tasks.
-    let episode_store = (config.enable_episodes || crate::episode::episodes_enabled())
-        .then(crate::episode::SharedEpisodeStore::default);
+    let episode_store = (!config.disable_episodes
+        && (config.enable_episodes || crate::episode::episodes_enabled()))
+    .then(crate::episode::SharedEpisodeStore::default);
     let (tool_registry, planning_registry, smol_registry, _subagent_runner) =
         crate::bootstrap::build_tool_registries(crate::bootstrap::ToolRegistryDeps {
             project_root: config.worktree_path.to_path_buf(),
@@ -699,6 +705,7 @@ async fn run_shared_workspace_peer(
         mock_context_window_tokens: None,
         enable_peer_context: true,
         enable_episodes: false,
+        disable_episodes: false,
         profile: EvalAgentProfile::Full,
         session_title: &session_title,
     })
@@ -765,6 +772,7 @@ async fn run_task(
         mock_context_window_tokens: task.mock_context_window_tokens,
         enable_peer_context: task.shared_workspace_peer.is_some(),
         enable_episodes: task.min_episode_evictions.is_some(),
+        disable_episodes: task.disable_episodes,
         profile: task.profile,
         session_title: &session_title,
     })
@@ -792,13 +800,37 @@ async fn run_task(
             })
         })
     };
+    let run = async {
+        if task.queued_messages.is_empty() {
+            return agent
+                .run(&task.prompt, cancellation_token, sink.clone())
+                .await;
+        }
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        for (index, text) in task.queued_messages.iter().enumerate() {
+            let id = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+            sender
+                .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+                    id,
+                    display_text: text.clone(),
+                    transcript_text: text.clone(),
+                    input: UserInput::from_text(text),
+                }))
+                .map_err(|_| anyhow::anyhow!("Eval queued-message channel closed"))?;
+        }
+        drop(sender);
+        agent
+            .run_with_queue_control(
+                UserInput::from_text(&task.prompt),
+                cancellation_token.into(),
+                sink.clone(),
+                receiver,
+            )
+            .await
+    };
     let mut run_result = if let Some(max_duration_ms) = budgets.max_duration_ms {
-        match tokio::time::timeout(
-            Duration::from_millis(max_duration_ms),
-            agent.run(&task.prompt, cancellation_token, sink.clone()),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_millis(max_duration_ms), run).await {
             Ok(result) => result,
             Err(_) => Err(anyhow::anyhow!(
                 "Eval task exceeded the {} ms duration budget",
@@ -806,9 +838,7 @@ async fn run_task(
             )),
         }
     } else {
-        agent
-            .run(&task.prompt, cancellation_token, sink.clone())
-            .await
+        run.await
     };
     if let Some(task) = cancellation_task {
         task.abort();
@@ -883,6 +913,7 @@ async fn run_task(
     };
     let usage_totals = agent.usage_totals();
     let completion_guard = agent.completion_guard_trace();
+    let execution_policy = agent.execution_policy_snapshot().map(str::to_owned);
     let usage = UsageReport::from_totals(usage_totals);
     let usage_turns = agent.context_report().usage_turns;
     let repair_turns = agent
@@ -1002,6 +1033,8 @@ async fn run_task(
     Ok(TaskReport {
         id: task_run_id.to_string(),
         prompt: task.prompt.clone(),
+        resume_prompt: task.resume_prompt.clone(),
+        queued_messages: task.queued_messages.clone(),
         profile: task.profile,
         status,
         expected_status: task.expected_status,
@@ -1010,6 +1043,7 @@ async fn run_task(
         output,
         run_error,
         completion_guard,
+        execution_policy,
         usage,
         usage_turns,
         budget,
@@ -1025,6 +1059,7 @@ async fn run_task(
         shared_workspace,
         changed_files: primary_changed_files,
         tool_effects: task_effects.tool_effects,
+        attempted_tool_effects: task_effects.attempted_tool_effects,
         worktree_path: worktree_path.display().to_string(),
         graders: grader_results,
     })
@@ -1152,6 +1187,11 @@ struct EvalTask {
     /// absent, the existing context resumes without another user message.
     #[serde(default)]
     resume_prompt: Option<String>,
+    /// Human follow-ups delivered through the in-flight composer queue. The
+    /// runner enqueues them before the first provider turn so the agent merges
+    /// them at the first normal tool/response boundary deterministically.
+    #[serde(default)]
+    queued_messages: Vec<String>,
     #[serde(default)]
     mock_context_window_tokens: Option<usize>,
     #[serde(default)]
@@ -1161,6 +1201,10 @@ struct EvalTask {
     /// deterministically regardless of the BONSAI_EPISODES environment.
     #[serde(default)]
     min_episode_evictions: Option<usize>,
+    /// Disable task episodes so a scenario specifically measures pressure
+    /// compaction rather than episode eviction.
+    #[serde(default)]
+    disable_episodes: bool,
     /// Ceiling on pressure compactions — `0` asserts that relevance-driven
     /// episode eviction alone kept the prompt healthy.
     #[serde(default)]
@@ -1244,6 +1288,13 @@ impl EvalTask {
                 anyhow::bail!("Task '{}' resume_prompt must not be blank", self.id);
             }
         }
+        if self
+            .queued_messages
+            .iter()
+            .any(|message| message.trim().is_empty())
+        {
+            anyhow::bail!("Task '{}' queued_messages must not contain blanks", self.id);
+        }
         if self.mock_context_window_tokens == Some(0) {
             anyhow::bail!(
                 "Task '{}' mock_context_window_tokens must be greater than zero",
@@ -1259,6 +1310,12 @@ impl EvalTask {
         if self.min_episode_evictions == Some(0) {
             anyhow::bail!(
                 "Task '{}' min_episode_evictions must be greater than zero",
+                self.id
+            );
+        }
+        if self.disable_episodes && self.min_episode_evictions.is_some() {
+            anyhow::bail!(
+                "Task '{}' cannot disable episodes and require episode evictions",
                 self.id
             );
         }
@@ -1590,6 +1647,7 @@ struct EvalSinkState {
     pending: HashMap<String, EvalToolAction>,
     pending_effects: HashMap<String, EvalToolEffect>,
     observed_tool_effects: HashSet<EvalToolEffect>,
+    attempted_tool_effects: HashSet<EvalToolEffect>,
     read_calls: HashMap<String, EvalReadCall>,
     path_generations: HashMap<String, usize>,
     global_generation: usize,
@@ -1633,9 +1691,16 @@ impl EvalSink {
             .copied()
             .collect::<Vec<_>>();
         tool_effects.sort();
+        let mut attempted_tool_effects = state
+            .attempted_tool_effects
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        attempted_tool_effects.sort();
         EvalTaskEffects {
             changed_files,
             tool_effects,
+            attempted_tool_effects,
         }
     }
 
@@ -1767,6 +1832,7 @@ impl OutputSink for EvalSink {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for call in calls {
             let effect = EvalToolEffect::for_tool_name(&call.name);
+            state.attempted_tool_effects.insert(effect);
             state.pending_effects.insert(call.id.clone(), effect);
             let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
             let path = arguments
@@ -2097,9 +2163,11 @@ mod tests {
                     cancel_after_provider_attempts: None,
                     resume_after_interruption: false,
                     resume_prompt: None,
+                    queued_messages: Vec::new(),
                     mock_context_window_tokens: None,
                     min_compactions: None,
                     min_episode_evictions: None,
+                    disable_episodes: false,
                     max_compactions: None,
                     shared_workspace_peer: None,
                 },
@@ -2135,9 +2203,11 @@ mod tests {
                     cancel_after_provider_attempts: None,
                     resume_after_interruption: false,
                     resume_prompt: None,
+                    queued_messages: Vec::new(),
                     mock_context_window_tokens: None,
                     min_compactions: None,
                     min_episode_evictions: None,
+                    disable_episodes: false,
                     max_compactions: None,
                     shared_workspace_peer: None,
                 },
@@ -2188,9 +2258,11 @@ mod tests {
                 cancel_after_provider_attempts: None,
                 resume_after_interruption: false,
                 resume_prompt: None,
+                queued_messages: Vec::new(),
                 mock_context_window_tokens: None,
                 min_compactions: None,
                 min_episode_evictions: None,
+                disable_episodes: false,
                 max_compactions: None,
                 shared_workspace_peer: None,
             }],
@@ -2243,9 +2315,11 @@ mod tests {
                 cancel_after_provider_attempts: None,
                 resume_after_interruption: false,
                 resume_prompt: None,
+                queued_messages: Vec::new(),
                 mock_context_window_tokens: None,
                 min_compactions: None,
                 min_episode_evictions: None,
+                disable_episodes: false,
                 max_compactions: None,
                 shared_workspace_peer: None,
             }],
@@ -2307,9 +2381,11 @@ mod tests {
                 cancel_after_provider_attempts: None,
                 resume_after_interruption: false,
                 resume_prompt: None,
+                queued_messages: Vec::new(),
                 mock_context_window_tokens: None,
                 min_compactions: None,
                 min_episode_evictions: None,
+                disable_episodes: false,
                 max_compactions: None,
                 shared_workspace_peer: None,
             }],
@@ -2380,7 +2456,7 @@ mod tests {
     }
 
     #[test]
-    fn intent_authority_suite_repeats_live_tasks_for_full_and_smol_profiles() {
+    fn intent_authority_suite_covers_the_release_intent_matrix() {
         let suite =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/intent_authority.toml");
         let suite = EvalSuite::load(&suite).unwrap();
@@ -2391,17 +2467,42 @@ mod tests {
             suite
                 .tasks
                 .iter()
-                .map(|task| task.profile)
+                .map(|task| (task.id.as_str(), task.profile))
                 .collect::<Vec<_>>(),
             [
-                EvalAgentProfile::Full,
-                EvalAgentProfile::Full,
-                EvalAgentProfile::Smol,
-                EvalAgentProfile::Smol,
+                ("full_explain_without_mutation", EvalAgentProfile::Full),
+                ("smol_explain_without_mutation", EvalAgentProfile::Smol),
+                (
+                    "full_review_findings_without_mutation",
+                    EvalAgentProfile::Full
+                ),
+                ("smol_verify_without_fixing", EvalAgentProfile::Smol),
+                ("full_monitor_until_unchanged", EvalAgentProfile::Full),
+                ("full_diagnose_then_fix", EvalAgentProfile::Full),
+                ("smol_diagnose_then_fix", EvalAgentProfile::Smol),
+                ("full_extend_established_parser", EvalAgentProfile::Full),
             ]
         );
         assert_eq!(repeated_task_id("diagnose", 2, 3), "diagnose-run-2");
         assert_eq!(repeated_task_id("diagnose", 1, 1), "diagnose");
+    }
+
+    #[tokio::test]
+    async fn intent_continuity_suite_runs_every_mock_scenario() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let suite =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/intent_continuity.toml");
+        let outcome = run(EvalCliConfig {
+            suite,
+            out_dir: temp.path().to_path_buf(),
+            fail_on_task_failure: true,
+            ..EvalCliConfig::default()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!((outcome.passed_tasks, outcome.total_tasks), (5, 5));
+        assert!(!outcome.should_fail_process());
     }
 
     #[tokio::test]

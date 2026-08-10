@@ -74,6 +74,10 @@ impl TaskStatus {
 pub(crate) struct TaskReport {
     pub(crate) id: String,
     pub(crate) prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resume_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) queued_messages: Vec<String>,
     pub(crate) profile: EvalAgentProfile,
     pub(crate) status: TaskStatus,
     pub(crate) expected_status: TaskStatus,
@@ -84,6 +88,8 @@ pub(crate) struct TaskReport {
     pub(crate) run_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) completion_guard: Option<crate::agent::CompletionGuardTrace>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_policy: Option<String>,
     pub(crate) usage: UsageReport,
     pub(crate) usage_turns: Vec<crate::agent::UsageTurnReport>,
     pub(crate) budget: EvalBudgetReport,
@@ -103,6 +109,7 @@ pub(crate) struct TaskReport {
     pub(crate) shared_workspace: Option<SharedWorkspaceReport>,
     pub(crate) changed_files: Vec<String>,
     pub(crate) tool_effects: Vec<EvalToolEffect>,
+    pub(crate) attempted_tool_effects: Vec<EvalToolEffect>,
     pub(crate) worktree_path: String,
     pub(crate) graders: Vec<GraderResult>,
 }
@@ -353,6 +360,8 @@ mod tests {
         TaskReport {
             id: id.to_string(),
             prompt: String::new(),
+            resume_prompt: None,
+            queued_messages: Vec::new(),
             profile: EvalAgentProfile::Full,
             status: TaskStatus::Completed,
             expected_status: TaskStatus::Completed,
@@ -361,6 +370,7 @@ mod tests {
             output: String::new(),
             run_error: None,
             completion_guard: None,
+            execution_policy: None,
             usage: UsageReport {
                 prompt_tokens: 1,
                 completion_tokens: 1,
@@ -390,6 +400,7 @@ mod tests {
             shared_workspace: None,
             changed_files: Vec::new(),
             tool_effects: Vec::new(),
+            attempted_tool_effects: Vec::new(),
             worktree_path: String::new(),
             graders: Vec::new(),
         }

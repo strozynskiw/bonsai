@@ -47,7 +47,9 @@ batches with malformed arguments, deterministic cancellation and resumption,
 truncated provider responses, forced compaction with a mock context window,
 prompt-cache simulation with forbidden request substrings, and
 shared-workspace tasks that run a second real agent session against the same
-worktree to verify the workspace lock and change attribution.
+worktree to verify the workspace lock and change attribution. Queued human
+follow-ups exercise additive, superseding, and status-request steering through
+the same in-flight queue as the TUI.
 
 Five grader types verify outcomes:
 
@@ -71,8 +73,12 @@ post-warmup cache percentage.
 - `eval/suites/language_acceptance.toml` — dependency-free Rust, TypeScript,
   Python, and Go repositories whose initial implementations fail their native
   tests; the agent must inspect, fix, and pass a clean re-run.
-- `eval/suites/intent_authority.toml` — repeated live-model checks that full
-  and SMOL prompts diagnose without mutation, then mutate and verify when asked.
+- `eval/suites/intent_continuity.toml` — deterministic queued-steering,
+  pressure-compaction, and episode-recall continuity checks.
+- `eval/suites/intent_authority.toml` — repeated live-model checks across full
+  and SMOL explanation, review, verification, monitoring, implementation, and
+  established-pattern engineering tasks. Run it on two model families for a
+  release qualification.
 - `eval/suites/task_todo.toml` and `eval/suites/read_efficiency.toml` — the
   end-to-end efficiency benchmarks. Run both on Codex and at least one
   non-Codex transport before changing read reuse, cache shaping, retry, or

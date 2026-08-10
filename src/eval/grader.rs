@@ -54,6 +54,7 @@ impl EvalToolEffect {
 pub(crate) struct EvalTaskEffects {
     pub(crate) changed_files: Vec<String>,
     pub(crate) tool_effects: Vec<EvalToolEffect>,
+    pub(crate) attempted_tool_effects: Vec<EvalToolEffect>,
 }
 
 /// A single grader declaration parsed from a suite's `[[tasks.graders]]` table.
@@ -100,6 +101,15 @@ pub(crate) enum GraderSpec {
         required: Vec<EvalToolEffect>,
         #[serde(default)]
         forbidden: Vec<EvalToolEffect>,
+        /// Effect classes that must be attempted, regardless of whether the
+        /// underlying operation succeeds (for example, an expected-failing
+        /// verification command).
+        #[serde(default)]
+        required_attempts: Vec<EvalToolEffect>,
+        /// Effect classes that must not even be attempted. This is stricter
+        /// than `forbidden`, which covers successfully completed calls.
+        #[serde(default)]
+        forbidden_attempts: Vec<EvalToolEffect>,
     },
 }
 
@@ -163,14 +173,29 @@ impl GraderSpec {
             Self::ToolEffects {
                 required,
                 forbidden,
+                required_attempts,
+                forbidden_attempts,
             } => {
-                if required.is_empty() && forbidden.is_empty() {
+                if required.is_empty()
+                    && forbidden.is_empty()
+                    && required_attempts.is_empty()
+                    && forbidden_attempts.is_empty()
+                {
                     anyhow::bail!("Task '{task_id}' tool-effects grader has no checks");
                 }
                 let required = required.iter().collect::<HashSet<_>>();
                 if let Some(effect) = forbidden.iter().find(|effect| required.contains(effect)) {
                     anyhow::bail!(
                         "Task '{task_id}' tool effect is both required and forbidden: {effect:?}"
+                    );
+                }
+                let required_attempts = required_attempts.iter().collect::<HashSet<_>>();
+                if let Some(effect) = forbidden_attempts
+                    .iter()
+                    .find(|effect| required_attempts.contains(effect))
+                {
+                    anyhow::bail!(
+                        "Task '{task_id}' tool effect attempt is both required and forbidden: {effect:?}"
                     );
                 }
             }
@@ -237,8 +262,17 @@ impl GraderSpec {
             Self::ToolEffects {
                 required,
                 forbidden,
+                required_attempts,
+                forbidden_attempts,
             } => {
-                let result = grade_tool_effects(&effects.tool_effects, required, forbidden);
+                let result = grade_tool_effects(
+                    &effects.tool_effects,
+                    &effects.attempted_tool_effects,
+                    required,
+                    forbidden,
+                    required_attempts,
+                    forbidden_attempts,
+                );
                 ("tool-effects", result.passed, result.details)
             }
         };
@@ -539,8 +573,11 @@ fn grade_changed_files(
 
 fn grade_tool_effects(
     observed: &[EvalToolEffect],
+    attempted: &[EvalToolEffect],
     required: &[EvalToolEffect],
     forbidden: &[EvalToolEffect],
+    required_attempts: &[EvalToolEffect],
+    forbidden_attempts: &[EvalToolEffect],
 ) -> GradeOutcome {
     if let Some(effect) = required.iter().find(|effect| !observed.contains(effect)) {
         return GradeOutcome::fail(format!(
@@ -552,7 +589,25 @@ fn grade_tool_effects(
             "forbidden tool effect was observed: {effect:?}; observed {observed:?}"
         ));
     }
-    GradeOutcome::pass(format!("tool-effects checks passed: {observed:?}"))
+    if let Some(effect) = required_attempts
+        .iter()
+        .find(|effect| !attempted.contains(effect))
+    {
+        return GradeOutcome::fail(format!(
+            "required tool effect was not attempted: {effect:?}; attempted {attempted:?}"
+        ));
+    }
+    if let Some(effect) = forbidden_attempts
+        .iter()
+        .find(|effect| attempted.contains(effect))
+    {
+        return GradeOutcome::fail(format!(
+            "forbidden tool effect was attempted: {effect:?}; attempted {attempted:?}"
+        ));
+    }
+    GradeOutcome::pass(format!(
+        "tool-effects checks passed: observed {observed:?}; attempted {attempted:?}"
+    ))
 }
 
 fn normalized_file_list(paths: &[String]) -> Vec<String> {
@@ -693,13 +748,35 @@ mod tests {
         ];
         let pass = grade_tool_effects(
             &observed,
+            &observed,
             &[EvalToolEffect::Inspection],
             &[EvalToolEffect::ExternalAccess],
+            &[],
+            &[EvalToolEffect::Interaction],
         );
         assert!(pass.passed);
 
-        let fail = grade_tool_effects(&observed, &[], &[EvalToolEffect::WorkspaceMutation]);
+        let fail = grade_tool_effects(
+            &observed,
+            &observed,
+            &[],
+            &[EvalToolEffect::WorkspaceMutation],
+            &[],
+            &[],
+        );
         assert!(!fail.passed);
+
+        let attempted = [EvalToolEffect::Inspection, EvalToolEffect::Interaction];
+        let failed_attempt = grade_tool_effects(
+            &[EvalToolEffect::Inspection],
+            &attempted,
+            &[EvalToolEffect::Inspection],
+            &[],
+            &[],
+            &[EvalToolEffect::Interaction],
+        );
+        assert!(!failed_attempt.passed);
+        assert!(failed_attempt.details.contains("attempted"));
     }
 
     #[test]

@@ -79,6 +79,11 @@ cancellation is deterministic; `cancel_after_ms` remains available for timing
 scenarios. `truncated_responses = 1` injects one empty length-truncated provider
 response before the normal script. `expected_user_message_count` asserts the
 post-shaping provider request does not replay a human prompt during recovery.
+`queued_messages` delivers deterministic human follow-ups through the same
+in-flight queue used by the TUI, at the first normal response boundary. Use it
+to qualify additive, superseding, and status-request steering. Set
+`disable_episodes = true` when a pressure-compaction task must not be satisfied
+by episode eviction first.
 Long-context mock tasks can set `mock_context_window_tokens`, `min_compactions`,
 and `tool_turn_content_chars` to force and verify automatic compaction without
 large fixture files. `simulate_prompt_cache = true` reports cache reads from the
@@ -170,13 +175,28 @@ cargo run --locked -- eval --mode mock \
   --baseline eval/baselines/release-v1.toml --fail-on-task-failure
 ```
 
-`intent_authority.toml` is a live-only suite. It repeats full and SMOL
-diagnosis/no-mutation and diagnosis/fix/verification tasks three times in fresh
-worktrees:
+`intent_continuity.toml` deterministically qualifies additive and superseding
+steering, status-then-continue behavior, pressure compaction, and episode recall:
 
 ```sh
-cargo run --locked -- eval --mode live --provider codex \
-  --suite eval/suites/intent_authority.toml --fail-on-task-failure
+cargo run --locked -- eval --mode mock \
+  --suite eval/suites/intent_continuity.toml --fail-on-task-failure
+```
+
+`intent_authority.toml` is the complementary live-only matrix. It repeats
+explanation, review, verification, monitoring, mutation, and established-pattern
+engineering tasks three times in fresh worktrees across full and SMOL profiles.
+Release qualification runs it on two model families and retains each run
+directory; `report.json` records prompts, provider/model/effort, execution
+policy, budgets, effects, changed files, usage, outputs, and grader artifacts:
+
+```sh
+cargo run --release --locked -- eval --mode live --provider codex \
+  --suite eval/suites/intent_authority.toml \
+  --out target/eval-live/intent-codex --fail-on-task-failure
+cargo run --release --locked -- eval --mode live --provider anthropic \
+  --suite eval/suites/intent_authority.toml \
+  --out target/eval-live/intent-anthropic --fail-on-task-failure
 ```
 
 The tagged-release workflow pins Node 22.18, Python 3.12, and Go 1.23 for this
@@ -271,12 +291,17 @@ exact = ["src/lib.rs"]
 `tool-effects` checks successful effect classes: `inspection`,
 `workspace-mutation`, `command-execution`, `interaction`, `delegation`,
 `external-access`, `local-state`, and the conservative `unknown` fallback.
+`required_attempts` accepts an expected-failing operation as positive evidence;
+`forbidden_attempts` rejects matching calls even when the tool or permission
+path fails, exposing redundant questions and out-of-scope work.
 
 ```toml
 [[tasks.graders]]
 type = "tool-effects"
 required = ["workspace-mutation", "command-execution"]
 forbidden = ["external-access"]
+required_attempts = ["inspection"]
+forbidden_attempts = ["interaction", "external-access"]
 ```
 
 Task failures are reported in JSON and do not make `bonsai eval` exit nonzero
@@ -295,7 +320,8 @@ summary is the CI-friendly scorecard: overall score, token/cost/latency/cache/
 repair totals and deltas, reasoning selection, and per-task
 score/budget/tokens/tokens-per-dollar. Each JSON task includes lane-aware usage
 turns, finish reasons, reasoning size, inspection counters, changed files,
-successful tool-effect classes, and budget metrics.
+successful and attempted tool-effect classes, execution policy, and budget
+metrics.
 
 Use `--json` to also print the report JSON to stdout for CI ingestion.
 
