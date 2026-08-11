@@ -1232,6 +1232,7 @@ async fn eviction_replaces_closed_episode_with_card_marker() {
         .unwrap();
 
     assert_eq!(evicted, 1);
+    assert_eq!(agent.episode_eviction_count(), 1);
     assert!(agent.messages.len() < before_len);
     assert_wire_valid(&agent.messages);
 

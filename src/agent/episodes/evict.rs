@@ -164,7 +164,8 @@ impl Agent {
         match pass {
             EpisodeEvictionPass::CloseTime => {
                 evictions.retain(|eviction| {
-                    eviction.size_boundary
+                    self.eager_episode_eviction
+                        || eviction.size_boundary
                         || clears_episode_rewrite_guard(
                             estimated_episode_savings(eviction),
                             before_tokens,
@@ -337,6 +338,9 @@ impl Agent {
         self.record_context_rewrite(ContextRewriteKind::Episode, before_tokens, after_tokens);
         self.pending_context_rewrite
             .record_episode_evictions(&evicted_seqs);
+        self.episode_eviction_count = self
+            .episode_eviction_count
+            .saturating_add(evicted_seqs.len());
         self.caches.last_prompt_estimate = None;
         self.caches.last_sent_prompt_estimate = None;
         sink.compaction_status(&episode_eviction_status(

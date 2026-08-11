@@ -120,8 +120,8 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         sink: SharedSink,
         queued_messages: Option<&'receiver mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
     ) -> Self {
-        let tool_schema = agent.active_tool_schema();
-        let tool_registry = agent.tool_registry.clone();
+        let tool_registry = agent.tool_registry_for_current_task();
+        let tool_schema = agent.tool_schema_for_registry(&tool_registry);
         Self {
             agent,
             cancellation_token: cancellation.foreground_token(),
@@ -176,6 +176,10 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
     }
 
     async fn advance_turn(&mut self) -> Result<TurnOutcome> {
+        if self.agent.take_read_only_conclusion_turn() {
+            self.tool_registry = Arc::new(ToolRegistry::new());
+            self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
+        }
         if self.cancellation_token.is_cancelled() {
             if self.detached_subagent_cancellation.is_cancelled() {
                 self.agent.cancel_running_subagents();
@@ -216,6 +220,8 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         if user_steered {
             self.state.policies.reset_for_user_steering();
             self.agent.set_planning_advisory(None);
+            self.tool_registry = self.agent.tool_registry_for_current_task();
+            self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
         }
 
         self.agent.caches.last_perf_report = None;
@@ -608,7 +614,16 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 
         // Harness notes are appended after tool results so they remain the
         // final model-visible message without invalidating the prompt prefix.
-        if let Some(transition) = implementation_stall.transition {
+        if let Some(nudge) = self.agent.read_only_conclusion_nudge(&response.tool_calls) {
+            tracing::info!(
+                target: "bonsai::guard",
+                guard = "read_only_conclusion",
+                action = "nudge",
+                "guard bounded read-only inspection"
+            );
+            self.agent.push_harness_note(nudge);
+            self.agent.emit_context_updated(&self.sink);
+        } else if let Some(transition) = implementation_stall.transition {
             let turns = self
                 .state
                 .policies

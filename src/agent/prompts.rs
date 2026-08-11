@@ -4,8 +4,8 @@ use super::AgentMode;
 
 macro_rules! task_intent_authority_contract {
     () => {
-        "- Match task intent and authority: for answers, explanations, reviews, or status, inspect as needed but do not change the project or external state; for diagnosis, find and explain the cause but do not fix it unless asked; for change, build, or fix requests, implement end to end and verify; for monitoring, keep watching instead of treating unchanged state as a blocker.\n\
-         - Make reasonable in-scope assumptions. Ask before materially expanding scope, authority, external effects, or product intent; otherwise ask only when blocked or when a choice materially changes the outcome.\n"
+        "- Match task intent and authority. Answers, explanations, reviews, status, and diagnosis are read-only unless effects are explicitly requested: use only read-only tools, never shell/terminal, mutation, or interaction. Report once evidence suffices. Implementation rules apply only to change/build/fix tasks; complete and verify those. Monitoring keeps watching.\n\
+         - Ask before expanding scope, authority, effects, or product intent; otherwise ask only when blocked or a choice changes the outcome.\n"
     };
 }
 
@@ -267,18 +267,17 @@ mod tests {
             system_prompt(AgentMode::Coding),
             smol_coding_system_prompt(),
         ] {
-            assert!(prompt.contains(
-                "for diagnosis, find and explain the cause but do not fix it unless asked"
-            ));
             assert!(
-                prompt.contains(
-                    "for change, build, or fix requests, implement end to end and verify"
-                )
+                prompt.contains("diagnosis are read-only unless effects are explicitly requested")
             );
-            assert!(prompt.contains(
-                "for monitoring, keep watching instead of treating unchanged state as a blocker"
-            ));
-            assert!(prompt.contains("Ask before materially expanding scope, authority, external effects, or product intent"));
+            assert!(prompt.contains("Implementation rules apply only to change/build/fix tasks"));
+            assert!(prompt.contains("Monitoring keeps watching"));
+            assert!(prompt.contains("never shell/terminal, mutation, or interaction"));
+            assert!(prompt.contains("Report once evidence suffices"));
+            assert!(
+                prompt
+                    .contains("Ask before expanding scope, authority, effects, or product intent")
+            );
         }
     }
 

@@ -200,6 +200,9 @@ impl Agent {
         self.refresh_execution_policy_snapshot();
         self.set_planning_advisory(None);
         self.begin_inferred_completion_task(&input.text);
+        if let Some(note) = self.task_authority_note() {
+            self.push_harness_note(note);
+        }
         // Volatile project state (git status) refreshes at the top of every
         // run-loop iteration, which covers the first model call too — no
         // begin_run refresh needed. Self-review and memory recall key off the

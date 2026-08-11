@@ -923,6 +923,30 @@ pub enum ToolEffectPolicy {
     Delegated,
 }
 
+/// Tool surface available under the authority inferred for one parent task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolAuthorityScope {
+    Full,
+    ReadOnlyTask,
+    SourceReview,
+}
+
+impl ToolAuthorityScope {
+    fn permits(self, name: &str, effect: ToolEffectPolicy) -> bool {
+        match self {
+            Self::Full => true,
+            Self::ReadOnlyTask => {
+                matches!(effect, ToolEffectPolicy::ReadOnly)
+                    || matches!(name, "recall" | "set_session_title")
+            }
+            Self::SourceReview => {
+                (matches!(effect, ToolEffectPolicy::ReadOnly) && name != "git")
+                    || matches!(name, "recall" | "set_session_title")
+            }
+        }
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -1153,6 +1177,24 @@ impl ToolRegistry {
         self.order.iter().map(String::as_str)
     }
 
+    pub(crate) fn scoped_to_authority(self: &Arc<Self>, scope: ToolAuthorityScope) -> Arc<Self> {
+        if scope == ToolAuthorityScope::Full {
+            return self.clone();
+        }
+
+        let mut scoped = Self::new();
+        scoped.set_authorization_ledger(self.authorization_ledger.clone());
+        for name in &self.order {
+            let Some(tool) = self.tools.get(name) else {
+                continue;
+            };
+            if scope.permits(name, tool.effect_policy()) {
+                scoped.register(tool.clone());
+            }
+        }
+        Arc::new(scoped)
+    }
+
     /// Build the error for a tool name we don't have. Lists the tools that *are*
     /// available — so a model that reached for one missing in the current mode
     /// (e.g. `bash` while planning, where the registry is read-only) can pick a
@@ -1224,6 +1266,34 @@ mod registry_tests {
     use crate::tool::symbol_search::SymbolSearchTool;
     use std::sync::Arc;
 
+    struct EffectTool {
+        name: &'static str,
+        effect: ToolEffectPolicy,
+    }
+
+    #[async_trait]
+    impl Tool for EffectTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "effect tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn effect_policy(&self) -> ToolEffectPolicy {
+            self.effect
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::Text(String::new()))
+        }
+    }
+
     fn sample_registry() -> ToolRegistry {
         let root = std::path::PathBuf::from(".");
         let tracker = ReadTracker::new();
@@ -1235,6 +1305,35 @@ mod registry_tests {
         registry.register(Arc::new(GrepTool::new(root.clone(), tracker)));
         registry.register(Arc::new(SymbolSearchTool::new(root)));
         registry
+    }
+
+    #[test]
+    fn read_only_task_scope_hides_effectful_and_interaction_tools() {
+        let mut registry = ToolRegistry::new();
+        for (name, effect) in [
+            ("read", ToolEffectPolicy::ReadOnly),
+            ("bash", ToolEffectPolicy::SelfAuthorized),
+            ("edit", ToolEffectPolicy::SelfAuthorized),
+            ("question", ToolEffectPolicy::LocalState),
+            ("agent", ToolEffectPolicy::Delegated),
+            ("recall", ToolEffectPolicy::LocalState),
+            ("set_session_title", ToolEffectPolicy::LocalState),
+        ] {
+            registry.register(Arc::new(EffectTool { name, effect }));
+        }
+        let registry = Arc::new(registry);
+
+        let scoped = registry.scoped_to_authority(ToolAuthorityScope::ReadOnlyTask);
+
+        assert_eq!(
+            scoped.names().collect::<Vec<_>>(),
+            ["read", "recall", "set_session_title"]
+        );
+        assert!(scoped.get("bash").is_none());
+        assert!(scoped.get("edit").is_none());
+        assert!(scoped.get("question").is_none());
+        assert!(scoped.get("agent").is_none());
+        assert!(scoped.get("recall").is_some());
     }
 
     #[test]

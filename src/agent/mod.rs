@@ -478,6 +478,7 @@ pub struct Agent {
     lsp_hub: Option<Arc<LspHub>>,
     todo_store: Option<SharedTodoStore>,
     completion: CompletionGuardState,
+    read_only_task_progress: ReadOnlyTaskProgress,
     /// Runtime-owned review/repair/final-gate sequence for the active task.
     finalization: FinalizationState,
     messages: Vec<ChatCompletionRequestMessage>,
@@ -549,6 +550,10 @@ pub struct Agent {
     /// Context rewrite applied before the next provider turn, consumed into
     /// that turn's usage diagnostics.
     pending_context_rewrite: PendingContextRewrite,
+    /// Cumulative count; unlike final episode status this survives later recall.
+    episode_eviction_count: usize,
+    /// Close-time eviction is required by deterministic lifecycle harnesses.
+    eager_episode_eviction: bool,
     yolo_mode: YoloMode,
     sandbox: CommandSandbox,
     workspace_trust: crate::workspace_trust::WorkspaceTrust,
@@ -1075,6 +1080,10 @@ impl Agent {
 
     pub(crate) const fn smol_mode(&self) -> bool {
         self.smol_mode
+    }
+
+    pub(crate) const fn episode_eviction_count(&self) -> usize {
+        self.episode_eviction_count
     }
 
     pub(crate) const fn pure_mode(&self) -> bool {
@@ -1921,7 +1930,7 @@ mod verification;
 use batching::*;
 use compaction::*;
 pub use completion::{CompletionFailureOutcome, CompletionGap, CompletionGuardFailure};
-use completion::{CompletionGuardState, CompletionGuardVerdict};
+use completion::{CompletionGuardState, CompletionGuardVerdict, ReadOnlyTaskProgress};
 pub(crate) use completion::{CompletionGuardTrace, TaskCompletionContract};
 use finalization::{FinalizationState, FinalizationStep};
 use messages::*;

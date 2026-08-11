@@ -634,6 +634,7 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         config.worktree_path.to_path_buf(),
     )
     .smol_registry(smol_registry)
+    .eager_episode_eviction(config.enable_episodes)
     .project_context_snapshot(project_context)
     .project_info_runtime(project_info_runtime)
     .lsp_hub(lsp_hub)
@@ -648,8 +649,8 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
     if config.profile == EvalAgentProfile::Smol {
         agent_builder = agent_builder.smol_preference(crate::smol::SmolPreference::On);
     }
-    if let Some(episode_store) = episode_store {
-        agent_builder = agent_builder.episode_store(episode_store);
+    if let Some(episode_store) = &episode_store {
+        agent_builder = agent_builder.episode_store(episode_store.clone());
     }
     let mut agent = agent_builder.build()?;
     let conversation_cache_key = config.storage.conversation_cache_key(session_id).await?;
@@ -945,11 +946,7 @@ async fn run_task(
     // Episodes that left live context as a card marker. A later `/ctx` restore
     // flips Evicted to Restored without undoing the fact of the eviction, so
     // both statuses count.
-    let episode_evictions = agent
-        .episode_reports()
-        .iter()
-        .filter(|episode| matches!(episode.status_label.as_str(), "evicted" | "restored"))
-        .count();
+    let episode_evictions = agent.episode_eviction_count();
     storage
         .record_session_file_changes(session_id, &primary_changed_files)
         .await?;

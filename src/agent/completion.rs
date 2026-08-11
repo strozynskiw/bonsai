@@ -76,6 +76,10 @@ pub(crate) struct TaskCompletionContract {
     pub(crate) goal_kind: CompletionGoalKind,
     pub(crate) effect: CompletionEffectRequirement,
     pub(crate) verification_required: bool,
+    #[serde(default)]
+    source_review: bool,
+    #[serde(default)]
+    read_only_authority: bool,
 }
 
 impl Default for TaskCompletionContract {
@@ -91,6 +95,8 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Informational,
             effect: CompletionEffectRequirement::None,
             verification_required: false,
+            source_review: false,
+            read_only_authority: false,
         }
     }
 
@@ -100,6 +106,8 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::WorkspaceMutation,
             verification_required: false,
+            source_review: false,
+            read_only_authority: false,
         }
     }
 
@@ -109,6 +117,8 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: false,
+            source_review: false,
+            read_only_authority: false,
         }
     }
 
@@ -118,18 +128,40 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: true,
+            source_review: false,
+            read_only_authority: false,
         }
     }
 
     fn inferred(prompt: &str) -> Self {
         let normalized = normalized_words(prompt);
         let directive = action_directive(&normalized);
+        let explicit_read_only = contains_any_phrase(
+            &normalized,
+            &[
+                "read only",
+                "do not modify",
+                "don t modify",
+                "do not change",
+                "don t change",
+                "do not edit",
+                "don t edit",
+                "do not fix",
+                "don t fix",
+                "without mutation",
+                "without modifying",
+                "without changing",
+                "without editing",
+            ],
+        );
         let workspace_mutation = contains_directive_clause(
             directive,
             &[
                 "fix",
                 "implement",
                 "add",
+                "address",
+                "apply",
                 "update",
                 "change",
                 "modify",
@@ -137,9 +169,15 @@ impl TaskCompletionContract {
                 "delete",
                 "remove",
                 "rename",
+                "resolve",
                 "refactor",
                 "write",
                 "edit",
+                "upgrade",
+                "bump",
+                "finish",
+                "finish topic",
+                "carry",
                 "napraw",
                 "zaimplementuj",
                 "dodaj",
@@ -261,6 +299,10 @@ impl TaskCompletionContract {
             },
             effect,
             verification_required: verification,
+            source_review: explicit_read_only
+                && review
+                && !mentions_version_control_review(directive),
+            read_only_authority: explicit_read_only,
         }
     }
 
@@ -283,7 +325,81 @@ impl TaskCompletionContract {
             },
             effect,
             verification_required: self.verification_required || other.verification_required,
+            source_review: self.source_review && other.source_review,
+            read_only_authority: self.read_only_authority || other.read_only_authority,
         }
+    }
+
+    const fn tool_authority_scope(self) -> crate::tool::ToolAuthorityScope {
+        match (self.intent, self.read_only_authority, self.source_review) {
+            (TaskIntent::Review, true, true) => crate::tool::ToolAuthorityScope::SourceReview,
+            (TaskIntent::Informational | TaskIntent::Diagnosis | TaskIntent::Review, true, _) => {
+                crate::tool::ToolAuthorityScope::ReadOnlyTask
+            }
+            _ => crate::tool::ToolAuthorityScope::Full,
+        }
+    }
+
+    const fn is_read_only_task(self) -> bool {
+        self.read_only_authority
+            && matches!(
+                self.intent,
+                TaskIntent::Informational | TaskIntent::Diagnosis | TaskIntent::Review
+            )
+    }
+}
+
+fn mentions_version_control_review(directive: &str) -> bool {
+    contains_any_phrase(
+        directive,
+        &[
+            "diff",
+            "commit",
+            "branch",
+            "uncommitted",
+            "git",
+            "pull request",
+            "pr changes",
+        ],
+    )
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ReadOnlyTaskProgress {
+    inspection_turns: usize,
+    conclusion_nudge_sent: bool,
+    conclusion_turn: bool,
+}
+
+impl ReadOnlyTaskProgress {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(super) fn observe_inspection_turn(
+        &mut self,
+        tool_calls: &[ToolCall],
+    ) -> Option<&'static str> {
+        if tool_calls.is_empty()
+            || tool_calls
+                .iter()
+                .any(|tool_call| tool_call.name == "set_session_title")
+        {
+            return None;
+        }
+        self.inspection_turns = self.inspection_turns.saturating_add(1);
+        if self.inspection_turns >= 8 && !self.conclusion_nudge_sent {
+            self.conclusion_nudge_sent = true;
+            self.conclusion_turn = true;
+            return Some(
+                "Read-only task evidence is sufficient after eight inspection turns. Do not run commands, emit tool-call syntax, or continue broad orientation; produce the requested explanation or review findings now using the evidence already collected.",
+            );
+        }
+        None
+    }
+
+    pub(super) fn take_conclusion_turn(&mut self) -> bool {
+        std::mem::take(&mut self.conclusion_turn)
     }
 }
 
@@ -564,6 +680,17 @@ impl CompletionGuardState {
 }
 
 impl Agent {
+    pub(super) fn tool_registry_for_current_task(&self) -> Arc<ToolRegistry> {
+        let scope = if self.execution_lane.kind == ExecutionLaneKind::Parent
+            && self.mode == AgentMode::Coding
+        {
+            self.completion.contract.tool_authority_scope()
+        } else {
+            crate::tool::ToolAuthorityScope::Full
+        };
+        self.tool_registry.scoped_to_authority(scope)
+    }
+
     pub(super) fn begin_inferred_completion_task(&mut self, prompt: &str) {
         let contract = if self.execution_lane.kind == ExecutionLaneKind::Parent {
             TaskCompletionContract::inferred(prompt)
@@ -579,6 +706,7 @@ impl Agent {
             self.verification.verification_runs.len(),
             self.self_review_runs.len(),
         );
+        self.read_only_task_progress.reset();
         self.finalization.begin_task();
     }
 
@@ -595,10 +723,35 @@ impl Agent {
             self.verification.verification_runs.len(),
             self.self_review_runs.len(),
         );
+        self.read_only_task_progress.reset();
         // Queued human steering is explicit authority for more work. It must
         // reopen finalization so a prior green gate blocks only unsolicited
         // model activity, never a newly requested review or verification.
         self.finalization.begin_task();
+    }
+
+    pub(super) fn read_only_conclusion_nudge(
+        &mut self,
+        tool_calls: &[ToolCall],
+    ) -> Option<&'static str> {
+        self.completion
+            .contract
+            .is_read_only_task()
+            .then(|| {
+                self.read_only_task_progress
+                    .observe_inspection_turn(tool_calls)
+            })
+            .flatten()
+    }
+
+    pub(super) fn take_read_only_conclusion_turn(&mut self) -> bool {
+        self.read_only_task_progress.take_conclusion_turn()
+    }
+
+    pub(super) fn task_authority_note(&self) -> Option<&'static str> {
+        self.completion.contract.is_read_only_task().then_some(
+            "Active task authority is read-only. The callable tools are intentionally limited to structured inspection; do not invoke or emit shell/terminal, mutation, interaction, or other unavailable tool calls. Answer directly once the requested evidence is collected.",
+        )
     }
 
     pub(super) fn note_completion_action(&mut self) {
@@ -1234,6 +1387,27 @@ mod tests {
     }
 
     #[test]
+    fn read_only_progress_bounds_inspection_and_resets_for_new_tasks() {
+        let inspection = || ToolCall {
+            id: "read".to_string(),
+            name: "read".to_string(),
+            arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+        };
+        let mut progress = ReadOnlyTaskProgress::default();
+
+        for _ in 0..7 {
+            assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
+        }
+        assert!(progress.observe_inspection_turn(&[inspection()]).is_some());
+        assert!(progress.take_conclusion_turn());
+        assert!(!progress.take_conclusion_turn());
+        assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
+
+        progress.reset();
+        assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
+    }
+
+    #[test]
     fn inference_separates_semantic_intent_from_required_effects() {
         assert_eq!(
             TaskCompletionContract::inferred("Explain how this module works"),
@@ -1251,14 +1425,58 @@ mod tests {
             TaskCompletionContract::inferred("NO to zacznij 139"),
             TaskCompletionContract::action()
         );
+        assert_eq!(
+            TaskCompletionContract::inferred("Finish topic A and wait for the next request."),
+            TaskCompletionContract::workspace_action()
+        );
+        assert_eq!(
+            TaskCompletionContract::inferred(
+                "Carry the release qualification through context pressure and finish README.md."
+            ),
+            TaskCompletionContract::workspace_action()
+        );
         let diagnosis = TaskCompletionContract::inferred("Check the parser state");
         assert_eq!(diagnosis.intent, TaskIntent::Diagnosis);
         assert_eq!(diagnosis.effect, CompletionEffectRequirement::AnyAction);
         assert!(!diagnosis.verification_required);
 
-        let review = TaskCompletionContract::inferred("Review the parser module");
+        let review = TaskCompletionContract::inferred(
+            "Review the parser module, but do not modify files or run commands.",
+        );
         assert_eq!(review.intent, TaskIntent::Review);
         assert_eq!(review.effect, CompletionEffectRequirement::AnyAction);
+        assert_eq!(
+            review.tool_authority_scope(),
+            crate::tool::ToolAuthorityScope::SourceReview
+        );
+
+        let diff_review = TaskCompletionContract::inferred(
+            "Review the uncommitted diff, but do not modify files or run commands.",
+        );
+        assert_eq!(
+            diff_review.tool_authority_scope(),
+            crate::tool::ToolAuthorityScope::ReadOnlyTask
+        );
+
+        for prompt in [
+            "Apply this patch",
+            "Address the review findings",
+            "Resolve the issue",
+            "Upgrade the dependency",
+            "Bump serde",
+        ] {
+            assert_eq!(
+                TaskCompletionContract::inferred(prompt).intent,
+                TaskIntent::Mutation,
+                "{prompt}"
+            );
+        }
+
+        let widened_review = review.merge(diff_review);
+        assert_eq!(
+            widened_review.tool_authority_scope(),
+            crate::tool::ToolAuthorityScope::ReadOnlyTask
+        );
 
         let monitoring = TaskCompletionContract::inferred("Monitor the deployment");
         assert_eq!(monitoring.intent, TaskIntent::Monitoring);

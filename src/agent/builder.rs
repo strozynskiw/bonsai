@@ -194,6 +194,7 @@ impl Agent {
             lsp_hub: builder.lsp_hub,
             todo_store: None,
             completion: CompletionGuardState::default(),
+            read_only_task_progress: ReadOnlyTaskProgress::default(),
             finalization: FinalizationState::default(),
             messages: vec![system_message],
             budget: SessionBudget {
@@ -255,6 +256,8 @@ impl Agent {
             summary_source_stable_ids: HashMap::new(),
             compaction_events: Vec::new(),
             pending_context_rewrite: PendingContextRewrite::default(),
+            episode_eviction_count: 0,
+            eager_episode_eviction: builder.eager_episode_eviction,
             yolo_mode: builder.yolo_mode,
             sandbox: builder.sandbox,
             workspace_trust: builder.workspace_trust,
@@ -343,6 +346,7 @@ pub(crate) struct AgentBuilder {
     /// isolated unit tests); production callers wire it by default unless the
     /// explicit `BONSAI_EPISODES=0` kill switch is set.
     pub(super) episode_store: Option<crate::episode::SharedEpisodeStore>,
+    pub(super) eager_episode_eviction: bool,
 }
 
 impl AgentBuilder {
@@ -395,6 +399,7 @@ impl AgentBuilder {
             extensions: Arc::new(crate::extension::status::ExtensionRegistry::new()),
             hooks: Arc::new(crate::hooks::HookEngine::disabled()),
             episode_store: None,
+            eager_episode_eviction: false,
         }
     }
 
@@ -599,6 +604,11 @@ impl AgentBuilder {
     /// behavior.
     pub(crate) fn episode_store(mut self, store: crate::episode::SharedEpisodeStore) -> Self {
         self.episode_store = Some(store);
+        self
+    }
+
+    pub(crate) fn eager_episode_eviction(mut self, enabled: bool) -> Self {
+        self.eager_episode_eviction = enabled;
         self
     }
 
