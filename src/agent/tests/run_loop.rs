@@ -2912,7 +2912,7 @@ async fn background_subagent_launch_pauses_parent_until_wake() {
 
     let result = agent
         .run(
-            "review this",
+            "delegate this review to the configured subagents",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )
@@ -3064,7 +3064,11 @@ async fn successful_rust_edit_injects_new_lsp_errors_once() {
     .unwrap();
 
     let result = agent
-        .run("break rust", CancellationToken::new(), Arc::new(StdoutSink))
+        .run(
+            "write the invalid Rust implementation",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
         .await
         .unwrap();
 

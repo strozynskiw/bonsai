@@ -369,23 +369,12 @@ impl Agent {
         // A model-only phase/title change has no human new-topic anchor. Keep
         // one episode and rename it instead of manufacturing an empty-goal
         // successor at the title tool group.
-        let Some(mut boundary) = self.last_human_user_index_before(group_start, start_index) else {
+        let Some(boundary) = self.last_human_user_index_before(group_start, start_index) else {
             if let Some(mut ledger) = self.episode_ledger() {
                 ledger.rename_active(signal.title);
             }
             return;
         };
-        // Runtime control rows appended after the successor request belong to
-        // the successor episode. Never close them into the prior span.
-        while boundary > start_index + 1
-            && self
-                .messages
-                .get(boundary.saturating_sub(1))
-                .is_some_and(|message| matches!(message, ChatCompletionRequestMessage::System(_)))
-        {
-            boundary = boundary.saturating_sub(1);
-        }
-
         // Size guard: the closing span must hold at least
         // EPISODE_MIN_CLOSED_GROUPS completed groups, one of them a tool
         // group. Too small → the title change renames the episode in place.
@@ -450,14 +439,7 @@ impl Agent {
     fn last_human_user_index_before(&self, ceiling: usize, floor: usize) -> Option<usize> {
         self.messages[..ceiling]
             .iter()
-            .rposition(|message| {
-                is_human_user_message(message)
-                    || matches!(
-                        message,
-                        ChatCompletionRequestMessage::System(system)
-                            if system.name.as_deref() == MessageProvenance::Harness.wire_name()
-                    )
-            })
+            .rposition(is_human_user_message)
             .filter(|index| *index > floor)
     }
 

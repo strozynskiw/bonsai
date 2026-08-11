@@ -711,7 +711,7 @@ async fn run_read_storm_replay(fixture: &ReplayFixture) {
 
     let result = agent
         .run(
-            "replay the read recovery",
+            "replay the read recovery and apply the recovered edit",
             CancellationToken::new(),
             Arc::new(CaptureSink::default()),
         )
@@ -842,7 +842,7 @@ async fn run_delegated_reread_replay(fixture: &ReplayFixture) {
 
     let result = agent
         .run(
-            "replay delegated recovery",
+            "replay delegated recovery and apply the recovered edit",
             CancellationToken::new(),
             Arc::new(CaptureSink::default()),
         )
@@ -948,7 +948,7 @@ async fn run_stale_edit_replay(fixture: &ReplayFixture) {
 
     let result = agent
         .run(
-            "replay stale edit recovery",
+            "edit the file while replaying stale edit recovery",
             CancellationToken::new(),
             Arc::new(CaptureSink::default()),
         )

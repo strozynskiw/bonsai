@@ -80,6 +80,8 @@ pub(crate) struct TaskCompletionContract {
     source_review: bool,
     #[serde(default)]
     read_only_authority: bool,
+    #[serde(default)]
+    bounded_read_only: bool,
 }
 
 impl Default for TaskCompletionContract {
@@ -96,7 +98,8 @@ impl TaskCompletionContract {
             effect: CompletionEffectRequirement::None,
             verification_required: false,
             source_review: false,
-            read_only_authority: false,
+            read_only_authority: true,
+            bounded_read_only: false,
         }
     }
 
@@ -108,6 +111,7 @@ impl TaskCompletionContract {
             verification_required: false,
             source_review: false,
             read_only_authority: false,
+            bounded_read_only: false,
         }
     }
 
@@ -119,6 +123,7 @@ impl TaskCompletionContract {
             verification_required: false,
             source_review: false,
             read_only_authority: false,
+            bounded_read_only: false,
         }
     }
 
@@ -130,6 +135,7 @@ impl TaskCompletionContract {
             verification_required: true,
             source_review: false,
             read_only_authority: false,
+            bounded_read_only: false,
         }
     }
 
@@ -152,6 +158,8 @@ impl TaskCompletionContract {
                 "without modifying",
                 "without changing",
                 "without editing",
+                "do not run commands",
+                "don t run commands",
             ],
         );
         let workspace_mutation = contains_directive_clause(
@@ -177,6 +185,8 @@ impl TaskCompletionContract {
                 "bump",
                 "finish",
                 "finish topic",
+                "record",
+                "preserve",
                 "carry",
                 "napraw",
                 "zaimplementuj",
@@ -236,6 +246,23 @@ impl TaskCompletionContract {
             ],
         );
         let generic_action = contains_directive_clause(directive, &["run", "uruchom"]);
+        let explicit_broad_effect = mutation
+            || verification
+            || generic_action
+            || contains_any_phrase(
+                directive,
+                &[
+                    "ask ",
+                    "delegate ",
+                    "fetch ",
+                    "search the web",
+                    "browse ",
+                    "download ",
+                    "call ",
+                    "finish it",
+                    "complete it",
+                ],
+            );
         let monitoring = contains_directive_clause(
             directive,
             &[
@@ -268,6 +295,8 @@ impl TaskCompletionContract {
             ],
         );
 
+        let explicit_broad_effect = explicit_broad_effect || monitoring;
+
         let intent = if mutation {
             TaskIntent::Mutation
         } else if verification {
@@ -299,10 +328,9 @@ impl TaskCompletionContract {
             },
             effect,
             verification_required: verification,
-            source_review: explicit_read_only
-                && review
-                && !mentions_version_control_review(directive),
-            read_only_authority: explicit_read_only,
+            source_review: review && !mentions_version_control_review(directive),
+            read_only_authority: !explicit_broad_effect,
+            bounded_read_only: explicit_read_only && !explicit_broad_effect,
         }
     }
 
@@ -326,7 +354,8 @@ impl TaskCompletionContract {
             effect,
             verification_required: self.verification_required || other.verification_required,
             source_review: self.source_review && other.source_review,
-            read_only_authority: self.read_only_authority || other.read_only_authority,
+            read_only_authority: self.read_only_authority && other.read_only_authority,
+            bounded_read_only: self.bounded_read_only && other.bounded_read_only,
         }
     }
 
@@ -341,7 +370,7 @@ impl TaskCompletionContract {
     }
 
     const fn is_read_only_task(self) -> bool {
-        self.read_only_authority
+        self.bounded_read_only
             && matches!(
                 self.intent,
                 TaskIntent::Informational | TaskIntent::Diagnosis | TaskIntent::Review

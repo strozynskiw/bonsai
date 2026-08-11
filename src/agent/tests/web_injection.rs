@@ -148,7 +148,7 @@ async fn malicious_web_page_cannot_drive_shell_or_network_actions() {
 
     let result = agent
         .run(
-            "read the docs",
+            "fetch the docs from the configured URL",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )
