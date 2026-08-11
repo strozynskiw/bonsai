@@ -1635,18 +1635,11 @@ struct DelegatedReadOverlap {
 
 impl Agent {
     fn auto_background_verification_calls(&self, tool_calls: &[ToolCall]) -> HashSet<String> {
-        if !self.auto_background_verification || self.verification.active_verification.is_some() {
-            return HashSet::new();
-        }
-        tool_calls
-            .iter()
-            .filter(|call| call.name == "bash")
-            .filter_map(|call| {
-                let value = serde_json::from_str::<serde_json::Value>(&call.arguments).ok()?;
-                let command = value.get("command")?.as_str()?;
-                known_slow_verification(command).then(|| call.id.clone())
-            })
-            .collect()
+        resolve_auto_background_verification_calls(
+            tool_calls,
+            self.auto_background_verification,
+            self.verification.active_verification.is_some(),
+        )
     }
 
     fn delegated_read_action(
@@ -1911,8 +1904,45 @@ impl Agent {
     }
 }
 
-fn known_slow_verification(command: &str) -> bool {
-    let normalized = command.split_whitespace().collect::<Vec<_>>();
+fn resolve_auto_background_verification_calls(
+    tool_calls: &[ToolCall],
+    enabled: bool,
+    verification_active: bool,
+) -> HashSet<String> {
+    if !enabled || verification_active {
+        return HashSet::new();
+    }
+
+    tool_calls
+        .iter()
+        .filter(|call| call.name == "bash")
+        .filter_map(|call| {
+            let serde_json::Value::Object(arguments) =
+                serde_json::from_str::<serde_json::Value>(&call.arguments).ok()?
+            else {
+                return None;
+            };
+            if arguments.contains_key("run_in_background")
+                || ["escape_sandbox", "interactive", "parallel"]
+                    .iter()
+                    .any(|field| {
+                        !matches!(
+                            arguments.get(*field),
+                            None | Some(serde_json::Value::Bool(false))
+                        )
+                    })
+            {
+                return None;
+            }
+            let command = arguments.get("command")?.as_str()?;
+            let normalized = crate::tool::normalize_verification_command(command)?;
+            known_slow_verification(&normalized).then(|| call.id.clone())
+        })
+        .collect()
+}
+
+fn known_slow_verification(command: &[String]) -> bool {
+    let normalized = command.iter().map(String::as_str).collect::<Vec<_>>();
     matches!(normalized.as_slice(), ["cargo", "test", ..])
         || (matches!(normalized.as_slice(), ["cargo", "clippy", ..])
             && normalized.contains(&"--all-targets"))
@@ -3213,6 +3243,8 @@ mod tests {
 
     struct ReadyTool;
 
+    struct BackgroundModeProbeTool;
+
     #[async_trait]
     impl crate::tool::Tool for ReadyTool {
         fn name(&self) -> &str {
@@ -3229,6 +3261,47 @@ mod tests {
 
         async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput> {
             Ok(ToolOutput::Text("completed".to_string()))
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::Tool for BackgroundModeProbeTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+
+        fn description(&self) -> &str {
+            "Report the requested execution mode"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "run_in_background": { "type": "boolean" },
+                    "escape_sandbox": { "type": "boolean" },
+                    "interactive": { "type": "boolean" },
+                    "parallel": { "type": "boolean" }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            })
+        }
+
+        async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+            if args
+                .get("run_in_background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                Ok(ToolOutput::BackgroundTaskStarted {
+                    task_id: "bg-probe".to_string(),
+                    message: "Started background task bg-probe".to_string(),
+                })
+            } else {
+                Ok(ToolOutput::Text("foreground".to_string()))
+            }
         }
     }
 
@@ -4530,14 +4603,116 @@ mod tests {
     }
 
     #[test]
-    fn only_known_slow_verification_commands_auto_background() {
-        assert!(known_slow_verification("cargo test --locked"));
-        assert!(known_slow_verification(
-            "cargo clippy --all-targets --all-features -- -D warnings"
+    fn auto_background_resolver_honors_complete_bash_arguments() {
+        let eligible = |arguments: &str, enabled: bool, verification_active: bool| {
+            !resolve_auto_background_verification_calls(
+                &[ToolCall {
+                    id: "call-1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: arguments.to_string(),
+                }],
+                enabled,
+                verification_active,
+            )
+            .is_empty()
+        };
+
+        for arguments in [
+            r#"{"command":"cargo test --locked","run_in_background":true}"#,
+            r#"{"command":"cargo test --locked","run_in_background":false}"#,
+            r#"{"command":"cargo test --locked","escape_sandbox":true}"#,
+            r#"{"command":"cargo test --locked","interactive":true}"#,
+            r#"{"command":"cargo test --locked","parallel":true}"#,
+            r#"{"command":"cargo test --locked","run_in_background":true,"escape_sandbox":true}"#,
+            r#"{"command":"cargo check --locked"}"#,
+            r#"{"command":"cargo test && echo done"}"#,
+            r#"{"command":"cargo test $(touch .pwned)"}"#,
+            r#"{"command":"time -o timings cargo test"}"#,
+        ] {
+            assert!(!eligible(arguments, true, false), "{arguments}");
+        }
+
+        for arguments in [
+            r#"{"command":"cargo test --locked"}"#,
+            r#"{"command":"time env RUST_BACKTRACE=1 cargo test --locked"}"#,
+            r#"{"command":"cargo clippy --all-targets --all-features -- -D warnings","parallel":false}"#,
+            r#"{"command":"cargo build --release --locked","escape_sandbox":false}"#,
+        ] {
+            assert!(eligible(arguments, true, false), "{arguments}");
+        }
+        assert!(!eligible(
+            r#"{"command":"cargo test --locked"}"#,
+            false,
+            false
         ));
-        assert!(known_slow_verification("cargo build --release --locked"));
-        assert!(!known_slow_verification("cargo check --locked"));
-        assert!(!known_slow_verification("cargo clippy -p small"));
-        assert!(!known_slow_verification("cargo build"));
+        assert!(!eligible(
+            r#"{"command":"cargo test --locked"}"#,
+            true,
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_resolver_selected_calls_are_rewritten_and_labelled() {
+        let calls = [
+            ToolCall {
+                id: "auto".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+            },
+            ToolCall {
+                id: "foreground".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test --locked","run_in_background":false}"#
+                    .to_string(),
+            },
+            ToolCall {
+                id: "explicit-background".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test --locked","run_in_background":true}"#
+                    .to_string(),
+            },
+        ];
+        let selected = resolve_auto_background_verification_calls(&calls, true, false);
+        assert_eq!(selected, HashSet::from(["auto".to_string()]));
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(BackgroundModeProbeTool));
+        let registry = Arc::new(registry);
+        let mut results = Vec::new();
+        for call in calls {
+            let (_, output, status) = Agent::execute_single_tool_call(
+                None,
+                call,
+                registry.clone(),
+                ToolRejections {
+                    auto_background: selected.clone(),
+                    ..ToolRejections::default()
+                },
+                Arc::new(crate::output::StdoutSink),
+                CancellationToken::new(),
+                Arc::new(crate::hooks::HookEngine::disabled()),
+                None,
+                None,
+            )
+            .await;
+            results.push((output, status));
+        }
+
+        assert!(matches!(
+            &results[0],
+            (ToolOutput::BackgroundTaskStarted { message, .. }, crate::output::ToolExecutionStatus::Started)
+                if message.starts_with("Auto-promoted known slow verification")
+        ));
+        assert!(matches!(
+            &results[1],
+            (ToolOutput::Text(message), crate::output::ToolExecutionStatus::Succeeded)
+                if message == "foreground"
+        ));
+        assert!(matches!(
+            &results[2],
+            (ToolOutput::BackgroundTaskStarted { message, .. }, crate::output::ToolExecutionStatus::Started)
+                if !message.contains("Auto-promoted")
+        ));
     }
 }

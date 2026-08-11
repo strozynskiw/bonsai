@@ -325,6 +325,7 @@ fn extract_substitutions(command: &str) -> (String, Vec<String>) {
 pub(super) fn tokenize_shell(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut word_started = false;
     let mut chars = command.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
@@ -332,24 +333,27 @@ pub(super) fn tokenize_shell(command: &str) -> Option<Vec<String>> {
     while let Some(ch) = chars.next() {
         match ch {
             '\'' if !in_double_quote => {
+                word_started = true;
                 in_single_quote = !in_single_quote;
             }
             '"' if !in_single_quote => {
+                word_started = true;
                 in_double_quote = !in_double_quote;
             }
             '\\' if !in_single_quote => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                }
+                word_started = true;
+                current.push(chars.next()?);
             }
             ch if ch.is_whitespace() && !in_single_quote && !in_double_quote => {
-                if !current.is_empty() {
+                if word_started {
                     tokens.push(std::mem::take(&mut current));
+                    word_started = false;
                 }
             }
             ch if is_control_char(ch) && !in_single_quote && !in_double_quote => {
-                if !current.is_empty() {
+                if word_started {
                     tokens.push(std::mem::take(&mut current));
+                    word_started = false;
                 }
                 if ch == '>' && chars.peek().is_some_and(|next| *next == '|') {
                     let next = chars.next().unwrap_or('|');
@@ -363,14 +367,17 @@ pub(super) fn tokenize_shell(command: &str) -> Option<Vec<String>> {
                     tokens.push(ch.to_string());
                 }
             }
-            _ => current.push(ch),
+            _ => {
+                word_started = true;
+                current.push(ch);
+            }
         }
     }
 
     if in_single_quote || in_double_quote {
         return None;
     }
-    if !current.is_empty() {
+    if word_started {
         tokens.push(current);
     }
 
@@ -379,6 +386,79 @@ pub(super) fn tokenize_shell(command: &str) -> Option<Vec<String>> {
 
 fn is_control_char(ch: char) -> bool {
     matches!(ch, '|' | '&' | ';' | '<' | '>')
+}
+
+/// Normalize a single verification command after stripping only shell wrappers
+/// that cannot introduce another command. This is deliberately fail-closed:
+/// callers use it only to recognize commands for execution-mode promotion, not
+/// to authorize or execute the normalized form.
+pub(crate) fn normalize_verification_command(command: &str) -> Option<Vec<String>> {
+    if command
+        .chars()
+        .any(|ch| matches!(ch, '\0' | '\n' | '\r' | '`'))
+        || ["$(", "<(", ">("]
+            .iter()
+            .any(|shape| command.contains(shape))
+    {
+        return None;
+    }
+
+    let tokens = tokenize_shell(command)?;
+    if tokens.is_empty()
+        || tokens.iter().any(String::is_empty)
+        || tokens.iter().any(|token| is_control_operator(token))
+    {
+        return None;
+    }
+
+    let mut index = 0;
+    let mut saw_env = false;
+    let mut saw_time = false;
+    loop {
+        while let Some(token) = tokens.get(index).filter(|token| is_env_assignment(token)) {
+            if !is_safe_env_assignment(token) {
+                return None;
+            }
+            index += 1;
+        }
+
+        match tokens.get(index).map(String::as_str) {
+            Some("env") if !saw_env => {
+                saw_env = true;
+                index += 1;
+                let assignment_start = index;
+                while let Some(token) = tokens.get(index).filter(|token| is_env_assignment(token)) {
+                    if !is_safe_env_assignment(token) {
+                        return None;
+                    }
+                    index += 1;
+                }
+                if index == assignment_start
+                    || tokens
+                        .get(index)
+                        .is_some_and(|token| token.starts_with('-'))
+                {
+                    return None;
+                }
+            }
+            Some("time") if !saw_time => {
+                saw_time = true;
+                index += 1;
+                if tokens.get(index).is_some_and(|token| token == "-p") {
+                    index += 1;
+                }
+                if tokens
+                    .get(index)
+                    .is_some_and(|token| token.starts_with('-'))
+                {
+                    return None;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    (index < tokens.len()).then(|| tokens[index..].to_vec())
 }
 
 fn strip_env_prefix(tokens: &[String]) -> Option<Vec<String>> {
@@ -704,6 +784,70 @@ mod tests {
 
     fn read_operands(command: &str) -> Vec<ReadOperand> {
         extract_read_paths(&analyze_command(command), "")
+    }
+
+    #[test]
+    fn verification_command_normalization_accepts_safe_wrappers() {
+        let cases = [
+            ("cargo test --locked", vec!["cargo", "test", "--locked"]),
+            (
+                "RUSTFLAGS='-D warnings' cargo test --locked",
+                vec!["cargo", "test", "--locked"],
+            ),
+            (
+                "env CARGO_TERM_COLOR=never cargo clippy --all-targets",
+                vec!["cargo", "clippy", "--all-targets"],
+            ),
+            (
+                "time cargo build --release --locked",
+                vec!["cargo", "build", "--release", "--locked"],
+            ),
+            (
+                "time -p env RUST_BACKTRACE=1 cargo test",
+                vec!["cargo", "test"],
+            ),
+            (
+                "env RUST_BACKTRACE=1 time -p cargo test",
+                vec!["cargo", "test"],
+            ),
+        ];
+
+        for (command, expected) in cases {
+            assert_eq!(
+                normalize_verification_command(command),
+                Some(expected.into_iter().map(str::to_string).collect()),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn verification_command_normalization_rejects_unsafe_or_compound_shapes() {
+        for command in [
+            "cargo test && echo done",
+            "cargo test; echo done",
+            "cargo test | cat",
+            "cargo test > result.txt",
+            "cargo test\necho done",
+            "cargo test $(touch .pwned)",
+            "cargo test `touch .pwned`",
+            "cargo test <(printf input)",
+            "env -i FOO=1 cargo test",
+            "env FOO=1 -- cargo test",
+            "env cargo test",
+            "time -o timings cargo test",
+            "time --format=%e cargo test",
+            "time -p -o timings cargo test",
+            "cargo '' test",
+            "cargo \"\" test",
+            "'' cargo test",
+            "\"\" cargo test",
+            "time '' cargo test",
+            "'cargo test",
+            "cargo test \\",
+        ] {
+            assert_eq!(normalize_verification_command(command), None, "{command}");
+        }
     }
 
     #[test]
