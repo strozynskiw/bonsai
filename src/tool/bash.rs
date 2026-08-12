@@ -849,6 +849,7 @@ impl BashTool {
             timed_out,
             summary,
             confined,
+            cargo_output,
         } = self
             .run_command(
                 &command,
@@ -863,7 +864,9 @@ impl BashTool {
             .await?;
 
         if canonical_check.is_some() {
-            body = crate::tool::diagnostics::format_cargo_json_for_bash(&stdout, &stderr);
+            body = cargo_output.unwrap_or_else(|| {
+                crate::tool::diagnostics::format_cargo_json_for_bash(&stdout, &stderr)
+            });
             stdout = body.clone();
             stderr.clear();
         }
