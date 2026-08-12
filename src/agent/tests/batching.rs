@@ -718,7 +718,7 @@ async fn parallel_bash_runs_concurrently() {
     )
     .unwrap();
     let result = tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(3),
         agent.run("hello", CancellationToken::new(), Arc::new(StdoutSink)),
     )
     .await

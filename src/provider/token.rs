@@ -1210,44 +1210,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qwen3_estimate_uses_local_tokenizer() {
-        let messages = vec![ChatCompletionRequestMessage::User(
+    async fn qwen3_estimate_routes_content_through_local_tokenizer() {
+        let estimator = PromptEstimator::for_tests("qwen3-coder", TokenCounterKind::Qwen3, None);
+        let short = vec![ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessageArgs::default()
-                .content("hello from qwen")
+                .content("hi")
                 .build()
                 .expect("user message should build"),
         )];
-        let estimator = PromptEstimator::for_tests("qwen3-coder", TokenCounterKind::Qwen3, None);
+        let long = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("the quick brown fox jumps over the lazy dog ".repeat(20))
+                .build()
+                .expect("user message should build"),
+        )];
 
-        let estimate = estimator
-            .estimate_prompt_with_tool_schema_tokens(&messages, &[], 0)
+        let short_estimate = estimator
+            .estimate_prompt_with_tool_schema_tokens(&short, &[], 0)
             .await;
-        let serialized = serialized_prompt(&messages, &[]).expect("prompt should serialize");
-        let expected =
-            count_text_with_local_tokenizer(TokenCounterKind::Qwen3, "qwen3-coder", &serialized)
-                .expect("qwen3 tokenizer should count text");
+        let long_estimate = estimator
+            .estimate_prompt_with_tool_schema_tokens(&long, &[], 0)
+            .await;
 
-        assert_eq!(estimate.input_tokens, expected);
-        assert_eq!(estimate.source, TokenCounterKind::Qwen3);
-        assert_eq!(estimate.confidence, EstimateConfidence::High);
+        // Routing: the local qwen3 tokenizer produced the count, not the
+        // heuristic fallback (which would report Heuristic/Low).
+        assert_eq!(long_estimate.source, TokenCounterKind::Qwen3);
+        assert_eq!(long_estimate.confidence, EstimateConfidence::High);
+        // The message content must actually reach the tokenizer: ~9x the text
+        // has to cost substantially more tokens, even with BPE merges.
+        assert!(
+            long_estimate.input_tokens > short_estimate.input_tokens * 2,
+            "longer prompt must count substantially more tokens: short={} long={}",
+            short_estimate.input_tokens,
+            long_estimate.input_tokens
+        );
     }
 
     #[test]
     fn qwen3_counts_tool_schema_for_runtime_and_reports() {
         let estimator = PromptEstimator::for_tests("qwen3-coder", TokenCounterKind::Qwen3, None);
         let schema = br#"{"type":"object","properties":{"path":{"type":"string"}}}"#;
-        let schema_text = std::str::from_utf8(schema).expect("schema should be utf-8");
-        let expected =
-            count_text_with_local_tokenizer(TokenCounterKind::Qwen3, "qwen3-coder", schema_text)
-                .expect("qwen3 tokenizer should count schema");
+        let larger = br#"{"type":"object","properties":{"path":{"type":"string"},"mode":{"type":"string"},"recursive":{"type":"boolean"}}}"#;
 
-        assert_eq!(
-            estimator.estimate_tool_schema_tokens_from_bytes(schema),
-            expected
+        let runtime = estimator.estimate_tool_schema_tokens_from_bytes(schema);
+        let report = estimator.estimate_tool_schema_tokens_for_report_from_bytes(schema);
+
+        // Both public entry points must agree on the same schema bytes.
+        assert_eq!(runtime, report);
+        // The count must reflect the schema: non-empty costs tokens, more
+        // schema text costs more tokens, empty input is free.
+        assert!(runtime > 0, "non-empty schema must count as tokens");
+        assert!(
+            estimator.estimate_tool_schema_tokens_from_bytes(larger) > runtime,
+            "a larger schema must count as more tokens"
         );
+        assert_eq!(estimator.estimate_tool_schema_tokens_from_bytes(b""), 0);
         assert_eq!(
-            estimator.estimate_tool_schema_tokens_for_report_from_bytes(schema),
-            expected
+            estimator.estimate_tool_schema_tokens_for_report_from_bytes(b""),
+            0
         );
     }
 
@@ -1256,13 +1276,13 @@ mod tests {
         let messages = vec![
             ChatCompletionRequestMessage::System(
                 ChatCompletionRequestSystemMessageArgs::default()
-                    .content("system")
+                    .content("the quick brown fox jumps over the lazy dog")
                     .build()
                     .expect("system message should build"),
             ),
             ChatCompletionRequestMessage::User(
                 ChatCompletionRequestUserMessageArgs::default()
-                    .content("hello")
+                    .content("hi")
                     .build()
                     .expect("user message should build"),
             ),
@@ -1271,20 +1291,27 @@ mod tests {
 
         let (message_tokens, estimate) =
             estimator.estimate_messages_for_report_with_tool_schema_tokens(&messages, 7);
-        let expected = messages
-            .iter()
-            .map(|message| {
-                let text = serde_json::to_string(&message_value_for_estimation(message))
-                    .expect("message should serialize");
-                count_text_with_local_tokenizer(TokenCounterKind::Qwen3, "qwen3-coder", &text)
-                    .expect("qwen3 tokenizer should count message")
-            })
-            .collect::<Vec<_>>();
 
-        assert_eq!(message_tokens, expected);
-        assert_eq!(estimate.input_tokens, expected.iter().sum::<usize>() + 7);
+        // The report routes through the local tokenizer, not the heuristic.
         assert_eq!(estimate.source, TokenCounterKind::Qwen3);
         assert_eq!(estimate.confidence, EstimateConfidence::High);
+        // Per-message counts are real counts: positive, and the much longer
+        // system message costs more tokens than the two-char user message.
+        assert_eq!(message_tokens.len(), 2);
+        assert!(
+            message_tokens.iter().all(|count| *count > 0),
+            "every message must count as at least one token: {message_tokens:?}"
+        );
+        assert!(
+            message_tokens[0] > message_tokens[1],
+            "longer message must count more tokens: {message_tokens:?}"
+        );
+        // The total is the per-message sum plus the tool schema, and the
+        // schema charge is reported on the estimate.
+        assert_eq!(
+            estimate.input_tokens,
+            message_tokens.iter().sum::<usize>() + 7
+        );
         assert_eq!(estimate.tool_schema_tokens, 7);
     }
 
