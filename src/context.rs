@@ -22,10 +22,13 @@ pub const PROJECT_STATE_MESSAGE_NAME: &str = "bonsai_project_state";
 /// (Qwen-class) drop the wire `name`, and models then read the bare user turn
 /// as the human speaking — burning thinking rounds on "the user sent an empty
 /// message" / "the user's volatile state shows…" misattributions observed live.
-pub const PROJECT_STATE_UPDATE_PREFIX: &str =
+pub const PROJECT_STATE_UPDATE_PREFIX: &str = "Harness note: Bonsai runtime state only—not a user request. Follow the latest explicit user request and current task state:";
+/// Harness envelope used before project-state updates became intent-neutral.
+/// Resumed sessions still carry snapshots with this prefix.
+pub const PREVIOUS_PROJECT_STATE_UPDATE_PREFIX: &str =
     "Harness note: automated project-state update (not a user message; continue the task):";
-/// Envelope used by earlier releases; resumed sessions still carry snapshots
-/// with this prefix, so matchers must accept both.
+/// Envelope used by still earlier releases; resumed sessions still carry
+/// snapshots with this prefix, so matchers must accept every generation.
 pub const LEGACY_PROJECT_STATE_UPDATE_PREFIX: &str = "Context update for the request above:";
 /// Snapshot body emitted when prior volatile state is no longer active.
 pub const PROJECT_STATE_CLEARED_BODY: &str = "## Volatile state\nNo volatile project-state advisories are active; earlier snapshots are historical only.";

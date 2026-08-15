@@ -777,6 +777,7 @@ fn is_project_state_block(block: &Value) -> bool {
                 // Legacy prefix: resumed sessions persisted before the
                 // `Harness note:` envelope still carry it.
                 text.starts_with(crate::context::PROJECT_STATE_UPDATE_PREFIX)
+                    || text.starts_with(crate::context::PREVIOUS_PROJECT_STATE_UPDATE_PREFIX)
                     || text.starts_with(crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX)
             })
 }
@@ -2707,6 +2708,20 @@ mod tests {
         assert!(second_blocks[1].get("cache_control").is_none());
         assert!(is_project_state_block(&second_blocks[1]));
         assert_eq!(count_cache_control(&second), 3);
+    }
+
+    #[test]
+    fn project_state_cache_detection_accepts_every_envelope_generation() {
+        for prefix in [
+            crate::context::PROJECT_STATE_UPDATE_PREFIX,
+            crate::context::PREVIOUS_PROJECT_STATE_UPDATE_PREFIX,
+            crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX,
+        ] {
+            assert!(is_project_state_block(&json!({
+                "type": "text",
+                "text": format!("{prefix}\n\n## Volatile state\n- git: clean")
+            })));
+        }
     }
 
     #[test]

@@ -145,14 +145,15 @@ pub(crate) enum ProjectStateWireLayout {
 
 /// Shape durable project-state history for a provider's proven cache layout.
 ///
-/// The append-only path borrows without cloning. Compatibility layouts own a
-/// rewritten wire-only copy; persisted conversation history is never mutated.
+/// The append-only path borrows unless a resumed session contains an obsolete
+/// intent-bearing envelope. Compatibility layouts own a rewritten wire-only
+/// copy; persisted conversation history is never mutated.
 pub(crate) fn messages_for_project_state_layout<'a>(
     messages: &'a [ChatCompletionRequestMessage],
     layout: ProjectStateWireLayout,
 ) -> Cow<'a, [ChatCompletionRequestMessage]> {
     match layout {
-        ProjectStateWireLayout::AppendOnly => Cow::Borrowed(messages),
+        ProjectStateWireLayout::AppendOnly => normalize_project_state_envelopes(messages),
         ProjectStateWireLayout::LatestAtEnd => {
             Cow::Owned(messages_with_latest_project_state_at_end(messages))
         }
@@ -160,6 +161,41 @@ pub(crate) fn messages_for_project_state_layout<'a>(
             Cow::Owned(messages_with_latest_project_state_in_system(messages))
         }
     }
+}
+
+fn normalize_project_state_envelopes(
+    messages: &[ChatCompletionRequestMessage],
+) -> Cow<'_, [ChatCompletionRequestMessage]> {
+    let needs_normalization = messages.iter().any(|message| {
+        project_state_message_text(message).is_some_and(|text| {
+            strip_project_state_prefix(text).is_some()
+                && !text.starts_with(crate::context::PROJECT_STATE_UPDATE_PREFIX)
+        })
+    });
+    if !needs_normalization {
+        return Cow::Borrowed(messages);
+    }
+
+    Cow::Owned(
+        messages
+            .iter()
+            .map(|message| {
+                let ChatCompletionRequestMessage::User(user) = message else {
+                    return message.clone();
+                };
+                let Some(text) = project_state_message_text(message) else {
+                    return message.clone();
+                };
+                let Some(normalized) = normalize_project_state_text(text) else {
+                    return message.clone();
+                };
+                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: normalized.into(),
+                    name: user.name.clone(),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Demote every non-leading `system` message to a named `user` message.
@@ -175,9 +211,10 @@ pub(crate) fn messages_for_project_state_layout<'a>(
 /// the user stream instead.
 ///
 /// The leading system prompt is left untouched, so the cache prefix stays
-/// byte-stable, and the `Harness note:` envelope plus the carried `name`
-/// (`bonsai_harness`) preserve provenance for the model. Returns `Borrowed`
-/// when there is nothing to demote, keeping the common wire body byte-identical.
+/// byte-stable. Demoted turns retain their structured `name` and gain a textual
+/// provenance frame because local chat templates may discard names. Returns
+/// `Borrowed` when there is nothing to demote, keeping the common wire body
+/// byte-identical.
 pub(crate) fn demote_non_leading_system_messages(
     messages: &[ChatCompletionRequestMessage],
 ) -> Cow<'_, [ChatCompletionRequestMessage]> {
@@ -200,7 +237,7 @@ pub(crate) fn demote_non_leading_system_messages(
                     .and_then(|value| content_to_text(Some(&value)))
                     .unwrap_or_default();
                 ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: text.into(),
+                    content: framed_demoted_system_text(system.name.as_deref(), &text).into(),
                     name: system.name.clone(),
                 })
             }
@@ -208,6 +245,18 @@ pub(crate) fn demote_non_leading_system_messages(
         })
         .collect();
     Cow::Owned(demoted)
+}
+
+fn framed_demoted_system_text(name: Option<&str>, text: &str) -> String {
+    let source = match name {
+        Some("bonsai_harness") => "harness guidance",
+        Some("bonsai_execution_policy") => "runtime policy",
+        Some("bonsai_scoped_steering") => "trusted project instructions",
+        _ => "trusted system context",
+    };
+    format!(
+        "[Bonsai {source} — not a user request; explicit human messages set task intent]\n{text}"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,7 +354,7 @@ fn without_project_state_messages(
         .iter()
         .filter_map(|message| {
             if let Some(text) = project_state_message_text(message) {
-                latest = Some(text.to_string());
+                latest = normalize_project_state_text(text);
                 None
             } else {
                 Some(message.clone())
@@ -333,7 +382,16 @@ fn project_state_message_text(message: &ChatCompletionRequestMessage) -> Option<
 fn strip_project_state_prefix(message: &str) -> Option<&str> {
     message
         .strip_prefix(crate::context::PROJECT_STATE_UPDATE_PREFIX)
+        .or_else(|| message.strip_prefix(crate::context::PREVIOUS_PROJECT_STATE_UPDATE_PREFIX))
         .or_else(|| message.strip_prefix(crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX))
+}
+
+fn normalize_project_state_text(message: &str) -> Option<String> {
+    let body = strip_project_state_prefix(message)?.trim_start();
+    Some(format!(
+        "{}\n\n{body}",
+        crate::context::PROJECT_STATE_UPDATE_PREFIX
+    ))
 }
 
 fn active_project_state_text(message: &str) -> Option<&str> {
@@ -617,14 +675,17 @@ mod tests {
             ChatCompletionRequestMessage::System(system)
                 if system_message_text(&system.content) == Some("system prompt")
         ));
-        // The mid-stream system note became a named user message, provenance intact.
+        // The mid-stream system note became a named user message with textual
+        // provenance for templates that discard `name`.
         match &shaped[2] {
             ChatCompletionRequestMessage::User(user) => {
                 assert_eq!(user.name.as_deref(), Some("bonsai_harness"));
                 let value = serde_json::to_value(&user.content).unwrap();
                 assert_eq!(
                     content_to_text(Some(&value)).as_deref(),
-                    Some("Harness note: Self-review before finishing.")
+                    Some(
+                        "[Bonsai harness guidance — not a user request; explicit human messages set task intent]\nHarness note: Self-review before finishing."
+                    )
                 );
             }
             other => panic!("expected a demoted user message, got {other:?}"),
@@ -650,6 +711,94 @@ mod tests {
             demote_non_leading_system_messages(&messages),
             Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn internal_context_after_completed_episode_does_not_create_new_task_intent() {
+        let episode = ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+            content: "Harness note: [Episode archived] #1\n## Episode card\n- Outcome: completed"
+                .to_string()
+                .into(),
+            name: Some("bonsai_harness".to_string()),
+        });
+        let policy = ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+            content: "[Execution policy snapshot — current]".to_string().into(),
+            name: Some("bonsai_execution_policy".to_string()),
+        });
+        let state = named_user_message(
+            crate::context::PROJECT_STATE_MESSAGE_NAME,
+            &format!(
+                "{}\n\n## Volatile state\n- git: clean",
+                crate::context::PROJECT_STATE_UPDATE_PREFIX
+            ),
+        );
+        let messages = vec![system_message("system prompt"), episode, policy, state];
+
+        let shaped = demote_non_leading_system_messages(&messages);
+        let text = shaped
+            .iter()
+            .filter_map(|message| serde_json::to_value(message).ok())
+            .filter_map(|value| content_to_text(value.get("content")))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!text.contains("continue the task"), "{text}");
+        assert!(text.contains("Bonsai harness guidance — not a user request"));
+        assert!(text.contains("Bonsai runtime policy — not a user request"));
+        assert!(text.contains("Bonsai runtime state only—not a user request"));
+        assert!(
+            shaped
+                .iter()
+                .skip(1)
+                .all(|message| !matches!(message, ChatCompletionRequestMessage::System(_)))
+        );
+    }
+
+    #[test]
+    fn project_state_layout_normalizes_previous_envelopes() {
+        for layout in [
+            ProjectStateWireLayout::AppendOnly,
+            ProjectStateWireLayout::LatestAtEnd,
+            ProjectStateWireLayout::SystemTail,
+        ] {
+            for prefix in [
+                crate::context::PREVIOUS_PROJECT_STATE_UPDATE_PREFIX,
+                crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX,
+            ] {
+                let messages = vec![
+                    system_message("stable"),
+                    named_user_message(
+                        crate::context::PROJECT_STATE_MESSAGE_NAME,
+                        &format!("{prefix}\n\n## Volatile state\nold"),
+                    ),
+                    user_message("work"),
+                ];
+                let wire = messages_for_project_state_layout(&messages, layout);
+                let text = serialize_messages(wire.as_ref())
+                    .into_iter()
+                    .filter_map(|value| content_to_text(value.get("content")))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                assert!(!text.contains("continue the task"), "{layout:?}: {text}");
+                if layout == ProjectStateWireLayout::SystemTail {
+                    assert!(
+                        !text.contains(crate::context::PREVIOUS_PROJECT_STATE_UPDATE_PREFIX)
+                            && !text.contains(crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX),
+                        "{layout:?}: {text}"
+                    );
+                } else {
+                    assert!(
+                        text.contains(crate::context::PROJECT_STATE_UPDATE_PREFIX),
+                        "{layout:?}: {text}"
+                    );
+                }
+                assert!(
+                    text.contains("## Volatile state\nold"),
+                    "{layout:?}: {text}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -861,22 +1010,38 @@ mod tests {
     }
 
     #[test]
-    fn append_only_layout_borrows_and_preserves_every_message() {
-        let messages = vec![
+    fn append_only_layout_borrows_current_envelopes_and_normalizes_legacy_ones() {
+        let current = vec![
             system_message("stable"),
             named_user_message(
                 crate::context::PROJECT_STATE_MESSAGE_NAME,
-                // Deliberately the legacy envelope: resumed pre-Harness-note
-                // sessions must keep working through every layout.
+                &volatile_context_user_text("## Volatile state\nfirst"),
+            ),
+            user_message("next"),
+        ];
+        let current_wire =
+            messages_for_project_state_layout(&current, ProjectStateWireLayout::AppendOnly);
+        assert!(matches!(current_wire, Cow::Borrowed(_)));
+        assert_eq!(current_wire.as_ref(), current.as_slice());
+
+        let legacy = vec![
+            system_message("stable"),
+            named_user_message(
+                crate::context::PROJECT_STATE_MESSAGE_NAME,
                 "Context update for the request above:\n\n## Volatile state\nfirst",
             ),
             user_message("next"),
         ];
-
-        let wire = messages_for_project_state_layout(&messages, ProjectStateWireLayout::AppendOnly);
-
-        assert!(matches!(wire, Cow::Borrowed(_)));
-        assert_eq!(wire.as_ref(), messages.as_slice());
+        let legacy_wire =
+            messages_for_project_state_layout(&legacy, ProjectStateWireLayout::AppendOnly);
+        let text = serialize_messages(legacy_wire.as_ref())
+            .into_iter()
+            .filter_map(|value| content_to_text(value.get("content")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(legacy_wire, Cow::Owned(_)));
+        assert!(!text.contains(crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX));
+        assert!(text.contains(crate::context::PROJECT_STATE_UPDATE_PREFIX));
     }
 
     fn serialize_messages(messages: &[ChatCompletionRequestMessage]) -> Vec<Value> {

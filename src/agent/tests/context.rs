@@ -705,6 +705,8 @@ async fn smol_system_message_uses_compact_prompt_and_lean_project_context() {
     let states = project_state_messages_in(agent.context_messages());
     assert_eq!(states.len(), 1);
     assert!(states[0].contains("Volatile state"));
+    assert!(states[0].contains("runtime state only—not a user request"));
+    assert!(!states[0].contains("continue the task"));
 }
 
 #[tokio::test]

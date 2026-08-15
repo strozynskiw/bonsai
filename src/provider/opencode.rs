@@ -1440,6 +1440,14 @@ mod tests {
             "demotion preserves the harness provenance name"
         );
         assert!(
+            messages[2]["content"]
+                .as_str()
+                .is_some_and(|text| text.starts_with(
+                    "[Bonsai harness guidance — not a user request; explicit human messages set task intent]"
+                )),
+            "demotion must also preserve provenance when a local template discards the name"
+        );
+        assert!(
             messages
                 .iter()
                 .skip(1)
