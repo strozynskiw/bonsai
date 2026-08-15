@@ -77,7 +77,7 @@ enum SessionTitleRunPolicy {
 
 impl SessionTitleRunPolicy {
     fn for_human_prompt(prompt: &str) -> Self {
-        if is_task_continuation_prompt(prompt) {
+        if crate::task_intent::TaskPromptKind::classify(prompt).is_continuation() {
             Self::ContinuationOrAutomatic
         } else {
             Self::ExplicitHumanTask
@@ -1632,6 +1632,14 @@ impl SessionTitleGuard {
             policy,
             handled: false,
             title_only_rejections: 0,
+        }
+    }
+
+    fn project_registry(&self, registry: Arc<ToolRegistry>) -> Arc<ToolRegistry> {
+        if self.policy.allows_initial_attempt() && !self.handled {
+            registry
+        } else {
+            registry.without("set_session_title")
         }
     }
 

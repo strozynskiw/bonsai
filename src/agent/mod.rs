@@ -1931,9 +1931,7 @@ use batching::*;
 use compaction::*;
 pub use completion::{CompletionFailureOutcome, CompletionGap, CompletionGuardFailure};
 use completion::{CompletionGuardState, CompletionGuardVerdict, ReadOnlyTaskProgress};
-pub(crate) use completion::{
-    CompletionGuardTrace, TaskCompletionContract, is_task_continuation_prompt,
-};
+pub(crate) use completion::{CompletionGuardTrace, TaskCompletionContract};
 use finalization::{FinalizationState, FinalizationStep};
 use messages::*;
 use output::*;

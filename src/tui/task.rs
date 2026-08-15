@@ -29,6 +29,7 @@ use crate::storage::{
     SessionId, Storage, TaskOutcome, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode,
 };
 use crate::subagent::SubagentRegistry;
+use crate::task_intent::TaskPromptKind;
 use crate::tui::app::TranscriptItem;
 use crate::tui::event::{
     CommandOutcomeEvent, CommandOutputEvent, ModalKind, ProviderRunSelection, RuntimeEvent, UiError,
@@ -761,7 +762,7 @@ impl TaskController {
         } else {
             input.text.clone()
         };
-        let task_run_intent = if crate::agent::is_task_continuation_prompt(&input.text) {
+        let task_run_intent = if TaskPromptKind::classify(&input.text).is_continuation() {
             TaskRunIntent::ContinueLatestOrStart(task_goal)
         } else {
             TaskRunIntent::Start(task_goal)
@@ -1357,7 +1358,11 @@ async fn begin_task_run(
             .await
             .map(|task| Some(task.id)),
         TaskRunIntent::ContinueLatestOrStart(fallback_goal) => {
-            match runtime.storage.retry_latest_task_run(session_id).await? {
+            match runtime
+                .storage
+                .retry_latest_substantive_task_run(session_id)
+                .await?
+            {
                 Some(task) => Ok(Some(task.id)),
                 None => runtime
                     .storage
@@ -1954,6 +1959,22 @@ mod tests {
             .finish_task_run(first.id, TaskOutcome::Succeeded, None)
             .await
             .unwrap();
+        for placeholder in ["continue", "try again"] {
+            let poisoned = fixture
+                .storage
+                .start_task_run(session_id, None, placeholder)
+                .await
+                .unwrap();
+            let reason = TaskTerminalReason::new(
+                TaskTerminalReasonCode::ExecutionFailure,
+                "Legacy runtime stored a continuation as a new task.",
+            );
+            fixture
+                .storage
+                .finish_task_run(poisoned.id, TaskOutcome::Failed, Some(&reason))
+                .await
+                .unwrap();
+        }
         let runtime = SessionRuntimeBudget {
             storage: fixture.storage.clone(),
             active_session_id: Arc::new(tokio::sync::Mutex::new(Some(session_id))),
@@ -1965,7 +1986,7 @@ mod tests {
         let resumed_id = begin_task_run(
             Some(&runtime),
             Some(session_id),
-            TaskRunIntent::ContinueLatestOrStart("continue".to_string()),
+            TaskRunIntent::ContinueLatestOrStart("try again".to_string()),
         )
         .await
         .unwrap()

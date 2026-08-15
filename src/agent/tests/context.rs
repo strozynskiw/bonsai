@@ -393,7 +393,7 @@ async fn restored_bare_continuation_recovers_mutation_tool_authority() {
     .unwrap();
     agent.push_user_message_raw("Fix the parser and run tests");
 
-    let inherited_goal = agent.begin_inferred_completion_task("continue");
+    let inherited_goal = agent.begin_inferred_completion_task("try again");
     let names = agent
         .tool_registry_for_current_task()
         .names()

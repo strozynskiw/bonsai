@@ -919,7 +919,10 @@ async fn completion_guard_retries_once_then_rejects_open_todos() {
     );
     assert!(matches!(
         failure.gaps.as_slice(),
-        [crate::agent::CompletionGap::InProgressTodos(1)]
+        [
+            crate::agent::CompletionGap::InProgressTodos(1),
+            crate::agent::CompletionGap::RequestedActionMissing
+        ]
     ));
     assert_eq!(
         requests.lock().await.len(),

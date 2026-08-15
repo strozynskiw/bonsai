@@ -1196,6 +1196,26 @@ impl ToolRegistry {
         Arc::new(scoped)
     }
 
+    /// Project a registry without one model-visible tool while preserving the
+    /// remaining registration order and authorization ledger.
+    pub(crate) fn without(self: &Arc<Self>, excluded_name: &str) -> Arc<Self> {
+        if !self.tools.contains_key(excluded_name) {
+            return self.clone();
+        }
+
+        let mut projected = Self::new();
+        projected.set_authorization_ledger(self.authorization_ledger.clone());
+        for name in &self.order {
+            if name == excluded_name {
+                continue;
+            }
+            if let Some(tool) = self.tools.get(name) {
+                projected.register(tool.clone());
+            }
+        }
+        Arc::new(projected)
+    }
+
     /// Build the error for a tool name we don't have. Lists the tools that *are*
     /// available — so a model that reached for one missing in the current mode
     /// (e.g. `bash` while planning, where the registry is read-only) can pick a
@@ -1335,6 +1355,25 @@ mod registry_tests {
         assert!(scoped.get("question").is_none());
         assert!(scoped.get("agent").is_none());
         assert!(scoped.get("recall").is_some());
+    }
+
+    #[test]
+    fn projected_registry_removes_one_tool_and_preserves_order() {
+        let mut registry = ToolRegistry::new();
+        for name in ["read", "set_session_title", "bash"] {
+            registry.register(Arc::new(EffectTool {
+                name,
+                effect: ToolEffectPolicy::ReadOnly,
+            }));
+        }
+        let registry = Arc::new(registry);
+
+        let projected = registry.without("set_session_title");
+
+        assert_eq!(projected.names().collect::<Vec<_>>(), ["read", "bash"]);
+        assert!(projected.get("set_session_title").is_none());
+        assert!(projected.get("read").is_some());
+        assert!(projected.get("bash").is_some());
     }
 
     #[test]

@@ -50,6 +50,7 @@ mod smol;
 mod storage;
 mod subagent;
 mod symbol;
+mod task_intent;
 mod terminal;
 mod todo;
 mod tool;

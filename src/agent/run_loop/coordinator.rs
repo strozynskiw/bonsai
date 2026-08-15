@@ -141,7 +141,14 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         queued_messages: Option<&'receiver mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
         session_title_policy: SessionTitleRunPolicy,
     ) -> Self {
-        let tool_registry = agent.tool_registry_for_current_task();
+        let state = TurnState {
+            policies: TurnPolicies::new(session_title_policy),
+            ..TurnState::default()
+        };
+        let tool_registry = state
+            .policies
+            .session_title
+            .project_registry(agent.tool_registry_for_current_task());
         let tool_schema = agent.tool_schema_for_registry(&tool_registry);
         Self {
             agent,
@@ -153,11 +160,17 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             cancelled_queued_message_ids: HashSet::new(),
             tool_schema,
             tool_registry,
-            state: TurnState {
-                policies: TurnPolicies::new(session_title_policy),
-                ..TurnState::default()
-            },
+            state,
         }
+    }
+
+    fn refresh_tool_registry(&mut self) {
+        self.tool_registry = self
+            .state
+            .policies
+            .session_title
+            .project_registry(self.agent.tool_registry_for_current_task());
+        self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
     }
 
     async fn run(mut self) -> Result<AgentRunResult> {
@@ -244,8 +257,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         if user_steered {
             self.state.policies.reset_for_user_steering();
             self.agent.set_planning_advisory(None);
-            self.tool_registry = self.agent.tool_registry_for_current_task();
-            self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
+            self.refresh_tool_registry();
         }
 
         self.agent.caches.last_perf_report = None;
@@ -563,6 +575,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )
             .await?;
         self.state.policies.observe_tool_execution(&tool_execution);
+        self.refresh_tool_registry();
         if tool_execution.tool_observations.iter().any(|observation| {
             matches!(
                 observation.status,

@@ -859,6 +859,79 @@ async fn retry_creates_a_new_attempt_with_the_same_stable_goal_id() {
     );
 }
 
+#[tokio::test]
+async fn substantive_retry_skips_legacy_continuation_goals() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let original = fixture
+        .storage
+        .start_task_run(session_id, Some(2), "Fix issue 173")
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .finish_task_run(original.id, TaskOutcome::Succeeded, None)
+        .await
+        .unwrap();
+
+    let failure = TaskTerminalReason::new(
+        TaskTerminalReasonCode::ExecutionFailure,
+        "Legacy continuation run stalled.",
+    );
+    for placeholder in ["continue", "try again"] {
+        let poisoned = fixture
+            .storage
+            .start_task_run(session_id, None, placeholder)
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .finish_task_run(poisoned.id, TaskOutcome::Failed, Some(&failure))
+            .await
+            .unwrap();
+    }
+
+    let resumed = fixture
+        .storage
+        .retry_latest_substantive_task_run(session_id)
+        .await
+        .unwrap()
+        .expect("the original substantive task should be resumed");
+
+    assert_eq!(resumed.goal_id, original.goal_id);
+    assert_eq!(resumed.goal, original.goal);
+    assert!(resumed.is_active());
+}
+
+#[tokio::test]
+async fn substantive_retry_returns_none_when_history_has_only_continuations() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let placeholder = fixture
+        .storage
+        .start_task_run(session_id, None, "try again")
+        .await
+        .unwrap();
+    let failure = TaskTerminalReason::new(
+        TaskTerminalReasonCode::ExecutionFailure,
+        "There was no established task.",
+    );
+    fixture
+        .storage
+        .finish_task_run(placeholder.id, TaskOutcome::Failed, Some(&failure))
+        .await
+        .unwrap();
+
+    assert!(
+        fixture
+            .storage
+            .retry_latest_substantive_task_run(session_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn saved_plan_status_db_strings_roundtrip() {
     for (status, db) in [

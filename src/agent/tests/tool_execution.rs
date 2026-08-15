@@ -210,7 +210,7 @@ async fn bare_continuation_rejects_title_churn_and_executes_real_work() {
     let mut registry = ToolRegistry::new();
     registry.register(title_tool);
     registry.register(Arc::new(SuccessfulBashTool));
-    let provider = Box::new(MockProvider::new(vec![
+    let provider = MockProvider::new(vec![
         Ok(StreamedResponse {
             tool_calls: vec![test_tool_call(
                 "title-1",
@@ -231,9 +231,10 @@ async fn bare_continuation_rejects_title_churn_and_executes_real_work() {
             content: "No change was needed; the tests pass.".to_string(),
             ..StreamedResponse::default()
         }),
-    ]));
+    ]);
+    let advertised_tools = provider.tool_names();
     let mut agent = Agent::new(
-        provider,
+        Box::new(provider),
         Arc::new(registry),
         empty_registry(),
         fixture.read_tracker.clone(),
@@ -244,7 +245,7 @@ async fn bare_continuation_rejects_title_churn_and_executes_real_work() {
     agent.push_user_message_raw("Fix the parser and run tests");
 
     let result = agent
-        .run("continue", CancellationToken::new(), Arc::new(StdoutSink))
+        .run("try again", CancellationToken::new(), Arc::new(StdoutSink))
         .await
         .unwrap();
 
@@ -260,6 +261,9 @@ async fn bare_continuation_rejects_title_churn_and_executes_real_work() {
         tool_message_text(&agent, "title-1").contains("unavailable on continuation"),
         "the model should receive precise recovery guidance"
     );
+    let advertised_tools = advertised_tools.lock().await;
+    assert_eq!(advertised_tools.len(), 3);
+    assert!(advertised_tools.iter().all(|names| names == &["bash"]));
 }
 
 #[tokio::test]

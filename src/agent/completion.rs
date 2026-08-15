@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::task_intent::{TaskPromptKind, action_directive, normalized_words};
 
 /// Semantic purpose of the current human task.
 ///
@@ -142,7 +143,7 @@ impl TaskCompletionContract {
     fn inferred(prompt: &str) -> Self {
         let normalized = normalized_words(prompt);
         let directive = action_directive(&normalized);
-        let continuation = is_task_continuation_prompt(prompt);
+        let continuation = TaskPromptKind::classify(prompt).is_continuation();
         let explicit_read_only = contains_any_phrase(
             &normalized,
             &[
@@ -723,11 +724,12 @@ impl Agent {
     }
 
     pub(super) fn begin_inferred_completion_task(&mut self, prompt: &str) -> Option<String> {
-        let continuation_goal = is_task_continuation_prompt(prompt)
+        let continuation_goal = TaskPromptKind::classify(prompt)
+            .is_continuation()
             .then(|| self.latest_explicit_human_goal())
             .flatten();
         let contract = if self.execution_lane.kind == ExecutionLaneKind::Parent {
-            if is_task_continuation_prompt(prompt) {
+            if TaskPromptKind::classify(prompt).is_continuation() {
                 inherited_continuation_contract(
                     self.completion.contract,
                     continuation_goal.as_deref(),
@@ -752,7 +754,7 @@ impl Agent {
             }
             let text = try_message_content_string(message)?;
             let text = text.trim();
-            (!text.is_empty() && !is_task_continuation_prompt(text))
+            (!text.is_empty() && !TaskPromptKind::classify(text).is_continuation())
                 .then(|| one_line_preview(text, 512))
         })
     }
@@ -1223,39 +1225,6 @@ fn response_signals(response: &str) -> CompletionResponseSignals {
     }
 }
 
-fn normalized_words(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
-    for character in text.to_lowercase().chars() {
-        if character.is_alphanumeric() {
-            normalized.push(character);
-        } else {
-            normalized.push(' ');
-        }
-    }
-    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Whether a human message is only asking Bonsai to resume the established
-/// task, rather than supplying a new goal whose few words should be inferred in
-/// isolation.
-pub(crate) fn is_task_continuation_prompt(prompt: &str) -> bool {
-    matches!(
-        action_directive(&normalized_words(prompt)),
-        "continue"
-            | "continue please"
-            | "go on"
-            | "go on please"
-            | "keep going"
-            | "keep going please"
-            | "carry on"
-            | "carry on please"
-            | "proceed"
-            | "proceed please"
-            | "resume"
-            | "resume please"
-    )
-}
-
 fn inherited_continuation_contract(
     current: TaskCompletionContract,
     previous_goal: Option<&str>,
@@ -1304,42 +1273,6 @@ fn starts_with_command(text: &str, commands: &[&str]) -> bool {
 
 fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(phrase))
-}
-
-fn action_directive(normalized: &str) -> &str {
-    let mut directive = normalized;
-    loop {
-        let mut stripped = None;
-        for prefix in [
-            "please ",
-            "pls ",
-            "can you ",
-            "could you ",
-            "would you ",
-            "i need you to ",
-            "we need to ",
-            "lets ",
-            "let us ",
-            "ok ",
-            "okay ",
-            "also ",
-            "no to ",
-            "dobra ",
-            "prosze ",
-            "proszę ",
-            "czy mozesz ",
-            "czy możesz ",
-        ] {
-            if let Some(remainder) = directive.strip_prefix(prefix) {
-                stripped = Some(remainder);
-                break;
-            }
-        }
-        match stripped {
-            Some(remainder) => directive = remainder,
-            None => return directive,
-        }
-    }
 }
 
 fn supersedes_goal(prompt: &str) -> bool {

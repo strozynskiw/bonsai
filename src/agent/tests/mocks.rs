@@ -8,6 +8,7 @@ use super::*;
 pub(super) struct MockProvider {
     pub(super) responses: Arc<Mutex<Vec<crate::provider::ProviderResult<StreamedResponse>>>>,
     pub(super) requests: Arc<Mutex<Vec<Vec<ChatCompletionRequestMessage>>>>,
+    tool_names: Arc<Mutex<Vec<Vec<String>>>>,
     conversation_cache_keys: Arc<StdMutex<Vec<String>>>,
     project_state_cache_strategy: crate::provider::ProjectStateCacheStrategy,
 }
@@ -17,6 +18,7 @@ impl MockProvider {
         Self {
             responses: Arc::new(Mutex::new(responses)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            tool_names: Arc::new(Mutex::new(Vec::new())),
             conversation_cache_keys: Arc::new(StdMutex::new(Vec::new())),
             project_state_cache_strategy:
                 crate::provider::ProjectStateCacheStrategy::MutableSystemTail,
@@ -41,6 +43,10 @@ impl MockProvider {
         self.requests.clone()
     }
 
+    pub(super) fn tool_names(&self) -> Arc<Mutex<Vec<Vec<String>>>> {
+        self.tool_names.clone()
+    }
+
     pub(super) fn conversation_cache_keys(&self) -> Arc<StdMutex<Vec<String>>> {
         self.conversation_cache_keys.clone()
     }
@@ -62,11 +68,17 @@ impl Provider for MockProvider {
     async fn chat_stream(
         &self,
         messages: &[ChatCompletionRequestMessage],
-        _tools: &[ChatCompletionTool],
+        tools: &[ChatCompletionTool],
         _cancellation_token: CancellationToken,
         _sink: SharedSink,
     ) -> crate::provider::ProviderResult<StreamedResponse> {
         self.requests.lock().await.push(messages.to_vec());
+        self.tool_names.lock().await.push(
+            tools
+                .iter()
+                .map(|tool| tool.function.name.clone())
+                .collect(),
+        );
         let mut responses = self.responses.lock().await;
         responses.remove(0)
     }

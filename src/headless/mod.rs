@@ -16,6 +16,7 @@ use crate::provider::ProviderRegistry;
 use crate::recovery::{RecoveryMode, RecoveryWorkspace};
 use crate::session::{DEFAULT_PROVIDER_ID, SessionStore};
 use crate::storage::{RecoveryId, SessionId, SessionStatus, Storage};
+use crate::task_intent::TaskPromptKind;
 use crate::todo::TodoStore;
 use crate::tool::ApprovalLevel;
 use crate::tool::SharedActiveSessionId;
@@ -650,8 +651,11 @@ async fn run_inner_with_provider_runtime(
         }
     }
 
-    let task_run = if crate::agent::is_task_continuation_prompt(&prompt) {
-        match storage.retry_latest_task_run(current_session_id).await? {
+    let task_run = if TaskPromptKind::classify(&prompt).is_continuation() {
+        match storage
+            .retry_latest_substantive_task_run(current_session_id)
+            .await?
+        {
             Some(task) => task,
             None => {
                 storage
