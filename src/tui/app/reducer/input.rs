@@ -306,6 +306,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             content,
             mode,
         } => app.enqueue_follow_up(id, text, content, mode, FollowUpDelivery::Queue),
+        AppAction::PromoteQueuedInputToSteer { id } => {
+            app.promote_queued_input_to_steer(id);
+        }
         AppAction::QueueDeferredCommand { input, label } => {
             let id = app.next_deferred_command_id();
             app.deferred_commands.push(DeferredCommand {

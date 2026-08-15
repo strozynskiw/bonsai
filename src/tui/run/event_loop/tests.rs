@@ -1734,20 +1734,24 @@ async fn running_enter_queues_normal_text_for_next_turn() {
 }
 
 #[tokio::test]
-async fn running_escape_interrupts_and_stages_immediate_steer() {
+async fn running_escape_interrupts_for_queued_message_without_sending_draft() {
     let (mut tasks, mut runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
     app.composer.set_text("do this now".to_string());
-
-    assert!(steer_active_run(
+    assert!(enqueue_running_follow_up(
         &mut app,
         &tasks,
+        FollowUpDelivery::Queue,
         &crate::provider::ProviderRegistry::default_registry(),
-        &test_model_catalog(),
+        None,
     ));
+    app.composer.set_text("unsent draft".to_string());
+
+    assert!(steer_active_run(&mut app, &tasks));
 
     assert_eq!(app.task_state, TaskState::Cancelling);
+    assert_eq!(app.input(), "unsent draft");
     assert!(matches!(
         app.queued_inputs.as_slice(),
         [QueuedInput {
@@ -1755,6 +1759,14 @@ async fn running_escape_interrupts_and_stages_immediate_steer() {
             delivery: FollowUpDelivery::Steer,
             ..
         }] if text == "do this now"
+    ));
+    assert!(matches!(
+        app.transcript.last(),
+        Some(TranscriptItem::QueuedUserMessage {
+            text,
+            delivery: FollowUpDelivery::Steer,
+            ..
+        }) if text == "do this now"
     ));
     let finished = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -1774,18 +1786,37 @@ async fn running_escape_interrupts_and_stages_immediate_steer() {
 }
 
 #[tokio::test]
+async fn running_escape_without_queued_message_keeps_foreground_active() {
+    let (mut tasks, _runtime_rx) = running_tasks().await;
+    let mut app = app();
+    app.task_state = TaskState::Running;
+    app.composer.set_text("unsent draft".to_string());
+
+    assert!(!steer_active_run(&mut app, &tasks));
+
+    assert_eq!(app.task_state, TaskState::Running);
+    assert_eq!(app.input(), "unsent draft");
+    assert!(app.queued_inputs.is_empty());
+    assert!(tasks.is_busy());
+    tasks.abort();
+}
+
+#[tokio::test]
 async fn escape_steer_reduces_old_completion_before_starting_replacement() {
     let (mut tasks, mut runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
-    app.composer.set_text("do this now".to_string());
+    app.reduce(AppAction::QueueNextInput {
+        id: 1,
+        text: "do this now".to_string(),
+        content: crate::tui::app::ComposerContent {
+            text: "do this now".to_string(),
+            chips: Vec::new(),
+        },
+        mode: AgentMode::Coding,
+    });
 
-    assert!(steer_active_run(
-        &mut app,
-        &tasks,
-        &crate::provider::ProviderRegistry::default_registry(),
-        &test_model_catalog(),
-    ));
+    assert!(steer_active_run(&mut app, &tasks));
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if reap_finished_task(&mut app, &mut tasks).await {

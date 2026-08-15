@@ -1111,6 +1111,10 @@ pub enum AppAction {
         content: crate::tui::app::ComposerContent,
         mode: crate::agent::AgentMode,
     },
+    /// Turn an already-queued message into the foreground replacement.
+    PromoteQueuedInputToSteer {
+        id: u64,
+    },
     QueueDeferredCommand {
         input: String,
         label: String,

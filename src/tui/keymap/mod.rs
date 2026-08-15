@@ -517,7 +517,11 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         }
         KeyEvent {
             code: KeyCode::Esc, ..
-        } if matches!(app.task_state, crate::tui::event::TaskState::Running) => KeyIntent::Steer,
+        } if matches!(app.task_state, crate::tui::event::TaskState::Running)
+            && app.last_queued_input().is_some() =>
+        {
+            KeyIntent::Steer
+        }
         // Esc progressively clears: selection first, then the draft.
         KeyEvent {
             code: KeyCode::Esc, ..
@@ -3099,8 +3103,24 @@ mod tests {
     }
 
     #[test]
-    fn esc_requests_immediate_steer_while_agent_runs() {
+    fn esc_clears_unsent_draft_while_agent_runs_without_queued_message() {
         let mut app = input_app_with_text("keep this draft");
+        app.task_state = crate::tui::event::TaskState::Running;
+
+        let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
+
+        assert!(matches!(intent, KeyIntent::Action(AppAction::ClearInput)));
+    }
+
+    #[test]
+    fn esc_requests_steer_while_agent_runs_with_queued_message() {
+        let mut app = input_app_with_text("queued correction");
+        app.reduce(AppAction::QueueNextInput {
+            id: 1,
+            text: "queued correction".to_string(),
+            content: crate::tui::app::ComposerContent::default(),
+            mode: crate::agent::AgentMode::Coding,
+        });
         app.task_state = crate::tui::event::TaskState::Running;
 
         let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);

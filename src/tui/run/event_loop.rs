@@ -637,43 +637,24 @@ fn handle_paste_event(
     }
 }
 
-/// Replace the active foreground turn with the current draft. Validation runs
-/// before cancellation so an unsupported image or slash command leaves both
-/// the turn and composer intact. An empty draft is an explicit foreground
-/// stop. Detached subagents use their separate cancellation channel and keep
-/// running in either case.
-fn steer_active_run(
-    app: &mut AppState,
-    tasks: &TaskController,
-    registry: &ProviderRegistry,
-    model_catalog: &crate::model_catalog::ModelCatalog,
-) -> bool {
+/// Replace the active foreground turn only after Enter has queued a message.
+/// The newest queued message becomes the steer; the current composer draft is
+/// never submitted by Escape. Detached subagents keep running.
+fn steer_active_run(app: &mut AppState, tasks: &TaskController) -> bool {
     if !matches!(app.task_state, TaskState::Running) {
         return false;
     }
 
-    let has_draft = !app.composer.submission().display_text.trim().is_empty();
-    if has_draft
-        && !enqueue_running_follow_up(
-            app,
-            tasks,
-            FollowUpDelivery::Steer,
-            registry,
-            Some(model_catalog),
-        )
-    {
+    let Some(queued_id) = app.last_queued_input().map(|queued| queued.id) else {
         return false;
-    }
+    };
+    app.reduce(AppAction::PromoteQueuedInputToSteer { id: queued_id });
 
     tasks.interrupt_foreground();
     app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
     push_transient_notice(
         app,
-        if has_draft {
-            "Steering foreground agent; background subagents continue"
-        } else {
-            "Stopping foreground agent; background subagents continue"
-        },
+        "Steering queued message; background subagents continue",
     );
     true
 }
@@ -3404,7 +3385,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 }
                             }
                             KeyIntent::Steer => {
-                                steer_active_run(&mut app, &tasks, &registry, &model_catalog);
+                                steer_active_run(&mut app, &tasks);
                             }
                             intent @ (KeyIntent::Submit | KeyIntent::SubmitReplacement(_)) => {
                                 if let KeyIntent::SubmitReplacement(replacement) = &intent {

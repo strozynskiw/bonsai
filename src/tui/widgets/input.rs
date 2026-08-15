@@ -612,7 +612,11 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Esc", " dismiss"),
         ]
     } else if matches!(app.task_state, crate::tui::event::TaskState::Running) {
-        vec![("Enter", " queue  "), ("Esc", " steer")]
+        let mut hints = vec![("Enter", " queue")];
+        if app.last_queued_input().is_some() {
+            hints.push(("Esc", " steer"));
+        }
+        hints
     } else {
         // Trailing version tag keeps the running build visible at a glance; a
         // self-update notice takes its place for the rest of the session.
@@ -1055,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn meta_line_explains_busy_follow_up_controls() {
+    fn meta_line_only_advertises_queue_before_message_is_queued() {
         let mut app = AppState::new(
             "codex",
             "test-model".to_string(),
@@ -1066,11 +1070,30 @@ mod tests {
 
         let text = line_text(&meta_line(&app, 120, false));
 
-        assert!(
-            text.contains("Enter queue") && text.contains("Esc steer"),
-            "{text}"
-        );
+        assert!(text.contains("Enter queue"), "{text}");
+        assert!(!text.contains("Esc steer"), "{text}");
         assert!(!text.contains("Tab queue"), "{text}");
+    }
+
+    #[test]
+    fn meta_line_advertises_steer_after_message_is_queued() {
+        let mut app = AppState::new(
+            "codex",
+            "test-model".to_string(),
+            "workspace".to_string(),
+            None,
+        );
+        app.reduce(crate::tui::event::AppAction::QueueNextInput {
+            id: 1,
+            text: "queued correction".to_string(),
+            content: crate::tui::app::ComposerContent::default(),
+            mode: crate::agent::AgentMode::Coding,
+        });
+        app.task_state = crate::tui::event::TaskState::Running;
+
+        let text = line_text(&meta_line(&app, 120, false));
+
+        assert!(text.contains("Esc steer"), "{text}");
     }
 
     #[test]

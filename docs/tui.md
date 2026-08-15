@@ -95,13 +95,14 @@ high-contrast theming are covered in [Theming](theming.md).
   argument completion covers providers, models, themes, sessions, autonomy
   levels, and more. `Tab` accepts; `Enter` on a fully-typed command submits
   as typed.
-- **While the agent runs** — `Enter` queues the draft for the next turn. `Esc`
-  stops only the foreground turn, sends the current draft immediately as a
-  steer, and continues under a fresh foreground turn; detached subagents keep
-  running. With an empty draft, `Esc` only stops the foreground turn. `Ctrl+C`
-  cancels the whole run tree. Withdraw a pending message with `Up` on an empty
-  composer, or cancel a focused pending item with `Delete`. Busy-incompatible
-  slash commands open the busy-command modal
+- **While the agent runs** — `Enter` queues the draft for the next turn. Once a
+  message is queued, `Esc` promotes the newest queued message to a steer, stops
+  only the foreground turn, and continues under a fresh foreground turn;
+  detached subagents keep running. `Esc` never submits the live draft and does
+  not stop a run when no message is queued. `Ctrl+C` cancels the whole run tree.
+  Withdraw a pending message with `Up` on an empty composer, or cancel a focused
+  pending item with `Delete`. Busy-incompatible slash commands open the
+  busy-command modal
   ([details](slash-commands.md#behavior-while-the-agent-is-running)).
 
 ## Keybindings
@@ -122,7 +123,7 @@ Keybindings are fixed (no user keymap file). The essentials:
 | `Ctrl+G` (or `/select`) | copy mode: release mouse capture for native terminal text selection (toggle; a `⊙ select` marker shows while it's on) |
 | `Ctrl+T` | cycle focus pane |
 | `Ctrl+End` | jump transcript to latest |
-| `Esc` while running | stop the foreground turn, send the draft immediately, and continue; detached subagents keep running |
+| `Esc` while running | if a message is queued, steer it by stopping only the foreground turn; never submits the live draft |
 | `Esc` otherwise | progressive: dismiss popup → clear selection → clear draft → close modal |
 
 Full editing/selection/scroll tables are in `/keys` inside the app.

@@ -98,6 +98,25 @@ impl AppState {
         self.queued_inputs.last()
     }
 
+    pub(super) fn promote_queued_input_to_steer(&mut self, id: u64) {
+        let Some(queued) = self.queued_inputs.iter_mut().find(|queued| queued.id == id) else {
+            return;
+        };
+        queued.delivery = FollowUpDelivery::Steer;
+
+        let transcript_index = self
+            .transcript
+            .iter()
+            .position(|item| {
+                matches!(item, TranscriptItem::QueuedUserMessage { id: item_id, .. } if *item_id == id)
+            });
+        if let Some(TranscriptItem::QueuedUserMessage { delivery, .. }) =
+            transcript_index.and_then(|index| self.transcript.get_mut(index))
+        {
+            *delivery = FollowUpDelivery::Steer;
+        }
+    }
+
     pub fn queued_input_ids(&self) -> Vec<u64> {
         self.queued_inputs.iter().map(|queued| queued.id).collect()
     }
