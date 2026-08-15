@@ -28,10 +28,23 @@ Each case runs against a throwaway, no-dependency environment (`e2e_begin` in
 
 | Lever | Effect |
 | --- | --- |
-| `BONSAI_HOME=$(mktemp -d)` | isolated SQLite state; your real `~/.bonsai` is never touched |
-| `HOME=$BONSAI_HOME` | isolates legacy config/session discovery too |
+| `e2e/verifier.sh` | allocates or validates the state root and launches through `env -i` |
+| isolated `HOME`, `BONSAI_HOME`, `CODEX_HOME`, and XDG roots | prevents all user config/session discovery |
 | `BONSAI_DISABLE_MODELS_FETCH=1` | no models.dev network fetch; built-in catalog only |
 | `OPENAI_COMPATIBLE_BASE_URL` + `_MODEL` | seeds an *authorized* provider; normally a dead address, overridden by turn tests with the loopback mock |
+
+`verifier.sh` also disables repository dotenv loading, admits only synthetic
+test credentials, and refuses a state root inside the parent `BONSAI_HOME`
+unless `--allow-shared-state` is explicit. With no options it creates a unique
+retained run under `target/tui-verification/runs/`; the newest 20 completed runs
+are retained. Concurrent launches therefore never share a database.
+
+Every suite run writes replay evidence under
+`target/tui-verification/e2e/<run>/`: per-launch binary/worktree identity and
+exit state, the exact tmux key script, normalized screen captures at each
+action/assertion, and the resulting isolated SQLite files. The newest 20 suite
+runs are retained. Key settling happens inside the driver against semantic
+screen changes, not through model-driven terminal polling.
 
 The "chat is ready" signal is the composer meta line `● Coding · … ` (or
 `Planning ·`).
@@ -41,8 +54,11 @@ The "chat is ready" signal is the composer meta line `● Coding · … ` (or
 
 ```
 e2e/
+  verifier.sh   # isolated-by-construction real-binary entry point
   run.sh        # build + run all cases + summary
   lib.sh        # isolated env, tmux driver, render-aware assertions
+  tests/
+    verifier_isolation.sh # parent-state byte-identity + credential scrub guard
   cases/
     00_startup.sh          # boots to chat; compact header on a short terminal
     01_execution_modes.sh  # /autonomy, /yolo, Alt+M  (idle-/yolo regression guard)
@@ -52,6 +68,7 @@ e2e/
     05_quit.sh             # /quit exits the process cleanly
     06_escape_steer.sh     # Esc replacement remains visibly active
     07_resume_selection.sh # resumed request keeps its persisted model
+    08_state_isolation.sh   # real child leaves parent state byte-identical
   mock_streaming_provider.py # deterministic loopback SSE provider
 ```
 

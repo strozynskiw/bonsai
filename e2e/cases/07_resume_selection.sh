@@ -39,7 +39,7 @@ if tui_alive; then
   e2e_done
 fi
 
-target_id="$(python3 - "$E2E_HOME/bonsai.db" <<'PY'
+target_id="$(python3 - "$E2E_BONSAI_HOME/bonsai.db" <<'PY'
 import sqlite3
 import sys
 
@@ -56,7 +56,7 @@ fi
 # Simulate another process changing the global default and the Coding persona
 # model after the target session was saved. Both routes point at the loopback
 # server so the rendered model identity, not network failure, proves routing.
-python3 - "$E2E_HOME/bonsai.db" "$E2E_PROVIDER_BASE_URL" <<'PY'
+python3 - "$E2E_BONSAI_HOME/bonsai.db" "$E2E_PROVIDER_BASE_URL" <<'PY'
 import json
 import sqlite3
 import sys
@@ -93,7 +93,7 @@ with sqlite3.connect(database_path) as database:
 PY
 
 E2E_OPENCODE_API_KEY="global-default-only"
-E2E_BONSAI_ARGS="-c $target_id"
+E2E_BONSAI_ARGS=(-c "$target_id")
 tui_start 140 40 || e2e_done
 expect_meta "resume restores target model" "Coding · mock-model"
 

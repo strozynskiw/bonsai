@@ -14,6 +14,7 @@ E2E_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E2E_REPO_ROOT="$(cd "$E2E_LIB_DIR/.." && pwd)"
 
 : "${BONSAI_BIN:=$E2E_REPO_ROOT/target/debug/bonsai}"
+E2E_VERIFIER="$E2E_LIB_DIR/verifier.sh"
 TMUX_BIN="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 
 E2E_SESSION="v"
@@ -23,6 +24,8 @@ E2E_ASSERT_TRIES="${E2E_ASSERT_TRIES:-20}"   # expect* polls (×0.15s ≈ 3s)
 
 E2E_FAIL=0
 E2E_NAME="?"
+E2E_EVIDENCE_SEQUENCE=0
+E2E_LAUNCH_SEQUENCE=0
 
 tx() { "$TMUX_BIN" -L "$E2E_SOCK" "$@"; }
 
@@ -33,6 +36,13 @@ e2e_begin() {
   E2E_NAME="$1"
   E2E_FAIL=0
   E2E_HOME="$(mktemp -d)"
+  E2E_BONSAI_HOME="$E2E_HOME/bonsai"
+  local evidence_root="${E2E_RUN_EVIDENCE_ROOT:-$E2E_REPO_ROOT/target/tui-verification/e2e}"
+  mkdir -p "$evidence_root"
+  E2E_EVIDENCE="$(mktemp -d "$evidence_root/case.XXXXXX")"
+  printf '%s\n' "$E2E_NAME" > "$E2E_EVIDENCE/case.txt"
+  E2E_EVIDENCE_SEQUENCE=0
+  E2E_LAUNCH_SEQUENCE=0
   E2E_SOCK="bonsai-e2e-$$"
   trap e2e_cleanup EXIT
   printf '\n=== %s ===\n' "$E2E_NAME"
@@ -41,6 +51,14 @@ e2e_begin() {
 e2e_cleanup() {
   [ -n "${E2E_HELPER_PID:-}" ] && kill "$E2E_HELPER_PID" 2>/dev/null || true
   [ -n "${E2E_SOCK:-}" ] && tx kill-server 2>/dev/null || true
+  if [ -n "${E2E_EVIDENCE:-}" ] && [ -n "${E2E_BONSAI_HOME:-}" ]; then
+    mkdir -p "$E2E_EVIDENCE/database"
+    local database_file
+    for database_file in "$E2E_BONSAI_HOME"/bonsai.db*; do
+      [ -f "$database_file" ] || continue
+      cp -p "$database_file" "$E2E_EVIDENCE/database/"
+    done
+  fi
   [ -n "${E2E_HOME:-}" ] && rm -rf "$E2E_HOME" 2>/dev/null || true
 }
 
@@ -63,21 +81,30 @@ tui_start() {
   local cols="${1:-140}" rows="${2:-40}" ready="${3:-(Coding|Planning) ·}"
   local provider_base_url="${E2E_PROVIDER_BASE_URL:-http://127.0.0.1:9/v1}"
   local opencode_api_key="${E2E_OPENCODE_API_KEY:-}"
-  local bonsai_args="${E2E_BONSAI_ARGS:-}"
+  local command argument launch_evidence
+  E2E_LAUNCH_SEQUENCE=$((E2E_LAUNCH_SEQUENCE + 1))
+  printf -v launch_evidence '%s/launches/%04d' "$E2E_EVIDENCE" "$E2E_LAUNCH_SEQUENCE"
+  mkdir -p "$launch_evidence"
+  local -a launch_args=(
+    --state-root "$E2E_HOME"
+    --evidence-dir "$launch_evidence"
+    --provider-base-url "$provider_base_url"
+    --binary "$BONSAI_BIN"
+  )
+  if [ -n "$opencode_api_key" ]; then
+    launch_args+=(--enable-opencode-test-key)
+  fi
+  launch_args+=(--)
+  if declare -p E2E_BONSAI_ARGS >/dev/null 2>&1; then
+    launch_args+=("${E2E_BONSAI_ARGS[@]}")
+  fi
+  printf -v command 'exec %q' "$E2E_VERIFIER"
+  for argument in "${launch_args[@]}"; do
+    printf -v command '%s %q' "$command" "$argument"
+  done
   tx kill-server 2>/dev/null || true
   tx new-session -d -s "$E2E_SESSION" -x "$cols" -y "$rows"
-  tx send-keys -t "$E2E_SESSION" \
-    "exec env HOME='$E2E_HOME' BONSAI_HOME='$E2E_HOME' CODEX_HOME='$E2E_HOME/codex' \
-BONSAI_DISABLE_MODELS_FETCH=1 OPENCODE_API_KEY='$opencode_api_key' ANTHROPIC_API_KEY='' \
-MINIMAX_API_KEY='' MINIMAX_CODING_PLAN_API_KEY='' ZAI_API_KEY='' \
-ZAI_CODING_PLAN_API_KEY='' MOONSHOT_API_KEY='' KIMI_CODING_PLAN_API_KEY='' \
-MIMO_API_KEY='' MIMO_CODING_PLAN_API_KEY='' OPENROUTER_API_KEY='' OPENAI_API_KEY='' \
-ANTHROPIC_COMPATIBLE_API_KEY='' DEEPSEEK_API_KEY='' DASHSCOPE_API_KEY='' \
-DASHSCOPE_TOKEN_PLAN_API_KEY='' GEMINI_API_KEY='' XAI_API_KEY='' MISTRAL_API_KEY='' \
-HUNYUAN_API_KEY='' \
-BONSAI_MEMORY_EMBEDDINGS=off OPENAI_COMPATIBLE_BASE_URL='$provider_base_url' \
-OPENAI_COMPATIBLE_MODEL='mock-model' OPENAI_COMPATIBLE_API_KEY='e2e-test' \
-'$BONSAI_BIN' $bonsai_args" Enter
+  tx send-keys -t "$E2E_SESSION" "$command" Enter
   # A pristine state root opens onboarding. Surface tests exercise the chat,
   # so take its documented "later" path instead of seeding private state.
   if wait_for "Welcome to Bonsai|$ready" "$E2E_STARTUP_WAIT"; then
@@ -91,9 +118,19 @@ OPENAI_COMPATIBLE_MODEL='mock-model' OPENAI_COMPATIBLE_API_KEY='e2e-test' \
     E2E_FAIL=$((E2E_FAIL + 1))
     return 1
   fi
+  evidence_screen
 }
 
-tui_keys() { tx send-keys -t "$E2E_SESSION" "$@"; sleep "$WAIT"; }
+tui_keys() {
+  printf '%04d ' "$E2E_LAUNCH_SEQUENCE" >> "$E2E_EVIDENCE/inputs.log"
+  printf '%q ' "$@" >> "$E2E_EVIDENCE/inputs.log"
+  printf '\n' >> "$E2E_EVIDENCE/inputs.log"
+  local before
+  before="$(semantic_tui_text | cksum)"
+  tx send-keys -t "$E2E_SESSION" "$@"
+  wait_for_screen_settle "$before"
+  evidence_screen
+}
 tui_text() { tx capture-pane -t "$E2E_SESSION" -p 2>/dev/null; }
 tui_ansi() { tx capture-pane -t "$E2E_SESSION" -p -e 2>/dev/null; }
 tui_meta() { tui_text | grep -aE '(Coding|Planning) ·' | tail -1; }
@@ -101,6 +138,40 @@ tui_meta() { tui_text | grep -aE '(Coding|Planning) ·' | tail -1; }
 # that structural difference so popup candidates can never masquerade as input.
 tui_input() { tui_text | grep -aE '│  > ' | tail -1; }
 tui_alive() { tx has-session -t "$E2E_SESSION" 2>/dev/null; }
+
+evidence_screen() {
+  E2E_EVIDENCE_SEQUENCE=$((E2E_EVIDENCE_SEQUENCE + 1))
+  printf -v screen_path '%s/screens/%04d.txt' "$E2E_EVIDENCE" "$E2E_EVIDENCE_SEQUENCE"
+  mkdir -p "$E2E_EVIDENCE/screens"
+  tui_text > "$screen_path" || true
+}
+
+# Wait internally for a semantic pane change followed by a stable render. This
+# absorbs redraw timing without spending model turns on terminal polling.
+semantic_tui_text() {
+  tui_text | sed -E \
+    -e 's/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/⠿/g' \
+    -e 's/([0-9]+h )?([0-9]+m )?[0-9]+([.][0-9]+)?(ms|s)/<elapsed>/g' \
+    -e 's/(⏱).*/\1 <elapsed>/'
+}
+
+wait_for_screen_settle() {
+  local previous="$1" current changed=0 stable=0 i=0
+  while [ "$i" -lt "$E2E_ASSERT_TRIES" ]; do
+    current="$(semantic_tui_text | cksum)"
+    if [ "$current" != "$previous" ]; then
+      changed=1
+      stable=0
+      previous="$current"
+    elif [ "$changed" -eq 1 ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 2 ] && return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 0
+}
 
 # wait_for <regex> [timeout_s]: poll the pane until the regex appears.
 wait_for() {
@@ -117,8 +188,8 @@ wait_for() {
 # expect* poll (so they tolerate render latency); forbid* check once (absence is
 # immediate — sync first with a preceding expect or tui_keys settle).
 
-_pass() { echo "  ✅ $1"; }
-_fail() { echo "  ❌ $1"; E2E_FAIL=$((E2E_FAIL + 1)); }
+_pass() { evidence_screen; echo "  ✅ $1"; }
+_fail() { evidence_screen; echo "  ❌ $1"; E2E_FAIL=$((E2E_FAIL + 1)); }
 
 expect() {        # expect <desc> <substr>  — whole pane eventually contains substr
   local desc="$1" want="$2" i=0
