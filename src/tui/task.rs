@@ -50,6 +50,7 @@ enum ReviewWorkflow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskRunIntent {
     Start(String),
+    ContinueLatestOrStart(String),
     ContinueActive,
     RetryLatest,
 }
@@ -760,10 +761,15 @@ impl TaskController {
         } else {
             input.text.clone()
         };
+        let task_run_intent = if crate::agent::is_task_continuation_prompt(&input.text) {
+            TaskRunIntent::ContinueLatestOrStart(task_goal)
+        } else {
+            TaskRunIntent::Start(task_goal)
+        };
         self.spawn_agent_task(
             persona,
             queued_messages,
-            TaskRunIntent::Start(task_goal),
+            task_run_intent,
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -1350,6 +1356,16 @@ async fn begin_task_run(
             .start_task_run(session_id, None, &goal)
             .await
             .map(|task| Some(task.id)),
+        TaskRunIntent::ContinueLatestOrStart(fallback_goal) => {
+            match runtime.storage.retry_latest_task_run(session_id).await? {
+                Some(task) => Ok(Some(task.id)),
+                None => runtime
+                    .storage
+                    .start_task_run(session_id, None, &fallback_goal)
+                    .await
+                    .map(|task| Some(task.id)),
+            }
+        }
         TaskRunIntent::ContinueActive => runtime
             .storage
             .active_task_run(session_id)
@@ -1922,6 +1938,48 @@ mod tests {
             session.latest_task.and_then(|task| task.outcome),
             Some(TaskOutcome::Succeeded)
         );
+    }
+
+    #[tokio::test]
+    async fn continuation_task_run_reuses_the_latest_persisted_goal() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let first = fixture
+            .storage
+            .start_task_run(session_id, None, "Fix issue 173")
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .finish_task_run(first.id, TaskOutcome::Succeeded, None)
+            .await
+            .unwrap();
+        let runtime = SessionRuntimeBudget {
+            storage: fixture.storage.clone(),
+            active_session_id: Arc::new(tokio::sync::Mutex::new(Some(session_id))),
+            max_active_duration: None,
+            activity: SessionActivityGate::new(fixture.storage.clone()),
+            subagents: Arc::new(SubagentRegistry::new()),
+        };
+
+        let resumed_id = begin_task_run(
+            Some(&runtime),
+            Some(session_id),
+            TaskRunIntent::ContinueLatestOrStart("continue".to_string()),
+        )
+        .await
+        .unwrap()
+        .expect("continuation should have a task run");
+        let resumed = fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resumed.id, resumed_id);
+        assert_eq!(resumed.goal_id, first.goal_id);
+        assert_eq!(resumed.goal, "Fix issue 173");
     }
 
     #[tokio::test]

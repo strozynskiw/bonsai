@@ -650,9 +650,20 @@ async fn run_inner_with_provider_runtime(
         }
     }
 
-    let task_run = storage
-        .start_task_run(current_session_id, None, &prompt)
-        .await?;
+    let task_run = if crate::agent::is_task_continuation_prompt(&prompt) {
+        match storage.retry_latest_task_run(current_session_id).await? {
+            Some(task) => task,
+            None => {
+                storage
+                    .start_task_run(current_session_id, None, &prompt)
+                    .await?
+            }
+        }
+    } else {
+        storage
+            .start_task_run(current_session_id, None, &prompt)
+            .await?
+    };
     let verification = match crate::verification::resolve_slash_command(
         &prompt,
         &project_root,

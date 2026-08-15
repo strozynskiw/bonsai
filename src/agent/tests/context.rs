@@ -380,6 +380,34 @@ async fn smol_mode_uses_minimal_coding_registry_and_restores_normal() {
 }
 
 #[tokio::test]
+async fn restored_bare_continuation_recovers_mutation_tool_authority() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        mock_registry(&["read", "bash", "set_session_title"]),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.push_user_message_raw("Fix the parser and run tests");
+
+    let inherited_goal = agent.begin_inferred_completion_task("continue");
+    let names = agent
+        .tool_registry_for_current_task()
+        .names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        inherited_goal.as_deref(),
+        Some("Fix the parser and run tests")
+    );
+    assert!(names.iter().any(|name| name == "bash"), "tools: {names:?}");
+}
+
+#[tokio::test]
 async fn smol_requires_an_explicit_setting_for_every_context_window() {
     let fixture = TestFixture::new();
     let mut agent = Agent::builder(

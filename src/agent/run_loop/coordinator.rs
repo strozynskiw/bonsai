@@ -6,10 +6,17 @@ pub(super) async fn run(
     cancellation: RunCancellation,
     sink: SharedSink,
     queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
+    session_title_policy: SessionTitleRunPolicy,
 ) -> Result<AgentRunResult> {
-    TurnCoordinator::new(agent, cancellation, sink, queued_messages)
-        .run()
-        .await
+    TurnCoordinator::new(
+        agent,
+        cancellation,
+        sink,
+        queued_messages,
+        session_title_policy,
+    )
+    .run()
+    .await
 }
 
 /// Owns the mutable state and policy decisions for one agent run.
@@ -44,6 +51,7 @@ impl TurnState {
 
 #[derive(Default)]
 struct TurnPolicies {
+    session_title: SessionTitleGuard,
     planning_research: PlanningResearchGuard,
     delegated_read: DelegatedReadGuard,
     repeated_inspection: RepeatedInspectionGuard,
@@ -56,7 +64,16 @@ struct TurnPolicies {
 }
 
 impl TurnPolicies {
+    fn new(session_title_policy: SessionTitleRunPolicy) -> Self {
+        Self {
+            session_title: SessionTitleGuard::new(session_title_policy),
+            ..Self::default()
+        }
+    }
+
     fn reset_for_user_steering(&mut self) {
+        self.session_title
+            .reset(SessionTitleRunPolicy::ContinuationOrAutomatic);
         self.planning_research.reset();
         self.delegated_read.reset();
         self.repeated_inspection.reset();
@@ -69,6 +86,7 @@ impl TurnPolicies {
     }
 
     fn observe_tool_execution(&mut self, execution: &ToolExecutionOutcome) {
+        self.session_title.observe(&execution.tool_observations);
         self.repeated_failure
             .observe(&execution.tool_observations, execution.reset_loop_guards);
         if execution
@@ -79,6 +97,8 @@ impl TurnPolicies {
             self.empty_response_nudges = 0;
         }
         if execution.reset_loop_guards {
+            self.session_title
+                .reset(SessionTitleRunPolicy::ContinuationOrAutomatic);
             self.planning_research.reset();
             self.delegated_read.reset();
             self.repeated_inspection.reset();
@@ -119,6 +139,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         cancellation: RunCancellation,
         sink: SharedSink,
         queued_messages: Option<&'receiver mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
+        session_title_policy: SessionTitleRunPolicy,
     ) -> Self {
         let tool_registry = agent.tool_registry_for_current_task();
         let tool_schema = agent.tool_schema_for_registry(&tool_registry);
@@ -132,7 +153,10 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             cancelled_queued_message_ids: HashSet::new(),
             tool_schema,
             tool_registry,
-            state: TurnState::default(),
+            state: TurnState {
+                policies: TurnPolicies::new(session_title_policy),
+                ..TurnState::default()
+            },
         }
     }
 
@@ -424,6 +448,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 
     async fn execute_tool_turn(&mut self, response: StreamedResponse) -> Result<TurnOutcome> {
         let policies = &mut self.state.policies;
+        let session_title_action = policies.session_title.action_for(&response.tool_calls);
+        let session_title_rejection =
+            resolve_guard(self.agent, "session_title", session_title_action, &response)?;
         let planning_research_action = self
             .agent
             .planning_research_action(&response.tool_calls, &mut policies.planning_research);
@@ -514,6 +541,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 &response.tool_calls,
                 &self.tool_registry,
                 ToolRejections {
+                    session_title: session_title_rejection.unwrap_or_default(),
                     scoped_steering: HashMap::new(),
                     precomputed_read,
                     precomputed_read_delta,

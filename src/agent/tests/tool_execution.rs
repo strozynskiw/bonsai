@@ -203,6 +203,66 @@ async fn deepseek_shaped_arguments_are_repaired_and_tool_executes() {
 }
 
 #[tokio::test]
+async fn bare_continuation_rejects_title_churn_and_executes_real_work() {
+    let fixture = TestFixture::new();
+    let title_tool = Arc::new(MockTool::new("set_session_title", "title changed"));
+    let title_calls = title_tool.calls.clone();
+    let mut registry = ToolRegistry::new();
+    registry.register(title_tool);
+    registry.register(Arc::new(SuccessfulBashTool));
+    let provider = Box::new(MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "title-1",
+                "set_session_title",
+                r#"{"title":"Isolate TUI verification"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "bash-1",
+                "bash",
+                r#"{"command":"cargo test --locked"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            content: "No change was needed; the tests pass.".to_string(),
+            ..StreamedResponse::default()
+        }),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.push_user_message_raw("Fix the parser and run tests");
+
+    let result = agent
+        .run("continue", CancellationToken::new(), Arc::new(StdoutSink))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("No change was needed; the tests pass.".to_string())
+    );
+    assert!(
+        title_calls.lock().await.is_empty(),
+        "continuation title call must be rejected before tool execution"
+    );
+    assert!(
+        tool_message_text(&agent, "title-1").contains("unavailable on continuation"),
+        "the model should receive precise recovery guidance"
+    );
+}
+
+#[tokio::test]
 async fn malformed_tool_arguments_return_precise_error_to_model() {
     let fixture = TestFixture::new();
     let mock_tool = Arc::new(MockTool::new("mock_tool", "tool result"));

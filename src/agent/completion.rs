@@ -142,6 +142,7 @@ impl TaskCompletionContract {
     fn inferred(prompt: &str) -> Self {
         let normalized = normalized_words(prompt);
         let directive = action_directive(&normalized);
+        let continuation = is_task_continuation_prompt(prompt);
         let explicit_read_only = contains_any_phrase(
             &normalized,
             &[
@@ -200,7 +201,8 @@ impl TaskCompletionContract {
                 "zrefaktoryzuj",
             ],
         );
-        let mutation = workspace_mutation
+        let mutation = continuation
+            || workspace_mutation
             || contains_directive_clause(
                 directive,
                 &[
@@ -720,13 +722,39 @@ impl Agent {
         self.tool_registry.scoped_to_authority(scope)
     }
 
-    pub(super) fn begin_inferred_completion_task(&mut self, prompt: &str) {
+    pub(super) fn begin_inferred_completion_task(&mut self, prompt: &str) -> Option<String> {
+        let continuation_goal = is_task_continuation_prompt(prompt)
+            .then(|| self.latest_explicit_human_goal())
+            .flatten();
         let contract = if self.execution_lane.kind == ExecutionLaneKind::Parent {
-            TaskCompletionContract::inferred(prompt)
+            if is_task_continuation_prompt(prompt) {
+                inherited_continuation_contract(
+                    self.completion.contract,
+                    continuation_goal.as_deref(),
+                )
+            } else {
+                TaskCompletionContract::inferred(prompt)
+            }
         } else {
             TaskCompletionContract::informational()
         };
         self.begin_completion_task(contract);
+        continuation_goal
+    }
+
+    fn latest_explicit_human_goal(&self) -> Option<String> {
+        self.messages.iter().rev().find_map(|message| {
+            let ChatCompletionRequestMessage::User(user) = message else {
+                return None;
+            };
+            if user.name.is_some() {
+                return None;
+            }
+            let text = try_message_content_string(message)?;
+            let text = text.trim();
+            (!text.is_empty() && !is_task_continuation_prompt(text))
+                .then(|| one_line_preview(text, 512))
+        })
     }
 
     pub(super) fn begin_completion_task(&mut self, contract: TaskCompletionContract) {
@@ -1207,6 +1235,39 @@ fn normalized_words(text: &str) -> String {
     normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Whether a human message is only asking Bonsai to resume the established
+/// task, rather than supplying a new goal whose few words should be inferred in
+/// isolation.
+pub(crate) fn is_task_continuation_prompt(prompt: &str) -> bool {
+    matches!(
+        action_directive(&normalized_words(prompt)),
+        "continue"
+            | "continue please"
+            | "go on"
+            | "go on please"
+            | "keep going"
+            | "keep going please"
+            | "carry on"
+            | "carry on please"
+            | "proceed"
+            | "proceed please"
+            | "resume"
+            | "resume please"
+    )
+}
+
+fn inherited_continuation_contract(
+    current: TaskCompletionContract,
+    previous_goal: Option<&str>,
+) -> TaskCompletionContract {
+    if current != TaskCompletionContract::informational() {
+        return current;
+    }
+    previous_goal
+        .map(TaskCompletionContract::inferred)
+        .unwrap_or_else(TaskCompletionContract::action)
+}
+
 fn contains_directive_clause(text: &str, commands: &[&str]) -> bool {
     if starts_with_command(text, commands) {
         return true;
@@ -1325,6 +1386,39 @@ mod tests {
     #[test]
     fn informational_answer_without_structured_work_is_complete() {
         assert!(completion_gaps(&evidence(TaskCompletionContract::informational())).is_empty());
+    }
+
+    #[test]
+    fn bare_continue_infers_action_authority() {
+        assert_eq!(
+            TaskCompletionContract::inferred("continue"),
+            TaskCompletionContract::action()
+        );
+    }
+
+    #[test]
+    fn continuation_inherits_the_active_workspace_contract() {
+        let contract = inherited_continuation_contract(
+            TaskCompletionContract::workspace_action(),
+            Some("Explain the API"),
+        );
+
+        assert_eq!(contract, TaskCompletionContract::workspace_action());
+    }
+
+    #[test]
+    fn restored_continuation_recovers_contract_from_prior_goal() {
+        let contract = inherited_continuation_contract(
+            TaskCompletionContract::informational(),
+            Some("Fix the parser and run tests"),
+        );
+
+        assert_eq!(contract.intent, TaskIntent::Mutation);
+        assert_eq!(
+            contract.effect,
+            CompletionEffectRequirement::WorkspaceMutation
+        );
+        assert!(contract.verification_required);
     }
 
     #[test]

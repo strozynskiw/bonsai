@@ -41,6 +41,9 @@ const PLANNING_RESEARCH_REJECTION_LIMIT: usize = 1;
 const REPEATED_FAILED_CALL_LIMIT: usize = 2;
 const REPEATED_FAILED_CALL_REJECTION_LIMIT: usize = 1;
 const FAILED_CALL_WINDOW: usize = 8;
+/// One rejected title-only turn is enough guidance. Repeating the metadata call
+/// after that proves the model is not advancing the human task.
+const SESSION_TITLE_ONLY_REJECTION_LIMIT: usize = 1;
 /// Detects and terminates the coding persona's silent non-progress spirals.
 /// Progress is based on observed effects and deduplicated evidence, never the
 /// spelling of a tool call. The terminal bound is provider-independent: a
@@ -64,6 +67,26 @@ const IMPLEMENTATION_STALL_EVIDENCE_HISTORY: usize = 4;
 enum ModelCallOutcome {
     Response(StreamedResponse),
     Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionTitleRunPolicy {
+    ExplicitHumanTask,
+    ContinuationOrAutomatic,
+}
+
+impl SessionTitleRunPolicy {
+    fn for_human_prompt(prompt: &str) -> Self {
+        if is_task_continuation_prompt(prompt) {
+            Self::ContinuationOrAutomatic
+        } else {
+            Self::ExplicitHumanTask
+        }
+    }
+
+    const fn allows_initial_attempt(self) -> bool {
+        matches!(self, Self::ExplicitHumanTask)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -190,7 +213,11 @@ fn build_assistant_message(response: &StreamedResponse) -> Result<ChatCompletion
 impl Agent {
     /// Shared preamble of [`Self::run`] and [`Self::run_with_queue`]: arm the
     /// turn with the fresh user input before either hands off to the run loop.
-    async fn begin_run(&mut self, input: &UserInput, sink: &SharedSink) -> Result<()> {
+    async fn begin_run(
+        &mut self,
+        input: &UserInput,
+        sink: &SharedSink,
+    ) -> Result<SessionTitleRunPolicy> {
         // A human-submitted turn resets the peer hop chain (anti-loop): only
         // auto-wake turns carry hops forward.
         if let Some(bus) = &self.peer_bus {
@@ -199,7 +226,15 @@ impl Agent {
         self.begin_verification_observation_window();
         self.refresh_execution_policy_snapshot();
         self.set_planning_advisory(None);
-        self.begin_inferred_completion_task(&input.text);
+        let continuation_goal = self.begin_inferred_completion_task(&input.text);
+        if let Some(goal) = continuation_goal {
+            self.push_harness_note(&format!(
+                "Continuation handoff: the latest human message resumes the established task; it \
+                 does not create a new goal. Continue from the current workspace, todo, and \
+                 verification state for this prior explicit human request: {goal}. Do not rename \
+                 the session unless a later human message introduces a distinct topic."
+            ));
+        }
         if let Some(note) = self.task_authority_note() {
             self.push_harness_note(note);
         }
@@ -216,7 +251,7 @@ impl Agent {
         // state is left behind for a turn the model never sees.
         self.inject_recalled_memory(&input.text).await;
         self.emit_context_updated(sink);
-        Ok(())
+        Ok(SessionTitleRunPolicy::for_human_prompt(&input.text))
     }
 
     pub async fn run(
@@ -225,9 +260,14 @@ impl Agent {
         cancellation_token: CancellationToken,
         sink: SharedSink,
     ) -> Result<AgentRunResult> {
-        self.begin_run(&UserInput::from_text(user_input), &sink)
+        let session_title_policy = self
+            .begin_run(&UserInput::from_text(user_input), &sink)
             .await?;
-        self.run_current_context(cancellation_token, sink).await
+        let result = self
+            .run_current_context_inner(cancellation_token.into(), sink, None, session_title_policy)
+            .await;
+        self.finish_verification_run(&result).await;
+        result
     }
 
     #[cfg(test)]
@@ -249,9 +289,14 @@ impl Agent {
         sink: SharedSink,
         mut queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
     ) -> Result<AgentRunResult> {
-        self.begin_run(&input, &sink).await?;
+        let session_title_policy = self.begin_run(&input, &sink).await?;
         let result = self
-            .run_current_context_inner(cancellation, sink, Some(&mut queued_messages))
+            .run_current_context_inner(
+                cancellation,
+                sink,
+                Some(&mut queued_messages),
+                session_title_policy,
+            )
             .await;
         self.finish_verification_run(&result).await;
         result
@@ -263,7 +308,12 @@ impl Agent {
         sink: SharedSink,
     ) -> Result<AgentRunResult> {
         let result = self
-            .run_current_context_inner(cancellation_token.into(), sink, None)
+            .run_current_context_inner(
+                cancellation_token.into(),
+                sink,
+                None,
+                SessionTitleRunPolicy::ContinuationOrAutomatic,
+            )
             .await;
         self.finish_verification_run(&result).await;
         result
@@ -276,19 +326,32 @@ impl Agent {
         mut queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
     ) -> Result<AgentRunResult> {
         let result = self
-            .run_current_context_inner(cancellation, sink, Some(&mut queued_messages))
+            .run_current_context_inner(
+                cancellation,
+                sink,
+                Some(&mut queued_messages),
+                SessionTitleRunPolicy::ContinuationOrAutomatic,
+            )
             .await;
         self.finish_verification_run(&result).await;
         result
     }
 
-    pub(super) async fn run_current_context_inner(
+    async fn run_current_context_inner(
         &mut self,
         cancellation: RunCancellation,
         sink: SharedSink,
         queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
+        session_title_policy: SessionTitleRunPolicy,
     ) -> Result<AgentRunResult> {
-        let result = coordinator::run(self, cancellation, sink, queued_messages).await;
+        let result = coordinator::run(
+            self,
+            cancellation,
+            sink,
+            queued_messages,
+            session_title_policy,
+        )
+        .await;
         // Every run variant funnels through here, so this is the one terminal
         // outcome line the support lifecycle log needs.
         let outcome = match &result {
@@ -1548,8 +1611,114 @@ fn resolve_guard<T>(
 
 type PlanningResearchAction = GuardAction<String>;
 
+type SessionTitleAction = GuardAction<HashMap<String, String>>;
+
+#[derive(Debug)]
+struct SessionTitleGuard {
+    policy: SessionTitleRunPolicy,
+    handled: bool,
+    title_only_rejections: usize,
+}
+
+impl Default for SessionTitleGuard {
+    fn default() -> Self {
+        Self::new(SessionTitleRunPolicy::ContinuationOrAutomatic)
+    }
+}
+
+impl SessionTitleGuard {
+    const fn new(policy: SessionTitleRunPolicy) -> Self {
+        Self {
+            policy,
+            handled: false,
+            title_only_rejections: 0,
+        }
+    }
+
+    fn action_for(&mut self, tool_calls: &[ToolCall]) -> Option<SessionTitleAction> {
+        let title_calls = tool_calls
+            .iter()
+            .filter(|tool_call| tool_call.name == "set_session_title")
+            .collect::<Vec<_>>();
+        if title_calls.is_empty() {
+            self.title_only_rejections = 0;
+            return None;
+        }
+
+        if self.policy.allows_initial_attempt() && !self.handled {
+            if title_calls.len() == 1 {
+                return None;
+            }
+            let rejected = title_calls
+                .into_iter()
+                .skip(1)
+                .map(|tool_call| (tool_call.id.clone(), self.rejection_message().to_string()))
+                .collect();
+            return Some(GuardAction::Reject(rejected));
+        }
+
+        if title_calls.len() == tool_calls.len() {
+            if self.title_only_rejections >= SESSION_TITLE_ONLY_REJECTION_LIMIT {
+                return Some(GuardAction::Stop(session_title_loop_stop_message()));
+            }
+            self.title_only_rejections = self.title_only_rejections.saturating_add(1);
+        } else {
+            self.title_only_rejections = 0;
+        }
+        Some(GuardAction::Reject(
+            title_calls
+                .into_iter()
+                .map(|tool_call| (tool_call.id.clone(), self.rejection_message().to_string()))
+                .collect(),
+        ))
+    }
+
+    fn observe(&mut self, observations: &[ToolCallObservation]) {
+        if observations.iter().any(|observation| {
+            observation.tool_name == "set_session_title"
+                || observation.status != crate::output::ToolExecutionStatus::Skipped
+        }) {
+            self.handled = true;
+        }
+    }
+
+    fn reset(&mut self, policy: SessionTitleRunPolicy) {
+        *self = Self::new(policy);
+    }
+
+    const fn rejection_message(&self) -> &'static str {
+        match self.policy {
+            SessionTitleRunPolicy::ExplicitHumanTask => session_title_rejection_message(),
+            SessionTitleRunPolicy::ContinuationOrAutomatic => {
+                continuation_title_rejection_message()
+            }
+        }
+    }
+}
+
+const fn session_title_rejection_message() -> &'static str {
+    "set_session_title is limited to one attempt before substantive work in each explicit human \
+     turn. It was already attempted or task work has begun. Do not call it for Harness notes, \
+     retries, `continue`, corrections, or phase changes; perform the pending substantive action now."
+}
+
+const fn continuation_title_rejection_message() -> &'static str {
+    "set_session_title is unavailable on continuation, retry, and automatic runs because no new \
+     human task boundary exists. Preserve the current title and perform the pending substantive \
+     action now."
+}
+
+fn session_title_loop_stop_message() -> String {
+    "Session-title loop guard stopped the run after set_session_title was repeated despite an \
+     explicit rejection. The title is metadata and was already handled, but no substantive task \
+     action followed. Partial workspace and conversation state are preserved."
+        .to_string()
+}
+
 #[derive(Debug, Clone, Default)]
 struct ToolRejections {
+    /// Title calls after the one metadata attempt permitted at a human boundary.
+    session_title: HashMap<String, String>,
     /// Mutations planned before newly discovered or changed scoped steering was
     /// active. The update is injected and the model must re-plan the write.
     scoped_steering: HashMap<String, String>,
@@ -1578,6 +1747,10 @@ struct ToolRejections {
 
 impl ToolRejections {
     fn message_for(&self, tool_call: &ToolCall) -> Option<String> {
+        if let Some(message) = self.session_title.get(&tool_call.id) {
+            return Some(message.clone());
+        }
+
         if let Some(message) = self.planning_research.as_deref()
             && !planning_tool_makes_progress(&tool_call.name)
         {
@@ -3700,6 +3873,75 @@ mod tests {
         status: crate::output::ToolExecutionStatus,
     ) -> ToolCallObservation {
         ToolCallObservation::new(&call(name, args), status)
+    }
+
+    #[test]
+    fn session_title_guard_rejects_then_stops_a_title_only_loop() {
+        let mut guard = SessionTitleGuard::new(SessionTitleRunPolicy::ContinuationOrAutomatic);
+        let title = call(
+            "set_session_title",
+            r#"{"title":"Isolate TUI verification","episode_action":"same_topic"}"#,
+        );
+        let Some(GuardAction::Reject(rejected)) = guard.action_for(std::slice::from_ref(&title))
+        else {
+            panic!("the first continuation title should be rejected");
+        };
+        assert_eq!(rejected.len(), 1);
+        assert!(matches!(
+            guard.action_for(std::slice::from_ref(&title)),
+            Some(GuardAction::Stop(_))
+        ));
+    }
+
+    #[test]
+    fn session_title_guard_allows_only_one_title_in_the_initial_batch() {
+        let mut guard = SessionTitleGuard::new(SessionTitleRunPolicy::ExplicitHumanTask);
+        let first = call(
+            "set_session_title",
+            r#"{"title":"First","episode_action":"new_topic"}"#,
+        );
+        let mut second = call(
+            "set_session_title",
+            r#"{"title":"Second","episode_action":"new_topic"}"#,
+        );
+        second.id = "call-second".to_string();
+
+        let Some(GuardAction::Reject(rejected)) = guard.action_for(&[first, second]) else {
+            panic!("extra title calls should be rejected");
+        };
+
+        assert!(rejected.contains_key("call-second"));
+    }
+
+    #[test]
+    fn failed_substantive_work_closes_the_title_window() {
+        let mut guard = SessionTitleGuard::new(SessionTitleRunPolicy::ExplicitHumanTask);
+        let failed_read = call("read", r#"{"path":"missing.rs"}"#);
+        guard.observe(&[ToolCallObservation::new(
+            &failed_read,
+            crate::output::ToolExecutionStatus::Failed,
+        )]);
+        let title = call(
+            "set_session_title",
+            r#"{"title":"Late title","episode_action":"new_topic"}"#,
+        );
+
+        assert!(matches!(
+            guard.action_for(&[title]),
+            Some(GuardAction::Reject(_))
+        ));
+    }
+
+    #[test]
+    fn bare_continuation_disables_session_title_attempts() {
+        assert_eq!(
+            SessionTitleRunPolicy::for_human_prompt("continue"),
+            SessionTitleRunPolicy::ContinuationOrAutomatic
+        );
+        assert_eq!(
+            SessionTitleRunPolicy::for_human_prompt("fix it properly"),
+            SessionTitleRunPolicy::ExplicitHumanTask
+        );
     }
 
     #[test]
