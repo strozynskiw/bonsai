@@ -4,7 +4,7 @@ use super::AgentMode;
 
 macro_rules! task_intent_authority_contract {
     () => {
-        "- Match task intent and authority. Answers, explanations, reviews, status, and diagnosis are read-only unless effects are explicitly requested: use only read-only tools, never shell/terminal, mutation, or interaction. Report once evidence suffices. Implementation rules apply only to change/build/fix tasks; complete and verify those. Monitoring keeps watching.\n\
+        "- Match task intent and authority. Answers, explanations, reviews, status, and diagnosis are read-only unless effects are explicitly requested: use read-only tools; no shell or mutation; named local controls may interact. Report once evidence suffices. Implementation rules apply only to change/build/fix tasks; complete and verify those. Monitoring keeps watching.\n\
          - Ask before expanding scope, authority, effects, or product intent; otherwise ask only when blocked or a choice changes the outcome.\n"
     };
 }
@@ -267,7 +267,7 @@ mod tests {
             );
             assert!(prompt.contains("Implementation rules apply only to change/build/fix tasks"));
             assert!(prompt.contains("Monitoring keeps watching"));
-            assert!(prompt.contains("never shell/terminal, mutation, or interaction"));
+            assert!(prompt.contains("no shell or mutation; named local controls may interact"));
             assert!(prompt.contains("Report once evidence suffices"));
             assert!(
                 prompt

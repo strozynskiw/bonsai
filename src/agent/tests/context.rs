@@ -1,5 +1,6 @@
 use super::*;
 use crate::context_view::ContextSourceKind;
+use crate::interaction::InteractionService;
 
 fn cache_strategy_test_context() -> crate::context::ProjectContextSnapshot {
     crate::context::ProjectContextSnapshot {
@@ -405,6 +406,35 @@ async fn restored_bare_continuation_recovers_mutation_tool_authority() {
         Some("Fix the parser and run tests")
     );
     assert!(names.iter().any(|name| name == "bash"), "tools: {names:?}");
+}
+
+#[tokio::test]
+async fn planning_request_keeps_mode_switch_in_coding_tool_surface() {
+    let fixture = TestFixture::new();
+    let interaction = Arc::new(InteractionService::noninteractive());
+    let mut coding_registry = ToolRegistry::new();
+    coding_registry.register(Arc::new(
+        crate::tool::start_new_plan::StartNewPlanTool::new(interaction.clone()),
+    ));
+    coding_registry.register(Arc::new(crate::tool::question::QuestionTool::new(
+        interaction,
+    )));
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        Arc::new(coding_registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    agent.begin_inferred_completion_task("Transfer the #168 plan into the live canvas there.");
+
+    let task_registry = agent.tool_registry_for_current_task();
+
+    assert!(task_registry.get("start_new_plan").is_some());
+    assert!(task_registry.get("question").is_none());
 }
 
 #[tokio::test]

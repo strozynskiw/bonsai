@@ -938,11 +938,11 @@ impl ToolAuthorityScope {
             Self::Full => true,
             Self::ReadOnlyTask => {
                 matches!(effect, ToolEffectPolicy::ReadOnly)
-                    || matches!(name, "recall" | "set_session_title")
+                    || matches!(name, "recall" | "set_session_title" | "start_new_plan")
             }
             Self::SourceReview => {
                 (matches!(effect, ToolEffectPolicy::ReadOnly) && name != "git")
-                    || matches!(name, "recall" | "set_session_title")
+                    || matches!(name, "recall" | "set_session_title" | "start_new_plan")
             }
         }
     }
@@ -1329,7 +1329,7 @@ mod registry_tests {
     }
 
     #[test]
-    fn read_only_task_scope_hides_effectful_and_interaction_tools() {
+    fn read_only_task_scope_retains_safe_local_controls() {
         let mut registry = ToolRegistry::new();
         for (name, effect) in [
             ("read", ToolEffectPolicy::ReadOnly),
@@ -1339,6 +1339,7 @@ mod registry_tests {
             ("agent", ToolEffectPolicy::Delegated),
             ("recall", ToolEffectPolicy::LocalState),
             ("set_session_title", ToolEffectPolicy::LocalState),
+            ("start_new_plan", ToolEffectPolicy::LocalState),
         ] {
             registry.register(Arc::new(EffectTool { name, effect }));
         }
@@ -1348,13 +1349,28 @@ mod registry_tests {
 
         assert_eq!(
             scoped.names().collect::<Vec<_>>(),
-            ["read", "recall", "set_session_title"]
+            ["read", "recall", "set_session_title", "start_new_plan"]
         );
         assert!(scoped.get("bash").is_none());
         assert!(scoped.get("edit").is_none());
         assert!(scoped.get("question").is_none());
         assert!(scoped.get("agent").is_none());
         assert!(scoped.get("recall").is_some());
+        assert!(scoped.get("start_new_plan").is_some());
+    }
+
+    #[test]
+    fn source_review_scope_retains_plan_mode_switch() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EffectTool {
+            name: "start_new_plan",
+            effect: ToolEffectPolicy::LocalState,
+        }));
+        let registry = Arc::new(registry);
+
+        let scoped = registry.scoped_to_authority(ToolAuthorityScope::SourceReview);
+
+        assert!(scoped.get("start_new_plan").is_some());
     }
 
     #[test]

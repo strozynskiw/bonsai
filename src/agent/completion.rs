@@ -809,7 +809,7 @@ impl Agent {
 
     pub(super) fn task_authority_note(&self) -> Option<&'static str> {
         self.completion.contract.is_read_only_task().then_some(
-            "Active task authority is read-only. The callable tools are intentionally limited to structured inspection; do not invoke or emit shell/terminal, mutation, interaction, or other unavailable tool calls. Answer directly once the requested evidence is collected.",
+            "Active task authority is read-only. The callable tools are intentionally limited to structured inspection and safe local controls; do not invoke or emit shell/terminal, project/external mutation, unrelated interaction, or other unavailable tool calls. Answer directly once the requested evidence is collected, unless an available mode-transition tool is the requested outcome.",
         )
     }
 
