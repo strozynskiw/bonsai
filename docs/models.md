@@ -148,6 +148,32 @@ priced at its own rate. The `/usage` dashboard and session
 [cost budget](sessions.md#budgets) consume these figures; cost enforcement is
 exact only while every contributing turn has known usage and pricing.
 
+Providers with time-of-day billing declare shared recurring, half-open UTC
+windows on the connection; each affected target declares its own peak rates.
+The base `pricing` and `pricing_tiers` remain the off-peak schedule, while
+`peak_pricing` and optional `peak_pricing_tiers` apply inside a window:
+
+```toml
+[[connections]]
+id = "example"
+# ... auth, transport, and endpoint fields ...
+peak_pricing_windows_utc = [
+  { start = "01:00", end = "04:00" },
+  { start = "06:00", end = "10:00" },
+]
+
+[[targets]]
+connection = "example"
+model = "example/model"
+pricing = { input_micros_per_million = 220000, output_micros_per_million = 660000 }
+peak_pricing = { input_micros_per_million = 440000, output_micros_per_million = 1320000 }
+```
+
+Windows recur daily, use `HH:MM` UTC, include their start, and exclude their
+end. A start later than the end wraps across midnight. A completed response is
+priced using the start time of its final provider attempt, so a long stream
+that crosses a boundary keeps the rate in effect when that attempt began.
+
 ## Prompt-cache shaping
 
 Providers differ in how a stable prefix must be presented; the catalog

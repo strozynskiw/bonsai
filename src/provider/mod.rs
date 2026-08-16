@@ -42,7 +42,7 @@ pub(crate) use request_preview::{
 pub(crate) use token::PromptEstimatorCacheKey;
 pub use token::{
     EstimateConfidence, ModelPricing, ModelPricingSchedule, ModelPricingTier, PromptEstimate,
-    PromptEstimator, TokenCounterKind,
+    PromptEstimator, TokenCounterKind, UtcPricingWindow,
 };
 
 use std::error::Error as StdError;

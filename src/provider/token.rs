@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool};
+use serde::de;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokenizers::Tokenizer;
@@ -135,16 +136,93 @@ pub struct ModelPricingTier {
     pub pricing: ModelPricing,
 }
 
-/// A model's base token rates plus any prompt-length-dependent tiers.
+const MINUTES_PER_DAY: i64 = 24 * 60;
+const MILLIS_PER_MINUTE: i64 = 60_000;
+
+/// One recurring, half-open UTC window during which peak rates apply.
+///
+/// Catalog values use `HH:MM` strings. A window whose start is later than its
+/// end wraps across midnight; equal endpoints are rejected as ambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UtcPricingWindow {
+    start_minute: u16,
+    end_minute: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUtcPricingWindow {
+    start: Box<str>,
+    end: Box<str>,
+}
+
+impl<'de> Deserialize<'de> for UtcPricingWindow {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawUtcPricingWindow::deserialize(deserializer)?;
+        let start_minute = parse_utc_time(&raw.start).map_err(de::Error::custom)?;
+        let end_minute = parse_utc_time(&raw.end).map_err(de::Error::custom)?;
+        if start_minute == end_minute {
+            return Err(de::Error::custom(
+                "UTC pricing window start and end must differ",
+            ));
+        }
+        Ok(Self {
+            start_minute,
+            end_minute,
+        })
+    }
+}
+
+impl UtcPricingWindow {
+    pub(crate) const fn start_minute(self) -> u16 {
+        self.start_minute
+    }
+
+    pub(crate) const fn end_minute(self) -> u16 {
+        self.end_minute
+    }
+
+    fn contains_timestamp_ms(self, timestamp_ms: i64) -> bool {
+        let minute = timestamp_ms
+            .div_euclid(MILLIS_PER_MINUTE)
+            .rem_euclid(MINUTES_PER_DAY) as u16;
+        if self.start_minute < self.end_minute {
+            (self.start_minute..self.end_minute).contains(&minute)
+        } else {
+            minute >= self.start_minute || minute < self.end_minute
+        }
+    }
+}
+
+fn parse_utc_time(value: &str) -> std::result::Result<u16, String> {
+    let Some((hour, minute)) = value.split_once(':') else {
+        return Err(format!("UTC time `{value}` must use HH:MM"));
+    };
+    if hour.len() != 2 || minute.len() != 2 {
+        return Err(format!("UTC time `{value}` must use HH:MM"));
+    }
+    let hour = hour
+        .parse::<u16>()
+        .map_err(|_| format!("UTC time `{value}` has an invalid hour"))?;
+    let minute = minute
+        .parse::<u16>()
+        .map_err(|_| format!("UTC time `{value}` has an invalid minute"))?;
+    if hour > 23 || minute > 59 {
+        return Err(format!("UTC time `{value}` is outside 00:00-23:59"));
+    }
+    Ok(hour * 60 + minute)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelPricingSchedule {
+struct TokenRateSchedule {
     base: ModelPricing,
     tiers: Box<[ModelPricingTier]>,
 }
 
-impl ModelPricingSchedule {
-    /// Builds a schedule from base rates and ordered input-size tiers.
-    pub fn new(base: ModelPricing, mut tiers: Vec<ModelPricingTier>) -> Self {
+impl TokenRateSchedule {
+    fn new(base: ModelPricing, mut tiers: Vec<ModelPricingTier>) -> Self {
         tiers.retain(|tier| tier.minimum_input_tokens > 0);
         tiers.sort_by_key(|tier| tier.minimum_input_tokens);
         tiers.dedup_by_key(|tier| tier.minimum_input_tokens);
@@ -154,18 +232,7 @@ impl ModelPricingSchedule {
         }
     }
 
-    /// Builds a schedule with one rate at every prompt length.
-    pub fn flat(pricing: ModelPricing) -> Self {
-        Self::new(pricing, Vec::new())
-    }
-
-    /// Returns the rates used at and below the first tier threshold.
-    pub const fn base(&self) -> ModelPricing {
-        self.base
-    }
-
-    /// Selects rates from the provider-reported prompt-token count.
-    pub fn pricing_for_prompt_tokens(&self, prompt_tokens: u32) -> ModelPricing {
+    fn pricing_for_prompt_tokens(&self, prompt_tokens: u32) -> ModelPricing {
         self.tiers
             .iter()
             .rev()
@@ -173,17 +240,79 @@ impl ModelPricingSchedule {
             .map(|tier| tier.pricing)
             .unwrap_or(self.base)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PeakRateSchedule {
+    rates: TokenRateSchedule,
+    windows: Box<[UtcPricingWindow]>,
+}
+
+/// A model's standard token rates plus prompt-length and UTC peak overrides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPricingSchedule {
+    standard: TokenRateSchedule,
+    peak: Option<PeakRateSchedule>,
+}
+
+impl ModelPricingSchedule {
+    /// Builds a schedule from base rates and ordered input-size tiers.
+    pub fn new(base: ModelPricing, tiers: Vec<ModelPricingTier>) -> Self {
+        Self {
+            standard: TokenRateSchedule::new(base, tiers),
+            peak: None,
+        }
+    }
+
+    /// Adds recurring UTC windows with their own base and input-size rates.
+    pub fn with_peak_pricing(
+        mut self,
+        base: ModelPricing,
+        tiers: Vec<ModelPricingTier>,
+        mut windows: Vec<UtcPricingWindow>,
+    ) -> Self {
+        windows.sort_by_key(|window| (window.start_minute, window.end_minute));
+        windows.dedup();
+        self.peak = (!windows.is_empty()).then(|| PeakRateSchedule {
+            rates: TokenRateSchedule::new(base, tiers),
+            windows: windows.into_boxed_slice(),
+        });
+        self
+    }
+
+    /// Builds a schedule with one rate at every prompt length.
+    pub fn flat(pricing: ModelPricing) -> Self {
+        Self::new(pricing, Vec::new())
+    }
+
+    /// Returns the rates used at and below the first tier threshold.
+    pub const fn base(&self) -> ModelPricing {
+        self.standard.base
+    }
+
+    /// Selects standard rates from the provider-reported prompt-token count.
+    pub fn pricing_for_prompt_tokens(&self, prompt_tokens: u32) -> ModelPricing {
+        self.standard.pricing_for_prompt_tokens(prompt_tokens)
+    }
 
     /// Selects the display rate appropriate for a configured context window.
     pub fn pricing_for_context_window(&self, context_window: Option<u32>) -> ModelPricing {
         context_window
             .map(|tokens| self.pricing_for_prompt_tokens(tokens))
-            .unwrap_or(self.base)
+            .unwrap_or(self.base())
     }
 
-    /// Selects rates from the prompt-token count in one completed response.
-    pub fn pricing_for_usage(&self, usage: TokenUsage) -> ModelPricing {
-        self.pricing_for_prompt_tokens(usage.prompt_tokens)
+    /// Selects prompt-length and peak rates at an epoch-millisecond timestamp.
+    pub fn pricing_for_usage_at(&self, usage: TokenUsage, timestamp_ms: i64) -> ModelPricing {
+        self.peak
+            .as_ref()
+            .filter(|peak| {
+                peak.windows
+                    .iter()
+                    .any(|window| window.contains_timestamp_ms(timestamp_ms))
+            })
+            .map(|peak| peak.rates.pricing_for_prompt_tokens(usage.prompt_tokens))
+            .unwrap_or_else(|| self.pricing_for_prompt_tokens(usage.prompt_tokens))
     }
 }
 
@@ -1053,6 +1182,97 @@ mod tests {
         assert_eq!(schedule.pricing_for_prompt_tokens(200_001), medium);
         assert_eq!(schedule.pricing_for_prompt_tokens(400_000), medium);
         assert_eq!(schedule.pricing_for_prompt_tokens(400_001), high);
+    }
+
+    #[test]
+    fn pricing_schedule_uses_peak_rates_inside_each_utc_window() {
+        let standard = ModelPricing::new(1_000_000, 2_000_000);
+        let peak = ModelPricing::new(3_000_000, 4_000_000);
+        let windows = [
+            json!({"start": "01:00", "end": "04:00"}),
+            json!({"start": "06:00", "end": "10:00"}),
+        ]
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<Vec<UtcPricingWindow>, _>>()
+        .expect("valid UTC pricing windows");
+        let schedule =
+            ModelPricingSchedule::flat(standard).with_peak_pricing(peak, Vec::new(), windows);
+        let usage = TokenUsage {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            input_cache: None,
+        };
+        let rate_at = |hour: i64, minute: i64| {
+            schedule
+                .pricing_for_usage_at(usage, (hour * 60 + minute) * MILLIS_PER_MINUTE)
+                .input_micros_per_million
+        };
+
+        assert_eq!(
+            [
+                rate_at(0, 59),
+                rate_at(1, 0),
+                rate_at(3, 59),
+                rate_at(4, 0),
+                rate_at(6, 0),
+                rate_at(9, 59),
+                rate_at(10, 0),
+            ],
+            [
+                standard.input_micros_per_million,
+                peak.input_micros_per_million,
+                peak.input_micros_per_million,
+                standard.input_micros_per_million,
+                peak.input_micros_per_million,
+                peak.input_micros_per_million,
+                standard.input_micros_per_million,
+            ]
+        );
+    }
+
+    #[test]
+    fn pricing_schedule_supports_peak_windows_across_midnight() {
+        let standard = ModelPricing::new(1_000_000, 2_000_000);
+        let peak = ModelPricing::new(3_000_000, 4_000_000);
+        let window = serde_json::from_value(json!({"start": "23:30", "end": "01:15"}))
+            .expect("valid wrapping UTC pricing window");
+        let schedule =
+            ModelPricingSchedule::flat(standard).with_peak_pricing(peak, Vec::new(), vec![window]);
+        let usage = TokenUsage {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            input_cache: None,
+        };
+        let rate_at = |hour: i64, minute: i64| {
+            schedule
+                .pricing_for_usage_at(usage, (hour * 60 + minute) * MILLIS_PER_MINUTE)
+                .input_micros_per_million
+        };
+
+        assert_eq!(
+            [
+                rate_at(23, 29),
+                rate_at(23, 30),
+                rate_at(0, 0),
+                rate_at(1, 15)
+            ],
+            [
+                standard.input_micros_per_million,
+                peak.input_micros_per_million,
+                peak.input_micros_per_million,
+                standard.input_micros_per_million,
+            ]
+        );
+    }
+
+    #[test]
+    fn utc_pricing_window_rejects_equal_endpoints() {
+        let error =
+            serde_json::from_value::<UtcPricingWindow>(json!({"start": "04:00", "end": "04:00"}))
+                .expect_err("equal endpoints are ambiguous");
+
+        assert!(error.to_string().contains("start and end must differ"));
     }
 
     #[test]

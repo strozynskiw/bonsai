@@ -374,8 +374,11 @@ base_url_env = "DEEPSEEK_BASE_URL"
 default_model = "deepseek/deepseek-v4-flash"
 default_endpoint_path = "chat/completions"
 default_token_counter = "tiktoken"
+# Daily peak windows published for the V4 API rates effective 2026-08-16
+# 16:00 UTC. Endpoints are half-open, so 04:00 and 10:00 use off-peak rates.
+peak_pricing_windows_utc = [{ start = "01:00", end = "04:00" }, { start = "06:00", end = "10:00" }]
 # DeepSeek does automatic, on-disk, strictly prefix-based context caching (a hit
-# is ~50x cheaper than a miss), reported as prompt_cache_hit_tokens /
+# is ~30x cheaper than a miss), reported as prompt_cache_hit_tokens /
 # prompt_cache_miss_tokens. Enable the OpenAI-family cache key + hit accounting.
 prompt_cache = true
 # Append-only project-state layout: store volatile state as immutable in-place

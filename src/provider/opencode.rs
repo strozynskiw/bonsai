@@ -2635,6 +2635,7 @@ mod tests {
                     default_model: None,
                     default_endpoint_path: Some("chat/completions".into()),
                     default_token_counter: Some(TokenCounterKind::Qwen3),
+                    peak_pricing_windows_utc: Vec::new(),
                     models_dev_provider: Some("opencode-go".parse().unwrap()),
                     model_exclude_prefixes: Vec::new(),
                     reasoning_codec: None,

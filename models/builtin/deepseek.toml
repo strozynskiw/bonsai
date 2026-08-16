@@ -2,13 +2,13 @@
 #
 # `/refresh` combines the authenticated `/models` response (current account
 # availability) with the Models.dev `deepseek` rows (prices, limits, and
-# capabilities). The values below are offline fallbacks. Only the deliberate
-# 32K output safety cap and the provider's two effective reasoning levels are
-# pinned, so refreshed prices and capabilities can change without a release.
+# capabilities). The values below are offline fallbacks. The deliberate 32K
+# output safety cap, two effective reasoning levels, and time-dependent prices
+# are pinned; models.dev cannot represent recurring peak windows.
 #
 # Context caching is automatic, on-disk, and strictly prefix-based: a request
 # hits the cache only when it fully matches a cached prefix unit (docs:
-# guides/kv_cache). A hit is ~50x cheaper than a miss, reported per response as
+# guides/kv_cache). A hit is ~30x cheaper than a miss, reported per response as
 # prompt_cache_hit_tokens / prompt_cache_miss_tokens. The `deepseek` connection
 # selects prompt_cache_policy = "rolling-history" so bonsai stores volatile
 # project state as immutable append-only history — every prior request stays an
@@ -45,15 +45,17 @@ context_window = 1000000
 # thinking enabled an uncapped turn can burn the entire allowance on
 # chain-of-thought. 32000 matches the reference-agent output clamp and still
 # leaves room for thinking plus a large diff. The field pin keeps Models.dev's
-# 384K maximum from clobbering the deliberate cap while leaving pricing and
-# capabilities refreshable.
-pinned_fields = ["output-limit", "reasoning"]
+# 384K maximum from clobbering the deliberate cap while leaving capabilities
+# refreshable.
+pinned_fields = ["output-limit", "pricing", "reasoning"]
 output_limit = 32000
 features = ["tool-call", "reasoning", "structured-output"]
-# Native pay-as-you-go pricing (docs: quick_start/pricing). Cache hit is the
-# 50x-cheaper input rate; automatic caching has no separate write charge, so no
-# cache_write_micros is set.
-pricing = { input_micros_per_million = 140000, output_micros_per_million = 280000, cache_read_micros_per_million = 2800 }
+# Native off-peak and peak pay-as-you-go pricing (docs: quick_start/pricing),
+# effective 2026-08-16 16:00 UTC. Automatic caching has no separate write
+# charge, so no cache_write_micros is set. The recurring UTC windows live on
+# the connection because both V4 models share them.
+pricing = { input_micros_per_million = 220000, output_micros_per_million = 660000, cache_read_micros_per_million = 7000 }
+peak_pricing = { input_micros_per_million = 440000, output_micros_per_million = 1320000, cache_read_micros_per_million = 14000 }
 
 # Toggle thinking on/off (off = cheapest non-thinking flash) or dial the effort.
 [[targets.reasoning_options]]
@@ -72,10 +74,11 @@ reasoning_codec = "zai-thinking"
 context_window = 1000000
 recommended_effort = "high"
 # Same deliberate 32K max_tokens cap as flash — see the comment there.
-pinned_fields = ["output-limit", "reasoning"]
+pinned_fields = ["output-limit", "pricing", "reasoning"]
 output_limit = 32000
 features = ["tool-call", "reasoning", "structured-output"]
-pricing = { input_micros_per_million = 435000, output_micros_per_million = 870000, cache_read_micros_per_million = 3625 }
+pricing = { input_micros_per_million = 660000, output_micros_per_million = 1980000, cache_read_micros_per_million = 22000 }
+peak_pricing = { input_micros_per_million = 1320000, output_micros_per_million = 3960000, cache_read_micros_per_million = 44000 }
 
 [[targets.reasoning_options]]
 type = "toggle"

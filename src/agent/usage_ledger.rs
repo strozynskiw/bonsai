@@ -94,6 +94,19 @@ pub(super) struct UsageTurnDiagnostics {
     pub(super) prefix_hash: Option<String>,
 }
 
+impl UsageTurnDiagnostics {
+    fn pricing_timestamp_ms(&self) -> i64 {
+        let final_attempt_latency = self
+            .provider_attempts
+            .last()
+            .and_then(|attempt| i64::try_from(attempt.latency_ms).ok())
+            .unwrap_or(0);
+        self.created_at_ms
+            .saturating_sub(final_attempt_latency)
+            .max(0)
+    }
+}
+
 /// Token-usage and cost accounting for a session: the most recent response plus
 /// running session totals. Reset together via [`SessionUsage::default`], so no
 /// individual field can be forgotten when clearing or restoring a session.
@@ -179,9 +192,10 @@ impl SessionUsage {
         pricing: Option<&ModelPricingSchedule>,
         diagnostics: UsageTurnDiagnostics,
     ) {
+        let pricing_timestamp_ms = diagnostics.pricing_timestamp_ms();
         let pricing = pricing.map(|schedule| {
             usage
-                .map(|usage| schedule.pricing_for_usage(usage))
+                .map(|usage| schedule.pricing_for_usage_at(usage, pricing_timestamp_ms))
                 .unwrap_or_else(|| schedule.base())
         });
         self.last_usage = usage;
@@ -652,11 +666,12 @@ fn percent_u64(part: u64, total: u64) -> Option<u64> {
 mod tests {
     use super::{SessionUsage, UsageTurnDiagnostics};
     use crate::agent::{
-        ContextRewriteKind, ExecutionLane, ExecutionLaneKind, UsageTotals, UsageTurn,
-        UsageTurnStatus,
+        ContextRewriteKind, ExecutionLane, ExecutionLaneKind, ProviderAttemptOutcome,
+        ProviderAttemptReport, UsageTotals, UsageTurn, UsageTurnStatus,
     };
     use crate::provider::{
         InputCacheUsage, ModelPricing, ModelPricingSchedule, ModelPricingTier, TokenUsage,
+        UtcPricingWindow,
     };
 
     fn pricing() -> ModelPricing {
@@ -741,6 +756,56 @@ mod tests {
         assert_ne!(
             usage.last_turn_cost_micros,
             Some(base.cost_micros_for_usage(high_tier_usage))
+        );
+    }
+
+    #[test]
+    fn peak_pricing_uses_the_final_provider_attempt_start_time() {
+        let standard = ModelPricing::new(1_000_000, 2_000_000);
+        let peak = ModelPricing::new(3_000_000, 4_000_000);
+        let window: UtcPricingWindow = serde_json::from_value(serde_json::json!({
+            "start": "01:00",
+            "end": "04:00"
+        }))
+        .expect("valid UTC pricing window");
+        let schedule =
+            ModelPricingSchedule::flat(standard).with_peak_pricing(peak, Vec::new(), vec![window]);
+        let turn_usage = TokenUsage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 0,
+            input_cache: None,
+        };
+        let final_attempt = ProviderAttemptReport {
+            attempt: 1,
+            outcome: ProviderAttemptOutcome::Completed,
+            latency_ms: 120_000,
+            assistant_chars: 0,
+            reasoning_chars: 0,
+            finish_reason: Some(crate::provider::FinishReason::Stop),
+            error_class: None,
+            backoff_ms: None,
+            prompt_tokens: Some(1_000_000),
+            completion_tokens: Some(0),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_measured_input_tokens: None,
+        };
+        let mut usage = SessionUsage::default();
+
+        usage.record_with_pricing_schedule(
+            Some(turn_usage),
+            Some(&schedule),
+            UsageTurnDiagnostics {
+                // Completion at 04:01 UTC; the final attempt began at 03:59.
+                created_at_ms: (4 * 60 + 1) * 60_000,
+                provider_attempts: vec![final_attempt],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            usage.last_turn_cost_micros,
+            Some(peak.cost_micros_for_usage(turn_usage))
         );
     }
 

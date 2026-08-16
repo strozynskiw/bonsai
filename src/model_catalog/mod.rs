@@ -290,6 +290,12 @@ pub(crate) enum CatalogError {
         model_id: ModelId,
         message: String,
     },
+    #[error("target `{connection_id}:{model_id}` has invalid peak pricing: {message}")]
+    InvalidPeakPricing {
+        connection_id: ConnectionId,
+        model_id: ModelId,
+        message: String,
+    },
     #[error("unknown connection `{id}`")]
     UnknownConnection { id: ConnectionId },
     #[error("unknown target `{connection_id}:{model_id}`")]
@@ -694,6 +700,8 @@ impl ModelCatalog {
             features,
             pricing: None,
             pricing_tiers: Vec::new(),
+            peak_pricing: None,
+            peak_pricing_tiers: Vec::new(),
             roles: Vec::new(),
             pinned: false,
             pinned_fields: Vec::new(),
@@ -1592,12 +1600,22 @@ fn resolve_target(
             .map(|base| ModelPricingSchedule::new(base, model.pricing_tiers.clone()))
     });
     let models_dev_pricing = models_dev.and_then(ModelsDevModel::pricing_schedule);
-    let (pricing_schedule, pricing_source) = choose_refreshed_metadata(
+    let (mut pricing_schedule, mut pricing_source) = choose_refreshed_metadata(
         target.pins(ModelMetadataField::Pricing),
         catalog_pricing,
         live_pricing,
         models_dev_pricing,
     );
+    if let Some(peak_pricing) = target.peak_pricing
+        && let Some(schedule) = pricing_schedule.take()
+    {
+        pricing_schedule = Some(schedule.with_peak_pricing(
+            peak_pricing,
+            target.peak_pricing_tiers.clone(),
+            connection.peak_pricing_windows_utc.clone(),
+        ));
+        pricing_source = Some(ModelMetadataSource::Catalog);
+    }
     let pricing = pricing_schedule
         .as_ref()
         .map(|schedule| schedule.pricing_for_context_window(context_window));
@@ -1755,6 +1773,21 @@ fn validate_catalog(
                 });
             }
         }
+        let mut peak_windows = HashSet::new();
+        for window in &connection.peak_pricing_windows_utc {
+            if !peak_windows.insert((window.start_minute(), window.end_minute())) {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: format!(
+                        "duplicate peak pricing window {:02}:{:02}-{:02}:{:02} UTC",
+                        window.start_minute() / 60,
+                        window.start_minute() % 60,
+                        window.end_minute() / 60,
+                        window.end_minute() % 60,
+                    ),
+                });
+            }
+        }
     }
 
     let mut target_keys = HashSet::new();
@@ -1802,6 +1835,53 @@ fn validate_catalog(
             }
         }
 
+        if target.peak_pricing.is_some() {
+            if target.pricing.is_none() {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: "peak rates require standard pricing".to_string(),
+                });
+            }
+            let has_peak_windows = connections.iter().any(|connection| {
+                connection.id == target.connection
+                    && !connection.peak_pricing_windows_utc.is_empty()
+            });
+            if !has_peak_windows {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: "peak rates require connection peak_pricing_windows_utc".to_string(),
+                });
+            }
+        } else if !target.peak_pricing_tiers.is_empty() {
+            return Err(CatalogError::InvalidPeakPricing {
+                connection_id: target.connection.clone(),
+                model_id: target.model.clone(),
+                message: "peak pricing tiers require base peak pricing".to_string(),
+            });
+        }
+        let mut peak_thresholds = HashSet::new();
+        for tier in &target.peak_pricing_tiers {
+            if tier.minimum_input_tokens == 0 {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: "peak tier thresholds must be greater than zero".to_string(),
+                });
+            }
+            if !peak_thresholds.insert(tier.minimum_input_tokens) {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: format!(
+                        "duplicate peak tier threshold {}",
+                        tier.minimum_input_tokens
+                    ),
+                });
+            }
+        }
+
         if target.enabled
             && target.is_default
             && let Some(first) =
@@ -1821,7 +1901,7 @@ fn validate_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ModelPricingTier, ReasoningEffort};
+    use crate::provider::{ModelPricingTier, ReasoningEffort, TokenUsage};
     fn source(name: &'static str, content: &'static str) -> TomlSource<'static> {
         TomlSource { name, content }
     }
@@ -4787,7 +4867,29 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
-    fn deepseek_builtin_refreshes_metadata_without_losing_safety_caps() {
+    fn catalog_rejects_peak_rates_without_connection_windows() {
+        let catalog = load_builtin_catalog().unwrap();
+        let mut connections = catalog.connections;
+        connections
+            .iter_mut()
+            .find(|connection| connection.id.as_str() == "deepseek")
+            .expect("DeepSeek connection")
+            .peak_pricing_windows_utc
+            .clear();
+
+        assert!(matches!(
+            validate_catalog(&connections, &catalog.targets),
+            Err(CatalogError::InvalidPeakPricing {
+                connection_id,
+                message,
+                ..
+            }) if connection_id.as_str() == "deepseek"
+                && message.contains("peak_pricing_windows_utc")
+        ));
+    }
+
+    #[test]
+    fn deepseek_builtin_refreshes_metadata_without_losing_pinned_overrides() {
         let catalog = ModelCatalog::load_builtin().unwrap();
         let deepseek_id = connection_id("deepseek");
         let connection = catalog.connection(&deepseek_id).unwrap();
@@ -4801,8 +4903,8 @@ default_base_url = "http://localhost:11434/v1"
         );
 
         for (model, input, output, cache_read) in [
-            ("deepseek/deepseek-v4-flash", 140_000, 280_000, 2_800),
-            ("deepseek/deepseek-v4-pro", 435_000, 870_000, 3_625),
+            ("deepseek/deepseek-v4-flash", 220_000, 660_000, 7_000),
+            ("deepseek/deepseek-v4-pro", 660_000, 1_980_000, 22_000),
         ] {
             let resolved = catalog
                 .resolve(&deepseek_id, &model_id(model))
@@ -4904,12 +5006,12 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             refreshed.pricing,
             Some(ModelPricing {
-                input_micros_per_million: 150_000,
-                output_micros_per_million: 300_000,
-                cache_read_micros_per_million: Some(3_000),
+                input_micros_per_million: 220_000,
+                output_micros_per_million: 660_000,
+                cache_read_micros_per_million: Some(7_000),
                 cache_write_micros_per_million: None,
             }),
-            "unlike the safety cap, prices must update through /refresh"
+            "time-based prices are pinned because models.dev cannot represent them"
         );
         assert!(
             refreshed.features.contains(&ModelFeature::Attachment),
@@ -4927,7 +5029,40 @@ default_base_url = "http://localhost:11434/v1"
         );
         assert_eq!(
             refreshed.metadata_sources.pricing,
-            Some(ModelMetadataSource::ModelsDev)
+            Some(ModelMetadataSource::Catalog)
+        );
+    }
+
+    #[test]
+    fn deepseek_builtin_applies_each_peak_window_to_both_models() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let deepseek_id = connection_id("deepseek");
+        let usage = TokenUsage {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            input_cache: None,
+        };
+        let mut actual = Vec::new();
+        for model in ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"] {
+            let resolved = catalog
+                .resolve(&deepseek_id, &model_id(model))
+                .expect("DeepSeek model resolves");
+            let schedule = resolved
+                .pricing_schedule
+                .expect("DeepSeek pricing schedule");
+            actual.push([0, 60, 240, 360, 600].map(|minute| {
+                schedule
+                    .pricing_for_usage_at(usage, minute * 60_000)
+                    .input_micros_per_million
+            }));
+        }
+
+        assert_eq!(
+            actual,
+            vec![
+                [220_000, 440_000, 220_000, 440_000, 220_000],
+                [660_000, 1_320_000, 660_000, 1_320_000, 660_000],
+            ]
         );
     }
 
