@@ -1751,6 +1751,74 @@ mod tests {
         assert!(!target.exists());
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn seatbelt_confined_pty_supports_interactive_io() {
+        let project = tempfile::TempDir::new().expect("project tempdir should be created");
+        let sandbox = CommandSandbox::new(
+            crate::sandbox::SandboxBackend::test_seatbelt(),
+            project.path(),
+        );
+        sandbox.set_enabled(true);
+        let registry = Arc::new(TerminalRegistry::with_sandbox(sandbox));
+        let started = registry
+            .start(
+                "/bin/sh",
+                "if test -t 0 && test -t 1; then printf 'Seatbelt prompt: '; else printf 'not-a-tty\\n'; exit 1; fi; IFS= read -r answer; printf '\\nreceived:%s\\n' \"$answer\"",
+                project.path(),
+                5,
+                None,
+            )
+            .await
+            .expect("confined PTY fixture should start");
+        assert!(started.confined, "test requires the confined path");
+
+        let prompt_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = registry
+                .snapshot(&started.id)
+                .await
+                .expect("confined PTY fixture should remain registered");
+            if snapshot.prompt_state == TerminalPromptState::WaitingForInput {
+                assert!(
+                    snapshot.tail.contains("Seatbelt prompt:"),
+                    "{}",
+                    snapshot.tail
+                );
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < prompt_deadline,
+                "confined PTY fixture never exposed a prompt: {}",
+                snapshot.tail
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        registry
+            .send(&started.id, "bonsai", true)
+            .await
+            .expect("confined PTY input should succeed");
+        let finished = registry
+            .wait_for_terminal(&started.id, Duration::from_secs(5))
+            .await
+            .expect("confined PTY fixture should remain registered");
+
+        assert!(finished.confined);
+        assert_eq!(finished.status, TerminalStatus::Succeeded);
+        assert!(
+            finished.tail.contains("Seatbelt prompt:"),
+            "{}",
+            finished.tail
+        );
+        assert!(
+            finished.tail.contains("received:bonsai"),
+            "{}",
+            finished.tail
+        );
+        assert!(!finished.tail.contains("not-a-tty"), "{}", finished.tail);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn send_answers_a_prompt_and_resize_reaches_the_child() {

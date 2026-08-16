@@ -487,12 +487,44 @@ mod seatbelt {
         assert!(p.contains("(subpath \"/proj\")"));
         assert!(p.contains("(subpath \"/tmp/work\")"));
         assert!(p.contains("(literal \"/dev/null\")"));
+        assert!(p.contains("(regex #\"^/dev/ttys[0-9a-f]+$\")"));
         assert!(p.contains("(deny network*)"));
         // Last-match-wins ordering is load-bearing.
         let allow_default = p.find("(allow default)").unwrap();
         let deny_writes = p.find("(deny file-write*)").unwrap();
         let allow_writes = p.find("(allow file-write*").unwrap();
         assert!(allow_default < deny_writes && deny_writes < allow_writes);
+    }
+
+    #[test]
+    fn profile_allows_only_hex_bsd_pty_slave_paths() {
+        let policy = SandboxPolicy {
+            writable_roots: vec!["/proj".into()],
+            deny_network: false,
+        };
+        let profile = macos::generate_profile(&policy);
+        let pty_pattern = r"^/dev/ttys[0-9a-f]+$";
+        assert!(profile.contains(&format!("(regex #\"{pty_pattern}\")")));
+
+        let matcher = regex::Regex::new(pty_pattern).unwrap();
+        for path in ["/dev/ttys000", "/dev/ttys00a", "/dev/ttys0ff"] {
+            assert!(
+                matcher.is_match(path),
+                "PTY slave path should match: {path}"
+            );
+        }
+        for path in [
+            "/dev/ttys",
+            "/dev/ttys00g",
+            "/dev/ttys00a/extra",
+            "/dev/cu.Bluetooth-Incoming-Port",
+            "/dev/null",
+        ] {
+            assert!(
+                !matcher.is_match(path),
+                "unrelated device path should not match: {path}"
+            );
+        }
     }
 
     #[test]

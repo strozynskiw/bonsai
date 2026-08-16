@@ -67,7 +67,7 @@ pub(super) fn generate_profile(policy: &SandboxPolicy) -> String {
         out.push_str("\")\n");
     }
     out.push_str("    (subpath \"/dev/fd\")\n");
-    out.push_str("    (regex #\"^/dev/ttys[0-9]*$\")\n");
+    out.push_str("    (regex #\"^/dev/ttys[0-9a-f]+$\")\n");
     out.push_str(")\n");
     if policy.deny_network {
         out.push_str("(deny network*)\n");
