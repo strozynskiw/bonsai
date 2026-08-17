@@ -50,9 +50,9 @@ pub(crate) use action_policy::{
 };
 pub use agent::AgentTool;
 pub(crate) use agent::{
-    GRANTABLE_AGENT_TOOLS, SubagentProviderConfig, SubagentProviderFactory, SubagentRunner,
-    SubagentToolRegistryFactory, agents_index_section_with_settings, builtin_agents,
-    builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
+    GRANTABLE_AGENT_TOOLS, SelfReviewRunOptions, SubagentProviderConfig, SubagentProviderFactory,
+    SubagentRunner, SubagentToolRegistryFactory, agents_index_section_with_settings,
+    builtin_agents, builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
 };
 pub(crate) use apply_patch::{patch_target_paths_from_arguments, patched_paths_from_arguments};
 pub use bash::BashTool;
@@ -1020,6 +1020,10 @@ pub struct ToolExecutionContext {
     /// that spawn nested work (e.g. `agent`) forward it so a parent cancel
     /// reaches the child's own cooperative checks, not only via future-drop.
     cancellation_token: Option<CancellationToken>,
+    /// Exact cache-inclusive token allowance available to nested agent work.
+    /// It is a snapshot, not a shared reservation; callers must serialize
+    /// delegated work whenever a cumulative cap is active.
+    remaining_billed_tokens: Option<u64>,
     background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
 }
 
@@ -1031,6 +1035,7 @@ impl ToolExecutionContext {
             sink,
             origin: None,
             cancellation_token: None,
+            remaining_billed_tokens: None,
             background_wakes: None,
         }
     }
@@ -1044,6 +1049,12 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
         self.origin = Some(origin.into());
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_remaining_billed_tokens(mut self, remaining: Option<u64>) -> Self {
+        self.remaining_billed_tokens = remaining;
         self
     }
 
@@ -1074,6 +1085,11 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn cancellation_token(&self) -> Option<CancellationToken> {
         self.cancellation_token.clone()
+    }
+
+    #[must_use]
+    pub(crate) const fn remaining_billed_tokens(&self) -> Option<u64> {
+        self.remaining_billed_tokens
     }
 
     #[must_use]

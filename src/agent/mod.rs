@@ -346,17 +346,22 @@ struct ToolRegistrySet {
 }
 
 /// Run-time limits set once at construction or tuned via [`Agent::set_run_budget`].
-/// Nine fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+/// Grouped into a sub-struct following the `ToolRegistrySet` pattern.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionBudget {
     pub(crate) max_iterations: usize,
     pub(crate) max_generation_duration: Option<Duration>,
     pub(crate) max_streamed_chars: Option<usize>,
     pub(crate) max_tool_duration: Option<Duration>,
+    pub(crate) max_session_billed_tokens: Option<u64>,
     pub(crate) max_session_turns: Option<usize>,
     pub(crate) max_session_output_chars: Option<usize>,
     pub(crate) max_session_active_seconds: Option<u64>,
     pub(crate) max_session_cost_micros: Option<u64>,
+    pub(crate) alert_session_billed_tokens: Option<u64>,
+    pub(crate) alert_session_turns: Option<usize>,
+    pub(crate) alert_session_active_seconds: Option<u64>,
+    pub(crate) alert_session_cost_micros: Option<u64>,
     pub(crate) context_budget_tokens: usize,
 }
 
@@ -696,10 +701,21 @@ impl Agent {
         self.budget.max_generation_duration = budget.max_generation_duration();
         self.budget.max_streamed_chars = budget.max_output_chars;
         self.budget.max_tool_duration = budget.max_tool_duration();
+        self.budget.max_session_billed_tokens = budget.max_session_billed_tokens;
         self.budget.max_session_turns = budget.max_session_turns;
         self.budget.max_session_output_chars = budget.max_session_output_chars;
         self.budget.max_session_active_seconds = budget.max_session_active_seconds;
         self.budget.max_session_cost_micros = budget.max_session_cost_micros;
+        self.budget.alert_session_billed_tokens = budget.alert_session_billed_tokens;
+        self.budget.alert_session_turns = budget.alert_session_turns;
+        self.budget.alert_session_active_seconds = budget.alert_session_active_seconds;
+        self.budget.alert_session_cost_micros = budget.alert_session_cost_micros;
+    }
+
+    /// Override only the per-run turn limit while preserving cumulative
+    /// session limits and alerts.
+    pub(crate) fn set_run_max_turns(&mut self, max_turns: usize) {
+        self.budget.max_iterations = max_turns;
     }
 
     /// Set the timing policy used between retryable provider attempts.

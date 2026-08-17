@@ -259,6 +259,23 @@ impl SessionUsage {
         self.usage_turns.push(turn);
     }
 
+    /// Persist provider work used only by cumulative safeguards. The detailed
+    /// turn remains available across session restore, but the visible
+    /// last-turn, token, cache, and cost aggregates stay unchanged.
+    pub(super) fn record_safeguard_usage(
+        &mut self,
+        usage: Option<TokenUsage>,
+        diagnostics: UsageTurnDiagnostics,
+    ) {
+        debug_assert_eq!(
+            diagnostics.execution_lane.kind,
+            ExecutionLaneKind::Compaction
+        );
+        debug_assert_eq!(diagnostics.rewrite.kind, ContextRewriteKind::Compaction);
+        let turn = self.usage_turn_for(usage, None, diagnostics);
+        self.usage_turns.push(turn);
+    }
+
     fn usage_turn_for(
         &self,
         usage: Option<TokenUsage>,
@@ -599,6 +616,28 @@ impl SessionUsage {
         self.cost_complete.then_some(self.cost_micros)
     }
 
+    /// Cache-inclusive prompt plus completion tokens only when every persisted
+    /// provider turn reported usage. Hidden provider compaction is persisted as
+    /// safeguard-only work and added after validating the visible aggregates.
+    pub(super) fn exact_session_billed_tokens(&self) -> Option<u64> {
+        let aggregate = self.prompt_tokens.saturating_add(self.completion_tokens);
+        if self.usage_turns.is_empty() {
+            return (aggregate == 0).then_some(0);
+        }
+        let (visible_total, safeguard_only_total) =
+            self.usage_turns
+                .iter()
+                .try_fold((0u64, 0u64), |(visible, safeguard_only), turn| {
+                    let billed = turn.prompt_tokens?.saturating_add(turn.completion_tokens?);
+                    if is_safeguard_only_compaction(turn) {
+                        Some((visible, safeguard_only.saturating_add(billed)))
+                    } else {
+                        Some((visible.saturating_add(billed), safeguard_only))
+                    }
+                })?;
+        (visible_total == aggregate).then_some(aggregate.saturating_add(safeguard_only_total))
+    }
+
     /// Foreground parent provider turns durably recorded across resumes.
     /// Delegated/self-review/compaction lanes retain their own bounded policies
     /// and are excluded so concurrent nested work cannot race this counter.
@@ -638,6 +677,11 @@ impl SessionUsage {
     pub(super) fn turn_reports(&self) -> Vec<UsageTurnReport> {
         self.usage_turns.iter().map(UsageTurnReport::from).collect()
     }
+}
+
+fn is_safeguard_only_compaction(turn: &UsageTurn) -> bool {
+    turn.lane_kind == ExecutionLaneKind::Compaction
+        && turn.rewrite_kind == ContextRewriteKind::Compaction
 }
 
 fn priced_turn_cost_totals(turns: &[UsageTurn]) -> Option<(u64, u64)> {
@@ -994,6 +1038,64 @@ mod tests {
 
         assert_eq!(usage.session_turn_count(), 1);
         assert_eq!(usage.session_output_chars(), 26);
+    }
+
+    #[test]
+    fn billed_tokens_are_cache_inclusive_and_require_complete_usage() {
+        let mut usage = SessionUsage::default();
+        usage.restore(100, 25, Some(0), Some(0), None);
+        let mut parent = usage_turn_without_cache(100);
+        parent.completion_tokens = Some(25);
+        let mut nested = usage_turn_without_cache(40);
+        nested.lane_kind = ExecutionLaneKind::SelfReview;
+        nested.lane_id = "review".to_string();
+        nested.completion_tokens = Some(10);
+        usage.restore_turns(vec![parent, nested]);
+        usage.absorb_totals(UsageTotals {
+            prompt_tokens: 40,
+            completion_tokens: 10,
+            cost_micros: Some(0),
+            no_cache_cost_micros: Some(0),
+            input_cache: Some(InputCacheUsage::new(30, 0, 40)),
+        });
+
+        assert_eq!(usage.exact_session_billed_tokens(), Some(175));
+
+        usage.usage_turns[1].completion_tokens = None;
+        assert_eq!(usage.exact_session_billed_tokens(), None);
+    }
+
+    #[test]
+    fn billed_tokens_require_ledger_coverage_of_restored_aggregates() {
+        let mut usage = SessionUsage::default();
+        usage.restore(100, 25, Some(0), Some(0), None);
+
+        assert_eq!(usage.exact_session_billed_tokens(), None);
+
+        let mut turn = usage_turn_without_cache(100);
+        turn.completion_tokens = Some(24);
+        usage.restore_turns(vec![turn]);
+        assert_eq!(usage.exact_session_billed_tokens(), None);
+    }
+
+    #[test]
+    fn restored_hidden_compaction_counts_only_toward_billed_token_safeguard() {
+        let mut usage = SessionUsage::default();
+        usage.restore(100, 25, Some(0), Some(0), None);
+        let mut parent = usage_turn_without_cache(100);
+        parent.completion_tokens = Some(25);
+        let mut compaction = usage_turn_without_cache(42);
+        compaction.seq = 2;
+        compaction.lane_kind = ExecutionLaneKind::Compaction;
+        compaction.lane_id = "compaction".to_string();
+        compaction.completion_tokens = Some(7);
+        compaction.rewrite_kind = ContextRewriteKind::Compaction;
+
+        usage.restore_turns(vec![parent, compaction]);
+
+        assert_eq!(usage.totals().prompt_tokens, 100);
+        assert_eq!(usage.totals().completion_tokens, 25);
+        assert_eq!(usage.exact_session_billed_tokens(), Some(174));
     }
 
     #[test]

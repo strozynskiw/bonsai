@@ -16,11 +16,122 @@ use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn budget_alert_classification_covers_model_dispatches_only() {
+    for input in [
+        "continue the work",
+        "/continue",
+        "/retry",
+        "/security-review",
+        "/compact",
+        "/compact provider",
+    ] {
+        assert!(
+            submitted_input_dispatches_model_work(input),
+            "{input} should be gated"
+        );
+    }
+    for input in [
+        "/usage",
+        "/ctx",
+        "/model",
+        "/compact preview",
+        "/compact deterministic",
+    ] {
+        assert!(
+            !submitted_input_dispatches_model_work(input),
+            "{input} should remain available"
+        );
+    }
+}
+
+#[tokio::test]
+async fn queued_follow_up_warns_before_starting_after_current_run() {
+    let agent = test_agent(Box::new(CompleteProvider));
+    agent
+        .lock()
+        .await
+        .set_run_budget(crate::run_budget::RunBudget {
+            alert_session_turns: Some(0),
+            ..crate::run_budget::RunBudget::default()
+        });
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.composer.set_text("queued follow-up".to_string());
+    let content = app.composer.content();
+    app.reduce(AppAction::QueueNextInput {
+        id: 1,
+        text: "queued follow-up".to_string(),
+        content,
+        mode: AgentMode::Coding,
+    });
+    app.task_state = TaskState::Idle;
+    let (_map_tx, map_rx) = tokio::sync::watch::channel(None::<String>);
+    let mut repo_map = RepoMapInjector::new(map_rx);
+
+    let started = start_pending_queued_run_if_idle(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        &mut repo_map,
+        &ProviderRegistry::default_registry(),
+        &test_model_catalog(),
+    )
+    .await;
+
+    assert!(!started);
+    assert!(app.queued_inputs.is_empty());
+    assert!(matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::BudgetWarning { ref submission, .. }
+        )) if submission.display_text == "queued follow-up"
+    ));
+}
+
 mod plan_execution;
 use plan_execution::{drain_tasks, two_phase_plan};
 
 fn smol_off() -> crate::smol::SmolProfile {
     crate::smol::SmolProfile::resolve(crate::smol::SmolPreference::Off, 128_000)
+}
+
+#[test]
+fn budget_warning_safe_default_preserves_submission_and_continue_consumes_it_once() {
+    let mut app = app();
+    app.composer.set_text("keep this prompt".to_string());
+    let submission = app.composer.submission();
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::BudgetWarning {
+            submission: Box::new(submission.clone()),
+            usage: crate::run_budget::SessionBudgetUsage {
+                turns: 5,
+                turn_alert: Some(5),
+                ..crate::run_budget::SessionBudgetUsage::default()
+            },
+            cursor: 0,
+        },
+    )));
+
+    assert_eq!(take_budget_warning_submission(&mut app), None);
+    assert_eq!(app.composer.submission(), submission);
+    assert!(app.transcript.is_empty());
+
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::BudgetWarning {
+            submission: Box::new(submission.clone()),
+            usage: crate::run_budget::SessionBudgetUsage {
+                turns: 5,
+                turn_alert: Some(5),
+                ..crate::run_budget::SessionBudgetUsage::default()
+            },
+            cursor: 1,
+        },
+    )));
+    assert_eq!(take_budget_warning_submission(&mut app), Some(submission));
+    assert!(take_budget_warning_submission(&mut app).is_none());
 }
 
 struct NullSink;
@@ -3998,6 +4109,56 @@ async fn settings_cycle_opts_into_and_persists_a_run_budget() {
     assert!(matches!(result, RuntimeActionResult::Handled));
     assert_eq!(app.run_budget.max_turns, Some(25));
     assert_eq!(storage.run_budget().await.unwrap().max_turns, Some(25));
+}
+
+#[tokio::test]
+async fn settings_cycle_opts_into_and_persists_a_session_alert() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let session_store = Arc::new(Mutex::new(SessionStore::default()));
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx.clone());
+    let mut current = session_id;
+    let mut signatures = zero_signatures();
+    let mut state = PersistenceCommandState {
+        current_session_id: &mut current,
+        signatures: &mut signatures,
+    };
+    let mut app = app();
+    let rows = crate::tui::settings::seed_settings_rows(&app, smol_off());
+    let cursor = rows
+        .iter()
+        .position(|row| row.id() == Some(crate::tui::event::SettingId::AlertSessionBilledTokens))
+        .expect("settings should include the billed-token alert row");
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::Settings { rows, cursor },
+    )));
+
+    let result = handle_runtime_action(
+        AppAction::SettingsCycle(1),
+        &mut app,
+        &mut tasks,
+        runtime_action_deps(
+            &storage,
+            temp_dir.path(),
+            session_id,
+            session_store,
+            runtime_tx,
+        ),
+        &mut state,
+    )
+    .await;
+
+    assert!(matches!(result, RuntimeActionResult::Handled));
+    assert_eq!(app.run_budget.alert_session_billed_tokens, Some(100_000));
+    assert_eq!(
+        storage
+            .run_budget()
+            .await
+            .unwrap()
+            .alert_session_billed_tokens,
+        Some(100_000)
+    );
 }
 
 #[tokio::test]

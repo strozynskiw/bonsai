@@ -85,6 +85,9 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 38, 7)
         }
+        ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning { .. }) => {
+            centered_rect_capped(area, MODAL_WIDTH_FORM, 48, 13)
+        }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { .. }) => {
             centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
         }

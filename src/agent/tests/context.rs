@@ -19,6 +19,47 @@ fn cache_strategy_test_context() -> crate::context::ProjectContextSnapshot {
 }
 
 #[tokio::test]
+async fn per_run_turn_override_preserves_cumulative_limits_and_alerts() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker,
+        fixture.project_root,
+    )
+    .build()
+    .unwrap();
+    agent.set_run_budget(crate::run_budget::RunBudget {
+        max_turns: Some(12),
+        max_session_turns: Some(20),
+        max_session_billed_tokens: Some(30),
+        max_session_output_chars: Some(40),
+        max_session_active_seconds: Some(50),
+        max_session_cost_micros: Some(60),
+        alert_session_billed_tokens: Some(7),
+        alert_session_turns: Some(8),
+        alert_session_active_seconds: Some(9),
+        alert_session_cost_micros: Some(10),
+        ..crate::run_budget::RunBudget::default()
+    });
+
+    agent.set_run_max_turns(500);
+
+    let usage = agent.session_budget_usage();
+    assert_eq!(agent.budget.max_iterations, 500);
+    assert_eq!(usage.turn_limit, Some(20));
+    assert_eq!(usage.billed_token_limit, Some(30));
+    assert_eq!(usage.output_char_limit, Some(40));
+    assert_eq!(usage.active_limit_seconds, Some(50));
+    assert_eq!(usage.cost_limit_micros, Some(60));
+    assert_eq!(usage.billed_token_alert, Some(7));
+    assert_eq!(usage.turn_alert, Some(8));
+    assert_eq!(usage.active_alert_seconds, Some(9));
+    assert_eq!(usage.cost_alert_micros, Some(10));
+}
+
+#[tokio::test]
 async fn execution_policy_snapshots_are_append_only_and_supersede_changes() {
     let fixture = TestFixture::new();
     let yolo = crate::yolo::YoloMode::with_level(crate::tool::ApprovalLevel::Balanced);

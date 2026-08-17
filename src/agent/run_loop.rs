@@ -608,12 +608,21 @@ impl Agent {
     ) -> Result<ToolExecutionOutcome> {
         let mut interrupted_mid_tools = false;
         let mut outcome = ToolExecutionOutcome::default();
+        let serialized_tool_names = self.hooks.serialized_tool_names();
+        let serialized_tool_names = if self.budget.max_session_billed_tokens.is_some() {
+            let mut names = serialized_tool_names;
+            names.insert("agent".to_string());
+            names.insert("task".to_string());
+            names
+        } else {
+            serialized_tool_names
+        };
         let planned_batches = tool_call_batches_with_yolo(
             tool_calls,
             tool_registry,
             &self.project_root,
             self.yolo_enabled(),
-            &self.hooks.serialized_tool_names(),
+            &serialized_tool_names,
         );
         // Batching telemetry: how the turn's tool calls were grouped. A
         // serialized batch (width 1) for >1 calls means a conflict forced
@@ -754,6 +763,11 @@ impl Agent {
             };
             let batch_width = batch.len();
             let batch_started = std::time::Instant::now();
+            let remaining_billed_tokens = self.budget.max_session_billed_tokens.and_then(|limit| {
+                self.usage
+                    .exact_session_billed_tokens()
+                    .map(|used| limit.saturating_sub(used))
+            });
             let mut results = if interrupted_mid_tools {
                 interrupted_tool_results(batch)
             } else {
@@ -768,6 +782,7 @@ impl Agent {
                     &self.hooks,
                     self.tool_origin.clone(),
                     self.budget.max_tool_duration,
+                    remaining_billed_tokens,
                 )
                 .await
             };
@@ -3550,6 +3565,7 @@ mod tests {
             Arc::new(crate::hooks::HookEngine::disabled()),
             None,
             Some(Duration::from_millis(10)),
+            None,
         )
         .await;
 
@@ -3580,6 +3596,7 @@ mod tests {
             Arc::new(crate::hooks::HookEngine::disabled()),
             None,
             Some(Duration::ZERO),
+            None,
         )
         .await;
 
@@ -4770,7 +4787,7 @@ mod tests {
                         "wait",
                         Arc::new(ToolRegistry::new()),
                         CancellationToken::new(),
-                        None,
+                        crate::tool::SelfReviewRunOptions::default(),
                     )
                     .await
             }
@@ -4942,6 +4959,7 @@ mod tests {
                 Arc::new(crate::output::StdoutSink),
                 CancellationToken::new(),
                 Arc::new(crate::hooks::HookEngine::disabled()),
+                None,
                 None,
                 None,
             )

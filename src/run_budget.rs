@@ -14,6 +14,10 @@ pub(crate) enum RunBudgetExhaustion {
     #[error("session exhausted its {limit}-turn budget after {used} persisted provider turns")]
     SessionTurns { limit: usize, used: usize },
     #[error(
+        "session exhausted its {limit_tokens}-token billed-token budget after {used_tokens} cache-inclusive tokens"
+    )]
+    SessionBilledTokens { limit_tokens: u64, used_tokens: u64 },
+    #[error(
         "session exhausted its {limit_seconds}s active-time budget after {used_seconds}s of foreground execution"
     )]
     SessionTime {
@@ -70,15 +74,74 @@ pub(crate) struct RunBudget {
     pub(crate) max_output_chars: Option<usize>,
     pub(crate) max_tool_seconds: Option<u64>,
     pub(crate) max_session_turns: Option<usize>,
+    pub(crate) max_session_billed_tokens: Option<u64>,
     pub(crate) max_session_output_chars: Option<usize>,
     pub(crate) max_session_active_seconds: Option<u64>,
     pub(crate) max_session_cost_micros: Option<u64>,
+    pub(crate) alert_session_billed_tokens: Option<u64>,
+    pub(crate) alert_session_turns: Option<usize>,
+    pub(crate) alert_session_active_seconds: Option<u64>,
+    pub(crate) alert_session_cost_micros: Option<u64>,
+}
+
+/// Current state of one configured cumulative session alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionBudgetAlertState {
+    BilledTokens {
+        used_tokens: Option<u64>,
+        threshold_tokens: u64,
+    },
+    ProviderTurns {
+        used_turns: usize,
+        threshold_turns: usize,
+    },
+    ActiveTime {
+        used_ms: u64,
+        threshold_seconds: u64,
+    },
+    Cost {
+        used_micros: Option<u64>,
+        threshold_micros: u64,
+    },
+}
+
+impl SessionBudgetAlertState {
+    pub(crate) const fn is_reached(self) -> bool {
+        match self {
+            Self::BilledTokens {
+                used_tokens: Some(used),
+                threshold_tokens,
+            } => used >= threshold_tokens,
+            Self::ProviderTurns {
+                used_turns,
+                threshold_turns,
+            } => used_turns >= threshold_turns,
+            Self::ActiveTime {
+                used_ms,
+                threshold_seconds,
+            } => used_ms >= threshold_seconds.saturating_mul(1_000),
+            Self::Cost {
+                used_micros: Some(used),
+                threshold_micros,
+            } => used >= threshold_micros,
+            Self::BilledTokens {
+                used_tokens: None, ..
+            }
+            | Self::Cost {
+                used_micros: None, ..
+            } => false,
+        }
+    }
 }
 
 /// Persisted usage consumed by the cumulative session budget axes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct SessionBudgetUsage {
+    /// Cache-inclusive prompt plus completion tokens, absent after any provider
+    /// turn omitted usage.
+    pub(crate) exact_billed_tokens: Option<u64>,
+    pub(crate) billed_token_limit: Option<u64>,
     pub(crate) turns: usize,
     pub(crate) turn_limit: Option<usize>,
     pub(crate) output_chars: usize,
@@ -88,12 +151,51 @@ pub(crate) struct SessionBudgetUsage {
     /// Exact cumulative cost, absent once any provider turn could not be priced.
     pub(crate) exact_cost_micros: Option<u64>,
     pub(crate) cost_limit_micros: Option<u64>,
+    pub(crate) billed_token_alert: Option<u64>,
+    pub(crate) turn_alert: Option<usize>,
+    pub(crate) active_alert_seconds: Option<u64>,
+    pub(crate) cost_alert_micros: Option<u64>,
 }
 
 impl SessionBudgetUsage {
     pub(crate) const fn with_active_run_ms(mut self, active_run_ms: u64) -> Self {
         self.active_run_ms = active_run_ms;
         self
+    }
+
+    pub(crate) fn alert_states(self) -> Vec<SessionBudgetAlertState> {
+        let mut alerts = Vec::with_capacity(4);
+        if let Some(threshold_tokens) = self.billed_token_alert {
+            alerts.push(SessionBudgetAlertState::BilledTokens {
+                used_tokens: self.exact_billed_tokens,
+                threshold_tokens,
+            });
+        }
+        if let Some(threshold_turns) = self.turn_alert {
+            alerts.push(SessionBudgetAlertState::ProviderTurns {
+                used_turns: self.turns,
+                threshold_turns,
+            });
+        }
+        if let Some(threshold_seconds) = self.active_alert_seconds {
+            alerts.push(SessionBudgetAlertState::ActiveTime {
+                used_ms: self.active_run_ms,
+                threshold_seconds,
+            });
+        }
+        if let Some(threshold_micros) = self.cost_alert_micros {
+            alerts.push(SessionBudgetAlertState::Cost {
+                used_micros: self.exact_cost_micros,
+                threshold_micros,
+            });
+        }
+        alerts
+    }
+
+    pub(crate) fn has_reached_alert(self) -> bool {
+        self.alert_states()
+            .into_iter()
+            .any(SessionBudgetAlertState::is_reached)
     }
 }
 
@@ -110,12 +212,23 @@ impl RunBudget {
         validate_positive("max_output_chars", self.max_output_chars)?;
         validate_positive("max_tool_seconds", self.max_tool_seconds)?;
         validate_positive("max_session_turns", self.max_session_turns)?;
+        validate_positive("max_session_billed_tokens", self.max_session_billed_tokens)?;
         validate_positive("max_session_output_chars", self.max_session_output_chars)?;
         validate_positive(
             "max_session_active_seconds",
             self.max_session_active_seconds,
         )?;
         validate_positive("max_session_cost_micros", self.max_session_cost_micros)?;
+        validate_positive(
+            "alert_session_billed_tokens",
+            self.alert_session_billed_tokens,
+        )?;
+        validate_positive("alert_session_turns", self.alert_session_turns)?;
+        validate_positive(
+            "alert_session_active_seconds",
+            self.alert_session_active_seconds,
+        )?;
+        validate_positive("alert_session_cost_micros", self.alert_session_cost_micros)?;
         Ok(self)
     }
 
@@ -247,9 +360,14 @@ mod tests {
                 max_output_chars: None,
                 max_tool_seconds: None,
                 max_session_turns: None,
+                max_session_billed_tokens: None,
                 max_session_output_chars: None,
                 max_session_active_seconds: None,
                 max_session_cost_micros: None,
+                alert_session_billed_tokens: None,
+                alert_session_turns: None,
+                alert_session_active_seconds: None,
+                alert_session_cost_micros: None,
             }
         );
     }
@@ -263,9 +381,14 @@ mod tests {
             max_output_chars: Some(64_000),
             max_tool_seconds: Some(120),
             max_session_turns: Some(500),
+            max_session_billed_tokens: Some(2_000_000),
             max_session_output_chars: Some(1_000_000),
             max_session_active_seconds: Some(7_200),
             max_session_cost_micros: Some(5_000_000),
+            alert_session_billed_tokens: Some(1_000_000),
+            alert_session_turns: Some(250),
+            alert_session_active_seconds: Some(3_600),
+            alert_session_cost_micros: Some(2_500_000),
         };
 
         assert_eq!(
@@ -282,6 +405,8 @@ mod tests {
         assert!(error.to_string().contains("max_session_output_chars"));
         let error = RunBudget::from_json(r#"{"max_session_cost_micros":0}"#).unwrap_err();
         assert!(error.to_string().contains("max_session_cost_micros"));
+        let error = RunBudget::from_json(r#"{"alert_session_billed_tokens":0}"#).unwrap_err();
+        assert!(error.to_string().contains("alert_session_billed_tokens"));
     }
 
     #[test]
@@ -307,6 +432,29 @@ mod tests {
         let usage: SessionBudgetUsage = serde_json::from_str("{}").unwrap();
 
         assert_eq!(usage, SessionBudgetUsage::default());
+    }
+
+    #[test]
+    fn alert_state_reaches_at_equality_and_keeps_unknown_axes_disabled() {
+        let usage = SessionBudgetUsage {
+            exact_billed_tokens: Some(1_000),
+            turns: 5,
+            active_run_ms: 30_000,
+            exact_cost_micros: None,
+            billed_token_alert: Some(1_000),
+            turn_alert: Some(5),
+            active_alert_seconds: Some(30),
+            cost_alert_micros: Some(100),
+            ..SessionBudgetUsage::default()
+        };
+        let states = usage.alert_states();
+
+        assert_eq!(states.len(), 4);
+        assert!(states[0].is_reached());
+        assert!(states[1].is_reached());
+        assert!(states[2].is_reached());
+        assert!(!states[3].is_reached());
+        assert!(usage.has_reached_alert());
     }
 
     #[test]

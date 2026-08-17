@@ -20,6 +20,7 @@ impl Agent {
         hooks: &Arc<crate::hooks::HookEngine>,
         tool_origin: Option<String>,
         max_tool_duration: Option<Duration>,
+        remaining_billed_tokens: Option<u64>,
     ) -> Vec<(ToolCall, ToolOutput, crate::output::ToolExecutionStatus)> {
         let started_calls = batch
             .iter()
@@ -51,6 +52,7 @@ impl Agent {
                     hooks.clone(),
                     tool_origin.clone(),
                     max_tool_duration,
+                    remaining_billed_tokens,
                 ),
             )
         }));
@@ -79,6 +81,7 @@ impl Agent {
         hooks: Arc<crate::hooks::HookEngine>,
         tool_origin: Option<String>,
         max_tool_duration: Option<Duration>,
+        remaining_billed_tokens: Option<u64>,
     ) -> (ToolCall, ToolOutput, crate::output::ToolExecutionStatus) {
         sink.thinking(&format!("Running {}", tool_call.name));
 
@@ -202,7 +205,8 @@ impl Agent {
             let tool_cancellation = cancellation_token.child_token();
             let mut context =
                 crate::tool::ToolExecutionContext::new(tool_call.id.clone(), sink.clone())
-                    .with_cancellation_token(tool_cancellation.clone());
+                    .with_cancellation_token(tool_cancellation.clone())
+                    .with_remaining_billed_tokens(remaining_billed_tokens);
             if let Some(background_wakes) = background_wakes {
                 context = context.with_background_wakes(background_wakes);
             }

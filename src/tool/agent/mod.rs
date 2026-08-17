@@ -14,7 +14,8 @@ pub(crate) use catalog::{
     builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
 };
 pub(crate) use runner::{
-    SubagentProviderConfig, SubagentProviderFactory, SubagentRunner, SubagentToolRegistryFactory,
+    SelfReviewRunOptions, SubagentProviderConfig, SubagentProviderFactory, SubagentRunner,
+    SubagentToolRegistryFactory,
 };
 pub use tool::AgentTool;
 

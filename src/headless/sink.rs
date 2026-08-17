@@ -607,8 +607,12 @@ mod tests {
             crate::storage::TaskTerminalReasonCode::BudgetExhausted,
             "Run-time budget exhausted.",
         ));
-        output.budget_exhaustion =
-            Some(crate::run_budget::RunBudgetExhaustion::RunTime { limit_seconds: 300 });
+        output.budget_exhaustion = Some(
+            crate::run_budget::RunBudgetExhaustion::SessionBilledTokens {
+                limit_tokens: 100_000,
+                used_tokens: 100_000,
+            },
+        );
         output.completion_report = crate::completion_report::CompletionReport::from_evidence(
             crate::completion_report::CompletionStatus::BudgetExhausted,
             crate::completion_report::CompletionEvidenceSnapshot::default(),
@@ -630,11 +634,12 @@ mod tests {
         assert_eq!(value["session_lifecycle"], "interrupted");
         assert_eq!(value["task_outcome"], "blocked");
         assert_eq!(value["task_terminal_reason"]["code"], "budget_exhausted");
-        assert_eq!(value["budget_exhaustion"]["kind"], "run_time");
-        assert_eq!(value["budget_exhaustion"]["limit_seconds"], 300);
+        assert_eq!(value["budget_exhaustion"]["kind"], "session_billed_tokens");
+        assert_eq!(value["budget_exhaustion"]["limit_tokens"], 100_000);
+        assert_eq!(value["budget_exhaustion"]["used_tokens"], 100_000);
         assert_eq!(
             value["completion_report"]["usage"]["budget_exhaustion"]["kind"],
-            "run_time"
+            "session_billed_tokens"
         );
         assert!(read_buffer(&stderr_buffer).is_empty());
     }

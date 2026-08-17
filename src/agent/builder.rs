@@ -202,10 +202,15 @@ impl Agent {
                 max_generation_duration: builder.max_generation_duration,
                 max_streamed_chars: builder.max_streamed_chars,
                 max_tool_duration: builder.max_tool_duration,
+                max_session_billed_tokens: builder.max_session_billed_tokens,
                 max_session_turns: builder.max_session_turns,
                 max_session_output_chars: builder.max_session_output_chars,
                 max_session_active_seconds: builder.max_session_active_seconds,
                 max_session_cost_micros: builder.max_session_cost_micros,
+                alert_session_billed_tokens: builder.alert_session_billed_tokens,
+                alert_session_turns: builder.alert_session_turns,
+                alert_session_active_seconds: builder.alert_session_active_seconds,
+                alert_session_cost_micros: builder.alert_session_cost_micros,
                 context_budget_tokens: builder.context_budget_tokens.max(1),
             },
             context_gc_trigger_percent: builder.context_gc_trigger_percent,
@@ -320,10 +325,15 @@ pub(crate) struct AgentBuilder {
     pub(super) max_generation_duration: Option<Duration>,
     pub(super) max_streamed_chars: Option<usize>,
     pub(super) max_tool_duration: Option<Duration>,
+    pub(super) max_session_billed_tokens: Option<u64>,
     pub(super) max_session_turns: Option<usize>,
     pub(super) max_session_output_chars: Option<usize>,
     pub(super) max_session_active_seconds: Option<u64>,
     pub(super) max_session_cost_micros: Option<u64>,
+    pub(super) alert_session_billed_tokens: Option<u64>,
+    pub(super) alert_session_turns: Option<usize>,
+    pub(super) alert_session_active_seconds: Option<u64>,
+    pub(super) alert_session_cost_micros: Option<u64>,
     pub(super) yolo_mode: YoloMode,
     pub(super) sandbox: CommandSandbox,
     pub(super) workspace_trust: crate::workspace_trust::WorkspaceTrust,
@@ -377,10 +387,15 @@ impl AgentBuilder {
             max_generation_duration: None,
             max_streamed_chars: None,
             max_tool_duration: None,
+            max_session_billed_tokens: None,
             max_session_turns: None,
             max_session_output_chars: None,
             max_session_active_seconds: None,
             max_session_cost_micros: None,
+            alert_session_billed_tokens: None,
+            alert_session_turns: None,
+            alert_session_active_seconds: None,
+            alert_session_cost_micros: None,
             yolo_mode: YoloMode::new(),
             sandbox: CommandSandbox::disabled(),
             workspace_trust: crate::workspace_trust::WorkspaceTrust::Trusted,
@@ -470,10 +485,15 @@ impl AgentBuilder {
         self.max_generation_duration = budget.max_generation_duration();
         self.max_streamed_chars = budget.max_output_chars;
         self.max_tool_duration = budget.max_tool_duration();
+        self.max_session_billed_tokens = budget.max_session_billed_tokens;
         self.max_session_turns = budget.max_session_turns;
         self.max_session_output_chars = budget.max_session_output_chars;
         self.max_session_active_seconds = budget.max_session_active_seconds;
         self.max_session_cost_micros = budget.max_session_cost_micros;
+        self.alert_session_billed_tokens = budget.alert_session_billed_tokens;
+        self.alert_session_turns = budget.alert_session_turns;
+        self.alert_session_active_seconds = budget.alert_session_active_seconds;
+        self.alert_session_cost_micros = budget.alert_session_cost_micros;
         self
     }
 

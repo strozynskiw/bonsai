@@ -861,6 +861,74 @@ async fn submit_and_start_run(
     false
 }
 
+async fn session_budget_usage_for_alert(
+    agent: &Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    tasks: &TaskController,
+) -> crate::run_budget::SessionBudgetUsage {
+    let active_run_ms = tasks
+        .reconcile_session_activity()
+        .await
+        .ok()
+        .flatten()
+        .map_or(0, |activity| activity.active_run_ms);
+    agent
+        .lock()
+        .await
+        .session_budget_usage()
+        .with_active_run_ms(active_run_ms)
+}
+
+fn compact_command_dispatches_model_work(input: &str) -> bool {
+    let mut parts = input.split_whitespace();
+    if parts.next() != Some("/compact") {
+        return false;
+    }
+    !parts.any(|argument| matches!(argument, "preview" | "deterministic" | "offline"))
+}
+
+fn submitted_input_dispatches_model_work(input: &str) -> bool {
+    if !input.starts_with('/') {
+        return true;
+    }
+    idle_slash_command(input).is_some_and(IdleSlashCommand::dispatches_model_work)
+        || compact_command_dispatches_model_work(input)
+}
+
+async fn open_budget_warning_if_reached(
+    app: &mut AppState,
+    tasks: &TaskController,
+    agent: &Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    submission: crate::tui::app::ComposerSubmission,
+) -> bool {
+    let usage = session_budget_usage_for_alert(agent, tasks).await;
+    if !usage.has_reached_alert() {
+        return false;
+    }
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::BudgetWarning {
+            submission: Box::new(submission),
+            usage,
+            cursor: 0,
+        },
+    )));
+    true
+}
+
+fn take_budget_warning_submission(
+    app: &mut AppState,
+) -> Option<crate::tui::app::ComposerSubmission> {
+    let submission = match app.modal.as_ref() {
+        Some(ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning {
+            submission,
+            cursor: 1,
+            ..
+        })) => Some((**submission).clone()),
+        _ => None,
+    };
+    app.reduce(AppAction::CloseModal);
+    submission
+}
+
 /// Consume the one-shot, plan-scoped natural confirmation. Exact matching is
 /// intentional: broader affirmative parsing would risk turning an answer to a
 /// permission or external-action prompt into authority for unrelated work.
@@ -3340,6 +3408,61 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                         }
                         match intent {
                             KeyIntent::Action(action) => {
+                                if matches!(action, AppAction::BudgetWarningSubmit) {
+                                    if let Some(submission) =
+                                        take_budget_warning_submission(&mut app)
+                                    {
+                                        let input = submission.display_text.trim().to_string();
+                                        let mut persistence = PersistenceCommandState {
+                                            current_session_id: &mut current_session_id,
+                                            signatures: &mut persisted_signatures,
+                                        };
+                                        if handle_toplevel_submit_command(
+                                            &input,
+                                            &mut app,
+                                            &mut tasks,
+                                            runtime_action_deps!(),
+                                            &mut persistence,
+                                            &subagents,
+                                            &peer_bus,
+                                            &update_config,
+                                        )
+                                        .await
+                                        {
+                                            continue;
+                                        }
+                                        if let Some(command) = idle_slash_command(&input) {
+                                            app.reduce(AppAction::ScrollBottom);
+                                            app.reduce(AppAction::SubmitCommandInput(
+                                                input.clone(),
+                                            ));
+                                            let mut persistence = PersistenceCommandState {
+                                                current_session_id: &mut current_session_id,
+                                                signatures: &mut persisted_signatures,
+                                            };
+                                            handle_idle_slash_command(
+                                                command,
+                                                &input,
+                                                &mut app,
+                                                &mut tasks,
+                                                runtime_action_deps!(),
+                                                &mut persistence,
+                                            )
+                                            .await;
+                                        } else {
+                                            let _ = submit_and_start_run(
+                                                submission,
+                                                &input,
+                                                &mut app,
+                                                &mut tasks,
+                                                runtime_action_deps!(),
+                                                &mut repo_map,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    continue;
+                                }
                                 // The Alt+S keybind opens `/subagents` from the cached
                                 // snapshot; refresh it first so the modal opens to
                                 // current data even though live refresh (above) is
@@ -3399,6 +3522,18 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 let submission = app.composer.submission();
                                 let input = submission.display_text.trim().to_string();
                                 if input.is_empty() {
+                                    continue;
+                                }
+                                if matches!(app.task_state, TaskState::Idle)
+                                    && submitted_input_dispatches_model_work(&input)
+                                    && open_budget_warning_if_reached(
+                                        &mut app,
+                                        &tasks,
+                                        &agent,
+                                        submission.clone(),
+                                    )
+                                    .await
+                                {
                                     continue;
                                 }
                                 let mut persistence = PersistenceCommandState {
@@ -4404,6 +4539,14 @@ async fn maybe_advance_plan_phase(
     if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() {
         return false;
     }
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::BudgetWarning { .. }
+        ))
+    ) {
+        return false;
+    }
     let Some(advance) = app.phase_advance.take() else {
         return false;
     };
@@ -4560,6 +4703,17 @@ async fn start_pending_queued_run_if_idle(
         return false;
     }
     if app.first_queued_input().is_none() {
+        return false;
+    }
+
+    let warning_submission = app.first_queued_input().map(|queued| {
+        let id = queued.id;
+        (id, queued.content.submission())
+    });
+    if let Some((id, submission)) = warning_submission
+        && open_budget_warning_if_reached(app, tasks, &agent, submission).await
+    {
+        app.reduce(AppAction::CancelQueuedInput { id });
         return false;
     }
 

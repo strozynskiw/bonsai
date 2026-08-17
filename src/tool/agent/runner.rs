@@ -161,6 +161,12 @@ pub(super) struct SubagentRunSpec {
     pub(super) limits: SubagentRunLimits,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SelfReviewRunOptions {
+    pub(crate) model_override: Option<crate::subagent::SubagentModelOverride>,
+    pub(crate) remaining_billed_tokens: Option<u64>,
+}
+
 impl SubagentRunner {
     #[cfg(test)]
     pub(crate) fn new(
@@ -278,7 +284,7 @@ impl SubagentRunner {
         task: &str,
         registry: Arc<ToolRegistry>,
         cancellation: CancellationToken,
-        model_override: Option<crate::subagent::SubagentModelOverride>,
+        options: SelfReviewRunOptions,
     ) -> (
         Result<String>,
         UsageTotals,
@@ -291,7 +297,7 @@ impl SubagentRunner {
             instructions: instructions.to_string(),
             task: task.to_string(),
             registry,
-            model_chain: SubagentModelChain::single(model_override),
+            model_chain: SubagentModelChain::single(options.model_override),
             lane_kind: ExecutionLaneKind::SelfReview,
             limits: SubagentRunLimits {
                 max_iterations: SELF_REVIEW_MAX_ITERATIONS,
@@ -304,7 +310,13 @@ impl SubagentRunner {
             .subagents
             .attach_tool_call(&subtask_id, tool_call_id.to_string());
         let (result, usage, turns, evidence) = self
-            .run_registered(spec, subtask_id.clone(), cancellation, true)
+            .run_registered(
+                spec,
+                subtask_id.clone(),
+                cancellation,
+                true,
+                options.remaining_billed_tokens,
+            )
             .await;
         let status = self
             .subagents
@@ -313,10 +325,26 @@ impl SubagentRunner {
         (result, usage, turns, evidence, status)
     }
 
+    #[cfg(test)]
     pub(super) async fn run_new(
         &self,
         spec: SubagentRunSpec,
         cancellation: CancellationToken,
+    ) -> (
+        Result<String>,
+        UsageTotals,
+        Vec<UsageTurn>,
+        Vec<DelegatedReadEvidence>,
+    ) {
+        self.run_new_with_billed_token_budget(spec, cancellation, None)
+            .await
+    }
+
+    pub(super) async fn run_new_with_billed_token_budget(
+        &self,
+        spec: SubagentRunSpec,
+        cancellation: CancellationToken,
+        remaining_billed_tokens: Option<u64>,
     ) -> (
         Result<String>,
         UsageTotals,
@@ -331,8 +359,14 @@ impl SubagentRunner {
         if let Some(tool_call_id) = crate::tool::current_tool_call_id() {
             let _ = self.subagents.attach_tool_call(&subtask_id, tool_call_id);
         }
-        self.run_registered(spec, subtask_id, cancellation, true)
-            .await
+        self.run_registered(
+            spec,
+            subtask_id,
+            cancellation,
+            true,
+            remaining_billed_tokens,
+        )
+        .await
     }
 
     /// Start a read-only detached subagent and return immediately. The spawned
@@ -368,8 +402,9 @@ impl SubagentRunner {
             let subtask_id = subtask_id.clone();
             async move {
                 let _active_run = active_run;
-                let (result, _totals, _turns, _evidence) =
-                    runner.run_registered(spec, subtask_id, token, false).await;
+                let (result, _totals, _turns, _evidence) = runner
+                    .run_registered(spec, subtask_id, token, false, None)
+                    .await;
                 if let Err(err) = result {
                     tracing::error!(%err, "subagent execution failed");
                 }
@@ -384,6 +419,7 @@ impl SubagentRunner {
         subtask_id: String,
         cancellation: CancellationToken,
         track_active: bool,
+        remaining_billed_tokens: Option<u64>,
     ) -> (
         Result<String>,
         UsageTotals,
@@ -511,6 +547,11 @@ impl SubagentRunner {
             self.project_root.clone(),
         )
         .max_iterations(max_iterations)
+        .run_budget(crate::run_budget::RunBudget {
+            max_turns: Some(max_iterations),
+            max_session_billed_tokens: remaining_billed_tokens,
+            ..crate::run_budget::RunBudget::default()
+        })
         .context_budget_tokens(context_budget_tokens)
         .execution_lane(match spec.lane_kind {
             ExecutionLaneKind::SelfReview => ExecutionLane::self_review(subtask_id.clone()),

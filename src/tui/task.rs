@@ -832,10 +832,7 @@ impl TaskController {
                 let mut guard = agent.lock().await;
                 // Give plan-implementation runs a larger budget — phases may
                 // need more turns than a typical conversation.
-                guard.set_run_budget(crate::run_budget::RunBudget {
-                    max_turns: Some(PLAN_PHASE_MAX_TURNS),
-                    ..Default::default()
-                });
+                guard.set_run_max_turns(PLAN_PHASE_MAX_TURNS);
                 let has_plan = guard
                     .implement_plan_from_with_context(&plan, phase, context_mode)
                     .await;

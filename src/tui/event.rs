@@ -59,6 +59,11 @@ pub enum PickerModal {
     StartPlanChoice {
         cursor: usize,
     },
+    BudgetWarning {
+        submission: Box<crate::tui::app::ComposerSubmission>,
+        usage: crate::run_budget::SessionBudgetUsage,
+        cursor: usize,
+    },
     ReviewScopePicker {
         cursor: usize,
     },
@@ -571,10 +576,15 @@ pub enum SettingId {
     BudgetGenerationTime,
     BudgetOutput,
     BudgetToolTime,
+    BudgetSessionBilledTokens,
     BudgetSessionTurns,
     BudgetSessionOutput,
     BudgetSessionTime,
     BudgetSessionCost,
+    AlertSessionBilledTokens,
+    AlertSessionTurns,
+    AlertSessionTime,
+    AlertSessionCost,
     SandboxConfinement,
     SandboxNetwork,
     /// Default storage for newly entered provider credentials.
@@ -1328,6 +1338,8 @@ pub enum AppAction {
     PlanOpenChoiceSubmit,
     StartPlanChoiceMove(i16),
     StartPlanChoiceSubmit,
+    BudgetWarningMove(i16),
+    BudgetWarningSubmit,
     PlanDeleteConfirmSubmit,
     PlanDiscardConfirmSubmit,
     ReviewScopePickerMove(i16),

@@ -3271,10 +3271,15 @@ async fn apply_setting(
         | SettingId::BudgetGenerationTime
         | SettingId::BudgetOutput
         | SettingId::BudgetToolTime
+        | SettingId::BudgetSessionBilledTokens
         | SettingId::BudgetSessionTurns
         | SettingId::BudgetSessionOutput
         | SettingId::BudgetSessionTime
         | SettingId::BudgetSessionCost
+        | SettingId::AlertSessionBilledTokens
+        | SettingId::AlertSessionTurns
+        | SettingId::AlertSessionTime
+        | SettingId::AlertSessionCost
         | SettingId::CredentialStorage
         | SettingId::Model
         | SettingId::Theme => None,

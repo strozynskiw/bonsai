@@ -23,6 +23,7 @@ const BUDGET_RUN_TIME_VALUES: &[&str] = &["off", "5m", "15m", "30m", "60m"];
 const BUDGET_GENERATION_TIME_VALUES: &[&str] = &["off", "1m", "3m", "5m", "10m"];
 const BUDGET_OUTPUT_VALUES: &[&str] = &["off", "32k", "64k", "128k", "256k"];
 const BUDGET_TOOL_TIME_VALUES: &[&str] = &["off", "30s", "2m", "5m", "10m"];
+const BUDGET_SESSION_TOKEN_VALUES: &[&str] = &["off", "100k", "250k", "500k", "1000k"];
 const BUDGET_SESSION_TURN_VALUES: &[&str] = &["off", "100", "250", "500", "1000"];
 const BUDGET_SESSION_OUTPUT_VALUES: &[&str] = &["off", "256k", "512k", "1000k", "2000k"];
 const BUDGET_SESSION_TIME_VALUES: &[&str] = &["off", "30m", "60m", "120m", "240m"];
@@ -145,6 +146,13 @@ pub(crate) fn seed_settings_rows(
         note: Some("per tool call".to_string()),
     });
     rows.push(SettingsRow::Choice {
+        id: SettingId::BudgetSessionBilledTokens,
+        key: "session billed tokens",
+        values: BUDGET_SESSION_TOKEN_VALUES,
+        current: token_index(app.run_budget.max_session_billed_tokens),
+        note: Some("hard limit, all lanes, across resumes".to_string()),
+    });
+    rows.push(SettingsRow::Choice {
         id: SettingId::BudgetSessionTurns,
         key: "session turns",
         values: BUDGET_SESSION_TURN_VALUES,
@@ -174,6 +182,39 @@ pub(crate) fn seed_settings_rows(
         values: BUDGET_SESSION_COST_VALUES,
         current: session_cost_index(app.run_budget.max_session_cost_micros),
         note: Some("exact priced usage, across resumes".to_string()),
+    });
+
+    rows.push(SettingsRow::Header("Session alerts"));
+    rows.push(SettingsRow::Choice {
+        id: SettingId::AlertSessionBilledTokens,
+        key: "billed tokens",
+        values: BUDGET_SESSION_TOKEN_VALUES,
+        current: token_index(app.run_budget.alert_session_billed_tokens),
+        note: Some("warn before submit, all lanes".to_string()),
+    });
+    rows.push(SettingsRow::Choice {
+        id: SettingId::AlertSessionTurns,
+        key: "provider turns",
+        values: BUDGET_SESSION_TURN_VALUES,
+        current: session_turn_index(app.run_budget.alert_session_turns),
+        note: Some("warn before submit".to_string()),
+    });
+    rows.push(SettingsRow::Choice {
+        id: SettingId::AlertSessionTime,
+        key: "active time",
+        values: BUDGET_SESSION_TIME_VALUES,
+        current: duration_index(
+            BUDGET_SESSION_TIME_VALUES,
+            app.run_budget.alert_session_active_seconds,
+        ),
+        note: Some("warn before submit".to_string()),
+    });
+    rows.push(SettingsRow::Choice {
+        id: SettingId::AlertSessionCost,
+        key: "exact cost",
+        values: BUDGET_SESSION_COST_VALUES,
+        current: session_cost_index(app.run_budget.alert_session_cost_micros),
+        note: Some("warn before submit; unknown cost stays disabled".to_string()),
     });
 
     rows.push(SettingsRow::Header("Sandbox"));
@@ -252,6 +293,16 @@ fn session_turn_index(value: Option<usize>) -> usize {
         .unwrap_or(0)
 }
 
+fn token_index(value: Option<u64>) -> usize {
+    value
+        .and_then(|value| {
+            BUDGET_SESSION_TOKEN_VALUES
+                .iter()
+                .position(|candidate| parse_token_count(candidate) == Some(value))
+        })
+        .unwrap_or(0)
+}
+
 fn session_output_index(value: Option<usize>) -> usize {
     value
         .and_then(|value| {
@@ -293,6 +344,9 @@ pub(crate) fn update_run_budget(
         SettingId::BudgetToolTime => {
             budget.max_tool_seconds = parse_optional(label, parse_duration_seconds)
         }
+        SettingId::BudgetSessionBilledTokens => {
+            budget.max_session_billed_tokens = parse_optional(label, parse_token_count)
+        }
         SettingId::BudgetSessionTurns => {
             budget.max_session_turns = parse_optional(label, |value| value.parse::<usize>().ok())
         }
@@ -304,6 +358,18 @@ pub(crate) fn update_run_budget(
         }
         SettingId::BudgetSessionCost => {
             budget.max_session_cost_micros = parse_optional(label, parse_cost_micros)
+        }
+        SettingId::AlertSessionBilledTokens => {
+            budget.alert_session_billed_tokens = parse_optional(label, parse_token_count)
+        }
+        SettingId::AlertSessionTurns => {
+            budget.alert_session_turns = parse_optional(label, |value| value.parse::<usize>().ok())
+        }
+        SettingId::AlertSessionTime => {
+            budget.alert_session_active_seconds = parse_optional(label, parse_duration_seconds)
+        }
+        SettingId::AlertSessionCost => {
+            budget.alert_session_cost_micros = parse_optional(label, parse_cost_micros)
         }
         _ => return None,
     }
@@ -327,6 +393,14 @@ fn parse_output_chars(label: &str) -> Option<usize> {
     label
         .strip_suffix('k')?
         .parse::<usize>()
+        .ok()?
+        .checked_mul(1_000)
+}
+
+fn parse_token_count(label: &str) -> Option<u64> {
+    label
+        .strip_suffix('k')?
+        .parse::<u64>()
         .ok()?
         .checked_mul(1_000)
 }
@@ -392,12 +466,12 @@ mod tests {
     fn seeds_all_sections_and_first_selectable_skips_header() {
         let app = app();
         let rows = seed_settings_rows(&app, smol_profile(crate::smol::SmolPreference::Off));
-        // Nine section headers group related rows.
+        // Ten section headers group related rows.
         assert_eq!(
             rows.iter()
                 .filter(|r| matches!(r, SettingsRow::Header(_)))
                 .count(),
-            9
+            10
         );
         // First selectable is the Model action, not the "Model" header.
         assert!(rows[first_selectable(&rows)].is_selectable());
@@ -467,6 +541,7 @@ mod tests {
             max_session_output_chars: Some(1_000_000),
             max_session_active_seconds: Some(7_200),
             max_session_cost_micros: Some(10_000_000),
+            ..crate::run_budget::RunBudget::default()
         };
         let rows = seed_settings_rows(&app, smol_profile(crate::smol::SmolPreference::Off));
         assert_eq!(choice_current(&rows, SettingId::BudgetTurns), Some(2));

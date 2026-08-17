@@ -912,7 +912,7 @@ fn mode_picker_collapses_to_selected_value_when_too_narrow() {
 fn settings_wide_layout_shows_every_section_in_two_columns() {
     let app = crate::tui::test_utils::app();
     let rows = crate::tui::settings::seed_settings_rows(&app, smol_off());
-    let area = Rect::new(0, 0, 220, 18);
+    let area = Rect::new(0, 0, 220, 24);
     let buffer = render_settings_to_buffer(area, &rows, 1);
     let text = buffer_text(&buffer);
     let (model_x, _) = find_cell(&buffer, "Model").expect("model section should render");
@@ -984,7 +984,7 @@ fn settings_wide_table_aligns_controls_and_descriptions() {
 fn settings_medium_table_collapses_options_but_keeps_notes() {
     let app = crate::tui::test_utils::app();
     let rows = crate::tui::settings::seed_settings_rows(&app, smol_off());
-    let area = Rect::new(0, 0, 80, 30);
+    let area = Rect::new(0, 0, 100, 38);
     let buffer = render_settings_to_buffer(area, &rows, 1);
     let text = buffer_text(&buffer);
 

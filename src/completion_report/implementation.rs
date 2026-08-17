@@ -249,11 +249,21 @@ impl CompletionReport {
                 authorization.denied
             ));
         }
-        if session.session_budget.cost_limit_micros.is_some()
+        if (session.session_budget.cost_limit_micros.is_some()
+            || session.session_budget.cost_alert_micros.is_some())
             && session.session_budget.exact_cost_micros.is_none()
         {
             caveats.push(
-                "Exact session cost is unavailable, so the configured cost budget could not be enforced."
+                "Exact session cost is unknown, so configured cost safeguards could not be evaluated."
+                    .to_string(),
+            );
+        }
+        if (session.session_budget.billed_token_limit.is_some()
+            || session.session_budget.billed_token_alert.is_some())
+            && session.session_budget.exact_billed_tokens.is_none()
+        {
+            caveats.push(
+                "Exact billed-token usage is unknown, so configured token safeguards could not be evaluated."
                     .to_string(),
             );
         }
@@ -402,11 +412,20 @@ impl CompletionReport {
         if let Some(reason) = self.usage.budget_exhaustion {
             lines.push(format!("Budget · exhausted: {reason}"));
         } else if self.usage.session_budget.turn_limit.is_some()
+            || self.usage.session_budget.billed_token_limit.is_some()
             || self.usage.session_budget.output_char_limit.is_some()
             || self.usage.session_budget.active_limit_seconds.is_some()
             || self.usage.session_budget.cost_limit_micros.is_some()
         {
             let mut values = Vec::new();
+            if let Some(limit) = self.usage.session_budget.billed_token_limit {
+                let used = self
+                    .usage
+                    .session_budget
+                    .exact_billed_tokens
+                    .map_or_else(|| "unknown".to_string(), |used| used.to_string());
+                values.push(format!("billed tokens {used}/{limit}"));
+            }
             if self.usage.session_budget.turn_limit.is_some() {
                 values.push(format!(
                     "turns {}",
@@ -446,6 +465,14 @@ impl CompletionReport {
             }
             lines.push(format!("Budget · session {}", values.join(" · ")));
         }
+        let alerts = self.usage.session_budget.alert_states();
+        if !alerts.is_empty() {
+            let values = alerts
+                .into_iter()
+                .map(format_session_alert)
+                .collect::<Vec<_>>();
+            lines.push(format!("Alerts · session {}", values.join(" · ")));
+        }
         let caveats = self
             .caveats
             .iter()
@@ -456,6 +483,44 @@ impl CompletionReport {
             lines.push(format!("Caveats · {}", caveats.join(" ")));
         }
         lines.join("\n")
+    }
+}
+
+fn format_session_alert(alert: crate::run_budget::SessionBudgetAlertState) -> String {
+    use crate::run_budget::SessionBudgetAlertState;
+    let state = if alert.is_reached() {
+        "reached"
+    } else {
+        "next"
+    };
+    match alert {
+        SessionBudgetAlertState::BilledTokens {
+            used_tokens,
+            threshold_tokens,
+        } => format!(
+            "billed tokens {}/{} ({state})",
+            used_tokens.map_or_else(|| "unknown".to_string(), |used| used.to_string()),
+            threshold_tokens
+        ),
+        SessionBudgetAlertState::ProviderTurns {
+            used_turns,
+            threshold_turns,
+        } => format!("turns {used_turns}/{threshold_turns} ({state})"),
+        SessionBudgetAlertState::ActiveTime {
+            used_ms,
+            threshold_seconds,
+        } => format!("active {}s/{threshold_seconds}s ({state})", used_ms / 1_000),
+        SessionBudgetAlertState::Cost {
+            used_micros,
+            threshold_micros,
+        } => format!(
+            "cost {}/${:.6} ({state})",
+            used_micros.map_or_else(
+                || "unknown".to_string(),
+                |used| format!("${:.6}", used as f64 / 1_000_000.0)
+            ),
+            threshold_micros as f64 / 1_000_000.0
+        ),
     }
 }
 
@@ -1113,6 +1178,7 @@ mod tests {
                     active_limit_seconds: Some(7_200),
                     exact_cost_micros: Some(1_250_000),
                     cost_limit_micros: Some(5_000_000),
+                    ..crate::run_budget::SessionBudgetUsage::default()
                 },
                 budget_exhaustion: None,
             },
@@ -1148,7 +1214,7 @@ mod tests {
                 .contains("Budget · session cost n/a/$5.000000")
         );
         assert!(report.render_compact().contains(
-            "Exact session cost is unavailable, so the configured cost budget could not be enforced."
+            "Exact session cost is unknown, so configured cost safeguards could not be evaluated."
         ));
     }
 }

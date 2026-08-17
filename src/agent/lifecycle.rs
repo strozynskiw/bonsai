@@ -235,6 +235,8 @@ impl Agent {
 
     pub(crate) fn session_budget_usage(&self) -> crate::run_budget::SessionBudgetUsage {
         crate::run_budget::SessionBudgetUsage {
+            exact_billed_tokens: self.usage.exact_session_billed_tokens(),
+            billed_token_limit: self.budget.max_session_billed_tokens,
             turns: self.usage.session_turn_count(),
             turn_limit: self.budget.max_session_turns,
             output_chars: self.usage.session_output_chars(),
@@ -243,6 +245,10 @@ impl Agent {
             active_limit_seconds: self.budget.max_session_active_seconds,
             exact_cost_micros: self.usage.exact_session_cost_micros(),
             cost_limit_micros: self.budget.max_session_cost_micros,
+            billed_token_alert: self.budget.alert_session_billed_tokens,
+            turn_alert: self.budget.alert_session_turns,
+            active_alert_seconds: self.budget.alert_session_active_seconds,
+            cost_alert_micros: self.budget.alert_session_cost_micros,
         }
     }
 

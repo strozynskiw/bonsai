@@ -185,7 +185,8 @@ files. These are the labels shown by the current settings screen:
 - Appearance: `serenity`, `theme`
 - Diagnostics: `support log`
 - Per-run budgets: `max turns`, `run time`, `generation`, `output`, `tool time`
-- Session budgets: `session turns`, `session output`, `session time`, `session cost`
+- Session budgets: `session billed tokens`, `session turns`, `session output`, `session time`, `session cost`
+- Session alerts: `billed tokens`, `provider turns`, `active time`, `exact cost`
 - Sandbox: `confinement`, `network`
 <!-- bonsai:settings:end -->
 

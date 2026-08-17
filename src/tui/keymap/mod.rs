@@ -96,6 +96,15 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     if matches!(
         app.modal,
         Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::BudgetWarning { .. }
+        ))
+    ) {
+        return map_budget_warning_key(key);
+    }
+
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
             crate::tui::event::PickerModal::ReviewScopePicker { .. }
         ))
     ) {

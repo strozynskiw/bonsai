@@ -906,6 +906,20 @@ pub(super) fn map_start_plan_choice_key(key: KeyEvent) -> KeyIntent {
     }
 }
 
+pub(super) fn map_budget_warning_key(key: KeyEvent) -> KeyIntent {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+            KeyIntent::Action(AppAction::CloseModal)
+        }
+        KeyCode::Enter => KeyIntent::Action(AppAction::BudgetWarningSubmit),
+        KeyCode::Up => KeyIntent::Action(AppAction::BudgetWarningMove(-1)),
+        KeyCode::Down | KeyCode::Tab => KeyIntent::Action(AppAction::BudgetWarningMove(1)),
+        KeyCode::Home => KeyIntent::Action(AppAction::BudgetWarningMove(i16::MIN)),
+        KeyCode::End => KeyIntent::Action(AppAction::BudgetWarningMove(i16::MAX)),
+        _ => KeyIntent::Noop,
+    }
+}
+
 pub(super) fn map_plan_delete_confirm_key(key: KeyEvent) -> KeyIntent {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {

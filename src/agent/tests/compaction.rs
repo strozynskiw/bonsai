@@ -652,7 +652,7 @@ async fn cancelled_manual_compaction_leaves_context_unchanged() {
 }
 
 #[tokio::test]
-async fn manual_compaction_keeps_hidden_summary_usage_out_of_visible_totals() {
+async fn manual_compaction_counts_hidden_summary_usage_only_for_safeguards() {
     let fixture = TestFixture::new();
     let mut agent = Agent::new(
             Box::new(MockProvider::new(vec![Ok(StreamedResponse {
@@ -689,6 +689,7 @@ async fn manual_compaction_keeps_hidden_summary_usage_out_of_visible_totals() {
     assert_eq!(context_report.session_prompt_tokens, 0);
     assert_eq!(context_report.session_completion_tokens, 0);
     assert_eq!(context_report.session_input_cache, None);
+    assert_eq!(agent.session_budget_usage().exact_billed_tokens, Some(49));
 }
 
 #[tokio::test]

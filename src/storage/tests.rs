@@ -5913,6 +5913,7 @@ async fn run_budget_is_unset_by_default_and_round_trips() {
         max_session_output_chars: Some(1_000_000),
         max_session_active_seconds: Some(7_200),
         max_session_cost_micros: Some(10_000_000),
+        ..crate::run_budget::RunBudget::default()
     };
     fixture.storage.set_run_budget(budget).await.unwrap();
 

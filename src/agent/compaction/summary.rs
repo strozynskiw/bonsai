@@ -10,16 +10,41 @@ impl Agent {
         cancellation_token: CancellationToken,
     ) -> Result<String> {
         let messages = self.compaction_summary_prompt(draft).await?;
-        let response = self
+        let retried = self
             .chat_stream_with_retry(
                 &messages,
                 &[],
                 cancellation_token.clone(),
                 Arc::new(SilentSink),
             )
-            .await?
-            .response;
+            .await?;
+        let response = retried.response;
         let interrupted = cancellation_token.is_cancelled() || response.is_interrupted();
+        let diagnostics = UsageTurnDiagnostics {
+            interrupted,
+            finish_reason: response.finish_reason().cloned(),
+            reasoning_chars: response.reasoning_chars,
+            provider_attempts: retried.attempts,
+            execution_lane: ExecutionLane::compaction(self.execution_lane.id.clone()),
+            provider_id: self
+                .active_model_identity
+                .as_ref()
+                .map(|identity| identity.provider_id.as_str().to_string()),
+            model: self
+                .active_model_identity
+                .as_ref()
+                .map(|identity| identity.model.clone()),
+            effective_reasoning: self.provider.reasoning(),
+            context_window_tokens: Some(self.budget.context_budget_tokens),
+            rewrite: PendingContextRewrite {
+                kind: ContextRewriteKind::Compaction,
+                ..PendingContextRewrite::default()
+            },
+            created_at_ms: crate::util::time::now_ms(),
+            ..UsageTurnDiagnostics::default()
+        };
+        self.usage
+            .record_safeguard_usage(response.usage, diagnostics);
         if interrupted {
             return Err(CompactionCancelled.into());
         }
