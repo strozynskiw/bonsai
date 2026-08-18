@@ -265,6 +265,7 @@ impl SessionUsage {
     pub(super) fn record_safeguard_usage(
         &mut self,
         usage: Option<TokenUsage>,
+        pricing: Option<&ModelPricingSchedule>,
         diagnostics: UsageTurnDiagnostics,
     ) {
         debug_assert_eq!(
@@ -272,7 +273,13 @@ impl SessionUsage {
             ExecutionLaneKind::Compaction
         );
         debug_assert_eq!(diagnostics.rewrite.kind, ContextRewriteKind::Compaction);
-        let turn = self.usage_turn_for(usage, None, diagnostics);
+        let pricing_timestamp_ms = diagnostics.pricing_timestamp_ms();
+        let pricing = pricing.map(|schedule| {
+            usage
+                .map(|usage| schedule.pricing_for_usage_at(usage, pricing_timestamp_ms))
+                .unwrap_or_else(|| schedule.base())
+        });
+        let turn = self.usage_turn_for(usage, pricing, diagnostics);
         self.usage_turns.push(turn);
     }
 
@@ -426,10 +433,17 @@ impl SessionUsage {
     }
 
     pub(super) fn restore_turns(&mut self, turns: Vec<UsageTurn>) {
-        if turns.iter().any(|turn| turn.turn_cost_micros.is_none()) {
+        if turns
+            .iter()
+            .any(|turn| turn.turn_cost_micros.is_none() && !is_safeguard_only_compaction(turn))
+            || turns.iter().any(|turn| {
+                is_safeguard_only_compaction(turn)
+                    && (turn.turn_cost_micros.is_none() || turn.no_cache_cost_micros.is_none())
+            })
+        {
             self.cost_complete = false;
         }
-        if let Some((turn_cost, turn_no_cache_cost)) = priced_turn_cost_totals(&turns)
+        if let Some((turn_cost, turn_no_cache_cost)) = visible_priced_turn_cost_totals(&turns)
             && turn_cost == self.cost_micros
         {
             // IMPORTANT ACCOUNTING INVARIANT: persisted per-turn pricing is the
@@ -613,7 +627,25 @@ impl SessionUsage {
 
     /// Cumulative cost only when every provider turn had usage and pricing.
     pub(super) fn exact_session_cost_micros(&self) -> Option<u64> {
-        self.cost_complete.then_some(self.cost_micros)
+        if !self.cost_complete {
+            return None;
+        }
+        if self.usage_turns.is_empty() {
+            return Some(self.cost_micros);
+        }
+        let (visible_cost, safeguard_only_cost) =
+            self.usage_turns
+                .iter()
+                .try_fold((0u64, 0u64), |(visible, safeguard_only), turn| {
+                    let cost = turn.turn_cost_micros?;
+                    if is_safeguard_only_compaction(turn) {
+                        Some((visible, safeguard_only.saturating_add(cost)))
+                    } else {
+                        Some((visible.saturating_add(cost), safeguard_only))
+                    }
+                })?;
+        (visible_cost == self.cost_micros)
+            .then_some(self.cost_micros.saturating_add(safeguard_only_cost))
     }
 
     /// Cache-inclusive prompt plus completion tokens only when every persisted
@@ -684,11 +716,14 @@ fn is_safeguard_only_compaction(turn: &UsageTurn) -> bool {
         && turn.rewrite_kind == ContextRewriteKind::Compaction
 }
 
-fn priced_turn_cost_totals(turns: &[UsageTurn]) -> Option<(u64, u64)> {
+fn visible_priced_turn_cost_totals(turns: &[UsageTurn]) -> Option<(u64, u64)> {
     let mut saw_priced_turn = false;
     let mut actual = 0u64;
     let mut no_cache = 0u64;
     for turn in turns {
+        if is_safeguard_only_compaction(turn) {
+            continue;
+        }
         match (turn.turn_cost_micros, turn.no_cache_cost_micros) {
             (Some(turn_actual), Some(turn_no_cache)) => {
                 saw_priced_turn = true;
@@ -1079,23 +1114,56 @@ mod tests {
     }
 
     #[test]
-    fn restored_hidden_compaction_counts_only_toward_billed_token_safeguard() {
+    fn restored_hidden_compaction_counts_only_toward_cumulative_safeguards() {
         let mut usage = SessionUsage::default();
         usage.restore(100, 25, Some(0), Some(0), None);
         let mut parent = usage_turn_without_cache(100);
         parent.completion_tokens = Some(25);
+        parent.turn_cost_micros = Some(0);
+        parent.no_cache_cost_micros = Some(0);
         let mut compaction = usage_turn_without_cache(42);
         compaction.seq = 2;
         compaction.lane_kind = ExecutionLaneKind::Compaction;
         compaction.lane_id = "compaction".to_string();
         compaction.completion_tokens = Some(7);
         compaction.rewrite_kind = ContextRewriteKind::Compaction;
+        compaction.turn_cost_micros = Some(12);
+        compaction.no_cache_cost_micros = Some(15);
 
         usage.restore_turns(vec![parent, compaction]);
 
         assert_eq!(usage.totals().prompt_tokens, 100);
         assert_eq!(usage.totals().completion_tokens, 25);
+        assert_eq!(usage.totals().cost_micros, Some(0));
         assert_eq!(usage.exact_session_billed_tokens(), Some(174));
+        assert_eq!(usage.exact_session_cost_micros(), Some(12));
+    }
+
+    #[test]
+    fn live_hidden_compaction_cost_is_safeguard_only() {
+        let mut usage = SessionUsage::default();
+        let schedule = ModelPricingSchedule::flat(pricing());
+        let turn_usage = read_heavy();
+        let expected_cost = schedule.base().cost_micros_for_usage(turn_usage);
+
+        usage.record_safeguard_usage(
+            Some(turn_usage),
+            Some(&schedule),
+            UsageTurnDiagnostics {
+                execution_lane: ExecutionLane::compaction("session-7"),
+                rewrite: super::PendingContextRewrite {
+                    kind: ContextRewriteKind::Compaction,
+                    ..super::PendingContextRewrite::default()
+                },
+                ..UsageTurnDiagnostics::default()
+            },
+        );
+
+        assert_eq!(usage.totals().prompt_tokens, 0);
+        assert_eq!(usage.totals().completion_tokens, 0);
+        assert_eq!(usage.totals().cost_micros, Some(0));
+        assert_eq!(usage.exact_session_billed_tokens(), Some(1_000_000));
+        assert_eq!(usage.exact_session_cost_micros(), Some(expected_cost));
     }
 
     #[test]

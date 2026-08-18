@@ -43,8 +43,11 @@ impl Agent {
             created_at_ms: crate::util::time::now_ms(),
             ..UsageTurnDiagnostics::default()
         };
-        self.usage
-            .record_safeguard_usage(response.usage, diagnostics);
+        self.usage.record_safeguard_usage(
+            response.usage,
+            self.prompt_estimator.pricing(),
+            diagnostics,
+        );
         if interrupted {
             return Err(CompactionCancelled.into());
         }
