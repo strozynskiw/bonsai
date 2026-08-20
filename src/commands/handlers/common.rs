@@ -406,6 +406,26 @@ pub(crate) async fn handle_command_with_catalog(
                 Err(message) => outcome.messages.push(error(message)),
             }
         }
+        Some("/lsp") => {
+            let args = arg.unwrap_or_default().trim();
+            let path = args.strip_prefix("restart ").map(str::trim);
+            match path {
+                Some(path) if !path.is_empty() => match agent.lsp_hub() {
+                    Some(hub) => match hub.restart_for_path(path).await {
+                        Ok(message) => outcome.messages.push(status(message)),
+                        Err(err) => outcome
+                            .messages
+                            .push(error(format!("Failed to restart language server: {err}"))),
+                    },
+                    None => outcome
+                        .messages
+                        .push(error("LSP is unavailable in this session.".to_string())),
+                },
+                _ => outcome
+                    .messages
+                    .push(error("Usage: /lsp restart <path>".to_string())),
+            }
+        }
         Some("/mcp") => match parse_mcp_command(input) {
             Ok(McpCommandRequest::View) => {
                 outcome.modal = Some(CommandModalRequest::McpServers {

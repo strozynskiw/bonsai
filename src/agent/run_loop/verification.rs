@@ -158,13 +158,16 @@ impl Agent {
         let mut paths = edited_paths.to_vec();
         paths.sort();
         paths.dedup();
-        let fresh = match hub.refresh_error_snapshot_for_files(&paths).await {
-            Ok(snapshot) => snapshot,
+        let (fresh, recovery_notice) = match hub.refresh_error_snapshot_for_files(&paths).await {
+            Ok(result) => result,
             Err(err) => {
                 tracing::debug!(error = %err, "failed to refresh LSP diagnostics after edits");
                 return;
             }
         };
+        if let Some(notice) = recovery_notice {
+            sink.status(&notice);
+        }
         let new_errors = fresh.new_errors_since(&baseline);
         if new_errors.is_empty() {
             return;

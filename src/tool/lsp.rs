@@ -166,12 +166,26 @@ impl Tool for DefinitionTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: PositionArgs = parse_args("definition", args)?;
-        let locations = self
+        let locations = match self
             .hub
             .definition(&args.path, args.line, args.character)
-            .await?;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(fallback) = recovery_fallback(&error) {
+                    return Ok(fallback);
+                }
+                return Err(error.into());
+            }
+        };
+        let text = format_locations(
+            self.hub.project_root(),
+            &locations.value,
+            "No definition found.",
+        );
         Ok(ToolOutput::Text(cap_text(
-            format_locations(self.hub.project_root(), &locations, "No definition found."),
+            with_recovery_notice(text, locations.recovery_notice),
             MAX_OUTPUT_CHARS,
             "Use read on the most relevant file.",
         )))
@@ -232,27 +246,52 @@ impl Tool for ReferencesTool {
             )
             .await
         {
-            Ok(locations) => locations,
+            Ok(outcome) => outcome,
             Err(error) if likely_warming_error(&error) => {
                 return Ok(ToolOutput::Text(
                     "Language server is still warming; retry references in 3s. Use grep meanwhile if the result is urgent."
                         .to_string(),
                 ));
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                if let Some(fallback) = recovery_fallback(&error) {
+                    return Ok(fallback);
+                }
+                return Err(error.into());
+            }
         };
-        if locations.is_empty() {
-            return Ok(ToolOutput::Text(
+        if locations.value.is_empty() {
+            return Ok(ToolOutput::Text(with_recovery_notice(
                 "No references found. If this is the server's first request, it may still be indexing; retry in 3s or use grep."
                     .to_string(),
-            ));
+                locations.recovery_notice,
+            )));
         }
         Ok(ToolOutput::Text(cap_text(
-            format_locations(self.hub.project_root(), &locations, "No references found."),
+            with_recovery_notice(
+                format_locations(
+                    self.hub.project_root(),
+                    &locations.value,
+                    "No references found.",
+                ),
+                locations.recovery_notice,
+            ),
             MAX_OUTPUT_CHARS,
             "Use query/path filters or read the referenced files.",
         )))
     }
+}
+
+fn with_recovery_notice(text: String, notice: Option<String>) -> String {
+    notice.map_or(text.clone(), |notice| format!("{notice}\n\n{text}"))
+}
+
+fn recovery_fallback(error: &lsp::LspError) -> Option<ToolOutput> {
+    matches!(error, lsp::LspError::RecoveryUnavailable { .. }).then(|| {
+        ToolOutput::Text(format!(
+            "{error}\nContinue with built-in symbol_search/grep while LSP recovery cools down."
+        ))
+    })
 }
 
 fn likely_warming_error(error: &lsp::LspError) -> bool {
@@ -294,12 +333,21 @@ impl Tool for HoverTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: PositionArgs = parse_args("hover", args)?;
-        let Some(hover) = self
-            .hub
-            .hover(&args.path, args.line, args.character)
-            .await?
-        else {
-            return Ok(ToolOutput::Text("No hover information found.".to_string()));
+        let hover = match self.hub.hover(&args.path, args.line, args.character).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(fallback) = recovery_fallback(&error) {
+                    return Ok(fallback);
+                }
+                return Err(error.into());
+            }
+        };
+        let recovery_notice = hover.recovery_notice;
+        let Some(hover) = hover.value else {
+            return Ok(ToolOutput::Text(with_recovery_notice(
+                "No hover information found.".to_string(),
+                recovery_notice,
+            )));
         };
         let mut out = hover.contents;
         if let Some(range) = hover.range {
@@ -312,7 +360,7 @@ impl Tool for HoverTool {
             ));
         }
         Ok(ToolOutput::Text(cap_text(
-            out,
+            with_recovery_notice(out, recovery_notice),
             MAX_OUTPUT_CHARS,
             "Use definition or references for more context.",
         )))
@@ -350,9 +398,20 @@ impl Tool for WorkspaceSymbolTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: WorkspaceSymbolArgs = parse_args("workspace_symbol", args)?;
-        let symbols = self.hub.workspace_symbol(&args.path, &args.query).await?;
+        let symbols = match self.hub.workspace_symbol(&args.path, &args.query).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(fallback) = recovery_fallback(&error) {
+                    return Ok(fallback);
+                }
+                return Err(error.into());
+            }
+        };
         Ok(ToolOutput::Text(cap_text(
-            format_symbols(self.hub.project_root(), &symbols),
+            with_recovery_notice(
+                format_symbols(self.hub.project_root(), &symbols.value),
+                symbols.recovery_notice,
+            ),
             MAX_OUTPUT_CHARS,
             "Use a narrower query.",
         )))

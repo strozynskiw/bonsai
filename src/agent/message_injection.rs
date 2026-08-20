@@ -205,6 +205,11 @@ impl Agent {
         &self.config
     }
 
+    /// The language-server hub, for `/lsp restart`.
+    pub(crate) fn lsp_hub(&self) -> Option<&std::sync::Arc<crate::lsp::LspHub>> {
+        self.lsp_hub.as_ref()
+    }
+
     /// The connected MCP hub, for `/mcp enable|disable|reload`. `None`
     /// in evals.
     pub(crate) fn mcp_hub(&self) -> Option<&std::sync::Arc<crate::mcp::McpHub>> {

@@ -495,9 +495,12 @@ impl Tool for DiagnosticsTool {
                 Ok(diagnostics) => {
                     let text = crate::lsp::format_diagnostics(
                         &self.project_root,
-                        &diagnostics,
+                        &diagnostics.value,
                         "LSP diagnostics",
                     );
+                    let text = diagnostics
+                        .recovery_notice
+                        .map_or(text.clone(), |notice| format!("{notice}\n\n{text}"));
                     return Ok(ToolOutput::Text(cap_text(
                         text,
                         MAX_OUTPUT_CHARS,
