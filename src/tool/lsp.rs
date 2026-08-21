@@ -28,6 +28,8 @@ struct PositionArgs {
     path: String,
     line: u32,
     character: u32,
+    #[serde(default)]
+    recheck: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,12 +39,16 @@ struct ReferencesArgs {
     character: u32,
     #[serde(default)]
     include_declaration: bool,
+    #[serde(default)]
+    recheck: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct WorkspaceSymbolArgs {
     path: String,
     query: String,
+    #[serde(default)]
+    recheck: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +147,12 @@ fn position_schema() -> serde_json::Value {
                     None,
                 ),
             ),
+            (
+                "recheck",
+                boolean_property(
+                    "Bypass cached missing-path evidence and check the filesystem again",
+                ),
+            ),
         ],
         &["path", "line", "character"],
     )
@@ -168,7 +180,7 @@ impl Tool for DefinitionTool {
         let args: PositionArgs = parse_args("definition", args)?;
         let locations = match self
             .hub
-            .definition(&args.path, args.line, args.character)
+            .definition_with_recheck(&args.path, args.line, args.character, args.recheck)
             .await
         {
             Ok(outcome) => outcome,
@@ -229,6 +241,12 @@ impl Tool for ReferencesTool {
                     "include_declaration",
                     boolean_property("Whether to include the declaration/definition"),
                 ),
+                (
+                    "recheck",
+                    boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["path", "line", "character"],
         )
@@ -238,11 +256,12 @@ impl Tool for ReferencesTool {
         let args: ReferencesArgs = parse_args("references", args)?;
         let locations = match self
             .hub
-            .references(
+            .references_with_recheck(
                 &args.path,
                 args.line,
                 args.character,
                 args.include_declaration,
+                args.recheck,
             )
             .await
         {
@@ -287,6 +306,11 @@ fn with_recovery_notice(text: String, notice: Option<String>) -> String {
 }
 
 fn recovery_fallback(error: &lsp::LspError) -> Option<ToolOutput> {
+    if let lsp::LspError::ReusedMissingPath { evidence } = error {
+        return Some(ToolOutput::MissingPathReuse {
+            text: evidence.render_reuse(),
+        });
+    }
     matches!(error, lsp::LspError::RecoveryUnavailable { .. }).then(|| {
         ToolOutput::Text(format!(
             "{error}\nContinue with built-in symbol_search/grep while LSP recovery cools down."
@@ -333,7 +357,11 @@ impl Tool for HoverTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: PositionArgs = parse_args("hover", args)?;
-        let hover = match self.hub.hover(&args.path, args.line, args.character).await {
+        let hover = match self
+            .hub
+            .hover_with_recheck(&args.path, args.line, args.character, args.recheck)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 if let Some(fallback) = recovery_fallback(&error) {
@@ -391,6 +419,12 @@ impl Tool for WorkspaceSymbolTool {
                     ),
                 ),
                 ("query", string_property("Symbol query")),
+                (
+                    "recheck",
+                    boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["path", "query"],
         )
@@ -398,7 +432,11 @@ impl Tool for WorkspaceSymbolTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: WorkspaceSymbolArgs = parse_args("workspace_symbol", args)?;
-        let symbols = match self.hub.workspace_symbol(&args.path, &args.query).await {
+        let symbols = match self
+            .hub
+            .workspace_symbol_with_recheck(&args.path, &args.query, args.recheck)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 if let Some(fallback) = recovery_fallback(&error) {

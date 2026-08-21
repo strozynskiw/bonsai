@@ -15,8 +15,9 @@ use crate::tool::schema::{
     bounded_integer_property, closed_object, parse_args, path_property, string_property,
 };
 use crate::tool::{
-    FileOrDirectoryKind, ProjectPathResolver, ReadCoverage, ReadEvidence, ReadTracker, ReadWindow,
-    Tool, ToolOutput, file_or_directory_kind, output, search,
+    FileOrDirectoryKind, PathEvidence, ProjectPathResolver, ReadCoverage, ReadEvidence,
+    ReadTracker, ReadWindow, Tool, ToolOutput, ToolPathError, file_or_directory_kind, output,
+    search,
 };
 
 #[derive(Deserialize)]
@@ -27,6 +28,8 @@ struct ReadArgs {
     #[serde(default = "default_limit")]
     limit: usize,
     depth: Option<usize>,
+    #[serde(default)]
+    recheck: bool,
 }
 
 fn default_offset() -> usize {
@@ -115,6 +118,7 @@ fn line_number(value: &serde_json::Value) -> Option<u64> {
 pub struct ReadTool {
     project_root: PathBuf,
     read_tracker: ReadTracker,
+    path_evidence: Option<PathEvidence>,
 }
 
 impl ReadTool {
@@ -122,7 +126,13 @@ impl ReadTool {
         Self {
             project_root,
             read_tracker,
+            path_evidence: None,
         }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        self.path_evidence = Some(path_evidence);
+        self
     }
 }
 
@@ -173,6 +183,12 @@ impl Tool for ReadTool {
                         "Concrete reason a broad parent reread is essential after delegated full-file coverage; omit for ordinary reads",
                     ),
                 ),
+                (
+                    "recheck",
+                    crate::tool::schema::boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["path"],
         )
@@ -185,9 +201,20 @@ impl Tool for ReadTool {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: ReadArgs = parse_args("read tool", args)?;
 
-        let resolved_path = ProjectPathResolver::new(&self.project_root)
+        let mut resolver = ProjectPathResolver::new(&self.project_root)
             .action("read files")
-            .resolve_existing(&args.path)?;
+            .recheck(args.recheck);
+        if let Some(evidence) = self.path_evidence.as_ref() {
+            resolver = resolver.path_evidence(evidence);
+        }
+        let resolved_path = match resolver.resolve_existing(&args.path) {
+            Err(ToolPathError::ReusedMissingPath { evidence }) => {
+                return Ok(ToolOutput::MissingPathReuse {
+                    text: evidence.render_reuse(),
+                });
+            }
+            result => result?,
+        };
         let canonical_path = resolved_path.canonical_path();
         let canonical_root = resolved_path.canonical_root();
 
@@ -1800,5 +1827,35 @@ mod tests {
             !fixture.read_tracker.was_fully_read(&canonical_path).await,
             "a hidden long-line tail must not authorize overwrite"
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_missing_read_reuses_evidence_and_recheck_refreshes() {
+        let fixture = TestFixture::new();
+        let evidence = PathEvidence::new(&fixture.project_root).unwrap();
+        let tool = ReadTool::new(fixture.project_root.clone(), fixture.read_tracker.clone())
+            .with_path_evidence(evidence);
+
+        let first = tool.execute(json!({ "path": "missing.md" })).await;
+        assert!(
+            first.is_err(),
+            "the first miss must keep normal failure behavior"
+        );
+
+        let second = tool
+            .execute(json!({ "path": "./missing.md" }))
+            .await
+            .unwrap();
+        let ToolOutput::MissingPathReuse { text } = second else {
+            panic!("expected missing-path reuse output");
+        };
+        assert!(text.contains("[reused missing-path evidence]"));
+
+        fixture.create_file("missing.md", "restored");
+        let restored = tool
+            .execute(json!({ "path": "missing.md", "recheck": true }))
+            .await
+            .unwrap();
+        assert!(matches!(restored, ToolOutput::Read { .. }));
     }
 }

@@ -17,7 +17,8 @@ use crate::tool::schema::{
     string_property,
 };
 use crate::tool::{
-    ProjectPathResolver, ReadCoverage, ReadEvidence, ReadTracker, ReadWindow, Tool, ToolOutput,
+    PathEvidence, ProjectPathResolver, ReadCoverage, ReadEvidence, ReadTracker, ReadWindow, Tool,
+    ToolOutput, ToolPathError,
 };
 
 const MAX_REGION_LINES: usize = 1000;
@@ -29,6 +30,8 @@ struct ReadRegionArgs {
     path: String,
     start_line: usize,
     end_line: usize,
+    #[serde(default)]
+    recheck: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +40,8 @@ struct ReadSymbolArgs {
     query: String,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    recheck: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +53,7 @@ struct Region {
 pub struct ReadRegionTool {
     project_root: PathBuf,
     read_tracker: ReadTracker,
+    path_evidence: Option<PathEvidence>,
 }
 
 impl ReadRegionTool {
@@ -55,7 +61,13 @@ impl ReadRegionTool {
         Self {
             project_root,
             read_tracker,
+            path_evidence: None,
         }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        self.path_evidence = Some(path_evidence);
+        self
     }
 }
 
@@ -88,6 +100,12 @@ impl Tool for ReadRegionTool {
                     "end_line",
                     bounded_integer_property("Last line to read, inclusive", Some(1), None),
                 ),
+                (
+                    "recheck",
+                    crate::tool::schema::boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["path", "start_line", "end_line"],
         )
@@ -95,9 +113,20 @@ impl Tool for ReadRegionTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: ReadRegionArgs = parse_args("read_region", args)?;
-        let resolved = ProjectPathResolver::new(&self.project_root)
+        let mut resolver = ProjectPathResolver::new(&self.project_root)
             .action("read files")
-            .resolve_existing(&args.path)?;
+            .recheck(args.recheck);
+        if let Some(evidence) = self.path_evidence.as_ref() {
+            resolver = resolver.path_evidence(evidence);
+        }
+        let resolved = match resolver.resolve_existing(&args.path) {
+            Err(ToolPathError::ReusedMissingPath { evidence }) => {
+                return Ok(ToolOutput::MissingPathReuse {
+                    text: evidence.render_reuse(),
+                });
+            }
+            result => result?,
+        };
         ensure_regular_file(resolved.canonical_path(), &args.path)?;
         read_file_region(
             resolved.canonical_path(),
@@ -116,6 +145,7 @@ impl Tool for ReadRegionTool {
 pub struct ReadSymbolTool {
     project_root: PathBuf,
     read_tracker: ReadTracker,
+    path_evidence: Option<PathEvidence>,
 }
 
 impl ReadSymbolTool {
@@ -123,7 +153,13 @@ impl ReadSymbolTool {
         Self {
             project_root,
             read_tracker,
+            path_evidence: None,
         }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        self.path_evidence = Some(path_evidence);
+        self
     }
 }
 
@@ -158,6 +194,12 @@ impl Tool for ReadSymbolTool {
                     "kind",
                     string_enum_property("Optional symbol kind filter", SYMBOL_KINDS),
                 ),
+                (
+                    "recheck",
+                    crate::tool::schema::boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["path", "query"],
         )
@@ -165,9 +207,20 @@ impl Tool for ReadSymbolTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: ReadSymbolArgs = parse_args("read_symbol", args)?;
-        let resolved = ProjectPathResolver::new(&self.project_root)
+        let mut resolver = ProjectPathResolver::new(&self.project_root)
             .action("read files")
-            .resolve_existing(&args.path)?;
+            .recheck(args.recheck);
+        if let Some(evidence) = self.path_evidence.as_ref() {
+            resolver = resolver.path_evidence(evidence);
+        }
+        let resolved = match resolver.resolve_existing(&args.path) {
+            Err(ToolPathError::ReusedMissingPath { evidence }) => {
+                return Ok(ToolOutput::MissingPathReuse {
+                    text: evidence.render_reuse(),
+                });
+            }
+            result => result?,
+        };
         ensure_regular_file(resolved.canonical_path(), &args.path)?;
         let kind_filter = parse_symbol_kind(args.kind.as_deref())?;
         let content = read_utf8_file(resolved.canonical_path(), &args.path).await?;

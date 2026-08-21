@@ -620,6 +620,7 @@ pub(crate) enum InspectionReason {
     NotReusable,
     ToolFailed,
     RepeatedFreshReuse,
+    MissingPathEvidence,
 }
 
 impl InspectionReason {
@@ -630,6 +631,7 @@ impl InspectionReason {
             Self::NotReusable => "not_reusable",
             Self::ToolFailed => "tool_failed",
             Self::RepeatedFreshReuse => "repeated_fresh_reuse",
+            Self::MissingPathEvidence => "missing_path_evidence",
         }
     }
 
@@ -640,6 +642,7 @@ impl InspectionReason {
             "not_reusable" => Some(Self::NotReusable),
             "tool_failed" => Some(Self::ToolFailed),
             "repeated_fresh_reuse" => Some(Self::RepeatedFreshReuse),
+            "missing_path_evidence" => Some(Self::MissingPathEvidence),
             _ => None,
         }
     }

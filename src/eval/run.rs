@@ -561,10 +561,14 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         ))
     });
     let project_context = context::isolated_project_context_snapshot(config.worktree_path);
+    let path_evidence = crate::tool::PathEvidence::new(config.worktree_path)?;
     let project_info_runtime = Arc::new(crate::tool::ProjectInfoRuntime::new(Some(
         config.provider_setup.project_info_provider_state(),
     )));
-    let lsp_hub = Arc::new(crate::lsp::LspHub::new(config.worktree_path.to_path_buf()));
+    let lsp_hub = Arc::new(
+        crate::lsp::LspHub::new(config.worktree_path.to_path_buf())
+            .with_path_evidence(path_evidence.clone()),
+    );
     let workspace_locks = if config.enable_peer_context {
         crate::tool::WorkspaceLockContext::new(
             config.worktree_path.to_path_buf(),
@@ -583,6 +587,7 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         crate::bootstrap::build_tool_registries(crate::bootstrap::ToolRegistryDeps {
             project_root: config.worktree_path.to_path_buf(),
             read_tracker: read_tracker.clone(),
+            path_evidence,
             lsp_hub: lsp_hub.clone(),
             project_info_runtime: project_info_runtime.clone(),
             permissions,

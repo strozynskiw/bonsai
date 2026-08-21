@@ -36,6 +36,7 @@ pub(crate) use protocol::{
 };
 pub(crate) use spec::{LanguageServerRegistry, LanguageServerSpec};
 
+use crate::tool::{PathEvidence, ProjectPathResolver, ToolPathError};
 use client::{LspClient, LspLifecycleFailure, LspServerError};
 use protocol::{path_to_file_uri, uri_to_path};
 
@@ -77,6 +78,7 @@ pub(crate) struct LspHub {
     project_root: PathBuf,
     registry: LanguageServerRegistry,
     spawner: Arc<dyn LspSpawner>,
+    path_evidence: Option<PathEvidence>,
     clients: Mutex<HashMap<ClientKey, Arc<ClientSlot>>>,
 }
 
@@ -98,21 +100,41 @@ impl LspHub {
             project_root,
             registry,
             spawner,
+            path_evidence: None,
             clients: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        if path_evidence.is_for_root(&self.project_root) {
+            self.path_evidence = Some(path_evidence);
+        }
+        self
     }
 
     pub(crate) fn project_root(&self) -> &Path {
         &self.project_root
     }
 
+    #[cfg(test)]
     pub(crate) async fn definition(
         &self,
         path: &str,
         line: u32,
         character: u32,
     ) -> Result<LspReadResult<Vec<LspLocation>>, LspError> {
-        let file = self.resolve_existing_file(path, "look up definition")?;
+        self.definition_with_recheck(path, line, character, false)
+            .await
+    }
+
+    pub(crate) async fn definition_with_recheck(
+        &self,
+        path: &str,
+        line: u32,
+        character: u32,
+        recheck: bool,
+    ) -> Result<LspReadResult<Vec<LspLocation>>, LspError> {
+        let file = self.resolve_existing_file(path, "look up definition", recheck)?;
         let client = self.client_for_file(&file).await?;
         let outcome = self
             .safe_request(
@@ -132,14 +154,15 @@ impl LspHub {
         })
     }
 
-    pub(crate) async fn references(
+    pub(crate) async fn references_with_recheck(
         &self,
         path: &str,
         line: u32,
         character: u32,
         include_declaration: bool,
+        recheck: bool,
     ) -> Result<LspReadResult<Vec<LspLocation>>, LspError> {
-        let file = self.resolve_existing_file(path, "look up references")?;
+        let file = self.resolve_existing_file(path, "look up references", recheck)?;
         let client = self.client_for_file(&file).await?;
         let outcome = self
             .safe_request(
@@ -160,13 +183,14 @@ impl LspHub {
         })
     }
 
-    pub(crate) async fn hover(
+    pub(crate) async fn hover_with_recheck(
         &self,
         path: &str,
         line: u32,
         character: u32,
+        recheck: bool,
     ) -> Result<LspReadResult<Option<LspHover>>, LspError> {
-        let file = self.resolve_existing_file(path, "look up hover")?;
+        let file = self.resolve_existing_file(path, "look up hover", recheck)?;
         let client = self.client_for_file(&file).await?;
         let outcome = self
             .safe_request(
@@ -186,12 +210,13 @@ impl LspHub {
         })
     }
 
-    pub(crate) async fn workspace_symbol(
+    pub(crate) async fn workspace_symbol_with_recheck(
         &self,
         path: &str,
         query: &str,
+        recheck: bool,
     ) -> Result<LspReadResult<Vec<LspSymbol>>, LspError> {
-        let anchor = self.resolve_existing_path(path, "search workspace symbols")?;
+        let anchor = self.resolve_existing_path(path, "search workspace symbols", recheck)?;
         let file = self.file_for_spec_resolution(&anchor)?;
         let client = self.client_for_file(&file).await?;
         let outcome = self
@@ -215,7 +240,7 @@ impl LspHub {
         line: u32,
         character: u32,
     ) -> Result<(), LspError> {
-        let file = self.resolve_existing_file(path, "prepare rename")?;
+        let file = self.resolve_existing_file(path, "prepare rename", true)?;
         let client = self.client_for_file(&file).await?;
         client.sync_document(&file).await?;
         let result = client
@@ -245,7 +270,7 @@ impl LspHub {
         character: u32,
         new_name: &str,
     ) -> Result<LspWorkspaceEdit, LspError> {
-        let file = self.resolve_existing_file(path, "rename symbol")?;
+        let file = self.resolve_existing_file(path, "rename symbol", true)?;
         let client = self.client_for_file(&file).await?;
         client.sync_document(&file).await?;
         let result = client
@@ -276,7 +301,7 @@ impl LspHub {
         path: &str,
         include_warnings: bool,
     ) -> Result<LspReadResult<Vec<LspDiagnostic>>, LspError> {
-        let file = self.resolve_existing_file(path, "diagnose")?;
+        let file = self.resolve_existing_file(path, "diagnose", false)?;
         self.refresh_diagnostics_for_file(&file, include_warnings)
             .await
             .map(|(diagnostics, _, recovery_notice)| LspReadResult {
@@ -327,11 +352,16 @@ impl LspHub {
         raw_path: &str,
         action: &str,
     ) -> Result<PathBuf, LspError> {
-        self.resolve_existing_file(raw_path, action)
+        self.resolve_existing_file(raw_path, action, false)
     }
 
-    fn resolve_existing_file(&self, raw_path: &str, action: &str) -> Result<PathBuf, LspError> {
-        let path = self.resolve_existing_path(raw_path, action)?;
+    fn resolve_existing_file(
+        &self,
+        raw_path: &str,
+        action: &str,
+        recheck: bool,
+    ) -> Result<PathBuf, LspError> {
+        let path = self.resolve_existing_path(raw_path, action, recheck)?;
         if path.is_dir() {
             return Err(LspError::Path(format!(
                 "Cannot {action}: path is a directory, not a file: {raw_path}"
@@ -340,33 +370,30 @@ impl LspHub {
         Ok(path)
     }
 
-    fn resolve_existing_path(&self, raw_path: &str, action: &str) -> Result<PathBuf, LspError> {
+    fn resolve_existing_path(
+        &self,
+        raw_path: &str,
+        action: &str,
+        recheck: bool,
+    ) -> Result<PathBuf, LspError> {
         if raw_path.trim().is_empty() {
             return Err(LspError::Path("path is required".to_string()));
         }
-        let input = Path::new(raw_path);
-        let candidate = if input.is_absolute() {
-            input.to_path_buf()
-        } else {
-            self.project_root.join(input)
-        };
-        let canonical_root = self
-            .project_root
-            .canonicalize()
-            .map_err(|source| LspError::Io {
-                action: "canonicalize project root".to_string(),
-                source,
-            })?;
-        let canonical = candidate.canonicalize().map_err(|source| LspError::Io {
-            action: format!("{action}: {}", candidate.display()),
-            source,
-        })?;
-        if !canonical.starts_with(&canonical_root) {
-            return Err(LspError::Path(format!(
-                "Cannot {action} files outside project root"
-            )));
+        let mut resolver = ProjectPathResolver::new(&self.project_root)
+            .action(action)
+            .recheck(recheck);
+        if let Some(evidence) = self.path_evidence.as_ref() {
+            resolver = resolver.path_evidence(evidence);
         }
-        Ok(canonical)
+        resolver
+            .resolve_existing(raw_path)
+            .map(|path| path.canonical_path().to_path_buf())
+            .map_err(|error| match error {
+                ToolPathError::ReusedMissingPath { evidence } => {
+                    LspError::ReusedMissingPath { evidence }
+                }
+                other => LspError::Path(other.to_string()),
+            })
     }
 
     fn file_for_spec_resolution(&self, path: &Path) -> Result<PathBuf, LspError> {
@@ -580,7 +607,7 @@ impl LspHub {
     }
 
     pub(crate) async fn restart_for_path(&self, raw_path: &str) -> Result<String, LspError> {
-        let path = self.resolve_existing_path(raw_path, "restart language server")?;
+        let path = self.resolve_existing_path(raw_path, "restart language server", true)?;
         let file = self.file_for_spec_resolution(&path)?;
         let (spec, root, slot) = self.slot_for_file(&file).await?;
         let _recovery = slot.recovery.lock().await;
@@ -839,6 +866,10 @@ pub(crate) enum LspError {
     NoServerForPath { path: PathBuf },
     #[error("{0}")]
     Path(String),
+    #[error("{evidence}")]
+    ReusedMissingPath {
+        evidence: crate::tool::MissingPathEvidence,
+    },
     #[error("LSP protocol error: {0}")]
     Protocol(String),
     #[error("LSP unavailable: {reason}")]
@@ -1042,6 +1073,18 @@ mod recovery_tests {
 
         assert!(message.contains("Restarted Rust"));
         assert!(outcome.value.is_empty());
+    }
+
+    #[test]
+    fn lsp_resolution_reuses_missing_path_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = PathEvidence::new(temp.path()).unwrap();
+        let hub = LspHub::new(temp.path().to_path_buf()).with_path_evidence(evidence);
+
+        let first = hub.resolve_existing_project_file("missing.rs", "look up definition");
+        assert!(first.is_err());
+        let second = hub.resolve_existing_project_file("./missing.rs", "look up definition");
+        assert!(matches!(second, Err(LspError::ReusedMissingPath { .. })));
     }
 
     #[test]

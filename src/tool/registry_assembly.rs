@@ -47,6 +47,7 @@ use crate::tool::{
 pub(crate) struct ToolRegistryDeps {
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) read_tracker: ReadTracker,
+    pub(crate) path_evidence: crate::tool::PathEvidence,
     pub(crate) lsp_hub: Arc<LspHub>,
     pub(crate) project_info_runtime: Arc<ProjectInfoRuntime>,
     pub(crate) permissions: PermissionManager,
@@ -335,6 +336,7 @@ pub(crate) fn build_tool_registries(
     let ToolRegistryDeps {
         project_root,
         read_tracker,
+        path_evidence,
         lsp_hub,
         project_info_runtime,
         permissions,
@@ -366,24 +368,34 @@ pub(crate) fn build_tool_registries(
         episode_store,
     } = deps;
 
-    let read_tool = Arc::new(ReadTool::new(project_root.clone(), read_tracker.clone()));
-    let read_region_tool = Arc::new(ReadRegionTool::new(
-        project_root.clone(),
-        read_tracker.clone(),
-    ));
-    let read_symbol_tool = Arc::new(ReadSymbolTool::new(
-        project_root.clone(),
-        read_tracker.clone(),
-    ));
+    let read_tool = Arc::new(
+        ReadTool::new(project_root.clone(), read_tracker.clone())
+            .with_path_evidence(path_evidence.clone()),
+    );
+    let read_region_tool = Arc::new(
+        ReadRegionTool::new(project_root.clone(), read_tracker.clone())
+            .with_path_evidence(path_evidence.clone()),
+    );
+    let read_symbol_tool = Arc::new(
+        ReadSymbolTool::new(project_root.clone(), read_tracker.clone())
+            .with_path_evidence(path_evidence.clone()),
+    );
     let skill_tool = Arc::new(SkillTool::new(skills.clone()));
     let project_info_tool = Arc::new(ProjectInfoTool::new(
         project_root.clone(),
         project_info_runtime.clone(),
     ));
-    let grep_tool = Arc::new(GrepTool::new(project_root.clone(), read_tracker.clone()));
+    let grep_tool = Arc::new(
+        GrepTool::new(project_root.clone(), read_tracker.clone())
+            .with_path_evidence(path_evidence.clone()),
+    );
     let core = ReadOnlyCore {
-        glob: Arc::new(GlobTool::new(project_root.clone())),
-        symbol: Arc::new(SymbolSearchTool::new(project_root.clone())),
+        glob: Arc::new(
+            GlobTool::new(project_root.clone()).with_path_evidence(path_evidence.clone()),
+        ),
+        symbol: Arc::new(
+            SymbolSearchTool::new(project_root.clone()).with_path_evidence(path_evidence.clone()),
+        ),
         definition: Arc::new(DefinitionTool::new(lsp_hub.clone())),
         references: Arc::new(ReferencesTool::new(lsp_hub.clone())),
         hover: Arc::new(HoverTool::new(lsp_hub.clone())),
@@ -429,22 +441,22 @@ pub(crate) fn build_tool_registries(
             project_root.clone(),
             subagent_info_runtime.clone(),
         ));
-        let sub_read: Arc<dyn Tool> = Arc::new(ReadTool::new(
-            project_root.clone(),
-            subagent_read_tracker.clone(),
-        ));
-        let sub_read_region: Arc<dyn Tool> = Arc::new(ReadRegionTool::new(
-            project_root.clone(),
-            subagent_read_tracker.clone(),
-        ));
-        let sub_read_symbol: Arc<dyn Tool> = Arc::new(ReadSymbolTool::new(
-            project_root.clone(),
-            subagent_read_tracker.clone(),
-        ));
-        let sub_grep: Arc<dyn Tool> = Arc::new(GrepTool::new(
-            project_root.clone(),
-            subagent_read_tracker.clone(),
-        ));
+        let sub_read: Arc<dyn Tool> = Arc::new(
+            ReadTool::new(project_root.clone(), subagent_read_tracker.clone())
+                .with_path_evidence(path_evidence.clone()),
+        );
+        let sub_read_region: Arc<dyn Tool> = Arc::new(
+            ReadRegionTool::new(project_root.clone(), subagent_read_tracker.clone())
+                .with_path_evidence(path_evidence.clone()),
+        );
+        let sub_read_symbol: Arc<dyn Tool> = Arc::new(
+            ReadSymbolTool::new(project_root.clone(), subagent_read_tracker.clone())
+                .with_path_evidence(path_evidence.clone()),
+        );
+        let sub_grep: Arc<dyn Tool> = Arc::new(
+            GrepTool::new(project_root.clone(), subagent_read_tracker.clone())
+                .with_path_evidence(path_evidence.clone()),
+        );
         // The read-only set built-in subagents run with (and a custom agent's
         // default when it declares no `tools:`).
         let mut subagent_instances = ToolInstances::default();
@@ -970,6 +982,7 @@ mod tests {
         let (coding, planning, smol, _runner) = build_tool_registries(ToolRegistryDeps {
             project_root: project_root.clone(),
             read_tracker: ReadTracker::new(),
+            path_evidence: crate::tool::PathEvidence::new(&project_root).unwrap(),
             lsp_hub: Arc::new(crate::lsp::LspHub::new(project_root)),
             project_info_runtime: Arc::new(crate::tool::ProjectInfoRuntime::default()),
             permissions: PermissionManager::memory_only(),
@@ -1236,6 +1249,7 @@ mod tests {
         let (coding, planning, smol, _runner) = build_tool_registries(ToolRegistryDeps {
             project_root: project_root.clone(),
             read_tracker: ReadTracker::new(),
+            path_evidence: crate::tool::PathEvidence::new(&project_root).unwrap(),
             lsp_hub: Arc::new(crate::lsp::LspHub::new(project_root)),
             project_info_runtime: Arc::new(crate::tool::ProjectInfoRuntime::default()),
             permissions: PermissionManager::memory_only(),
@@ -1298,6 +1312,7 @@ mod tests {
         let (coding, planning, smol, _runner) = build_tool_registries(ToolRegistryDeps {
             project_root: project_root.clone(),
             read_tracker: ReadTracker::new(),
+            path_evidence: crate::tool::PathEvidence::new(&project_root).unwrap(),
             lsp_hub: Arc::new(crate::lsp::LspHub::new(project_root)),
             project_info_runtime: Arc::new(crate::tool::ProjectInfoRuntime::default()),
             permissions: PermissionManager::memory_only(),
@@ -1364,6 +1379,7 @@ mod tests {
             build_tool_registries(ToolRegistryDeps {
                 project_root: project_root.clone(),
                 read_tracker: ReadTracker::new(),
+                path_evidence: crate::tool::PathEvidence::new(&project_root).unwrap(),
                 lsp_hub: Arc::new(crate::lsp::LspHub::new(project_root)),
                 project_info_runtime: Arc::new(crate::tool::ProjectInfoRuntime::default()),
                 permissions: PermissionManager::memory_only(),

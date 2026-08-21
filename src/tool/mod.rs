@@ -13,6 +13,7 @@ pub(crate) mod grep;
 pub(crate) mod lsp;
 pub(crate) mod memory_write;
 mod output;
+pub(crate) mod path_evidence;
 mod path_suggest;
 pub(crate) mod peers;
 pub(crate) mod plan;
@@ -28,7 +29,7 @@ pub(crate) mod registry_assembly;
 mod repo_map;
 mod risk;
 pub(crate) mod schema;
-mod search;
+pub(crate) mod search;
 #[cfg(unix)]
 mod secure_fs;
 pub(crate) mod set_session_title;
@@ -62,6 +63,7 @@ pub(crate) use bash::command::single_read_path;
 pub(crate) use bash::direct_verification_is_cacheable;
 pub(crate) use bash::{BashExecutionPolicy, BashOutputBudget, BashRuntimeDeps};
 pub use edit::EditTool;
+pub(crate) use path_evidence::{MissingPathEvidence, PathEvidence};
 pub use project_info::ProjectInfoTool;
 pub(crate) use project_info::{ProjectInfoProviderState, ProjectInfoRuntime};
 pub use read::ReadTool;
@@ -143,6 +145,11 @@ pub enum ToolOutput {
         evidence: ReadEvidence,
         target_call_ids: Vec<String>,
         avoided_chars: usize,
+    },
+    /// A path inspection reused validated negative evidence rather than
+    /// repeating a failing filesystem resolution.
+    MissingPathReuse {
+        text: String,
     },
     TextWithUsage {
         text: String,
@@ -238,6 +245,7 @@ impl ToolOutput {
             Self::Read { text, .. } => text,
             Self::ReadReuse { text, .. } => text,
             Self::ReadDelta { text, .. } => text,
+            Self::MissingPathReuse { text } => text,
             Self::TextWithUsage { text, .. } => text,
             Self::TrustedContext { summary, .. } => summary,
             // The framed content *is* what the model sees; there is no separate
@@ -262,6 +270,7 @@ impl ToolOutput {
             Self::Read { text, .. } => crate::redact::redact_in_place(text),
             Self::ReadReuse { text, .. } => crate::redact::redact_in_place(text),
             Self::ReadDelta { text, .. } => crate::redact::redact_in_place(text),
+            Self::MissingPathReuse { text } => crate::redact::redact_in_place(text),
             Self::TextWithUsage { text, .. } => crate::redact::redact_in_place(text),
             Self::TrustedContext { summary, content } => {
                 crate::redact::redact_in_place(summary);
@@ -488,6 +497,8 @@ pub(crate) struct ProjectPathResolver<'a> {
     project_root: &'a Path,
     action: &'a str,
     yolo_enabled: bool,
+    path_evidence: Option<&'a PathEvidence>,
+    recheck: bool,
 }
 
 #[derive(Debug, Error)]
@@ -520,6 +531,8 @@ pub(crate) enum ToolPathError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{evidence}")]
+    ReusedMissingPath { evidence: MissingPathEvidence },
     #[error(
         "'{raw}' looks like {count} paths in one argument, but this tool takes a single path. \
          Search one path per call, omit `path` to cover the whole project, or pass a glob \
@@ -586,6 +599,8 @@ impl<'a> ProjectPathResolver<'a> {
             project_root,
             action: "access",
             yolo_enabled: false,
+            path_evidence: None,
+            recheck: false,
         }
     }
 
@@ -599,19 +614,41 @@ impl<'a> ProjectPathResolver<'a> {
         self
     }
 
+    pub(crate) fn path_evidence(mut self, evidence: &'a PathEvidence) -> Self {
+        self.path_evidence = evidence.is_for_root(self.project_root).then_some(evidence);
+        self
+    }
+
+    pub(crate) fn recheck(mut self, recheck: bool) -> Self {
+        self.recheck = recheck;
+        self
+    }
+
     pub(crate) fn resolve_existing(
         self,
         raw_path: &str,
     ) -> std::result::Result<ExistingProjectPath, ToolPathError> {
+        if let Some(evidence) = self
+            .path_evidence
+            .and_then(|cache| cache.reused_missing(raw_path, self.recheck))
+        {
+            return Err(ToolPathError::ReusedMissingPath { evidence });
+        }
         let path = self.project_input_path(raw_path);
         let canonical_root = self.canonical_project_root()?;
         let canonical_path = path.canonicalize().map_err(|source| {
-            self.multi_path_error(raw_path)
-                .unwrap_or_else(|| ToolPathError::PathNotFound {
-                    path: raw_path.to_string(),
-                    hint: path_suggest::nearest_path_hint(self.project_root, raw_path),
-                    source,
-                })
+            if let Some(error) = self.multi_path_error(raw_path) {
+                return error;
+            }
+            let hint = path_suggest::nearest_path_hint(self.project_root, raw_path);
+            if let Some(cache) = self.path_evidence {
+                cache.record_missing(raw_path, hint.clone(), &source);
+            }
+            ToolPathError::PathNotFound {
+                path: raw_path.to_string(),
+                hint,
+                source,
+            }
         })?;
 
         self.ensure_canonical_path_inside_project(&canonical_path, &canonical_root)?;
@@ -626,6 +663,12 @@ impl<'a> ProjectPathResolver<'a> {
         self,
         raw_path: Option<&str>,
     ) -> std::result::Result<ExistingProjectPath, ToolPathError> {
+        if let Some(evidence) = raw_path.and_then(|raw| {
+            self.path_evidence
+                .and_then(|cache| cache.reused_missing(raw, self.recheck))
+        }) {
+            return Err(ToolPathError::ReusedMissingPath { evidence });
+        }
         let path = match raw_path {
             Some(raw_path) => self.project_input_path(raw_path),
             None => self.project_root.to_path_buf(),
@@ -634,12 +677,18 @@ impl<'a> ProjectPathResolver<'a> {
         let canonical_path = path.canonicalize().map_err(|source| {
             raw_path
                 .and_then(|raw| self.multi_path_error(raw))
-                .unwrap_or_else(|| ToolPathError::SearchPathNotFound {
-                    path: path.display().to_string(),
-                    hint: raw_path
+                .unwrap_or_else(|| {
+                    let hint = raw_path
                         .map(|raw| path_suggest::nearest_path_hint(self.project_root, raw))
-                        .unwrap_or_default(),
-                    source,
+                        .unwrap_or_default();
+                    if let (Some(cache), Some(raw)) = (self.path_evidence, raw_path) {
+                        cache.record_missing(raw, hint.clone(), &source);
+                    }
+                    ToolPathError::SearchPathNotFound {
+                        path: path.display().to_string(),
+                        hint,
+                        source,
+                    }
                 })
         })?;
 

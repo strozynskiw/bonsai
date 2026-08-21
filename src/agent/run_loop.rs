@@ -2479,7 +2479,7 @@ fn semantic_evidence_for_result(
         }
         // A reuse is explicit proof that the requested bytes were already in
         // context. Counting it would turn unchanged reads back into progress.
-        ToolOutput::ReadReuse { .. } => return None,
+        ToolOutput::ReadReuse { .. } | ToolOutput::MissingPathReuse { .. } => return None,
         ToolOutput::Command {
             stdout,
             stderr,

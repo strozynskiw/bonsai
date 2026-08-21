@@ -210,6 +210,7 @@ impl Agent {
             &result,
             ToolOutput::Read { .. } | ToolOutput::ReadDelta { .. }
         );
+        let missing_path_reuse = matches!(&result, ToolOutput::MissingPathReuse { .. });
         let partial_read_avoided = match &result {
             ToolOutput::ReadDelta { avoided_chars, .. } => Some(*avoided_chars),
             _ => None,
@@ -244,7 +245,9 @@ impl Agent {
                         .map(str::to_string)
                 })
                 .is_some_and(|op| matches!(op.as_str(), "diff" | "show"));
-        let admission = if let Some((reuse, _requested_chars)) = &precomputed_read {
+        let admission = if missing_path_reuse {
+            ReadAdmission::Execute(InspectionReason::MissingPathEvidence)
+        } else if let Some((reuse, _requested_chars)) = &precomputed_read {
             ReadAdmission::Reuse(ReadReuse {
                 target_call_id: reuse.target_call_id.clone(),
                 pointer: reuse.pointer.clone(),
@@ -267,6 +270,7 @@ impl Agent {
             .map(|(_reuse, requested_chars)| *requested_chars)
             .unwrap_or_else(|| model_rendered_summary.chars().count());
         let record_admission = typed_read
+            || missing_path_reuse
             || structured_read_name
             || git_inspection
             || repeated_fresh_reuse
@@ -295,6 +299,11 @@ impl Agent {
                 } => target_call_ids.first().cloned(),
                 _ => None,
             };
+        }
+        if missing_path_reuse && let Some(metadata) = admission_metadata.as_mut() {
+            metadata.outcome = InspectionOutcome::Reused;
+            metadata.reason = InspectionReason::MissingPathEvidence;
+            metadata.avoided_chars = metadata.requested_chars;
         }
         if let Some(metadata) = admission_metadata {
             self.usage

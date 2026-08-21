@@ -196,7 +196,9 @@ impl RuntimeBuilder {
         let smol_preference = storage.smol_preference().await?;
 
         let read_tracker = ReadTracker::new();
-        let lsp_hub = Arc::new(LspHub::new(project_root.clone()));
+        let path_evidence = crate::tool::PathEvidence::new(&project_root)?;
+        let lsp_hub =
+            Arc::new(LspHub::new(project_root.clone()).with_path_evidence(path_evidence.clone()));
         let project_id = storage.ensure_project(&session_project_root).await?;
         let permissions = PermissionManager::load(storage.clone(), project_id).await?;
         let domain_permissions =
@@ -266,7 +268,12 @@ impl RuntimeBuilder {
             project_id,
         ));
         let skills_snapshot = crate::resource::skill::snapshot(&skills);
-        let mut project_context = crate::context::project_context_snapshot(&project_root)
+        let context_snapshot = if workspace_trusted {
+            crate::context::trusted_project_context_snapshot(&project_root, &path_evidence)
+        } else {
+            crate::context::project_context_snapshot(&project_root)
+        };
+        let mut project_context = context_snapshot
             .with_skills_index(skills_snapshot.index_section())
             .with_smol_skills_index(skills_snapshot.user_index_section())
             .with_agents_index(crate::tool::agents_index_section_with_settings(
@@ -345,6 +352,7 @@ impl RuntimeBuilder {
         let deps = crate::bootstrap::ToolRegistryDeps {
             project_root: project_root.clone(),
             read_tracker: read_tracker.clone(),
+            path_evidence: path_evidence.clone(),
             lsp_hub: lsp_hub.clone(),
             project_info_runtime: project_info_runtime.clone(),
             permissions: permissions.clone(),

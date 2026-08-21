@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use pulldown_cmark::{Event, Parser, Tag};
+
 /// Markdown heading that introduces the per-turn volatile project state (git
 /// status, etc.). It marks the boundary between the byte-stable, cacheable
 /// prefix of the system prompt and its volatile tail, so the Anthropic provider
@@ -38,6 +40,7 @@ const STEERING_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", ".cursorrules"];
 /// Cap each steering file so a long one can't blow up the prompt budget.
 const MAX_STEERING_BYTES: usize = 16 * 1024;
 const SMOL_STEERING_BYTES: usize = 2 * 1024;
+const MAX_STEERING_REFERENCE_PREFLIGHTS: usize = 128;
 /// Cap how far up the tree we walk looking for steering files.
 const MAX_PARENT_DEPTH: usize = 16;
 
@@ -602,6 +605,151 @@ pub fn project_context_snapshot(root: &Path) -> ProjectContextSnapshot {
     }
 }
 
+/// Collect project context and preflight explicit local references found in
+/// trusted steering files. Callers must enforce workspace trust before using
+/// this constructor; repository-authored instructions are otherwise data only.
+pub(crate) fn trusted_project_context_snapshot(
+    root: &Path,
+    path_evidence: &crate::tool::PathEvidence,
+) -> ProjectContextSnapshot {
+    let mut snapshot = project_context_snapshot(root);
+    let contradictions =
+        steering_reference_contradictions(root, &snapshot.steering_files, path_evidence);
+    if !contradictions.is_empty() {
+        snapshot.environment.push_str("\n\n");
+        snapshot.environment.push_str(&contradictions);
+    }
+    snapshot
+}
+
+fn steering_reference_contradictions(
+    root: &Path,
+    steering_files: &[SteeringFileContext],
+    path_evidence: &crate::tool::PathEvidence,
+) -> String {
+    if !path_evidence.is_for_root(root) {
+        return String::new();
+    }
+    let canonical_root = path_evidence.canonical_root();
+    let gitignore = crate::tool::search::build_gitignore(canonical_root, canonical_root);
+    let mut targets = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+
+    for steering in steering_files {
+        let source = steering.directory.join(&steering.name);
+        let Ok(source_directory) = steering.directory.canonicalize() else {
+            continue;
+        };
+        for reference in trusted_local_references(&steering.body) {
+            let candidate = source_directory.join(reference.replace('\\', "/"));
+            let Ok(relative) = candidate.strip_prefix(canonical_root) else {
+                continue;
+            };
+            let Some(normalized) = normalize_local_reference(relative) else {
+                continue;
+            };
+            let is_directory = reference.ends_with('/');
+            if gitignore.as_ref().is_some_and(|gitignore| {
+                gitignore
+                    .matched_path_or_any_parents(&normalized, is_directory)
+                    .is_ignore()
+            }) {
+                continue;
+            }
+            targets
+                .entry(normalized)
+                .or_default()
+                .insert(source.display().to_string());
+        }
+    }
+
+    let mut missing = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    let observation = path_evidence.observation();
+    for (normalized, sources) in targets.into_iter().take(MAX_STEERING_REFERENCE_PREFLIGHTS) {
+        let raw = normalized.to_string_lossy().replace('\\', "/");
+        match std::fs::canonicalize(canonical_root.join(&normalized)) {
+            Ok(_) => path_evidence.forget(&raw),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(evidence) = observation.record_missing(&raw, String::new(), &error) {
+                    missing.insert(evidence.project_relative_path().to_path_buf(), sources);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    if missing.is_empty() {
+        return String::new();
+    }
+    let lines = missing
+        .into_iter()
+        .map(|(path, sources)| {
+            format!(
+                "- `{}` — referenced by {}",
+                path.to_string_lossy().replace('\\', "/"),
+                sources.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "## Steering reference contradictions\nThese trusted steering references do not exist in the current worktree; later path tools can reuse this validated evidence:\n{lines}"
+    )
+}
+
+fn trusted_local_references(markdown: &str) -> BTreeSet<String> {
+    let mut references = BTreeSet::new();
+    for event in Parser::new(markdown) {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                if local_reference_candidate(dest_url.as_ref()) {
+                    references.insert(dest_url.into_string());
+                }
+            }
+            Event::Code(code) if local_reference_candidate(code.as_ref()) => {
+                references.insert(code.into_string());
+            }
+            _ => {}
+        }
+    }
+    references
+}
+
+fn local_reference_candidate(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.contains(char::is_whitespace)
+        || raw.starts_with('#')
+        || raw.starts_with('/')
+        || raw.starts_with('~')
+        || raw.starts_with('$')
+        || raw.contains('#')
+        || raw.contains(':')
+        || raw.contains("://")
+        || raw.contains(['*', '?', '[', ']', '{', '}', '|', ';', '>', '<'])
+    {
+        return false;
+    }
+    let path = Path::new(raw);
+    let Some(last) = path.file_name().and_then(|part| part.to_str()) else {
+        return false;
+    };
+    raw.ends_with('/') || last.contains('.')
+}
+
+fn normalize_local_reference(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
+}
+
 /// Collect project context for an isolated fixture root without walking into a
 /// parent repository or parent steering files.
 pub fn isolated_project_context_snapshot(root: &Path) -> ProjectContextSnapshot {
@@ -888,6 +1036,98 @@ mod tests {
         assert!(context.contains("platform:"));
         assert!(context.contains("local data:"));
         assert!(context.contains("usage_turns"));
+    }
+
+    #[test]
+    fn trusted_context_warns_once_and_seeds_missing_path_evidence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "Read [the guide](docs/missing.md), then `./docs/missing.md`.",
+        )
+        .unwrap();
+        let evidence = crate::tool::PathEvidence::new(dir.path()).unwrap();
+
+        let snapshot = trusted_project_context_snapshot(dir.path(), &evidence);
+        let rendered = snapshot.render();
+        assert!(rendered.contains("## Steering reference contradictions"));
+        assert_eq!(rendered.matches("`docs/missing.md`").count(), 1);
+        assert!(rendered.contains("AGENTS.md"));
+        assert!(evidence.reused_missing("docs/missing.md", false).is_some());
+    }
+
+    #[test]
+    fn trusted_context_ignores_nonlocal_and_low_confidence_references() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "[web](https://example.com/a.md) [fragment](#a) [escape](../outside.md) \
+             `/absolute.md` `~/home.md` `$ROOT/file.md` `*.md` `cargo test` `src`",
+        )
+        .unwrap();
+        let evidence = crate::tool::PathEvidence::new(dir.path()).unwrap();
+
+        let rendered = trusted_project_context_snapshot(dir.path(), &evidence).render();
+        assert!(!rendered.contains("## Steering reference contradictions"));
+        assert!(evidence.reused_missing("outside.md", false).is_none());
+    }
+
+    #[test]
+    fn trusted_context_ignores_gitignored_missing_references() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "generated/\nignored.md\n").unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "[generated](generated/missing.md) and `ignored.md`",
+        )
+        .unwrap();
+        let evidence = crate::tool::PathEvidence::new(dir.path()).unwrap();
+
+        let rendered = trusted_project_context_snapshot(dir.path(), &evidence).render();
+        assert!(!rendered.contains("## Steering reference contradictions"));
+        assert!(
+            evidence
+                .reused_missing("generated/missing.md", false)
+                .is_none()
+        );
+        assert!(evidence.reused_missing("ignored.md", false).is_none());
+    }
+
+    #[test]
+    fn valid_isolated_and_untrusted_steering_do_not_warn_or_seed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/valid.md"), "ok").unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "[valid](docs/valid.md) [missing](docs/missing.md)",
+        )
+        .unwrap();
+
+        let trusted_evidence = crate::tool::PathEvidence::new(dir.path()).unwrap();
+        let trusted = trusted_project_context_snapshot(dir.path(), &trusted_evidence).render();
+        assert!(trusted.contains("docs/missing.md"));
+        assert!(!trusted.contains("`docs/valid.md` — referenced"));
+
+        let untrusted_evidence = crate::tool::PathEvidence::new(dir.path()).unwrap();
+        let untrusted = project_context_snapshot(dir.path())
+            .restrict_untrusted_workspace()
+            .render();
+        assert!(!untrusted.contains("## Steering reference contradictions"));
+        assert!(
+            untrusted_evidence
+                .reused_missing("docs/missing.md", false)
+                .is_none()
+        );
+
+        let isolated_evidence = crate::tool::PathEvidence::new(dir.path()).unwrap();
+        let isolated = isolated_project_context_snapshot(dir.path()).render();
+        assert!(!isolated.contains("## Steering reference contradictions"));
+        assert!(
+            isolated_evidence
+                .reused_missing("docs/missing.md", false)
+                .is_none()
+        );
     }
 
     #[test]
