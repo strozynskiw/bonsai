@@ -166,11 +166,6 @@ impl BashTool {
             self.sandbox
                 .command_with_network(&self.shell, command, cwd, allow_network)
         };
-        if allow_network && !decision.confined {
-            anyhow::bail!(
-                "planning collaboration commands require an active filesystem sandbox; enable a supported sandbox before retrying"
-            );
-        }
         let confined = decision.confined;
         decision.log();
         // Backstop: SIGKILL the shell PID if this future is dropped. The timeout

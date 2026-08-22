@@ -46,6 +46,14 @@ pub(super) struct PlanningCommand {
 }
 
 impl PlanningCommand {
+    #[cfg(test)]
+    pub(super) fn for_test(command: &str, kind: PlanningCommandKind) -> Self {
+        Self {
+            command: command.to_string(),
+            kind,
+        }
+    }
+
     pub(super) fn command(&self) -> &str {
         &self.command
     }

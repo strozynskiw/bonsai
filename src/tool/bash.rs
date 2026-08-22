@@ -571,7 +571,7 @@ impl Tool for BashTool {
                  supports bounded foreground, background task, PTY, parallel, and approved sandbox-escape modes."
             }
             BashCapability::Planning => {
-                "Run a restricted planning command: safe local inspection or approved gh/glab issue and pull/merge-request collaboration. gh/glab resolve from fixed trusted directories or validated collaboration-only PATH entries; local tools never resolve from PATH. Foreground only; shell syntax, redirects, project mutation, and sandbox escape are unavailable."
+                "Run a restricted planning command: safe local inspection or approved gh/glab issue and pull/merge-request collaboration. gh/glab resolve from fixed trusted directories or validated collaboration-only PATH entries; local tools never resolve from PATH. Foreground only; shell syntax, redirects, project mutation, and sandbox escape requests are unavailable. Commands follow the session's current sandbox setting."
             }
         }
     }
@@ -687,7 +687,7 @@ impl BashTool {
             && (run_in_background || interactive || parallel || escape_sandbox)
         {
             anyhow::bail!(
-                "planning Bash only supports confined foreground commands; background, interactive, parallel, and sandbox escape are unavailable"
+                "planning Bash only supports foreground commands; background, interactive, parallel, and sandbox escape requests are unavailable"
             );
         }
         let canonical_check = planning_command
@@ -1834,6 +1834,44 @@ mod tests {
             yolo,
             sandbox,
         )
+    }
+
+    #[tokio::test]
+    async fn planning_collaboration_follows_disabled_sandbox() {
+        let fixture = TestFixture::new();
+        let tool = BashTool::with_background_tasks_and_yolo_mode(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(InteractionService::noninteractive()),
+            Arc::new(BackgroundTaskRegistry::new()),
+            YoloMode::with_level(ApprovalLevel::Balanced),
+            CommandSandbox::disabled(),
+        );
+        let planning = super::planning::PlanningCommand::for_test(
+            "gh issue list",
+            super::planning::PlanningCommandKind::CollaborationRead,
+        );
+        let command = "printf planning-network-ok";
+        let analysis = analyze_command(command);
+
+        tool.authorize_planning_command(command, &analysis, &planning, None)
+            .await
+            .expect("disabled sandbox should not block planning collaboration authorization");
+        let result = tool
+            .run_command(
+                command,
+                &fixture.project_root,
+                5,
+                false,
+                planning.permits_network(),
+                None,
+            )
+            .await
+            .expect("disabled sandbox should run planning collaboration unconfined");
+
+        assert_eq!(result.stdout, "planning-network-ok");
+        assert!(!result.confined);
     }
 
     /// Spawn a background responder that replies `decision` to every sandbox-escape

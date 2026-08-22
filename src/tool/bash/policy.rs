@@ -188,11 +188,6 @@ impl BashTool {
             .await?;
             return Ok(());
         }
-        if planning.permits_network() && !self.sandbox.is_active() {
-            anyhow::bail!(
-                "planning collaboration commands require an active filesystem sandbox; enable a supported sandbox before retrying"
-            );
-        }
         let plan = planning_action_plan(command, planning);
         self.authorization_ledger
             .record(
