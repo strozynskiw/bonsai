@@ -639,6 +639,7 @@ fn tool_detail_caps_rendered_diff_rows() {
         ))),
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let text = rendered_lines_text(&tool_detail_lines(&activity, None, 80));
@@ -717,6 +718,7 @@ fn tool_detail_extracts_authorization_into_its_own_section() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let text = rendered_lines_text(&tool_detail_lines(&activity, None, 100));
@@ -771,6 +773,7 @@ fn agent_tool_detail_sections_subagent_report() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let lines = tool_detail_lines(&activity, None, 100);
@@ -839,6 +842,7 @@ fn agent_tool_detail_shows_adopted_subagent_model_while_running() {
         diff: None,
         started_at: now,
         finished_at: None,
+        timing: Default::default(),
     };
 
     let text = rendered_lines_text(&tool_detail_lines(
@@ -868,6 +872,7 @@ fn tool_detail_has_no_model_row_without_a_subagent_run() {
         diff: None,
         started_at: now,
         finished_at: None,
+        timing: Default::default(),
     };
 
     let text = rendered_lines_text(&tool_detail_lines(&activity, None, 100));
@@ -891,6 +896,7 @@ fn agent_tool_detail_shows_placeholder_while_subagent_runs() {
         diff: None,
         started_at: now,
         finished_at: None,
+        timing: Default::default(),
     };
 
     let text = rendered_lines_text(&tool_detail_lines(&activity, None, 100));

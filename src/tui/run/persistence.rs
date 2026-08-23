@@ -1289,6 +1289,11 @@ pub(super) fn reconcile_self_review_tool_calls(
             }
             if run.status.is_terminal() {
                 activity.finished_at.get_or_insert_with(Instant::now);
+                let reviewer_duration_ms =
+                    i64::try_from(run.reviewer_duration_ms).unwrap_or(i64::MAX);
+                activity
+                    .timing
+                    .finish(run.started_at_ms.saturating_add(reviewer_duration_ms));
             }
         }
         if let TranscriptItem::ExecutionGroup(group) = &mut *item
@@ -1354,6 +1359,7 @@ fn normalize_lost_terminal(activity: &mut ToolActivity) -> Option<String> {
         .to_string();
     activity.status = ToolStatus::Failed;
     activity.finished_at = Some(Instant::now());
+    activity.timing.finish(crate::util::time::now_ms());
     activity.result = Some(
         "Interactive terminal lost: PTY processes are process-local and cannot be reattached after Bonsai restarts. Start the command again if it is still needed."
             .to_string(),
@@ -1590,6 +1596,7 @@ mod tests {
             Some("Major: persisted finding")
         );
         assert!(group.tools[0].finished_at.is_some());
+        assert_eq!(group.tools[0].timing.finished_at_ms, Some(49));
     }
 
     #[test]
@@ -1629,6 +1636,7 @@ mod tests {
             Some("Reviewer subagent interrupted before its terminal outcome was persisted.")
         );
         assert!(activity.finished_at.is_some());
+        assert_eq!(activity.timing.finished_at_ms, Some(43));
         assert_eq!(
             runs[0].status,
             crate::self_review::SelfReviewRunStatus::ParentInterrupted

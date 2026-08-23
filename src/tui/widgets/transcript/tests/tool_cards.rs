@@ -74,6 +74,7 @@ fn diff_tool_activity_renders_comparison_view() {
             })),
             started_at: std::time::Instant::now(),
             finished_at: Some(std::time::Instant::now()),
+            timing: Default::default(),
         }));
 
     let rendered = rendered_text(transcript_lines(&app, 80));
@@ -109,6 +110,7 @@ fn wrapped_tool_card_paints_every_row_with_block_background() {
         diff: None,
         started_at: std::time::Instant::now(),
         finished_at: Some(std::time::Instant::now()),
+        timing: Default::default(),
     };
     let block_bg = theme::palette().tool_block;
 
@@ -261,6 +263,7 @@ fn execution_group_summary_reports_running_count_only() {
                 diff: None,
                 started_at: std::time::Instant::now(),
                 finished_at: None,
+                timing: Default::default(),
             },
             ToolActivity {
                 id: "call-2".to_string(),
@@ -272,6 +275,7 @@ fn execution_group_summary_reports_running_count_only() {
                 diff: None,
                 started_at: std::time::Instant::now(),
                 finished_at: None,
+                timing: Default::default(),
             },
         ],
         None,
@@ -296,6 +300,7 @@ fn execution_group_summary_uses_tool_card_style() {
                 diff: None,
                 started_at: std::time::Instant::now(),
                 finished_at: Some(std::time::Instant::now()),
+                timing: Default::default(),
             },
             ToolActivity {
                 id: "call-2".to_string(),
@@ -307,6 +312,7 @@ fn execution_group_summary_uses_tool_card_style() {
                 diff: None,
                 started_at: std::time::Instant::now(),
                 finished_at: Some(std::time::Instant::now()),
+                timing: Default::default(),
             },
         ],
         None,
@@ -336,6 +342,7 @@ fn execution_group_summary_reports_summarize_phase() {
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         }],
         Some(now),
     );
@@ -389,6 +396,7 @@ fn execution_group_summary_reports_duration_and_edit_summary() {
                 })),
                 started_at,
                 finished_at: Some(started_at + std::time::Duration::from_millis(750)),
+                timing: Default::default(),
             },
             ToolActivity {
                 id: "call-2".to_string(),
@@ -400,6 +408,7 @@ fn execution_group_summary_reports_duration_and_edit_summary() {
                 diff: None,
                 started_at,
                 finished_at: Some(started_at + std::time::Duration::from_millis(750)),
+                timing: Default::default(),
             },
         ],
         Some(started_at + std::time::Duration::from_millis(750)),
@@ -431,6 +440,7 @@ fn execution_group_renders_summary_and_nested_tool_rows() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
                 ToolActivity {
                     id: "call-failed".to_string(),
@@ -442,6 +452,7 @@ fn execution_group_renders_summary_and_nested_tool_rows() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
             ],
             Some(now),
@@ -497,6 +508,7 @@ fn serenity_execution_group_keeps_authorization_out_of_the_transcript() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
                 ToolActivity {
                     id: "call-bash".to_string(),
@@ -511,6 +523,7 @@ fn serenity_execution_group_keeps_authorization_out_of_the_transcript() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
                 ToolActivity {
                     id: "call-read-2".to_string(),
@@ -522,6 +535,7 @@ fn serenity_execution_group_keeps_authorization_out_of_the_transcript() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
             ],
             Some(now),
@@ -563,6 +577,7 @@ fn failed_bash_row_omits_warning_suffix() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 220)).join("\n");
@@ -591,6 +606,7 @@ fn failed_tool_row_hides_reason_and_authorization() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 220)).join("\n");
@@ -615,6 +631,7 @@ fn large_successful_execution_group_shows_nested_rows() {
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         })
         .collect::<Vec<_>>();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
@@ -656,6 +673,7 @@ fn serenity_execution_group_collapses_nested_rows_by_default() {
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         })
         .collect::<Vec<_>>();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
@@ -692,6 +710,7 @@ fn serenity_expanded_execution_group_shows_nested_rows() {
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         })
         .collect::<Vec<_>>();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
@@ -849,6 +868,7 @@ fn selected_large_execution_group_expands_nested_rows() {
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         })
         .collect::<Vec<_>>();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
@@ -895,6 +915,7 @@ fn large_failed_execution_group_keeps_failed_row_visible() {
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         })
         .collect::<Vec<_>>();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
@@ -943,6 +964,7 @@ fn execution_group_running_tool_renders_after_existing_rows() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
                 ToolActivity {
                     id: "call-bash".to_string(),
@@ -954,6 +976,7 @@ fn execution_group_running_tool_renders_after_existing_rows() {
                     diff: None,
                     started_at: now + std::time::Duration::from_millis(1),
                     finished_at: None,
+                    timing: Default::default(),
                 },
             ],
             None,
@@ -993,6 +1016,7 @@ fn running_bash_row_surfaces_live_output_preview() {
                 diff: None,
                 started_at: now,
                 finished_at: None,
+                timing: Default::default(),
             }],
             None,
         )));
@@ -1025,6 +1049,7 @@ fn running_bash_row_skips_live_truncation_footer() {
                 diff: None,
                 started_at: now,
                 finished_at: None,
+                timing: Default::default(),
             }],
             None,
         )));
@@ -1063,6 +1088,7 @@ fn finished_successful_bash_row_shows_command_summary() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1098,6 +1124,7 @@ fn cargo_fmt_bash_row_shows_format_workflow() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 220)).join("\n");
@@ -1133,6 +1160,7 @@ fn cargo_clippy_bash_row_shows_lint_failure() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 260)).join("\n");
@@ -1168,6 +1196,7 @@ fn failed_bash_row_shows_exit_summary_instead_of_first_output_line() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1195,6 +1224,7 @@ fn running_cargo_test_row_keeps_live_output_with_typed_label() {
         diff: None,
         started_at: now,
         finished_at: None,
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1236,6 +1266,7 @@ fn generic_bash_command_keeps_bash_label() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1270,6 +1301,7 @@ fn compound_raw_bash_command_overrides_compact_footer_workflow() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 220)).join("\n");
@@ -1308,6 +1340,7 @@ fn timed_out_saved_bash_row_shows_distinct_summary() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1328,6 +1361,7 @@ fn git_tool_row_promotes_operation_argument() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1352,6 +1386,7 @@ fn signal_bash_row_shows_signal_summary() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1379,6 +1414,7 @@ fn warning_bash_row_keeps_warning_suffix_with_command_summary() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 220)).join("\n");
@@ -1409,6 +1445,7 @@ fn bash_row_ignores_command_summary_marker_in_last_output() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     let rendered = rendered_text(transcript_lines_for_activity(&activity, 180)).join("\n");
@@ -1436,6 +1473,7 @@ fn successful_bash_row_surfaces_warning_output() {
                 diff: None,
                 started_at: now,
                 finished_at: Some(now),
+                timing: Default::default(),
             }],
             Some(now),
         )));
@@ -1467,6 +1505,7 @@ fn successful_bash_row_ignores_warning_substrings() {
                 diff: None,
                 started_at: now,
                 finished_at: Some(now),
+                timing: Default::default(),
             }],
             Some(now),
         )));
@@ -1499,6 +1538,7 @@ fn inline_group_selection_highlights_only_selected_nested_tool_row() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
                 ToolActivity {
                     id: "call-2".to_string(),
@@ -1510,6 +1550,7 @@ fn inline_group_selection_highlights_only_selected_nested_tool_row() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
             ],
             Some(now),
@@ -1588,6 +1629,7 @@ fn running_bash_waiting_for_permission_uses_stable_pending_text() {
                 diff: None,
                 started_at: now,
                 finished_at: None,
+                timing: Default::default(),
             }],
             None,
         )));
@@ -1614,6 +1656,7 @@ fn running_websearch_marks_only_an_active_domain_prompt_as_pending() {
         diff: None,
         started_at: now,
         finished_at: None,
+        timing: Default::default(),
     };
     assert!(!tool_waits_for_permission(&activity, None));
     assert!(tool_waits_for_permission(
@@ -1662,6 +1705,7 @@ fn denied_permission_renders_as_failed_tool_row() {
                 diff: None,
                 started_at: now,
                 finished_at: Some(now),
+                timing: Default::default(),
             }],
             Some(now),
         )));
@@ -1690,6 +1734,7 @@ fn agent_tool_activity_shows_subagent_type() {
             diff: None,
             started_at: now,
             finished_at: None,
+            timing: Default::default(),
         }));
 
     let rendered = rendered_text(transcript_lines(&app, 80)).join("\n");
@@ -1719,6 +1764,7 @@ fn delegated_agent_model_renders_in_nested_collapsed_and_linear_rows() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
     let item = TranscriptItem::ExecutionGroup(execution_group(1, now, vec![activity], Some(now)));
     let options = |serenity_mode, linear_output| TranscriptRenderOptions {

@@ -747,10 +747,14 @@ pub enum UiEvent {
         name: String,
         arguments: String,
         started_at: Instant,
+        /// Authoritative wall-clock start in epoch ms, captured at emission.
+        started_at_ms: i64,
     },
     ToolCallsStarted {
         calls: Vec<ToolCallStart>,
         started_at: Instant,
+        /// Shared authoritative wall-clock start for the emitted batch.
+        started_at_ms: i64,
     },
     ToolOutput {
         id: String,
@@ -762,6 +766,10 @@ pub enum UiEvent {
         result: String,
         status: crate::output::ToolExecutionStatus,
         finished_at: Instant,
+        /// Authoritative wall-clock finish in epoch ms, captured at emission
+        /// (#166). Background/terminal completion carries the time its snapshot
+        /// already holds; `None` lets the reducer stamp receipt time.
+        finished_at_ms: Option<i64>,
     },
     ToolFinishedWithDiff {
         id: String,
@@ -772,6 +780,8 @@ pub enum UiEvent {
         // moved through the channel.
         diff: Box<FileDiff>,
         finished_at: Instant,
+        /// Authoritative wall-clock finish in epoch ms; see [`Self::ToolFinished`].
+        finished_at_ms: Option<i64>,
     },
     /// Ordered output fence used by lifecycle-sensitive tool completions.
     /// Applying it acknowledges that every prior event reached the reducer.

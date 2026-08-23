@@ -37,8 +37,7 @@ impl AppState {
                 TranscriptItem::ToolActivity(activity)
                     if tool_waits_for_permission_command(activity, command) =>
                 {
-                    activity.started_at = started_at;
-                    activity.finished_at = None;
+                    reset_tool_clock(activity, started_at);
                     reset = true;
                 }
                 TranscriptItem::ExecutionGroup(group) => {
@@ -47,8 +46,7 @@ impl AppState {
                         .iter_mut()
                         .find(|activity| tool_waits_for_permission_command(activity, command))
                     {
-                        activity.started_at = started_at;
-                        activity.finished_at = None;
+                        reset_tool_clock(activity, started_at);
                         reset = true;
                     }
                 }
@@ -103,6 +101,9 @@ impl AppState {
     /// bumping every item's layout-cache revision — acceptable because this
     /// fires once per turn end, not per frame.
     pub(super) fn reconcile_orphaned_running_tools(&mut self, finished_at: Instant) {
+        // One wall-clock stamp for the whole reconciliation pass; each orphaned
+        // call gets its first (and only) terminal finish here.
+        let wall_finished_at_ms = crate::util::time::now_ms();
         for item in &mut self.transcript {
             let tools = match item {
                 TranscriptItem::ToolActivity(activity) => std::slice::from_mut(activity),
@@ -121,6 +122,7 @@ impl AppState {
                     ToolStatus::Failed
                 };
                 activity.finished_at = Some(finished_at);
+                activity.timing.finish(wall_finished_at_ms);
             }
         }
     }
@@ -241,6 +243,7 @@ impl AppState {
         result: String,
         status: crate::output::ToolExecutionStatus,
         finished_at: Instant,
+        finished_at_ms: Option<i64>,
     ) {
         if let Some(activity) = self.tool_activity_mut(id) {
             activity.status = ToolStatus::from_execution_status(status);
@@ -249,6 +252,9 @@ impl AppState {
                 &result,
             ));
             activity.finished_at = Some(finished_at);
+            activity
+                .timing
+                .finish(finished_at_ms.unwrap_or_else(crate::util::time::now_ms));
             self.current_phase = Some(format!("Finished {}", activity.name));
             return;
         }
@@ -282,6 +288,7 @@ impl AppState {
         status: crate::output::ToolExecutionStatus,
         diff: crate::diff::FileDiff,
         finished_at: Instant,
+        finished_at_ms: Option<i64>,
     ) {
         if let Some(activity) = self.tool_activity_mut(id) {
             activity.status = ToolStatus::from_execution_status(status);
@@ -291,6 +298,9 @@ impl AppState {
             ));
             activity.diff = Some(Box::new(diff));
             activity.finished_at = Some(finished_at);
+            activity
+                .timing
+                .finish(finished_at_ms.unwrap_or_else(crate::util::time::now_ms));
             self.current_phase = Some(format!("Finished {}", activity.name));
             return;
         }
@@ -300,6 +310,18 @@ impl AppState {
             text: result,
         });
     }
+}
+
+/// A permission re-prompt restarts a waiting call's clock: fresh monotonic and
+/// wall-clock starts, no finish yet. The call never legitimately completed, so
+/// any previously carried endpoints are discarded with the old clock.
+fn reset_tool_clock(activity: &mut ToolActivity, started_at: Instant) {
+    activity.started_at = started_at;
+    activity.finished_at = None;
+    activity.timing = crate::tui::transcript::ToolCallTiming {
+        started_at_ms: Some(crate::util::time::now_ms()),
+        ..crate::tui::transcript::ToolCallTiming::default()
+    };
 }
 
 fn merge_authorization_output(existing: Option<&str>, incoming: &str) -> String {
@@ -374,5 +396,97 @@ mod authorization_output_tests {
         assert!(final_output.starts_with(authorization));
         assert!(final_output.ends_with("done"));
         assert!(!final_output.contains("building..."));
+    }
+}
+
+#[cfg(test)]
+mod tool_timing_tests {
+    use super::*;
+    use crate::output::ToolExecutionStatus;
+    use std::time::Instant;
+
+    fn app() -> AppState {
+        AppState::new("opencode", "test-model".to_string(), ".".to_string(), None)
+    }
+
+    #[test]
+    fn batched_calls_share_one_wall_start_and_finish_stamps_once() {
+        let mut app = app();
+        let now = Instant::now();
+        let emitted_start_ms = 1_700_000_000_000;
+        app.reduce(crate::tui::event::AppAction::Agent(
+            crate::tui::event::UiEvent::ToolCallsStarted {
+                calls: vec![
+                    crate::output::ToolCallStart::new("call-1", "read", "{}"),
+                    crate::output::ToolCallStart::new("call-2", "read", "{}"),
+                ],
+                started_at: now,
+                started_at_ms: emitted_start_ms,
+            },
+        ));
+
+        // Batched calls share the batch's single wall-clock capture.
+        let first = app.tool_activity("call-1").unwrap().timing;
+        let second = app.tool_activity("call-2").unwrap().timing;
+        let batch_start = first.started_at_ms.expect("wall start captured at entry");
+        assert_eq!(first, second);
+        assert_eq!(batch_start, emitted_start_ms);
+        assert_eq!(second.finished_at_ms, None);
+
+        // The first terminal transition stamps its carried wall finish...
+        app.reduce(crate::tui::event::AppAction::Agent(
+            crate::tui::event::UiEvent::ToolFinished {
+                id: "call-1".to_string(),
+                result: "ok".to_string(),
+                status: ToolExecutionStatus::Succeeded,
+                finished_at: now,
+                finished_at_ms: Some(batch_start + 75),
+            },
+        ));
+        assert_eq!(
+            app.tool_activity("call-1").unwrap().timing.finished_at_ms,
+            Some(batch_start + 75)
+        );
+
+        // ...and a late duplicate completion cannot move it.
+        app.reduce(crate::tui::event::AppAction::Agent(
+            crate::tui::event::UiEvent::ToolFinished {
+                id: "call-1".to_string(),
+                result: "late".to_string(),
+                status: ToolExecutionStatus::Succeeded,
+                finished_at: now,
+                finished_at_ms: Some(9_999_999),
+            },
+        ));
+        let timing = app.tool_activity("call-1").unwrap().timing;
+        assert_eq!(timing.started_at_ms, Some(batch_start));
+        assert_eq!(timing.finished_at_ms, Some(batch_start + 75));
+    }
+
+    #[test]
+    fn orphaned_running_tools_get_one_immutable_wall_finish() {
+        let mut app = app();
+        app.reduce(crate::tui::event::AppAction::Agent(
+            crate::tui::event::UiEvent::ToolStarted {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                arguments: "{}".to_string(),
+                started_at: Instant::now(),
+                started_at_ms: 1_700_000_000_000,
+            },
+        ));
+
+        // Turn-end interruption reconciles the orphan with a wall finish.
+        app.reduce(crate::tui::event::AppAction::Agent(
+            crate::tui::event::UiEvent::Interrupted,
+        ));
+        let timing = app.tool_activity("call-1").unwrap().timing;
+        assert!(timing.finished_at_ms.is_some());
+
+        // A second pass must not move the stamp.
+        app.reduce(crate::tui::event::AppAction::Agent(
+            crate::tui::event::UiEvent::Interrupted,
+        ));
+        assert_eq!(app.tool_activity("call-1").unwrap().timing, timing);
     }
 }

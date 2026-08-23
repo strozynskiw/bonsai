@@ -73,6 +73,7 @@ pub(super) fn render_tool_detail_activity_to_buffer(
             diff: diff.map(Box::new),
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         }));
     app.modal_scroll = scroll;
     terminal
@@ -103,6 +104,7 @@ pub(super) fn render_diff_preview_to_buffer(
             diff: Some(Box::new(diff)),
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         }));
     app.modal_scroll = scroll;
     terminal

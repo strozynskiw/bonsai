@@ -183,6 +183,7 @@ fn tool_card_summarizes_todowrite_in_progress_item() {
             diff: None,
             started_at: std::time::Instant::now(),
             finished_at: Some(std::time::Instant::now()),
+            timing: Default::default(),
         };
     let lines = transcript_lines_for_activity(&activity, 120);
     let text: String = lines
@@ -210,6 +211,7 @@ fn tool_card_summarizes_todowrite_count_when_no_in_progress() {
             diff: None,
             started_at: std::time::Instant::now(),
             finished_at: Some(std::time::Instant::now()),
+            timing: Default::default(),
         };
     let lines = transcript_lines_for_activity(&activity, 120);
     let text: String = lines
@@ -246,6 +248,7 @@ fn tool_card_summarizes_question_options_without_raw_json() {
         diff: None,
         started_at: std::time::Instant::now(),
         finished_at: None,
+        timing: Default::default(),
     };
     let lines = transcript_lines_for_activity(&activity, 120);
     let text: String = lines
@@ -543,6 +546,7 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
                     diff: None,
                     started_at: now,
                     finished_at: Some(now),
+                    timing: Default::default(),
                 },
                 ToolActivity {
                     id: "bash-1".to_string(),
@@ -554,6 +558,7 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
                     diff: None,
                     started_at: now,
                     finished_at: None,
+                    timing: Default::default(),
                 },
             ],
             None,

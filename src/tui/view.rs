@@ -758,6 +758,7 @@ mod tests {
                 diff: None,
                 started_at: started,
                 finished_at: Some(now),
+                timing: Default::default(),
             }),
             TranscriptItem::ToolActivity(ToolActivity {
                 id: "sample-edit".to_string(),
@@ -802,6 +803,7 @@ mod tests {
                 })),
                 started_at: started,
                 finished_at: Some(now),
+                timing: Default::default(),
             }),
             TranscriptItem::ToolActivity(ToolActivity {
                 id: "sample-bash".to_string(),
@@ -813,6 +815,7 @@ mod tests {
                 diff: None,
                 started_at: now,
                 finished_at: None,
+                timing: Default::default(),
             }),
             TranscriptItem::Edit {
                 text: "src/lib.rs — tweaked greeting (+2 / -1)".to_string(),

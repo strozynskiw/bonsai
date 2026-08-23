@@ -251,6 +251,7 @@ mod tests {
             diff: None,
             started_at: Instant::now(),
             finished_at: Some(Instant::now()),
+            timing: Default::default(),
         }
     }
 

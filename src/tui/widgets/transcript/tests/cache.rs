@@ -35,6 +35,7 @@ fn running_tool(id: &str) -> ToolActivity {
         diff: None,
         started_at: std::time::Instant::now(),
         finished_at: None,
+        timing: Default::default(),
     }
 }
 
@@ -49,6 +50,7 @@ fn finished_tool(id: &str) -> ToolActivity {
         diff: None,
         started_at: std::time::Instant::now(),
         finished_at: Some(std::time::Instant::now()),
+        timing: Default::default(),
     }
 }
 

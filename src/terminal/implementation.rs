@@ -322,6 +322,10 @@ pub(crate) enum TerminalEvent {
         summary: String,
         success: bool,
         version: u64,
+        /// The terminal's actual wall-clock completion in epoch ms (#166),
+        /// taken from the snapshot's `finished_at` so a UI that observes the
+        /// event later still persists the real completion time.
+        finished_at_ms: Option<i64>,
     },
     Removed {
         terminal_id: String,
@@ -1011,6 +1015,10 @@ impl TerminalRegistry {
                 summary: record.snapshot.detail(),
                 success: matches!(status, TerminalStatus::Succeeded),
                 version: record.snapshot.version,
+                finished_at_ms: record
+                    .snapshot
+                    .finished_at
+                    .and_then(crate::util::time::system_time_to_ms),
             }
         };
         let _ = self.events.send(event);

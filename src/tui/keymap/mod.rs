@@ -1827,6 +1827,7 @@ mod tests {
                         diff: None,
                         started_at: std::time::Instant::now(),
                         finished_at: Some(std::time::Instant::now()),
+                        timing: Default::default(),
                     },
                     ToolActivity {
                         id: "call-2".to_string(),
@@ -1838,6 +1839,7 @@ mod tests {
                         diff: None,
                         started_at: std::time::Instant::now(),
                         finished_at: Some(std::time::Instant::now()),
+                        timing: Default::default(),
                     },
                 ],
             }));
@@ -1894,6 +1896,7 @@ mod tests {
                     })),
                     started_at: std::time::Instant::now(),
                     finished_at: None,
+                    timing: Default::default(),
                 }],
             }));
 

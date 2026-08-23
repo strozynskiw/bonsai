@@ -73,16 +73,27 @@ impl AppState {
         name: String,
         arguments: String,
         started_at: Instant,
+        started_at_ms: i64,
     ) {
-        self.record_tools_started(vec![ToolCallStart::new(id, name, arguments)], started_at);
+        self.record_tools_started(
+            vec![ToolCallStart::new(id, name, arguments)],
+            started_at,
+            started_at_ms,
+        );
     }
 
-    pub(super) fn record_tools_started(&mut self, calls: Vec<ToolCallStart>, started_at: Instant) {
+    pub(super) fn record_tools_started(
+        &mut self,
+        calls: Vec<ToolCallStart>,
+        started_at: Instant,
+        started_at_ms: i64,
+    ) {
         let activities = calls
             .into_iter()
             .map(|call| {
                 let arguments = display_tool_arguments(&call.arguments, &self.project_root);
                 let mut activity = ToolActivity::new(call.id, call.name, arguments, started_at);
+                activity.timing.started_at_ms = Some(started_at_ms);
                 self.adopt_pending_subagent_model(&mut activity);
                 activity
             })

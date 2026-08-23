@@ -63,6 +63,41 @@ impl HeadlessSink {
         self.recorder.take()
     }
 
+    pub(crate) fn tool_finished_at(
+        &self,
+        id: &str,
+        result: &str,
+        status: crate::output::ToolExecutionStatus,
+        finished_at_ms: i64,
+    ) {
+        self.recorder
+            .tool_finished_at(id, result, status, None, finished_at_ms);
+        self.record_tool_finished_output(id, result, status, None);
+    }
+
+    fn record_tool_finished_output(
+        &self,
+        id: &str,
+        result: &str,
+        status: crate::output::ToolExecutionStatus,
+        diff: Option<&crate::diff::FileDiff>,
+    ) {
+        self.completion_evidence
+            .record_tool_result(id, result, status, diff);
+        let state = status.label();
+        self.emit_tool_progress(&format!("[tool:{id} {state}] {result}"));
+        if let Some(diff) = diff {
+            self.emit_tool_progress(&format!("[diff:{} ready]", diff.path));
+        }
+        let _ = self.write_stream_event(&StreamToolFinishedEvent {
+            event_type: "tool_finished",
+            id,
+            result,
+            status,
+            diff,
+        });
+    }
+
     pub(crate) fn finish(&self, output: &HeadlessFinalOutput) -> Result<()> {
         match self.format {
             OutputFormat::Text => {
@@ -338,17 +373,7 @@ impl OutputSink for HeadlessSink {
 
     fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
         self.recorder.tool_finished(id, result, status, None);
-        self.completion_evidence
-            .record_tool_result(id, result, status, None);
-        let state = status.label();
-        self.emit_tool_progress(&format!("[tool:{id} {state}] {result}"));
-        let _ = self.write_stream_event(&StreamToolFinishedEvent {
-            event_type: "tool_finished",
-            id,
-            result,
-            status,
-            diff: None,
-        });
+        self.record_tool_finished_output(id, result, status, None);
     }
 
     fn tool_finished_with_diff(
@@ -360,18 +385,7 @@ impl OutputSink for HeadlessSink {
     ) {
         self.recorder
             .tool_finished(id, result, status, Some(diff.clone()));
-        self.completion_evidence
-            .record_tool_result(id, result, status, Some(&diff));
-        let state = status.label();
-        self.emit_tool_progress(&format!("[tool:{id} {state}] {result}"));
-        self.emit_tool_progress(&format!("[diff:{} ready]", diff.path));
-        let _ = self.write_stream_event(&StreamToolFinishedEvent {
-            event_type: "tool_finished",
-            id,
-            result,
-            status,
-            diff: Some(&diff),
-        });
+        self.record_tool_finished_output(id, result, status, Some(&diff));
     }
 
     fn workspace_changed(&self, paths: &[String], intent: &str) {

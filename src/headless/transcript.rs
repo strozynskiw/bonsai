@@ -91,21 +91,32 @@ impl TranscriptRecorder {
         status: crate::output::ToolExecutionStatus,
         diff: Option<FileDiff>,
     ) {
+        self.tool_finished_at(id, result, status, diff, crate::util::time::now_ms());
+    }
+
+    pub(crate) fn tool_finished_at(
+        &self,
+        id: &str,
+        result: &str,
+        status: crate::output::ToolExecutionStatus,
+        diff: Option<FileDiff>,
+        finished_at_ms: i64,
+    ) {
         self.with_state(|state| {
             state.flush_text_buffers();
             let now = Instant::now();
             if let Some(mut activity) = state.tools.remove(id) {
-                finish_tool_activity(&mut activity, result, status, diff, now);
+                finish_tool_activity(&mut activity, result, status, diff, now, finished_at_ms);
                 state.items.push(TranscriptItem::ToolActivity(activity));
                 return;
             }
             if let Some(activity) = recorded_tool_activity_mut(&mut state.items, id) {
-                finish_tool_activity(activity, result, status, diff, now);
+                finish_tool_activity(activity, result, status, diff, now, finished_at_ms);
                 return;
             }
             let mut activity =
                 ToolActivity::new(id.to_string(), "tool".to_string(), String::new(), now);
-            finish_tool_activity(&mut activity, result, status, diff, now);
+            finish_tool_activity(&mut activity, result, status, diff, now, finished_at_ms);
             state.items.push(TranscriptItem::ToolActivity(activity));
         });
     }
@@ -130,11 +141,13 @@ fn finish_tool_activity(
     status: crate::output::ToolExecutionStatus,
     diff: Option<FileDiff>,
     now: Instant,
+    finished_at_ms: i64,
 ) {
     activity.status = ToolStatus::from_execution_status(status);
     activity.result = Some(result.to_string());
     activity.diff = diff.map(Box::new);
     activity.finished_at.get_or_insert(now);
+    activity.timing.finish(finished_at_ms);
 }
 
 fn recorded_tool_activity_mut<'a>(
@@ -201,6 +214,7 @@ impl TranscriptRecorderState {
                     .get_or_insert_with(|| "Interrupted before completion".to_string());
             }
             activity.finished_at.get_or_insert(now);
+            activity.timing.finish(crate::util::time::now_ms());
             self.items.push(TranscriptItem::ToolActivity(activity));
         }
         std::mem::take(&mut self.items)
@@ -251,11 +265,12 @@ mod tests {
         let recorder = TranscriptRecorder::default();
 
         recorder.tool_started("call-1", "read", r#"{"path":"README.md"}"#);
-        recorder.tool_finished(
+        recorder.tool_finished_at(
             "call-1",
             "ok",
             crate::output::ToolExecutionStatus::Succeeded,
             None,
+            1_700_000_000_025,
         );
 
         let items = recorder.take();
@@ -267,6 +282,7 @@ mod tests {
         assert_eq!(activity.name, "read");
         assert_eq!(activity.status, ToolStatus::Succeeded);
         assert_eq!(activity.result.as_deref(), Some("ok"));
+        assert_eq!(activity.timing.finished_at_ms, Some(1_700_000_000_025));
     }
 
     #[test]

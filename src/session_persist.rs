@@ -900,6 +900,9 @@ fn hash_tool_activity(activity: &ToolActivity, hasher: &mut DefaultHasher) {
     activity.status.as_db_str().hash(hasher);
     activity.result.hash(hasher);
     activity.finished_at.is_some().hash(hasher);
+    activity.timing.started_at_ms.hash(hasher);
+    activity.timing.finished_at_ms.hash(hasher);
+    activity.timing.legacy_duration_ms.hash(hasher);
     if let Some(diff) = &activity.diff {
         diff.path.hash(hasher);
         format!("{:?}", diff.status).hash(hasher);
@@ -913,6 +916,7 @@ fn hash_tool_activity(activity: &ToolActivity, hasher: &mut DefaultHasher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn agent_snapshot() -> AgentStateSnapshot {
         AgentStateSnapshot {
@@ -1069,5 +1073,23 @@ mod tests {
                 text,
             }] if text == "Durable action required."
         ));
+    }
+
+    #[test]
+    fn timing_only_tool_change_updates_transcript_signature() {
+        let mut activity = ToolActivity::new(
+            "call-1".to_string(),
+            "read".to_string(),
+            "{}".to_string(),
+            Instant::now(),
+        );
+        activity.timing.started_at_ms = None;
+        let before = vec![TranscriptItem::ToolActivity(activity.clone())];
+        activity.timing.started_at_ms = Some(1_700_000_000_000);
+        activity.timing.finished_at_ms = Some(1_700_000_000_025);
+        activity.timing.legacy_duration_ms = Some(25);
+        let after = vec![TranscriptItem::ToolActivity(activity)];
+
+        assert_ne!(transcript_signature(&before), transcript_signature(&after));
     }
 }

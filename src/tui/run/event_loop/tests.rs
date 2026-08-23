@@ -4590,6 +4590,7 @@ fn background_task_finished_event_updates_attached_tool_and_refreshes_tasks() {
         name: "bash".to_string(),
         arguments: r#"{"command":"sleep 1","run_in_background":true}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     }));
 
     let refresh = apply_background_task_event(
@@ -4601,6 +4602,7 @@ fn background_task_finished_event_updates_attached_tool_and_refreshes_tasks() {
             summary: "done".to_string(),
             success: true,
             version: 2,
+            finished_at_ms: Some(1_700_000_000_000),
         },
     );
 
@@ -4630,6 +4632,7 @@ fn stopped_background_task_finish_does_not_request_wake() {
             summary: "stopped".to_string(),
             success: false,
             version: 2,
+            finished_at_ms: None,
         },
     );
 
@@ -4650,6 +4653,7 @@ fn terminal_wait_and_finish_update_attached_bash_tool() {
         name: "bash".to_string(),
         arguments: r#"{"command":"read answer","interactive":true}"#.to_string(),
         started_at: Instant::now(),
+        started_at_ms: crate::util::time::now_ms(),
     }));
 
     let waiting = apply_terminal_event(
@@ -4677,6 +4681,7 @@ fn terminal_wait_and_finish_update_attached_bash_tool() {
             summary: "terminal complete".to_string(),
             success: true,
             version: 2,
+            finished_at_ms: Some(1_700_000_000_000),
         },
     );
     assert!(finished.wake_candidate);
@@ -4700,6 +4705,7 @@ fn resume_marks_process_local_interactive_terminal_as_lost() {
         diff: None,
         started_at: now,
         finished_at: None,
+        timing: Default::default(),
     })];
 
     let lost = normalize_lost_interactive_terminals(&mut items);
@@ -4727,6 +4733,7 @@ fn shutdown_background_task_snapshot_finishes_attached_tool_before_persistence()
         name: "bash".to_string(),
         arguments: r#"{"command":"sleep 30","run_in_background":true}"#.to_string(),
         started_at,
+        started_at_ms: crate::util::time::now_ms(),
     }));
     app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
         crate::tui::event::AgentRunOutcome::Completed,
@@ -4769,6 +4776,77 @@ fn shutdown_background_task_snapshot_finishes_attached_tool_before_persistence()
 }
 
 #[test]
+fn snapshot_completions_carry_their_actual_finish_clock() {
+    let mut app = app();
+    let now = Instant::now();
+    app.reduce(AppAction::Agent(UiEvent::ToolStarted {
+        id: "call-bg".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"sleep 30","run_in_background":true}"#.to_string(),
+        started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
+    }));
+    app.task_state = TaskState::Exiting;
+
+    // The task finished while the UI was busy: the persisted completion time
+    // must come from the snapshot's clock, not this frame's receipt time (#166).
+    let finished_at = std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_000);
+    let mut task = background_task_snapshot(
+        "bg-1",
+        BackgroundTaskStatus::Succeeded,
+        Some("call-bg"),
+        "done",
+    );
+    task.finished_at = Some(finished_at);
+    let _ = apply_background_task_snapshot(&mut app, &task);
+    assert_eq!(
+        app.tool_activity("call-bg")
+            .expect("activity")
+            .timing
+            .finished_at_ms,
+        Some(1_700_000_000_000)
+    );
+
+    // Same contract for an interactive terminal's completion.
+    app.reduce(AppAction::Agent(UiEvent::ToolStarted {
+        id: "call-pty".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"repl","interactive":true}"#.to_string(),
+        started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
+    }));
+    let terminal = TerminalSnapshot {
+        id: "pty-1".to_string(),
+        incarnation: "inc".to_string(),
+        command: "repl".to_string(),
+        cwd: std::path::PathBuf::from("/tmp/project"),
+        status: TerminalStatus::Succeeded,
+        started_at: std::time::SystemTime::UNIX_EPOCH,
+        finished_at: Some(finished_at),
+        exit_code: Some(0),
+        timeout_secs: 5,
+        tail: "bye".to_string(),
+        tail_truncated: false,
+        total_output_chars: 3,
+        version: 2,
+        confined: false,
+        tool_call_id: Some("call-pty".to_string()),
+        rows: 24,
+        cols: 80,
+        prompt_state: crate::terminal::TerminalPromptState::Unknown,
+        screen: String::new(),
+    };
+    let _ = apply_terminal_snapshot(&mut app, &terminal);
+    assert_eq!(
+        app.tool_activity("call-pty")
+            .expect("terminal activity")
+            .timing
+            .finished_at_ms,
+        Some(1_700_000_000_000)
+    );
+}
+
+#[test]
 fn completed_detached_subagent_finishes_attached_agent_tool() {
     let mut app = app();
     let started_at = Instant::now();
@@ -4778,6 +4856,7 @@ fn completed_detached_subagent_finishes_attached_agent_tool() {
         arguments: r#"{"agent":"explore","prompt":"Review area","run_in_background":true}"#
             .to_string(),
         started_at,
+        started_at_ms: crate::util::time::now_ms(),
     }));
     assert!(matches!(
         app.tool_activity("call-1").map(|activity| activity.status),
@@ -4794,10 +4873,19 @@ fn completed_detached_subagent_finishes_attached_agent_tool() {
         crate::subagent::SubagentStatus::Succeeded,
         Some("all clear".to_string()),
     );
+    let expected_finished_at_ms = subagents
+        .snapshot(&subtask_id)
+        .and_then(|snapshot| snapshot.finished_at)
+        .and_then(crate::util::time::system_time_to_ms)
+        .expect("finished subagent has a wall-clock endpoint");
 
     assert!(apply_completed_subagent_tool_calls(&mut app, &subagents));
     let activity = app.tool_activity("call-1").expect("tool remains visible");
     assert_eq!(activity.status, ToolStatus::Succeeded);
+    assert_eq!(
+        activity.timing.finished_at_ms,
+        Some(expected_finished_at_ms)
+    );
     assert!(
         activity
             .result
@@ -4831,6 +4919,7 @@ fn completed_subagent_reconciles_after_late_tool_started_event() {
         arguments: r#"{"agent":"explore","prompt":"Review area","run_in_background":true}"#
             .to_string(),
         started_at: Instant::now(),
+        started_at_ms: crate::util::time::now_ms(),
     }));
 
     assert!(apply_completed_subagent_tool_calls(&mut app, &subagents));
@@ -7942,6 +8031,7 @@ fn tool_detail_modal_scroll_is_clamped_to_rendered_content() {
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         }));
     app.modal = Some(ModalKind::Detail(
         crate::tui::event::DetailModal::ToolDetail {
@@ -8099,6 +8189,7 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
         name: "bash".to_string(),
         arguments: r#"{"command":"sleep 1"}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     })
     .expect("tool start should enqueue");
     tx.send(UiEvent::ToolStarted {
@@ -8106,6 +8197,7 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
         name: "read".to_string(),
         arguments: r#"{"path":"src/main.rs"}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     })
     .expect("second tool start should enqueue");
     tx.send(UiEvent::ToolFinished {
@@ -8113,6 +8205,7 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
         result: "ok".to_string(),
         status: crate::output::ToolExecutionStatus::Succeeded,
         finished_at: now,
+        finished_at_ms: None,
     })
     .expect("tool finish should enqueue");
 
@@ -8154,6 +8247,7 @@ async fn self_review_delivery_barrier_precedes_parent_finalization() {
         name: "agent".to_string(),
         arguments: r#"{"agent":"self-review"}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     })
     .expect("self-review start should enqueue");
     tx.send(UiEvent::ToolFinished {
@@ -8161,6 +8255,7 @@ async fn self_review_delivery_barrier_precedes_parent_finalization() {
         result: "Major: deterministic finding".to_string(),
         status: crate::output::ToolExecutionStatus::Succeeded,
         finished_at: now + Duration::from_millis(1),
+        finished_at_ms: None,
     })
     .expect("self-review finish should enqueue");
     tx.send(UiEvent::OutputDeliveryBarrier(marker))

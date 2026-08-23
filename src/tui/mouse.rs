@@ -889,6 +889,7 @@ mod tests {
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
+                    timing: Default::default(),
                 }],
             }));
         let area = Rect::new(0, 0, 80, 24);
@@ -924,6 +925,7 @@ mod tests {
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
+                    timing: Default::default(),
                 }],
             }));
         let area = Rect::new(0, 0, 80, 24);
@@ -959,6 +961,7 @@ mod tests {
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
+                    timing: Default::default(),
                 }],
             }));
         let area = Rect::new(0, 0, 80, 24);

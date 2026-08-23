@@ -1050,14 +1050,19 @@ impl AppState {
                 name,
                 arguments,
                 started_at,
+                started_at_ms,
             } => {
                 self.current_phase = Some(self.active_phase_text());
-                self.record_tool_started(id, name, arguments, started_at);
+                self.record_tool_started(id, name, arguments, started_at, started_at_ms);
                 self.maybe_scroll_to_bottom_current();
             }
-            UiEvent::ToolCallsStarted { calls, started_at } => {
+            UiEvent::ToolCallsStarted {
+                calls,
+                started_at,
+                started_at_ms,
+            } => {
                 self.current_phase = Some(self.active_phase_text());
-                self.record_tools_started(calls, started_at);
+                self.record_tools_started(calls, started_at, started_at_ms);
                 self.maybe_scroll_to_bottom_current();
             }
             UiEvent::ToolOutput {
@@ -1075,6 +1080,7 @@ impl AppState {
                 result,
                 status,
                 finished_at,
+                finished_at_ms,
             } => {
                 let finished_background_bash =
                     self.tool_activity(&id).is_some_and(is_background_bash_call);
@@ -1089,7 +1095,7 @@ impl AppState {
                     // keep the TUI header in lockstep with the plan rename.
                     self.current_session_summary = title;
                 }
-                self.finish_tool(&id, result, status, finished_at);
+                self.finish_tool(&id, result, status, finished_at, finished_at_ms);
                 self.recompute_active_tools();
                 if matches!(self.task_state, TaskState::Idle | TaskState::Exiting)
                     && finished_background_bash
@@ -1105,8 +1111,9 @@ impl AppState {
                 status,
                 diff,
                 finished_at,
+                finished_at_ms,
             } => {
-                self.finish_tool_with_diff(&id, result, status, *diff, finished_at);
+                self.finish_tool_with_diff(&id, result, status, *diff, finished_at, finished_at_ms);
                 self.recompute_active_tools();
                 self.current_phase = Some(self.active_phase_text());
                 self.maybe_scroll_to_bottom_current();
@@ -1756,6 +1763,7 @@ mod tests {
             "agent".to_string(),
             r#"{"agent":"self-review"}"#.to_string(),
             started_at,
+            crate::util::time::now_ms(),
         );
         app.update_tool_output("self-review-1", "review complete".to_string(), started_at);
         assert!(matches!(
@@ -1786,6 +1794,7 @@ mod tests {
             "bash".to_string(),
             r#"{"command":"sleep 100","run_in_background":true}"#.to_string(),
             Instant::now(),
+            crate::util::time::now_ms(),
         );
 
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
@@ -2094,6 +2103,7 @@ mod tests {
             diff: None,
             started_at: Instant::now(),
             finished_at: Some(Instant::now()),
+            timing: Default::default(),
         }
     }
 
@@ -3536,6 +3546,7 @@ mod tests {
             name: "read_file".to_string(),
             arguments: "{}".to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         assert_eq!(app.active_tools.len(), 1);
         assert_eq!(app.active_tools[0].0, "read_file");
@@ -3544,6 +3555,7 @@ mod tests {
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(12),
+            finished_at_ms: None,
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDelta("hi".to_string())));
         app.reduce(AppAction::Agent(UiEvent::AssistantDelta(
@@ -3694,6 +3706,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: r#"{"command":"sleep 5","run_in_background":true}"#.to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolOutput {
             id: "call-bg".to_string(),
@@ -3717,6 +3730,7 @@ mod tests {
             result: "bg-1 succeeded".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(10),
+            finished_at_ms: None,
         }));
 
         let activity = app.tool_activity("call-bg").expect("tool exists");
@@ -3735,6 +3749,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: r#"{"command":"repl","interactive":true}"#.to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolOutput {
             id: "call-pty".to_string(),
@@ -3764,6 +3779,7 @@ mod tests {
             name: "set_session_title".to_string(),
             arguments: r#"{"title":"Polish resume picker"}"#.to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
@@ -3771,6 +3787,7 @@ mod tests {
             result: "Session title set to: Polish resume picker".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(12),
+            finished_at_ms: None,
         }));
 
         assert_eq!(app.current_session_summary, "Polish resume picker");
@@ -3788,6 +3805,7 @@ mod tests {
             name: "plan_set_title".to_string(),
             arguments: r#"{"title":"Refactor editor"}"#.to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
@@ -3795,6 +3813,7 @@ mod tests {
             result: "Plan title set to: Refactor editor".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(12),
+            finished_at_ms: None,
         }));
 
         assert_eq!(app.current_session_summary, "Refactor editor");
@@ -3816,12 +3835,14 @@ mod tests {
             name: "read_file".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: Instant::now(),
+            finished_at_ms: None,
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDone));
         assert_eq!(
@@ -3866,6 +3887,7 @@ mod tests {
             name: "edit".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert!(
@@ -3897,6 +3919,7 @@ mod tests {
             name: "edit".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert!(
@@ -3927,6 +3950,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert!(
@@ -4301,6 +4325,7 @@ mod tests {
                 diff: None,
                 started_at: Instant::now(),
                 finished_at: Some(Instant::now()),
+                timing: Default::default(),
             }));
         app.transcript_focus = Some(0);
 
@@ -4326,6 +4351,7 @@ mod tests {
                 diff: None,
                 started_at: Instant::now(),
                 finished_at: Some(Instant::now()),
+                timing: Default::default(),
             }));
         app.plan.edit().add_finding(crate::plan::Finding {
             severity: crate::plan::Severity::Blocker,
@@ -4398,12 +4424,14 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{\"command\":\"echo hi\"}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
             id: "call-2".to_string(),
             name: "read".to_string(),
             arguments: "{\"file_path\":\"src/main.rs\"}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.transcript_focus = Some(0);
 
@@ -4433,12 +4461,14 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{\"command\":\"echo hi\"}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
             id: "call-2".to_string(),
             name: "read".to_string(),
             arguments: "{\"file_path\":\"src/main.rs\"}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.transcript_focus = Some(0);
         app.reduce(AppAction::OpenFocusedDetail);
@@ -4477,6 +4507,7 @@ mod tests {
             name: "write".to_string(),
             arguments: "{\"file_path\":\"src/main.rs\"}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinishedWithDiff {
             id: "call-1".to_string(),
@@ -4494,6 +4525,7 @@ mod tests {
                 additional_files: Box::default(),
             }),
             finished_at: Instant::now(),
+            finished_at_ms: None,
         }));
         app.transcript_focus = Some(0);
         app.reduce(AppAction::OpenFocusedDetail);
@@ -4522,12 +4554,14 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
             id: "call-2".to_string(),
             name: "read".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert_eq!(app.transcript.len(), 1);
@@ -4553,6 +4587,7 @@ mod tests {
                 ToolCallStart::new("call-2", "read", "{}"),
             ],
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert_eq!(app.transcript.len(), 1);
@@ -4642,6 +4677,7 @@ mod tests {
             "agent".to_string(),
             r#"{"agent":"explore"}"#.to_string(),
             started_at,
+            crate::util::time::now_ms(),
         );
         assert_eq!(
             early.subagent_model_for("call-agent"),
@@ -4669,6 +4705,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: started_at + Duration::from_millis(10),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert!(matches!(
@@ -4698,12 +4735,14 @@ mod tests {
             name: "read".to_string(),
             arguments: "{}".to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(5),
+            finished_at_ms: None,
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDelta(
             "checking one more thing".to_string(),
@@ -4713,6 +4752,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: started_at + Duration::from_millis(10),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert_eq!(app.transcript.len(), 3);
@@ -4748,12 +4788,14 @@ mod tests {
             name: "read".to_string(),
             arguments: "{}".to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: started_at + Duration::from_millis(5),
+            finished_at_ms: None,
         }));
         app.reduce(AppAction::Agent(UiEvent::AssistantDelta(String::new())));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
@@ -4761,6 +4803,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: started_at + Duration::from_millis(10),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert_eq!(app.transcript.len(), 1);
@@ -4786,6 +4829,7 @@ mod tests {
             name: "read".to_string(),
             arguments: "{}".to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ReasoningDelta(String::new())));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
@@ -4793,6 +4837,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: started_at + Duration::from_millis(10),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         assert_eq!(app.transcript.len(), 1);
@@ -4817,24 +4862,28 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: start,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
             id: "call-2".to_string(),
             name: "read".to_string(),
             arguments: "{}".to_string(),
             started_at: start,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-2".to_string(),
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: start + Duration::from_millis(5),
+            finished_at_ms: None,
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "fail".to_string(),
             status: crate::output::ToolExecutionStatus::Failed,
             finished_at: start + Duration::from_millis(10),
+            finished_at_ms: None,
         }));
 
         let Some(group) = app.execution_group(1) else {
@@ -4865,6 +4914,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
 
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
@@ -4887,36 +4937,42 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
             id: "call-2".to_string(),
             name: "read".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolStarted {
             id: "call-3".to_string(),
             name: "write".to_string(),
             arguments: "{}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-2".to_string(),
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: Instant::now(),
+            finished_at_ms: None,
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-3".to_string(),
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at: Instant::now(),
+            finished_at_ms: None,
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "fail".to_string(),
             status: crate::output::ToolExecutionStatus::Failed,
             finished_at: Instant::now(),
+            finished_at_ms: None,
         }));
 
         let group = app
@@ -4942,6 +4998,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: r#"{"command":"sleep 5"}"#.to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::ResetPermissionToolTimer {
             command: "sleep 5".to_string(),
@@ -4982,6 +5039,7 @@ mod tests {
             name: "bash".to_string(),
             arguments: "{\"command\":\"date\"}".to_string(),
             started_at: Instant::now(),
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::OpenToolDetail("call-1".to_string()));
 
@@ -5002,12 +5060,14 @@ mod tests {
             name: "read".to_string(),
             arguments: "{}".to_string(),
             started_at,
+            started_at_ms: crate::util::time::now_ms(),
         }));
         app.reduce(AppAction::Agent(UiEvent::ToolFinished {
             id: "call-1".to_string(),
             result: "ok".to_string(),
             status: crate::output::ToolExecutionStatus::Succeeded,
             finished_at,
+            finished_at_ms: None,
         }));
 
         let Some(activity) = app.tool_activity("call-1") else {

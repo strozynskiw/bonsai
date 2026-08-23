@@ -8,6 +8,7 @@ use crate::tool::read_evidence::{
     ReadEvidenceRecord, ReadProvenance,
 };
 use crate::tool::{ReadCoverage, ReadEvidence, ReadWindow, digest_content};
+use crate::tui::transcript::ToolCallTiming;
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
 };
@@ -1610,6 +1611,7 @@ async fn duplicate_tool_call_id_does_not_abort_transcript_snapshot() {
         diff: None,
         started_at: now,
         finished_at: Some(now),
+        timing: Default::default(),
     };
 
     // The same call_id can legitimately appear twice in one snapshot (standalone
@@ -2763,6 +2765,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
         diff: None,
         started_at,
         finished_at: Some(started_at + Duration::from_millis(10)),
+        timing: Default::default(),
     };
     storage
         .replace_transcript_snapshot(
@@ -5653,6 +5656,7 @@ async fn transcript_snapshot_rehydrates_execution_group_tools() {
             diff: None,
             started_at,
             finished_at: Some(started_at + Duration::from_millis(5)),
+            timing: Default::default(),
         }],
     })];
 
@@ -5694,6 +5698,7 @@ async fn transcript_snapshot_round_trips_delegated_agent_model() {
         diff: None,
         started_at,
         finished_at: Some(started_at),
+        timing: Default::default(),
     };
     let transcript = vec![
         TranscriptItem::ToolActivity(activity.clone()),
@@ -5740,6 +5745,7 @@ async fn self_review_tool_block_metadata_contains_structured_findings() {
         diff: None,
         started_at,
         finished_at: Some(started_at + Duration::from_millis(5)),
+        timing: Default::default(),
     })];
 
     fixture
@@ -5776,20 +5782,24 @@ async fn tool_call_snapshot_records_real_start_and_finish_timestamps() {
         .await
         .unwrap();
     let started_at = Instant::now();
+    // Wall-clock endpoints are captured at lifecycle entry/finish, not at
+    // flush time: pick fixed values so persistence can be asserted exactly.
+    let wall_started_at_ms = 1_700_000_000_000;
+    let mut activity = ToolActivity::new(
+        "call-1".to_string(),
+        "bash".to_string(),
+        r#"{"cmd":"cargo test"}"#.to_string(),
+        started_at,
+    );
+    activity.status = ToolStatus::Succeeded;
+    activity.result = Some("ok".to_string());
+    activity.finished_at = Some(started_at + Duration::from_millis(250));
+    activity.timing.started_at_ms = Some(wall_started_at_ms);
+    activity.timing.finish(wall_started_at_ms + 250);
     let transcript = vec![TranscriptItem::ExecutionGroup(ExecutionGroup {
         id: 1,
         finished_at: Some(started_at + Duration::from_millis(250)),
-        tools: vec![ToolActivity {
-            id: "call-1".to_string(),
-            name: "bash".to_string(),
-            arguments: r#"{"cmd":"cargo test"}"#.to_string(),
-            delegated_model: None,
-            status: ToolStatus::Succeeded,
-            result: Some("ok".to_string()),
-            diff: None,
-            started_at,
-            finished_at: Some(started_at + Duration::from_millis(250)),
-        }],
+        tools: vec![activity],
     })];
 
     storage
@@ -5797,24 +5807,310 @@ async fn tool_call_snapshot_records_real_start_and_finish_timestamps() {
         .await
         .unwrap();
 
-    let row: (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+    async fn tool_call_row(storage: &Storage, session_id: SessionId) -> (i64, i64, i64) {
+        let row: (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT started_at_ms, finished_at_ms, duration_ms FROM tool_calls \
+             WHERE session_id = ? AND call_id = 'call-1'",
+        )
+        .bind(session_id.as_i64())
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        (
+            row.0.expect("started_at_ms must be populated, not NULL"),
+            row.1
+                .expect("finished_at_ms must be populated for a finished tool"),
+            row.2.expect("duration_ms must be recorded"),
+        )
+    }
+
+    let (started, finished, duration) = tool_call_row(&storage, session_id).await;
+    // Endpoints persist verbatim from the carried timing while duration keeps
+    // the non-negative monotonic elapsed-time telemetry (#166).
+    assert_eq!(started, wall_started_at_ms);
+    assert_eq!(finished, wall_started_at_ms + 250);
+    assert_eq!(duration, finished - started);
+
+    // A much later flush of the same snapshot must leave all three columns
+    // byte-identical: repeated flushes cannot move a known endpoint.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    storage
+        .replace_transcript_snapshot(session_id, &transcript)
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_call_row(&storage, session_id).await,
+        (started, finished, duration)
+    );
+
+    // Resume hydrates every appearance from the same canonical record.
+    let snapshot = storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let TranscriptItem::ExecutionGroup(group) = &snapshot.transcript[0] else {
+        panic!("expected execution group");
+    };
+    assert_eq!(group.tools[0].timing.started_at_ms, Some(started));
+    assert_eq!(group.tools[0].timing.finished_at_ms, Some(finished));
+    assert_eq!(group.tools[0].timing.signed_duration_ms(), Some(250));
+    assert_eq!(group.tools[0].timing.legacy_duration_ms, Some(duration));
+}
+
+/// Reads the canonical timing row for one call back as `ToolCallTiming`.
+async fn tool_call_timing_row(
+    storage: &Storage,
+    session_id: SessionId,
+    call_id: &str,
+) -> crate::tui::transcript::ToolCallTiming {
+    let (started, finished, duration): (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT started_at_ms, finished_at_ms, duration_ms FROM tool_calls \
-         WHERE session_id = ? AND call_id = 'call-1'",
+         WHERE session_id = ? AND call_id = ?",
+    )
+    .bind(session_id.as_i64())
+    .bind(call_id)
+    .fetch_one(&storage.pool)
+    .await
+    .unwrap();
+    crate::tui::transcript::ToolCallTiming {
+        started_at_ms: started,
+        finished_at_ms: finished,
+        legacy_duration_ms: duration,
+    }
+}
+
+fn timing_activity(id: &str, status: ToolStatus, timing: ToolCallTiming) -> ToolActivity {
+    let started_at = Instant::now();
+    ToolActivity {
+        id: id.to_string(),
+        name: "read".to_string(),
+        arguments: "{}".to_string(),
+        delegated_model: None,
+        status,
+        result: None,
+        diff: None,
+        started_at,
+        finished_at: timing.finished_at_ms.map(|_| {
+            let elapsed_ms = timing.legacy_duration_ms.unwrap_or_default().max(0) as u64;
+            started_at + Duration::from_millis(elapsed_ms)
+        }),
+        timing,
+    }
+}
+
+#[tokio::test]
+async fn duplicate_call_id_preserves_first_non_null_timing_and_latest_payload() {
+    let fixture = TestStorage::new().await;
+    let storage = &fixture.storage;
+    let session_id = fixture.start_session().await;
+
+    // First flush: a running call with a real wall start.
+    let running_timing = ToolCallTiming {
+        started_at_ms: Some(1_700_000_000_000),
+        ..ToolCallTiming::default()
+    };
+    storage
+        .replace_transcript_snapshot(
+            session_id,
+            &[TranscriptItem::ToolActivity(timing_activity(
+                "dup-1",
+                ToolStatus::Running,
+                running_timing,
+            ))],
+        )
+        .await
+        .unwrap();
+
+    // Second flush: the same call completed. The finish and signed duration
+    // land; the known start must not move.
+    let mut completed_timing = running_timing;
+    completed_timing.finish(1_700_000_000_000 + 75);
+    completed_timing.legacy_duration_ms = Some(75);
+    storage
+        .replace_transcript_snapshot(
+            session_id,
+            &[TranscriptItem::ToolActivity(timing_activity(
+                "dup-1",
+                ToolStatus::Succeeded,
+                completed_timing,
+            ))],
+        )
+        .await
+        .unwrap();
+    let timing = tool_call_timing_row(storage, session_id, "dup-1").await;
+    assert_eq!(timing.started_at_ms, Some(1_700_000_000_000));
+    assert_eq!(timing.finished_at_ms, Some(1_700_000_000_000 + 75));
+    assert_eq!(timing.signed_duration_ms(), Some(75));
+
+    // One later snapshot re-emits the same call twice: the completed standalone
+    // card plus a stale timing-less re-emit inside a group. The first non-null
+    // endpoints/duration survive (COALESCE), while payload/status follow the
+    // latest appearance in sequence order.
+    storage
+        .replace_transcript_snapshot(
+            session_id,
+            &[
+                TranscriptItem::ToolActivity(timing_activity(
+                    "dup-1",
+                    ToolStatus::Succeeded,
+                    completed_timing,
+                )),
+                TranscriptItem::ExecutionGroup(ExecutionGroup {
+                    id: 9,
+                    finished_at: Some(Instant::now()),
+                    tools: vec![timing_activity(
+                        "dup-1",
+                        ToolStatus::Failed,
+                        ToolCallTiming {
+                            legacy_duration_ms: Some(9),
+                            ..ToolCallTiming::default()
+                        },
+                    )],
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+    let timing = tool_call_timing_row(storage, session_id, "dup-1").await;
+    assert_eq!(timing.started_at_ms, Some(1_700_000_000_000));
+    assert_eq!(timing.finished_at_ms, Some(1_700_000_000_000 + 75));
+    assert_eq!(timing.legacy_duration_ms, Some(75));
+    assert_eq!(timing.signed_duration_ms(), Some(75));
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM tool_calls WHERE session_id = ? AND call_id = 'dup-1'",
     )
     .bind(session_id.as_i64())
     .fetch_one(&storage.pool)
     .await
     .unwrap();
-    let (started, finished, duration) = row;
-    let started = started.expect("started_at_ms must be populated, not NULL");
-    let finished = finished.expect("finished_at_ms must be populated for a finished tool");
-    let duration = duration.expect("duration_ms must be recorded");
-    assert_eq!(
-        finished - started,
-        duration,
-        "the persisted start/finish must span exactly the real duration"
+    assert_eq!(status, "failed");
+}
+
+#[tokio::test]
+async fn reversed_wall_clock_preserves_negative_chronology_and_nonnegative_duration() {
+    let fixture = TestStorage::new().await;
+    let storage = &fixture.storage;
+    let session_id = fixture.start_session().await;
+
+    // The wall clock moved backward 100ms between the endpoints: preserve that
+    // chronology while keeping monotonic elapsed-time telemetry non-negative.
+    let mut activity = ToolActivity::new(
+        "call-neg".to_string(),
+        "bash".to_string(),
+        "{}".to_string(),
+        Instant::now(),
     );
-    assert!(duration >= 250, "the real elapsed time must be preserved");
+    activity.status = ToolStatus::Succeeded;
+    activity.result = Some("ok".to_string());
+    activity.finished_at = Some(activity.started_at + Duration::from_millis(12));
+    activity.timing.started_at_ms = Some(1_700_000_000_100);
+    activity.timing.finish(1_700_000_000_000);
+    let transcript = vec![TranscriptItem::ToolActivity(activity)];
+    storage
+        .replace_transcript_snapshot(session_id, &transcript)
+        .await
+        .unwrap();
+
+    let timing = tool_call_timing_row(storage, session_id, "call-neg").await;
+    assert_eq!(timing.started_at_ms, Some(1_700_000_000_100));
+    assert_eq!(timing.finished_at_ms, Some(1_700_000_000_000));
+    assert_eq!(timing.signed_duration_ms(), Some(-100));
+    assert_eq!(timing.legacy_duration_ms, Some(12));
+
+    // Reload keeps the negative chronology but the monotonic runtime duration
+    // stays non-negative for display.
+    let snapshot = storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let TranscriptItem::ToolActivity(reloaded) = &snapshot.transcript[0] else {
+        panic!("expected tool activity");
+    };
+    assert_eq!(reloaded.timing.signed_duration_ms(), Some(-100));
+    assert_eq!(reloaded.duration(), Duration::from_millis(12));
+
+    // Re-flushing the reloaded snapshot is byte-identical.
+    storage
+        .replace_transcript_snapshot(session_id, &snapshot.transcript)
+        .await
+        .unwrap();
+    let timing = tool_call_timing_row(storage, session_id, "call-neg").await;
+    assert_eq!(timing.started_at_ms, Some(1_700_000_000_100));
+    assert_eq!(timing.finished_at_ms, Some(1_700_000_000_000));
+    assert_eq!(timing.signed_duration_ms(), Some(-100));
+    assert_eq!(timing.legacy_duration_ms, Some(12));
+}
+
+#[tokio::test]
+async fn legacy_tool_call_without_endpoints_round_trips_unchanged() {
+    let fixture = TestStorage::new().await;
+    let storage = &fixture.storage;
+    let session_id = fixture.start_session().await;
+
+    let mut activity = ToolActivity::new(
+        "legacy-1".to_string(),
+        "read".to_string(),
+        "{}".to_string(),
+        Instant::now(),
+    );
+    activity.status = ToolStatus::Succeeded;
+    activity.result = Some("ok".to_string());
+    storage
+        .replace_transcript_snapshot(session_id, &[TranscriptItem::ToolActivity(activity)])
+        .await
+        .unwrap();
+
+    // Simulate a pre-timing snapshot: endpoints NULL, only a duration.
+    sqlx::query(
+        "UPDATE tool_calls SET started_at_ms = NULL, finished_at_ms = NULL, duration_ms = 42 \
+         WHERE session_id = ? AND call_id = 'legacy-1'",
+    )
+    .bind(session_id.as_i64())
+    .execute(&storage.pool)
+    .await
+    .unwrap();
+
+    // Loading hydrates no wall endpoints, retains the legacy duration, and
+    // re-saving invents nothing.
+    let snapshot = storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let TranscriptItem::ToolActivity(reloaded) = &snapshot.transcript[0] else {
+        panic!("expected tool activity");
+    };
+    assert_eq!(reloaded.timing.started_at_ms, None);
+    assert_eq!(reloaded.timing.finished_at_ms, None);
+    assert_eq!(reloaded.timing.legacy_duration_ms, Some(42));
+    assert_eq!(reloaded.timing.signed_duration_ms(), None);
+
+    storage
+        .replace_transcript_snapshot(session_id, &snapshot.transcript)
+        .await
+        .unwrap();
+    let timing = tool_call_timing_row(storage, session_id, "legacy-1").await;
+    assert_eq!(timing.started_at_ms, None);
+    assert_eq!(timing.finished_at_ms, None);
+    assert_eq!(timing.legacy_duration_ms, Some(42));
+
+    // A real post-resume terminal transition supplies the previously missing
+    // finish; the unknown start and the legacy duration are left alone.
+    let mut resumed = snapshot.transcript;
+    let TranscriptItem::ToolActivity(activity) = &mut resumed[0] else {
+        panic!("expected tool activity");
+    };
+    activity.timing.finish(1_700_000_099_999);
+    storage
+        .replace_transcript_snapshot(session_id, &resumed)
+        .await
+        .unwrap();
+    let timing = tool_call_timing_row(storage, session_id, "legacy-1").await;
+    assert_eq!(timing.started_at_ms, None);
+    assert_eq!(timing.finished_at_ms, Some(1_700_000_099_999));
+    assert_eq!(timing.legacy_duration_ms, Some(42));
 }
 
 #[tokio::test]

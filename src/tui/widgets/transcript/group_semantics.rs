@@ -267,6 +267,7 @@ mod tests {
                 diff: None,
                 started_at,
                 finished_at: Some(started_at + Duration::from_millis(250)),
+                timing: Default::default(),
             }],
         };
 
@@ -291,6 +292,7 @@ mod tests {
                 diff: None,
                 started_at,
                 finished_at: Some(started_at + Duration::from_millis(20)),
+                timing: Default::default(),
             }],
         };
 

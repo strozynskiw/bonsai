@@ -1125,6 +1125,7 @@ fn forward_terminal_event(sink: &HeadlessSink, event: crate::terminal::TerminalE
             tool_call_id: Some(id),
             status,
             summary,
+            finished_at_ms,
             ..
         } => {
             let status = match status {
@@ -1142,7 +1143,11 @@ fn forward_terminal_event(sink: &HeadlessSink, event: crate::terminal::TerminalE
                     crate::output::ToolExecutionStatus::Started
                 }
             };
-            sink.tool_finished(&id, &summary, status);
+            if let Some(finished_at_ms) = finished_at_ms {
+                sink.tool_finished_at(&id, &summary, status, finished_at_ms);
+            } else {
+                sink.tool_finished(&id, &summary, status);
+            }
         }
         crate::terminal::TerminalEvent::Started { .. }
         | crate::terminal::TerminalEvent::Output { .. }

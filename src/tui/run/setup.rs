@@ -465,20 +465,26 @@ impl OutputSink for TuiSink {
             self.completion_evidence
                 .record_tool_started(&call.id, &call.name, &call.arguments);
         }
+        let started_at = Instant::now();
+        let started_at_ms = crate::util::time::now_ms();
         let _ = self.sender.send(UiEvent::ToolCallsStarted {
             calls: calls.to_vec(),
-            started_at: Instant::now(),
+            started_at,
+            started_at_ms,
         });
     }
 
     fn tool_started(&self, id: &str, name: &str, arguments: &str) {
         self.completion_evidence
             .record_tool_started(id, name, arguments);
+        let started_at = Instant::now();
+        let started_at_ms = crate::util::time::now_ms();
         let _ = self.sender.send(UiEvent::ToolStarted {
             id: id.to_string(),
             name: name.to_string(),
             arguments: arguments.to_string(),
-            started_at: Instant::now(),
+            started_at,
+            started_at_ms,
         });
     }
 
@@ -498,6 +504,8 @@ impl OutputSink for TuiSink {
             result: result.to_string(),
             status,
             finished_at: Instant::now(),
+            // Captured beside the lifecycle event, not at flush/reduce time.
+            finished_at_ms: Some(crate::util::time::now_ms()),
         });
     }
 
@@ -516,6 +524,7 @@ impl OutputSink for TuiSink {
             status,
             diff: Box::new(diff),
             finished_at: Instant::now(),
+            finished_at_ms: Some(crate::util::time::now_ms()),
         });
     }
 

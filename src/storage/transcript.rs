@@ -81,7 +81,7 @@ impl Storage {
             }
 
             for activity in tool_activities(item) {
-                insert_tool_call(tx, session_id.as_i64(), tool_seq, activity, now).await?;
+                insert_tool_call(tx, session_id.as_i64(), tool_seq, activity).await?;
                 tool_seq += 1;
             }
         }
@@ -250,7 +250,7 @@ impl Storage {
         let rows = sqlx::query(
             r#"
             SELECT call_id, name, args_json, result_json, diff_json, delegated_model,
-                   duration_ms, status
+                   duration_ms, status, started_at_ms, finished_at_ms
             FROM tool_calls
             WHERE session_id = ?
             ORDER BY seq
@@ -275,6 +275,8 @@ impl Storage {
                     diff: parse_tool_diff(row.try_get("diff_json")?)?,
                     duration_ms: row.try_get("duration_ms")?,
                     status: ToolStatus::from_db_str(&row.try_get::<String, _>("status")?),
+                    started_at_ms: row.try_get("started_at_ms")?,
+                    finished_at_ms: row.try_get("finished_at_ms")?,
                 },
             );
         }
@@ -301,6 +303,8 @@ struct ToolCallRecord {
     diff: Option<crate::diff::FileDiff>,
     duration_ms: Option<i64>,
     status: ToolStatus,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
 }
 
 fn titled_body(title: String, body: String) -> String {
@@ -368,9 +372,12 @@ fn load_execution_group_block(
 
 fn tool_activity_from_record(record: &ToolCallRecord) -> ToolActivity {
     let now = Instant::now();
+    // Monotonic fields stay process-local display evidence; a negative
+    // persisted duration (clock rollback) clamps here and is never re-derived.
     let duration = record
         .duration_ms
-        .and_then(|ms| (ms >= 0).then_some(Duration::from_millis(ms as u64)))
+        .and_then(|ms| u64::try_from(ms).ok())
+        .map(Duration::from_millis)
         .unwrap_or_default();
     let finished_at = (!matches!(record.status, ToolStatus::Running)).then_some(now);
     ToolActivity {
@@ -383,6 +390,13 @@ fn tool_activity_from_record(record: &ToolCallRecord) -> ToolActivity {
         diff: record.diff.clone().map(Box::new),
         started_at: now.checked_sub(duration).unwrap_or(now),
         finished_at,
+        // Canonical chronology travels verbatim with the snapshot model, so
+        // every appearance of this call id hydrates from the same timing.
+        timing: crate::tui::transcript::ToolCallTiming {
+            started_at_ms: record.started_at_ms,
+            finished_at_ms: record.finished_at_ms,
+            legacy_duration_ms: record.duration_ms,
+        },
     }
 }
 
@@ -408,7 +422,6 @@ async fn insert_tool_call(
     session_id: i64,
     seq: i64,
     activity: &ToolActivity,
-    now: i64,
 ) -> Result<()> {
     let result_json = activity
         .result
@@ -420,19 +433,16 @@ async fn insert_tool_call(
         .map(serde_json::to_string)
         .transpose()
         .context("Failed to serialize tool diff")?;
+    // Canonical wall-clock endpoints are written exactly as carried (#166).
+    // `duration_ms` remains non-negative monotonic elapsed-time telemetry: wall
+    // clocks can jump, so signed chronology is derived from the endpoint
+    // columns instead of corrupting duration aggregates. A legacy row without
+    // live monotonic evidence retains its prior duration verbatim.
+    let timing = &activity.timing;
     let duration_ms = activity
         .finished_at
-        .map(|_| duration_to_i64_ms(activity.duration()));
-    // The activity clock is a monotonic `Instant`, so absolute start/finish are
-    // anchored to the flush time (`now`): a finished tool finished ~now, and its
-    // start is `now - duration` (duration is the real elapsed time). This gives
-    // a correct duration placement; the absolute anchor is within a flush
-    // interval of the truth. `duration_ms` remains the authoritative per-tool
-    // timing column.
-    let finished_at_ms = activity.finished_at.map(|_| now);
-    let started_at_ms = finished_at_ms
-        .map(|finished| finished - duration_ms.unwrap_or(0))
-        .unwrap_or(now);
+        .map(|_| duration_to_i64_ms(activity.duration()))
+        .or(timing.legacy_duration_ms);
 
     sqlx::query(
         r#"
@@ -452,10 +462,13 @@ async fn insert_tool_call(
           result_json = excluded.result_json,
           diff_json = excluded.diff_json,
           delegated_model = excluded.delegated_model,
-          duration_ms = excluded.duration_ms,
           status = excluded.status,
-          started_at_ms = excluded.started_at_ms,
-          finished_at_ms = excluded.finished_at_ms
+          -- First non-null wins for the immutable chronology columns (#166):
+          -- a repeated appearance may refresh payload/status/seq but can
+          -- neither invent nor move a known endpoint or duration.
+          duration_ms = COALESCE(tool_calls.duration_ms, excluded.duration_ms),
+          started_at_ms = COALESCE(tool_calls.started_at_ms, excluded.started_at_ms),
+          finished_at_ms = COALESCE(tool_calls.finished_at_ms, excluded.finished_at_ms)
         "#,
     )
     .bind(session_id)
@@ -468,8 +481,8 @@ async fn insert_tool_call(
     .bind(&activity.delegated_model)
     .bind(duration_ms)
     .bind(activity.status.as_db_str())
-    .bind(started_at_ms)
-    .bind(finished_at_ms)
+    .bind(timing.started_at_ms)
+    .bind(timing.finished_at_ms)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -651,6 +664,7 @@ fn json_text_or_wrapped(text: &str) -> String {
         Err(_) => json!({ "raw": text }).to_string(),
     }
 }
+
 fn duration_to_i64_ms(duration: Duration) -> i64 {
     duration.as_millis().min(i64::MAX as u128) as i64
 }
