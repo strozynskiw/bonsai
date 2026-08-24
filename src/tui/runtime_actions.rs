@@ -40,12 +40,12 @@ use crate::tui::local_model_wizard::{LocalModelWizardState, LocalModelWizardStep
 use crate::tui::mcp::McpServerStateKind;
 use crate::tui::pickers::{ModelOption, ModelSelection, ProviderSelection};
 use crate::tui::run::{
-    PersistenceCommandDeps, PersistenceCommandState, apply_context_control_action,
-    apply_non_idle_read_only_command, clear_canvas_plan, delete_saved_plan_from_picker,
-    implement_plan, implement_plan_with_context, mark_started_saved_plan, non_empty_trimmed,
-    open_background_task_list, open_context_modal_with_preview, open_saved_plan,
-    persist_current_theme, push_command_message, resume_session, review_changes,
-    start_delete_selected_background_task, switch_model_selection,
+    PersistenceCommandDeps, PersistenceCommandState, ReviewCanvasPreflightDeps,
+    apply_context_control_action, apply_non_idle_read_only_command, clear_canvas_plan,
+    delete_saved_plan_from_picker, implement_plan, implement_plan_with_context,
+    mark_started_saved_plan, non_empty_trimmed, open_background_task_list,
+    open_context_modal_with_preview, open_saved_plan, persist_current_theme, push_command_message,
+    resume_session, review_changes, start_delete_selected_background_task, switch_model_selection,
 };
 use crate::tui::task::{CommandTaskDeps, TaskController};
 
@@ -302,7 +302,7 @@ pub(super) async fn handle_runtime_action(
             submit_unauthorize_confirm(app, tasks, deps);
         }
         AppAction::ReviewScopePickerSubmit => {
-            submit_review_scope_picker(app, tasks, deps).await;
+            submit_review_scope_picker(app, tasks, deps, *state.current_session_id).await;
         }
         AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Submit) => {
             if !submit_local_model_wizard(app, deps) {
@@ -1509,6 +1509,7 @@ async fn submit_review_scope_picker(
     app: &mut AppState,
     tasks: &mut TaskController,
     deps: RuntimeActionDeps<'_>,
+    current_session_id: crate::storage::SessionId,
 ) {
     let Some(ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor })) =
         app.modal.clone()
@@ -1519,7 +1520,15 @@ async fn submit_review_scope_picker(
     app.reduce(AppAction::CloseModal);
     let scopes = crate::agent::ReviewScope::all();
     let scope = scopes[cursor.min(scopes.len().saturating_sub(1))];
-    review_changes(app, tasks, deps.agent, scope, deps.sink).await;
+    review_changes(
+        app,
+        tasks,
+        deps.agent.clone(),
+        scope,
+        deps.sink.clone(),
+        ReviewCanvasPreflightDeps::new(deps.storage, current_session_id, &deps.plan_store),
+    )
+    .await;
 }
 
 fn submit_local_model_wizard(app: &mut AppState, deps: RuntimeActionDeps<'_>) -> bool {

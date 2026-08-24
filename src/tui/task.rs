@@ -35,6 +35,7 @@ use crate::tui::event::{
     CommandOutcomeEvent, CommandOutputEvent, ModalKind, ProviderRunSelection, RuntimeEvent, UiError,
 };
 use crate::tui::pickers::ModelOption;
+use crate::tui::run::{ReviewCanvasPreflightDeps, protect_canvas_before_review};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
@@ -853,33 +854,39 @@ impl TaskController {
     /// a review instruction, then dispatches the run loop. The agent stays in
     /// `Review` mode with read-only tools. When the scope has no changes the
     /// run loop is skipped.
-    pub async fn start_review(
+    pub(in crate::tui) async fn start_review(
         &mut self,
+        app: &mut crate::tui::app::AppState,
         agent: Arc<tokio::sync::Mutex<Agent>>,
         scope: crate::agent::ReviewScope,
         sink: SharedSink,
+        preflight: ReviewCanvasPreflightDeps<'_>,
     ) -> Result<bool, UiError> {
-        self.start_review_workflow(agent, scope, sink, ReviewWorkflow::General)
+        self.start_review_workflow(app, agent, scope, sink, preflight, ReviewWorkflow::General)
             .await
     }
 
     /// Begin the curated `/security-review` workflow in the same enforced
     /// read-only review persona.
-    pub async fn start_security_review(
+    pub(in crate::tui) async fn start_security_review(
         &mut self,
+        app: &mut crate::tui::app::AppState,
         agent: Arc<tokio::sync::Mutex<Agent>>,
         scope: crate::agent::ReviewScope,
         sink: SharedSink,
+        preflight: ReviewCanvasPreflightDeps<'_>,
     ) -> Result<bool, UiError> {
-        self.start_review_workflow(agent, scope, sink, ReviewWorkflow::Security)
+        self.start_review_workflow(app, agent, scope, sink, preflight, ReviewWorkflow::Security)
             .await
     }
 
     async fn start_review_workflow(
         &mut self,
+        app: &mut crate::tui::app::AppState,
         agent: Arc<tokio::sync::Mutex<Agent>>,
         scope: crate::agent::ReviewScope,
         sink: SharedSink,
+        preflight: ReviewCanvasPreflightDeps<'_>,
         workflow: ReviewWorkflow,
     ) -> Result<bool, UiError> {
         if self.active.is_some() {
@@ -899,6 +906,10 @@ impl TaskController {
         if !has_changes {
             return Ok(false);
         }
+
+        protect_canvas_before_review(app, preflight)
+            .await
+            .map_err(|err| UiError::new("Review setup failed", format!("{err:#}")))?;
 
         let completion = CompletionRunContext {
             agent: agent.clone(),

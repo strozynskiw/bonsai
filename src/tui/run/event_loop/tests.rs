@@ -526,6 +526,10 @@ fn background_task_snapshot(
 
 fn test_agent(provider: Box<dyn Provider>) -> Arc<Mutex<Agent>> {
     let fixture = TestFixture::new();
+    test_agent_in_project(provider, &fixture)
+}
+
+fn test_agent_in_project(provider: Box<dyn Provider>, fixture: &TestFixture) -> Arc<Mutex<Agent>> {
     Arc::new(Mutex::new(
         Agent::new(
             provider,
@@ -537,6 +541,26 @@ fn test_agent(provider: Box<dyn Provider>) -> Arc<Mutex<Agent>> {
         )
         .expect("test agent should build"),
     ))
+}
+
+fn run_review_git(root: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .status()
+        .expect("review test git command should run");
+    assert!(status.success(), "git command failed: {args:?}");
+}
+
+fn init_review_repo(root: &std::path::Path) {
+    run_review_git(root, &["init", "--quiet"]);
+    run_review_git(root, &["config", "user.email", "test@example.com"]);
+    run_review_git(root, &["config", "user.name", "Test"]);
+    std::fs::write(root.join("review.rs"), "fn baseline() {}\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "bonsai.db*\n").unwrap();
+    run_review_git(root, &["add", "review.rs", ".gitignore"]);
+    run_review_git(root, &["commit", "--quiet", "-m", "baseline"]);
 }
 
 /// Regression: `/self-review <mode>` used to change state silently, which was
@@ -1031,6 +1055,166 @@ async fn fresh_plan_protection_keeps_an_invalid_canvas_intact() {
     assert_eq!(*plan_store.lock().await, invalid);
     assert_eq!(app.plan, invalid);
     assert!(app.active_saved_plan_session_id.is_none());
+}
+
+#[tokio::test]
+async fn general_review_saves_then_clears_canvas_before_spawn() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    std::fs::write(fixture.project_root.join("review.rs"), "fn changed() {}\n").unwrap();
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let canvas = sample_plan("Archive before review");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(canvas.clone()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.plan = canvas;
+
+    let started = review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        crate::agent::ReviewScope::Uncommitted,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(started);
+    assert!(tasks.is_busy(), "reviewer should spawn after the preflight");
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    assert!(app.active_saved_plan_session_id.is_none());
+    let saved = storage
+        .saved_plans_for_project(&fixture.project_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].title, "Archive before review");
+    drain_tasks(&mut tasks).await;
+}
+
+#[tokio::test]
+async fn general_review_without_diff_preserves_canvas_and_binding() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let canvas = sample_plan("Keep without diff");
+    let saved = storage
+        .save_plan_to_library(session_id, None, &canvas, None)
+        .await
+        .unwrap();
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(canvas.clone()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.plan = canvas.clone();
+    app.active_saved_plan_session_id = Some(saved.id);
+
+    let started = review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        crate::agent::ReviewScope::Uncommitted,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(!started);
+    assert!(!tasks.is_busy());
+    assert_eq!(app.plan, canvas);
+    assert_eq!(*plan_store.lock().await, canvas);
+    assert_eq!(app.active_saved_plan_session_id, Some(saved.id));
+}
+
+#[tokio::test]
+async fn security_review_starts_with_an_empty_canvas_without_saving() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    std::fs::write(
+        fixture.project_root.join("review.rs"),
+        "fn security_change() {}\n",
+    )
+    .unwrap();
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(crate::plan::PlanDoc::default()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+
+    let started = security_review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(started);
+    assert!(tasks.is_busy());
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    assert!(
+        storage
+            .saved_plans_for_project(&fixture.project_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drain_tasks(&mut tasks).await;
+}
+
+#[tokio::test]
+async fn security_review_save_failure_preserves_canvas_and_skips_spawn() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    std::fs::write(
+        fixture.project_root.join("review.rs"),
+        "fn security_change() {}\n",
+    )
+    .unwrap();
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let saved = storage
+        .save_plan_to_library(session_id, None, &sample_plan("Existing archive"), None)
+        .await
+        .unwrap();
+    let mut invalid = crate::plan::PlanDoc::default();
+    invalid.edit().add_task("Untitled task");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.plan = invalid.clone();
+    app.active_saved_plan_session_id = Some(saved.id);
+
+    let started = security_review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(!started);
+    assert!(
+        !tasks.is_busy(),
+        "reviewer must not spawn after save failure"
+    );
+    assert_eq!(app.task_state, TaskState::Idle);
+    assert_eq!(app.plan, invalid);
+    assert_eq!(*plan_store.lock().await, invalid);
+    assert_eq!(app.active_saved_plan_session_id, Some(saved.id));
+    assert!(app.transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Error { error } if error.detail.contains("untitled")
+    )));
 }
 
 #[tokio::test]

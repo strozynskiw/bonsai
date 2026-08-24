@@ -1218,7 +1218,18 @@ async fn handle_idle_slash_command(
             }
         }
         IdleSlashCommand::SecurityReview => {
-            security_review_changes(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
+            security_review_changes(
+                app,
+                tasks,
+                deps.agent.clone(),
+                deps.sink.clone(),
+                ReviewCanvasPreflightDeps::new(
+                    deps.storage,
+                    *persistence.current_session_id,
+                    &deps.plan_store,
+                ),
+            )
+            .await;
         }
         IdleSlashCommand::Mode => {
             // Rows are seeded by the reducer from current app state; pass an empty

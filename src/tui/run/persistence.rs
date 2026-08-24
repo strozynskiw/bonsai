@@ -422,6 +422,27 @@ pub(in crate::tui) struct PersistenceCommandState<'a> {
     pub(in crate::tui) signatures: &'a mut PersistedSnapshotSignatures,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(in crate::tui) struct ReviewCanvasPreflightDeps<'a> {
+    storage: &'a Storage,
+    current_session_id: SessionId,
+    plan_store: &'a SharedPlanStore,
+}
+
+impl<'a> ReviewCanvasPreflightDeps<'a> {
+    pub(in crate::tui) const fn new(
+        storage: &'a Storage,
+        current_session_id: SessionId,
+        plan_store: &'a SharedPlanStore,
+    ) -> Self {
+        Self {
+            storage,
+            current_session_id,
+            plan_store,
+        }
+    }
+}
+
 pub(in crate::tui::run) fn persistence_command(input: &str) -> Option<PersistenceCommand<'_>> {
     let trimmed = input.trim();
     let (command, arg) = trimmed
@@ -753,15 +774,46 @@ pub(in crate::tui) async fn protect_canvas_before_new_plan(
     current_session_id: SessionId,
     plan_store: &SharedPlanStore,
 ) -> Result<()> {
+    protect_canvas_before_transition(
+        app,
+        storage,
+        current_session_id,
+        plan_store,
+        "before starting a new plan",
+    )
+    .await
+}
+
+/// Archive and clear the working canvas after review seeding confirms a real
+/// diff. Validation or persistence failures leave the canvas and saved-plan
+/// binding intact so the reviewer is never started against partial state.
+pub(in crate::tui) async fn protect_canvas_before_review(
+    app: &mut AppState,
+    deps: ReviewCanvasPreflightDeps<'_>,
+) -> Result<()> {
+    protect_canvas_before_transition(
+        app,
+        deps.storage,
+        deps.current_session_id,
+        deps.plan_store,
+        "before starting review",
+    )
+    .await
+}
+
+async fn protect_canvas_before_transition(
+    app: &mut AppState,
+    storage: &Storage,
+    current_session_id: SessionId,
+    plan_store: &SharedPlanStore,
+    notice_context: &str,
+) -> Result<()> {
     let plan = plan_store.lock().await.clone();
     app.plan = plan;
     if !app.plan.is_empty() {
         let saved = save_current_plan_to_library(app, storage, current_session_id).await?;
         app.reduce(AppAction::SetActiveSavedPlan(Some(saved.id)));
-        push_transient_notice(
-            app,
-            &format!("Saved plan #{} before starting a new plan.", saved.id),
-        );
+        push_transient_notice(app, &format!("Saved plan #{} {notice_context}.", saved.id));
     }
     clear_canvas_plan(app, plan_store).await;
     Ok(())
