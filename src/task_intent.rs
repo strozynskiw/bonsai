@@ -1,11 +1,13 @@
 //! Classification of short human prompts that refer back to an established
 //! task instead of defining a new goal.
 
-/// Whether a human prompt starts a new goal or resumes the existing one.
+/// Whether a human prompt starts a new goal, resumes it, or authorizes its
+/// referenced action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskPromptKind {
     NewGoal,
     Continuation,
+    ActionContinuation,
 }
 
 impl TaskPromptKind {
@@ -13,6 +15,12 @@ impl TaskPromptKind {
     /// remains a new goal so those details are not discarded during resume.
     pub(crate) fn classify(prompt: &str) -> Self {
         match action_directive(&normalized_words(prompt)) {
+            "do it"
+            | "do it please"
+            | "go ahead"
+            | "go ahead please"
+            | "make it happen"
+            | "make it happen please" => Self::ActionContinuation,
             "continue"
             | "continue please"
             | "continue the task"
@@ -43,7 +51,13 @@ impl TaskPromptKind {
     }
 
     pub(crate) const fn is_continuation(self) -> bool {
-        matches!(self, Self::Continuation)
+        matches!(self, Self::Continuation | Self::ActionContinuation)
+    }
+
+    /// Whether the continuation requires an observable action even when the
+    /// prior task's completion contract was informational or read-only.
+    pub(crate) const fn requests_action(self) -> bool {
+        matches!(self, Self::ActionContinuation)
     }
 }
 
@@ -114,6 +128,17 @@ mod tests {
             assert_eq!(
                 TaskPromptKind::classify(prompt),
                 TaskPromptKind::Continuation,
+                "prompt: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_terse_execution_approvals_as_action_continuations() {
+        for prompt in ["DO it", "please go ahead", "make it happen please"] {
+            assert_eq!(
+                TaskPromptKind::classify(prompt),
+                TaskPromptKind::ActionContinuation,
                 "prompt: {prompt:?}"
             );
         }

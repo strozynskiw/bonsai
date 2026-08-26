@@ -450,7 +450,33 @@ async fn restored_bare_continuation_recovers_mutation_tool_authority() {
 }
 
 #[tokio::test]
-async fn planning_request_keeps_mode_switch_in_coding_tool_surface() {
+async fn coding_review_task_keeps_mutation_tools_available() {
+    let fixture = TestFixture::new();
+    let mut coding_registry = ToolRegistry::new();
+    coding_registry.register(Arc::new(crate::tool::EditTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        Arc::new(coding_registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let prior_goal = "Review the release script, but do not modify files.";
+    agent.push_user_message_raw(prior_goal);
+    agent.begin_inferred_completion_task(prior_goal);
+
+    let task_registry = agent.tool_registry_for_current_task();
+
+    assert!(task_registry.get("edit").is_some());
+}
+
+#[tokio::test]
+async fn planning_request_keeps_complete_coding_tool_surface() {
     let fixture = TestFixture::new();
     let interaction = Arc::new(InteractionService::noninteractive());
     let mut coding_registry = ToolRegistry::new();
@@ -475,7 +501,7 @@ async fn planning_request_keeps_mode_switch_in_coding_tool_surface() {
     let task_registry = agent.tool_registry_for_current_task();
 
     assert!(task_registry.get("start_new_plan").is_some());
-    assert!(task_registry.get("question").is_none());
+    assert!(task_registry.get("question").is_some());
 }
 
 #[tokio::test]

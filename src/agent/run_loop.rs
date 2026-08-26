@@ -235,9 +235,6 @@ impl Agent {
                  the session unless a later human message introduces a distinct topic."
             ));
         }
-        if let Some(note) = self.task_authority_note() {
-            self.push_harness_note(note);
-        }
         // Volatile project state (git status) refreshes at the top of every
         // run-loop iteration, which covers the first model call too — no
         // begin_run refresh needed. Self-review and memory recall key off the

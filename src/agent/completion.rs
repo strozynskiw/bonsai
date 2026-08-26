@@ -78,10 +78,6 @@ pub(crate) struct TaskCompletionContract {
     pub(crate) effect: CompletionEffectRequirement,
     pub(crate) verification_required: bool,
     #[serde(default)]
-    source_review: bool,
-    #[serde(default)]
-    read_only_authority: bool,
-    #[serde(default)]
     bounded_read_only: bool,
 }
 
@@ -98,8 +94,6 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Informational,
             effect: CompletionEffectRequirement::None,
             verification_required: false,
-            source_review: false,
-            read_only_authority: true,
             bounded_read_only: false,
         }
     }
@@ -110,8 +104,6 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::WorkspaceMutation,
             verification_required: false,
-            source_review: false,
-            read_only_authority: false,
             bounded_read_only: false,
         }
     }
@@ -122,8 +114,6 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: false,
-            source_review: false,
-            read_only_authority: false,
             bounded_read_only: false,
         }
     }
@@ -134,8 +124,6 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: true,
-            source_review: false,
-            read_only_authority: false,
             bounded_read_only: false,
         }
     }
@@ -331,8 +319,6 @@ impl TaskCompletionContract {
             },
             effect,
             verification_required: verification,
-            source_review: review && !mentions_version_control_review(directive),
-            read_only_authority: !explicit_broad_effect,
             bounded_read_only: explicit_read_only && !explicit_broad_effect,
         }
     }
@@ -356,19 +342,7 @@ impl TaskCompletionContract {
             },
             effect,
             verification_required: self.verification_required || other.verification_required,
-            source_review: self.source_review && other.source_review,
-            read_only_authority: self.read_only_authority && other.read_only_authority,
             bounded_read_only: self.bounded_read_only && other.bounded_read_only,
-        }
-    }
-
-    const fn tool_authority_scope(self) -> crate::tool::ToolAuthorityScope {
-        match (self.intent, self.read_only_authority, self.source_review) {
-            (TaskIntent::Review, true, true) => crate::tool::ToolAuthorityScope::SourceReview,
-            (TaskIntent::Informational | TaskIntent::Diagnosis | TaskIntent::Review, true, _) => {
-                crate::tool::ToolAuthorityScope::ReadOnlyTask
-            }
-            _ => crate::tool::ToolAuthorityScope::Full,
         }
     }
 
@@ -379,21 +353,6 @@ impl TaskCompletionContract {
                 TaskIntent::Informational | TaskIntent::Diagnosis | TaskIntent::Review
             )
     }
-}
-
-fn mentions_version_control_review(directive: &str) -> bool {
-    contains_any_phrase(
-        directive,
-        &[
-            "diff",
-            "commit",
-            "branch",
-            "uncommitted",
-            "git",
-            "pull request",
-            "pr changes",
-        ],
-    )
 }
 
 #[derive(Debug, Default)]
@@ -713,23 +672,17 @@ impl CompletionGuardState {
 
 impl Agent {
     pub(super) fn tool_registry_for_current_task(&self) -> Arc<ToolRegistry> {
-        let scope = if self.execution_lane.kind == ExecutionLaneKind::Parent
-            && self.mode == AgentMode::Coding
-        {
-            self.completion.contract.tool_authority_scope()
-        } else {
-            crate::tool::ToolAuthorityScope::Full
-        };
-        self.tool_registry.scoped_to_authority(scope)
+        self.tool_registry.clone()
     }
 
     pub(super) fn begin_inferred_completion_task(&mut self, prompt: &str) -> Option<String> {
-        let continuation_goal = TaskPromptKind::classify(prompt)
+        let prompt_kind = TaskPromptKind::classify(prompt);
+        let continuation_goal = prompt_kind
             .is_continuation()
             .then(|| self.latest_explicit_human_goal())
             .flatten();
-        let contract = if self.execution_lane.kind == ExecutionLaneKind::Parent {
-            if TaskPromptKind::classify(prompt).is_continuation() {
+        let mut contract = if self.execution_lane.kind == ExecutionLaneKind::Parent {
+            if prompt_kind.is_continuation() {
                 inherited_continuation_contract(
                     self.completion.contract,
                     continuation_goal.as_deref(),
@@ -740,6 +693,9 @@ impl Agent {
         } else {
             TaskCompletionContract::informational()
         };
+        if self.execution_lane.kind == ExecutionLaneKind::Parent && prompt_kind.requests_action() {
+            contract = contract.merge(TaskCompletionContract::action());
+        }
         self.begin_completion_task(contract);
         continuation_goal
     }
@@ -805,12 +761,6 @@ impl Agent {
 
     pub(super) fn take_read_only_conclusion_turn(&mut self) -> bool {
         self.read_only_task_progress.take_conclusion_turn()
-    }
-
-    pub(super) fn task_authority_note(&self) -> Option<&'static str> {
-        self.completion.contract.is_read_only_task().then_some(
-            "Active task authority is read-only. The callable tools are intentionally limited to structured inspection and safe local controls; do not invoke or emit shell/terminal, project/external mutation, unrelated interaction, or other unavailable tool calls. Answer directly once the requested evidence is collected, unless an available mode-transition tool is the requested outcome.",
-        )
     }
 
     pub(super) fn note_completion_action(&mut self) {
@@ -1501,18 +1451,7 @@ mod tests {
         );
         assert_eq!(review.intent, TaskIntent::Review);
         assert_eq!(review.effect, CompletionEffectRequirement::AnyAction);
-        assert_eq!(
-            review.tool_authority_scope(),
-            crate::tool::ToolAuthorityScope::SourceReview
-        );
-
-        let diff_review = TaskCompletionContract::inferred(
-            "Review the uncommitted diff, but do not modify files or run commands.",
-        );
-        assert_eq!(
-            diff_review.tool_authority_scope(),
-            crate::tool::ToolAuthorityScope::ReadOnlyTask
-        );
+        assert!(review.is_read_only_task());
 
         for prompt in [
             "Apply this patch",
@@ -1527,12 +1466,6 @@ mod tests {
                 "{prompt}"
             );
         }
-
-        let widened_review = review.merge(diff_review);
-        assert_eq!(
-            widened_review.tool_authority_scope(),
-            crate::tool::ToolAuthorityScope::ReadOnlyTask
-        );
 
         let monitoring = TaskCompletionContract::inferred("Monitor the deployment");
         assert_eq!(monitoring.intent, TaskIntent::Monitoring);

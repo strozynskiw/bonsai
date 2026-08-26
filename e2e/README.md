@@ -69,6 +69,8 @@ e2e/
     06_escape_steer.sh     # Esc replacement remains visibly active
     07_resume_selection.sh # resumed request keeps its persisted model
     08_state_isolation.sh   # real child leaves parent state byte-identical
+    09_continuation_resume.sh # retries recover the substantive task identity
+    10_action_continuation.sh # terse approvals keep the complete Coding tools
   mock_streaming_provider.py # deterministic loopback SSE provider
 ```
 
