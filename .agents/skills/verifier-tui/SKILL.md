@@ -65,7 +65,8 @@ semantic screen versions, so spinner/redraw noise does not cause a polling loop.
 The `terminal read` output includes a `Normalized screen:` section — the
 vt100-parsed pane content. Use it to check:
 
-- **Composer meta line** (bottom): `● Agent · <model> · <effort> · <provider> [· <policy>]`.
+- **Composer meta line** (bottom): `● Coding · <model> · <effort> · <provider> [· <policy>]`
+  (the persona label is `Planning` on the plan agent).
   The execution-mode policy marker is appended only when non-default
   (`auto-accept` amber, `yolo` red); `default` is quiet. Note the `· default`
   earlier on the line is the *reasoning effort*, not the policy.
@@ -92,17 +93,17 @@ send keys → terminal wait (wait_seconds: 3) → terminal read → assert
 
 The M3.1 checklist, driven through the terminal tool:
 
-1. **Launch** and wait for `● Agent ·` in the meta line
+1. **Launch** and wait for `● Coding ·` in the meta line
 2. **`/autonomy auto-accept`** → meta line shows `· auto-accept`, no `· yolo`
 3. **`/yolo on`** → meta line shows `· yolo`, no `· auto-accept` (this is the regression guard — yolo must not collapse to auto-accept)
 4. **`/autonomy ask`** → neither marker (quiet)
 5. **`/autonomy yolo`** → meta line shows `· yolo` (yolo selectable directly)
 6. **Alt+M** from ask → cycles to `· conservative` (Alt+M walks ask → conservative → balanced → auto-accept; never yolo)
-7. **Tab** → switches to `Plan ·` agent
+7. **Shift+Tab** (`S-Tab`) → switches to the `Planning` agent
 
 Covers: default is quiet → `/autonomy auto-accept` → `/yolo on` is distinct
 (not auto-accept) → `/autonomy ask` clears → `/autonomy yolo` selects directly
-→ Alt+M cycles → Tab switches agent.
+→ Alt+M cycles → Shift+Tab switches agent.
 
 ## Batch testing (CI)
 

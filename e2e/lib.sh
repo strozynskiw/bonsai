@@ -103,8 +103,10 @@ tui_start() {
     printf -v command '%s %q' "$command" "$argument"
   done
   tx kill-server 2>/dev/null || true
-  tx new-session -d -s "$E2E_SESSION" -x "$cols" -y "$rows"
-  tx send-keys -t "$E2E_SESSION" "$command" Enter
+  # Launch verifier.sh as the tmux session command, not via the pane's login
+  # shell: an interactive login shell (zsh + oh-my-zsh update nag, slow rc)
+  # can eat the first sent key or stall on a prompt, mangling the launch.
+  tx new-session -d -s "$E2E_SESSION" -x "$cols" -y "$rows" "$command"
   # A pristine state root opens onboarding. Surface tests exercise the chat,
   # so take its documented "later" path instead of seeding private state.
   if wait_for "Welcome to Bonsai|$ready" "$E2E_STARTUP_WAIT"; then
