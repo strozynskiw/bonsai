@@ -30,7 +30,7 @@ jobs:
       REQUESTED_RECORD: ${{ inputs.record || '' }}
       REQUIRE_QUALIFIED: ${{ inputs.require_qualified || false }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 

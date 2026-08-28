@@ -32,7 +32,7 @@ jobs:
             macos_deployment_target: "13.0"
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Measure and compare the native release binary
         env:
           BONSAI_PERF_REPORT: target/perf/${{ matrix.target }}.json
