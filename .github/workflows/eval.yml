@@ -14,7 +14,7 @@ jobs:
     continue-on-error: true
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Run mock eval suite
         run: cargo run --locked -- eval --mode mock --json --out target/eval
       - name: Publish mock eval summary
@@ -39,7 +39,7 @@ jobs:
     if: vars.BONSAI_EVAL_LIVE == '1'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Run live eval suite
         env:
           BONSAI_PROVIDER: ${{ vars.BONSAI_EVAL_PROVIDER }}
