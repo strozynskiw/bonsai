@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams,
-    Tool as RmcpTool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, Tool as RmcpTool,
 };
 use rmcp::service::{RequestContext, RunningService};
 use rmcp::{RoleClient, RoleServer, ServerHandler};
@@ -45,22 +45,18 @@ impl ServerHandler for FakeServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult {
-            tools: vec![
-                RmcpTool::new("echo", "Echo the input back", object_schema()),
-                RmcpTool::new("read_note", "Return a fixed note", object_schema()),
-                RmcpTool::new("do_write", "Report a write failure", object_schema()),
-            ],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListToolsResult::with_all_items(vec![
+            RmcpTool::new("echo", "Echo the input back", object_schema()),
+            RmcpTool::new("read_note", "Return a fixed note", object_schema()),
+            RmcpTool::new("do_write", "Report a write failure", object_schema()),
+        ]))
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let text = match request.name.as_ref() {
             "echo" => {
                 let echoed = request
@@ -70,17 +66,17 @@ impl ServerHandler for FakeServer {
                     .and_then(|value| value.as_str())
                     .unwrap_or_default()
                     .to_string();
-                return Ok(CallToolResult::success(vec![ContentBlock::text(echoed)]));
+                return Ok(CallToolResult::success(vec![ContentBlock::text(echoed)]).into());
             }
             "read_note" => INJECTED_NOTE.to_string(),
             "do_write" => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "write not permitted",
-                )]));
+                return Ok(
+                    CallToolResult::error(vec![ContentBlock::text("write not permitted")]).into(),
+                );
             }
             other => format!("unknown tool '{other}'"),
         };
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
     }
 }
 

@@ -44,7 +44,7 @@ futures = "0.3.33"
 dotenvy = "0.15.7"
 tiktoken-rs = { version = "0.12.0", default-features = false }
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 blake3 = "1"
 ring = "0.17.14"
 semver = "1.0.27"
@@ -67,7 +67,7 @@ grep-regex = "0.1.14"
 regex = "1.11.1"
 nix = { version = "0.31.3", features = ["process", "signal", "time", "poll", "fs", "term", "user"] }
 portable-pty = "0.9.0"
-tree-sitter = "0.26.9"
+tree-sitter = "0.27.0"
 tree-sitter-go = "0.25.0"
 tree-sitter-javascript = "0.25.0"
 tree-sitter-python = "0.25.0"
@@ -93,7 +93,7 @@ png = "0.18.1"
 # MCP client (M5.2). client + stdio child-process transport + Streamable HTTP
 # over the reqwest we already ship. rmcp has renamed transport features
 # between minor versions — re-verify these exact names at the next bump.
-rmcp = { version = "2.1.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.2.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 tempfile = "3.27.0"
 uuid = { version = "1.23.4", features = ["v7"] }
 nucleo-matcher = "0.3.1"
@@ -107,5 +107,5 @@ wiremock = "0.6.5"
 # Paused-clock control (`start_paused`) for deterministic timeout tests.
 tokio = { version = "1", features = ["test-util"] }
 # In-process fake MCP server for src/mcp/tests.rs (M5.2).
-rmcp = { version = "2.1.0", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "3.2.0", default-features = false, features = ["server", "transport-io"] }
 temp-env = { version = "0.3.6", features = ["async_closure"] }

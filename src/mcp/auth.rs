@@ -13,10 +13,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
 use rmcp::transport::auth::{
-    AuthError, AuthorizationManager, AuthorizationSession, CredentialStore as RmcpCredentialStore,
-    InMemoryCredentialStore, OAuthClientConfig, OAuthHttpClient, OAuthHttpClientError,
-    OAuthHttpClientFuture, OAuthHttpRedirectPolicy, OAuthHttpRequest, OAuthState,
-    StoredCredentials,
+    AuthError, AuthorizationManager, AuthorizationRequest, AuthorizationSession,
+    CredentialStore as RmcpCredentialStore, InMemoryCredentialStore, OAuthClientConfig,
+    OAuthHttpClient, OAuthHttpClientError, OAuthHttpClientFuture, OAuthHttpRedirectPolicy,
+    OAuthHttpRequest, OAuthState, StoredCredentials,
 };
 use tokio::sync::RwLock;
 
@@ -67,7 +67,7 @@ impl OAuthHttpClient for PinnedOAuthHttpClient {
                 let chunk =
                     chunk.map_err(|error| oauth_http_error("OAuth response read failed", error))?;
                 if body.len().saturating_add(chunk.len()) > MAX_OAUTH_RESPONSE_BYTES {
-                    return Err(OAuthHttpClientError::new(format!(
+                    return Err(oauth_http_client_error(format!(
                         "OAuth HTTP response exceeds {MAX_OAUTH_RESPONSE_BYTES} bytes"
                     )));
                 }
@@ -161,10 +161,14 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
+fn oauth_http_client_error(message: String) -> OAuthHttpClientError {
+    std::io::Error::other(message).into()
+}
+
 fn oauth_http_error(context: &str, error: impl std::fmt::Display) -> OAuthHttpClientError {
     let error = error.to_string();
     let message = crate::redact::redact(&error);
-    OAuthHttpClientError::new(format!("{context}: {message}"))
+    oauth_http_client_error(format!("{context}: {message}"))
 }
 
 async fn authorization_manager(server_url: &str) -> Result<AuthorizationManager> {
@@ -468,9 +472,10 @@ impl PendingAuthorization {
         let mut manager = authorization_manager(server_url).await?;
         manager.set_credential_store(staging.clone());
         let metadata = manager
-            .discover_metadata()
+            .resolve_metadata()
             .await
-            .context("failed to discover MCP OAuth metadata")?;
+            .context("failed to discover MCP OAuth metadata")?
+            .metadata;
         validate_authorization_metadata(&metadata)?;
         let pkce_methods = metadata.code_challenge_methods_supported.as_ref().context(
             "MCP authorization server does not advertise PKCE methods; S256 is required",
@@ -499,12 +504,12 @@ impl PendingAuthorization {
         } else {
             AuthorizationSession::new(
                 manager,
-                &scope_refs,
-                redirect_uri,
-                Some("bonsai"),
-                None,
+                AuthorizationRequest::new(redirect_uri)
+                    .with_scopes(scopes)
+                    .with_client_name("bonsai"),
             )
             .await
+            .map_err(|(_manager, error)| error)
             .context(
                 "failed to dynamically register the MCP OAuth client; configure oauth_client_id when the authorization server does not support dynamic registration",
             )?
@@ -638,9 +643,10 @@ pub(super) async fn revoke(server_url: &str, store: &McpOAuthStore) -> Result<Re
 async fn revoke_remote(server_url: &str, credentials: &StoredCredentials) -> Result<bool> {
     let manager = authorization_manager(server_url).await?;
     let metadata = manager
-        .discover_metadata()
+        .resolve_metadata()
         .await
-        .context("failed to discover MCP OAuth revocation metadata")?;
+        .context("failed to discover MCP OAuth revocation metadata")?
+        .metadata;
     validate_authorization_metadata(&metadata)?;
     let Some(endpoint) = metadata
         .additional_fields
