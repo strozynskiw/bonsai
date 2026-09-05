@@ -269,7 +269,7 @@ fn zai_models_from_openapi(value: &Value) -> Result<Vec<AvailableModel>> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|model| model.as_str().is_some_and(|id| id.starts_with("glm-4.6v")));
+        .filter(|model| model.as_str().is_some_and(zai_vision_line_is_tool_capable));
     let mut seen = std::collections::HashSet::new();
     let models = text_models
         .iter()
@@ -282,13 +282,20 @@ fn zai_models_from_openapi(value: &Value) -> Result<Vec<AvailableModel>> {
     Ok(models)
 }
 
+/// Z.AI documents function-tool support on vision-schema models selectively:
+/// the GLM-4.6V family and GLM-5.3-Flash accept tools, while GLM-5V-Turbo and
+/// GLM-4.5V reject them and stay out of the catalog.
+fn zai_vision_line_is_tool_capable(id: &str) -> bool {
+    id.starts_with("glm-4.6v") || id == "glm-5.3-flash"
+}
+
 fn zai_model_from_id(id: &str) -> AvailableModel {
     let mut features = vec![
         ModelFeature::ToolCall,
         ModelFeature::StructuredOutput,
         ModelFeature::Temperature,
     ];
-    if id.starts_with("glm-4.6v") {
+    if zai_vision_line_is_tool_capable(id) {
         features.push(ModelFeature::Attachment);
     }
     let supports_thinking = id != "glm-4-32b-0414-128k";
@@ -1570,6 +1577,7 @@ mod tests {
                         "properties": {
                             "model": {
                                 "enum": [
+                                    "glm-5.3",
                                     "glm-5.2",
                                     "glm-4.7",
                                     "glm-4-32b-0414-128k",
@@ -1582,10 +1590,12 @@ mod tests {
                         "properties": {
                             "model": {
                                 "enum": [
+                                    "glm-5.3-flash",
                                     "glm-5v-turbo",
                                     "glm-4.6v",
                                     "glm-4.6v-flashx",
-                                    "glm-4.5v"
+                                    "glm-4.5v",
+                                    "autoglm-phone-multilingual"
                                 ]
                             }
                         }
@@ -1602,9 +1612,11 @@ mod tests {
                 .map(|model| model.remote_model_id.as_ref())
                 .collect::<Vec<_>>(),
             [
+                "glm-5.3",
                 "glm-5.2",
                 "glm-4.7",
                 "glm-4-32b-0414-128k",
+                "glm-5.3-flash",
                 "glm-4.6v",
                 "glm-4.6v-flashx",
             ]
@@ -1631,11 +1643,16 @@ mod tests {
             Some(ReasoningSelection::Max)
         );
         assert!(
-            !models[2].features.contains(&ModelFeature::Reasoning),
+            !models[3].features.contains(&ModelFeature::Reasoning),
             "the legacy GLM-4 model predates Z.AI's thinking control"
         );
-        assert!(models[3].features.contains(&ModelFeature::Attachment));
+        assert!(
+            models[4].features.contains(&ModelFeature::Attachment),
+            "GLM-5.3-Flash is a tool-capable vision-schema line"
+        );
+        assert!(models[5].features.contains(&ModelFeature::Attachment));
         assert!(zai_supports_reasoning_effort("glm-5.3"));
+        assert!(zai_supports_reasoning_effort("glm-5.3-flash"));
         assert!(zai_supports_reasoning_effort("glm-6"));
         assert!(!zai_supports_reasoning_effort("glm-5-turbo"));
     }

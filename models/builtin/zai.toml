@@ -1,5 +1,46 @@
 [[targets]]
 connection = "zai"
+model = "zai/glm-5.3"
+remote_model = "glm-5.3"
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+recommended_effort = "max"
+# Z.AI's compatibility labels map minimal -> disabled thinking and
+# medium/xhigh -> high/max; GLM-5.3 keeps low as a native effort.
+discouraged_efforts = ["minimal", "medium", "xhigh"]
+context_window = 1000000
+# Rumination clamp shared with GLM-5.2: the full 131K output allowance can
+# otherwise be consumed entirely by reasoning before any action (session 262:
+# a 71k-token thinking turn with zero actions).
+pinned = true
+output_limit = 12000
+pricing = { input_micros_per_million = 1400000, output_micros_per_million = 4400000, cache_read_micros_per_million = 260000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "zai"
+model = "zai/glm-5.3-flash"
+remote_model = "glm-5.3-flash"
+token_counter = "zai-tokenizer"
+reasoning_codec = "zai-thinking"
+recommended_effort = "max"
+discouraged_efforts = ["minimal", "medium", "xhigh"]
+context_window = 1000000
+# Rumination clamp shared with GLM-5.2 (see the glm-5.3 entry).
+pinned = true
+output_limit = 12000
+features = ["tool-call", "reasoning", "structured-output", "temperature", "attachment"]
+pricing = { input_micros_per_million = 75000, output_micros_per_million = 250000, cache_read_micros_per_million = 15000, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "zai"
 model = "zai/glm-5.2"
 remote_model = "glm-5.2"
 recommended = true
@@ -200,7 +241,8 @@ pricing = { input_micros_per_million = 100000, output_micros_per_million = 10000
 pinned = true
 
 # Z.AI's OpenAPI restricts function tools on vision models to the GLM-4.6V
-# series, so GLM-5V-Turbo and GLM-4.5V are deliberately omitted.
+# series plus GLM-5.3-Flash; GLM-5V-Turbo and GLM-4.5V are deliberately
+# omitted.
 # not-shipped: glm-5v-turbo — official OpenAPI does not support function tools
 # not-shipped: glm-4.5v — official OpenAPI does not support function tools
 

@@ -1919,7 +1919,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 218);
+        assert_eq!(catalog.targets.len(), 220);
         assert!(
             catalog
                 .connections
@@ -2721,7 +2721,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 218);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 220);
 
         let cases = [
             EquivalenceCase {
@@ -4588,6 +4588,20 @@ default_base_url = "http://localhost:11434/v1"
         let glm_52 = catalog.resolve(&zai_id, &model_id("zai/glm-5.2")).unwrap();
         assert_eq!(glm_52.reasoning_codec, ReasoningCodec::ZaiThinking);
         assert_eq!(glm_52.recommended_effort, Some(ReasoningSelection::Max));
+
+        let glm_53 = catalog.resolve(&zai_id, &model_id("zai/glm-5.3")).unwrap();
+        assert_eq!(glm_53.context_window, Some(1_000_000));
+        assert_eq!(glm_53.output_limit, Some(12_000));
+        assert_eq!(glm_53.reasoning_codec, ReasoningCodec::ZaiThinking);
+        assert_eq!(glm_53.recommended_effort, Some(ReasoningSelection::Max));
+
+        let glm_53_flash = catalog
+            .resolve(&zai_id, &model_id("zai/glm-5.3-flash"))
+            .unwrap();
+        assert!(glm_53_flash.features.contains(&ModelFeature::Attachment));
+        assert!(glm_53_flash.features.contains(&ModelFeature::ToolCall));
+        assert_eq!(glm_53_flash.context_window, Some(1_000_000));
+        assert_eq!(glm_53_flash.output_limit, Some(12_000));
 
         let glm_45_x = catalog
             .resolve(&zai_id, &model_id("zai/glm-4.5-x"))
