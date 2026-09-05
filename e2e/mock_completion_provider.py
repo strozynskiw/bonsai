@@ -2,6 +2,7 @@
 """Finite OpenAI-compatible provider that records each TUI request."""
 
 import json
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,6 +11,16 @@ from pathlib import Path
 
 class CompletionServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # http.server's bind calls socket.getfqdn(host), a reverse-DNS lookup
+        # that can stall for tens of seconds on hosts without working mDNS.
+        # Loopback binds never need a hostname, so bind directly.
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
 
     def __init__(self, address, request_log):
         super().__init__(address, CompletionHandler)
