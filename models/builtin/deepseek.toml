@@ -8,7 +8,7 @@
 #
 # Context caching is automatic, on-disk, and strictly prefix-based: a request
 # hits the cache only when it fully matches a cached prefix unit (docs:
-# guides/kv_cache). A hit is ~30x cheaper than a miss, reported per response as
+# guides/kv_cache). A hit is ~50x cheaper than a miss, reported per response as
 # prompt_cache_hit_tokens / prompt_cache_miss_tokens. The `deepseek` connection
 # selects prompt_cache_policy = "rolling-history" so bonsai stores volatile
 # project state as immutable append-only history — every prior request stays an
@@ -50,12 +50,14 @@ context_window = 1000000
 pinned_fields = ["output-limit", "pricing", "reasoning"]
 output_limit = 32000
 features = ["tool-call", "reasoning", "structured-output"]
-# Native off-peak and peak pay-as-you-go pricing (docs: quick_start/pricing),
-# effective 2026-08-16 16:00 UTC. Automatic caching has no separate write
-# charge, so no cache_write_micros is set. The recurring UTC windows live on
-# the connection because both V4 models share them.
-pricing = { input_micros_per_million = 220000, output_micros_per_million = 660000, cache_read_micros_per_million = 7000 }
-peak_pricing = { input_micros_per_million = 440000, output_micros_per_million = 1320000, cache_read_micros_per_million = 14000 }
+# Native off-peak and peak pay-as-you-go pricing (docs: quick_start/pricing;
+# the V4.1-Flash rates below were announced by team email 2026-09-08 and take
+# effect 2026-09-10 04:00 UTC — the docs page updates at launch). Automatic
+# caching has no separate write charge, so no cache_write_micros is set. The
+# recurring UTC windows live on the connection because both V4 models share
+# them.
+pricing = { input_micros_per_million = 150000, output_micros_per_million = 600000, cache_read_micros_per_million = 3000 }
+peak_pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 6000 }
 
 # Toggle thinking on/off (off = cheapest non-thinking flash) or dial the effort.
 [[targets.reasoning_options]]
@@ -77,8 +79,11 @@ recommended_effort = "high"
 pinned_fields = ["output-limit", "pricing", "reasoning"]
 output_limit = 32000
 features = ["tool-call", "reasoning", "structured-output"]
-pricing = { input_micros_per_million = 660000, output_micros_per_million = 1980000, cache_read_micros_per_million = 22000 }
-peak_pricing = { input_micros_per_million = 1320000, output_micros_per_million = 3960000, cache_read_micros_per_million = 44000 }
+# From the V4.1-Flash launch (2026-09-10 04:00 UTC) until V4.1 Pro ships, all
+# deepseek-v4-pro requests are served by V4.1 Flash and billed at Flash's price
+# (team email 2026-09-08), so this mirrors the flash table above.
+pricing = { input_micros_per_million = 150000, output_micros_per_million = 600000, cache_read_micros_per_million = 3000 }
+peak_pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 6000 }
 
 [[targets.reasoning_options]]
 type = "toggle"

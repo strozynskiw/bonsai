@@ -4917,8 +4917,8 @@ default_base_url = "http://localhost:11434/v1"
         );
 
         for (model, input, output, cache_read) in [
-            ("deepseek/deepseek-v4-flash", 220_000, 660_000, 7_000),
-            ("deepseek/deepseek-v4-pro", 660_000, 1_980_000, 22_000),
+            ("deepseek/deepseek-v4-flash", 150_000, 600_000, 3_000),
+            ("deepseek/deepseek-v4-pro", 150_000, 600_000, 3_000),
         ] {
             let resolved = catalog
                 .resolve(&deepseek_id, &model_id(model))
@@ -5020,9 +5020,9 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             refreshed.pricing,
             Some(ModelPricing {
-                input_micros_per_million: 220_000,
-                output_micros_per_million: 660_000,
-                cache_read_micros_per_million: Some(7_000),
+                input_micros_per_million: 150_000,
+                output_micros_per_million: 600_000,
+                cache_read_micros_per_million: Some(3_000),
                 cache_write_micros_per_million: None,
             }),
             "time-based prices are pinned because models.dev cannot represent them"
@@ -5074,8 +5074,8 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             actual,
             vec![
-                [220_000, 440_000, 220_000, 440_000, 220_000],
-                [660_000, 1_320_000, 660_000, 1_320_000, 660_000],
+                [150_000, 300_000, 150_000, 300_000, 150_000],
+                [150_000, 300_000, 150_000, 300_000, 150_000],
             ]
         );
     }

@@ -378,8 +378,8 @@ default_token_counter = "tiktoken"
 # 16:00 UTC. Endpoints are half-open, so 04:00 and 10:00 use off-peak rates.
 peak_pricing_windows_utc = [{ start = "01:00", end = "04:00" }, { start = "06:00", end = "10:00" }]
 # DeepSeek does automatic, on-disk, strictly prefix-based context caching (a hit
-# is ~30x cheaper than a miss), reported as prompt_cache_hit_tokens /
-# prompt_cache_miss_tokens. Enable the OpenAI-family cache key + hit accounting.
+# is ~50x cheaper than a miss under the V4.1-Flash rates), reported as
+# prompt_cache_hit_tokens / prompt_cache_miss_tokens. Enable the OpenAI-family cache key + hit accounting.
 prompt_cache = true
 # Append-only project-state layout: store volatile state as immutable in-place
 # snapshots so every prior request stays an EXACT prefix of the next — the
