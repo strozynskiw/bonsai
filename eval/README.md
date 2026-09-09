@@ -3,6 +3,36 @@
 `bonsai eval` runs source-controlled fixture tasks through the normal agent and
 tool loop, grades the resulting worktree, and writes a JSON report.
 
+## Experimental qualification matrix (#13)
+
+```sh
+cargo run --locked -- eval --suite eval/suites/language_acceptance.toml \
+  --qualification --mode mock --out target/qualification
+```
+
+This expands all four language tasks into available/unavailable LSP cells for
+all suite repetitions. Mock available cells use an embedded Python protocol
+fixture, not installed language servers; unavailable cells force startup failure.
+Native commands still execute: Cargo, npm, Python unittest, and Go tests.
+Install Rust, Node (with TypeScript stripping support), Python 3.10+, and Go
+before running. Independent scripted review shares the provider-attempt budget.
+Any failed cell returns nonzero without `--fail-on-task-failure`.
+
+`qualification.json` is the allowlisted, credential-pattern-redacted snapshot.
+Do not upload the run directory: databases, worktrees, and `*-private-evidence.json`
+are private forensic artifacts. Pattern redaction is not a guarantee that all
+sensitive prose is removed; inspect any bundle before publication.
+
+This is **not live model qualification**. Live qualification and legacy baseline
+comparison are rejected on this experimental path. Source/fixture hashes are
+recorded, but full environment provenance, reviewed live candidate promotion,
+strict versioned comparison and stronger fixtures remain unfinished.
+The mock-only workflow is `.github/workflows/qualification.yml`; it uses explicit
+Node/Python/Go versions and the repository's stable Rust toolchain policy.
+No live baseline is frozen. #13 remains open; authorized model/spend selection,
+complete repeated live evidence, human review, and measured baseline freezing
+must follow completion of those framework pieces.
+
 ## Commands
 
 ```sh

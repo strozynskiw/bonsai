@@ -9,6 +9,19 @@ This page is the orientation; [`eval/README.md`](../eval/README.md) is the
 authoritative reference for the suite schema, graders, budgets, baselines, and
 adapters — keep that file the single source of truth when they disagree.
 
+## Experimental language matrix
+
+Run `cargo run --locked -- eval --suite eval/suites/language_acceptance.toml --qualification --mode mock --out target/qualification`
+for the eight language/LSP cells. This executes real native tests and scripted
+independent review, but uses fake available LSP servers and makes no paid calls.
+The qualification workflow uploads only `qualification.json`; raw databases,
+worktrees and private stage evidence must not be published.
+
+Live qualification and baseline freezing remain disabled pending completion of
+provenance, promotion and strict comparison. See the [qualification status and
+remaining #13 work](../eval/README.md#experimental-qualification-matrix-13).
+Deterministic mock success is not a live model release qualification.
+
 ## Running
 
 ```sh

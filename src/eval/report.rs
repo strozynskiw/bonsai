@@ -8,6 +8,135 @@ use crate::agent::UsageTotals;
 
 use super::*;
 
+/// Write an allowlisted qualification snapshot; forensic files stay private.
+pub(crate) fn write_qualification_bundle(
+    report: &EvalReport,
+    suite_path: &Path,
+    fixture_root: &Path,
+    destination: &Path,
+    tool_versions: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let mut inputs = std::collections::BTreeMap::new();
+    hash_qualification_inputs(fixture_root, fixture_root, &mut inputs)?;
+    let suite_hash = blake3::hash(&fs::read(suite_path)?).to_hex().to_string();
+    let cells = report
+        .tasks
+        .iter()
+        .map(|task| {
+            serde_json::json!({
+                "id": task.id, "passed": task.passed, "status": task.status,
+                "prompt": task.prompt, "output": task.output, "error": task.run_error,
+                "stages": task.graders, "policy": task.execution_policy,
+                "budget": task.budget, "usage": task.usage,
+            })
+        })
+        .collect::<Vec<_>>();
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let revision = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(source_root)
+        .output()?;
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(source_root)
+        .output()?;
+    if !revision.status.success() || !dirty.status.success() {
+        anyhow::bail!("Cannot capture qualification source provenance");
+    }
+    let mut bundle = serde_json::json!({
+        "source_revision": String::from_utf8_lossy(&revision.stdout).trim(),
+        "source_dirty": !dirty.stdout.is_empty(),
+        "platform": {"os": std::env::consts::OS, "architecture": std::env::consts::ARCH},
+        "tool_versions": tool_versions,
+        "server_backend": "scripted-protocol-fixture",
+        "live_promotable": false,
+        "matrix_passed": super::baseline::validate_qualification_cells(report).is_ok(),
+        "schema_version": 2,
+        "kind": "qualification-candidate",
+        "mode": report.mode,
+        "suite_hash": suite_hash,
+        "fixture_hashes": inputs,
+        "suite": report.suite.id,
+        "repetitions": report.suite.repetitions,
+        "seed": report.seed,
+        "provider": report.provider,
+        "model": report.model,
+        "effort": report.reasoning,
+        "cells": cells,
+        "approved": false,
+    });
+    redact_report_value(&mut bundle);
+    fs::write(destination, serde_json::to_string_pretty(&bundle)?)?;
+    Ok(())
+}
+
+fn hash_qualification_inputs(
+    root: &Path,
+    directory: &Path,
+    hashes: &mut std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            anyhow::bail!("Qualification fixtures must not contain symlinks");
+        }
+        if kind.is_dir() {
+            if !matches!(
+                entry.file_name().to_str(),
+                Some("target" | "node_modules" | "__pycache__" | ".git")
+            ) {
+                hash_qualification_inputs(root, &path, hashes)?;
+            }
+        } else if kind.is_file() {
+            hashes.insert(
+                path.strip_prefix(root)?.to_string_lossy().into_owned(),
+                blake3::hash(&fs::read(&path)?).to_hex().to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Serialize public report data through the shared secret-redaction boundary.
+/// Raw databases and worktrees are intentionally not part of this export.
+pub(crate) fn sanitized_report_json(report: &EvalReport) -> Result<String> {
+    let mut value = serde_json::to_value(report)?;
+    redact_report_value(&mut value);
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
+#[cfg(test)]
+mod export_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn nested_prompts_errors_and_review_outputs_are_redacted() {
+        let token = "abcdefghijklmnop".repeat(3);
+        let secret = format!("Bearer {token}");
+        let mut value = serde_json::json!({
+            "prompt": secret,
+            "tasks": [{"run_error": secret, "graders": [{"details": secret}],
+                "review": {"result": secret}}],
+            "configuration": {"authorization": secret},
+        });
+        redact_report_value(&mut value);
+        let output = serde_json::to_string(&value).unwrap();
+        assert!(!output.contains(&token));
+        assert!(output.contains("REDACTED"));
+    }
+}
+
+fn redact_report_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => crate::redact::redact_in_place(text),
+        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_report_value),
+        serde_json::Value::Object(fields) => fields.values_mut().for_each(redact_report_value),
+        _ => {}
+    }
+}
+
 /// Top-level eval report serialized to `report.json` (and summarized to
 /// `summary.md`).
 #[derive(Debug, Serialize)]

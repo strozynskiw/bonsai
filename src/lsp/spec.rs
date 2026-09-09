@@ -203,7 +203,6 @@ impl LanguageServerRegistry {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn new(specs: Vec<LanguageServerSpec>) -> Self {
         Self { specs }
     }

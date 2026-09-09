@@ -1,0 +1,38 @@
+name: Mock language qualification
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/eval/**'
+      - 'src/lsp/**'
+      - 'eval/**'
+      - '.github/workflows/qualification.yml'
+permissions:
+  contents: read
+jobs:
+  mock-matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.4.1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.5'
+      - name: Focused eval tests
+        run: cargo test --locked eval::
+      - name: Eight-cell mock matrix (no provider credentials)
+        run: cargo run --locked -- eval --suite eval/suites/language_acceptance.toml --qualification --mode mock --out target/qualification
+      - name: Upload allowlisted mock snapshots only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-qualification-not-live-evidence
+          path: target/qualification/*/qualification.json
+          if-no-files-found: ignore

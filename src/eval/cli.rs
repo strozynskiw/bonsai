@@ -43,6 +43,8 @@ pub(crate) struct EvalCliConfig {
     pub suite: PathBuf,
     /// Provider backend (mock or live).
     pub mode: EvalMode,
+    /// Require the complete multi-language/LSP acceptance matrix.
+    pub qualification: bool,
     /// Optional live-provider override (only valid in live mode).
     pub provider: Option<String>,
     /// Optional live-model override, resolved with the normal `/model` rules.
@@ -68,6 +70,7 @@ impl Default for EvalCliConfig {
         Self {
             suite: PathBuf::from(DEFAULT_SUITE_PATH),
             mode: EvalMode::Mock,
+            qualification: false,
             provider: None,
             model: None,
             effort: None,

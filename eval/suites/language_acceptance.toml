@@ -2,8 +2,9 @@ id = "language_acceptance"
 seed = 104
 
 [budgets]
-max_logical_turns = 5
-max_provider_attempts = 5
+# Includes an independent reviewer call and the parent's confirmation turn.
+max_logical_turns = 8
+max_provider_attempts = 8
 max_duration_ms = 30000
 max_reads_per_unchanged_path = 1
 
