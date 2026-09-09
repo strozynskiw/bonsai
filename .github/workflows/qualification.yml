@@ -1,5 +1,11 @@
 name: Mock language qualification
 on:
+  push:
+    paths:
+      - 'src/eval/**'
+      - 'src/lsp/**'
+      - 'eval/**'
+      - '.github/workflows/qualification.yml'
   workflow_dispatch:
   pull_request:
     paths:
@@ -26,7 +32,7 @@ jobs:
         with:
           go-version: '1.24.5'
       - name: Focused eval tests
-        run: cargo test --locked eval::
+        run: 'cargo test --locked eval::'
       - name: Eight-cell mock matrix (no provider credentials)
         run: cargo run --locked -- eval --suite eval/suites/language_acceptance.toml --qualification --mode mock --out target/qualification
       - name: Upload allowlisted mock snapshots only
