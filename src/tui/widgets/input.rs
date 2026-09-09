@@ -612,7 +612,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Esc", " dismiss"),
         ]
     } else if matches!(app.task_state, crate::tui::event::TaskState::Running) {
-        let mut hints = vec![("Enter", " queue")];
+        let mut hints = vec![("Enter", " queue  ")];
         if app.last_queued_input().is_some() {
             hints.push(("Esc", " steer"));
         }
@@ -1093,7 +1093,7 @@ mod tests {
 
         let text = line_text(&meta_line(&app, 120, false));
 
-        assert!(text.contains("Esc steer"), "{text}");
+        assert!(text.contains("Enter queue  Esc steer"), "{text}");
     }
 
     #[test]
