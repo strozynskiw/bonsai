@@ -125,15 +125,6 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
     }
     let selected_tasks = select_tasks(&suite, config.task.as_deref())?;
     let seed = config.seed.unwrap_or(suite.seed);
-    if config.qualification {
-        let effective = run_id(config.mode, seed);
-        let real = run_id(EvalMode::Mock, seed);
-        if effective == real && seed == suite.seed && config.seed.is_none() {
-            anyhow::bail!(
-                "Qualification requires an explicit fresh --seed to avoid colliding with prior runs"
-            );
-        }
-    }
     let run_id = run_id(config.mode, seed);
     let run_dir = config.out_dir.join(&run_id);
     fs::create_dir_all(&run_dir)
