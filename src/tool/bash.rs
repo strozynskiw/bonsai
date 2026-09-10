@@ -3088,16 +3088,22 @@ mod tests {
             fixture.read_tracker.clone(),
             fixture.interaction.clone(),
         );
+        // This test asserts the *success* path under a deadline, so the
+        // deadline must not be reachable: process spawn and teardown can take
+        // arbitrary time under full-suite load on a saturated machine. The
+        // timeout-exceeded behavior is covered by `test_bash_timeout_exceeded`;
+        // here the parameter only has to be accepted and plumbed through.
         let result = tool
             .execute(json!({
                 "command": "sleep 0.1",
-                "timeout": 1
+                "timeout": 30
             }))
             .await
             .unwrap();
 
         let output = rendered_command_output(result);
 
+        assert_summary_value(&output, "timed_out", "false");
         assert!(output.contains("Command completed successfully"));
     }
 
