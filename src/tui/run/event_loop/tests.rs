@@ -9599,3 +9599,134 @@ async fn halt_folds_completed_todos_into_plan_so_continue_resumes_in_place() {
         .expect("second fold should update the plan");
     assert_eq!(plan.next_phase_with_pending(None), Some(1));
 }
+
+/// Thread-local tracing capture so shutdown tests can assert on what the drain
+/// actually logs. `set_default` (not `init`) keeps it thread-scoped, which is
+/// what the test harness needs — tests in this binary run on separate threads.
+#[derive(Clone, Default)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        let bytes = self.0.lock().expect("captured log buffer lock").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured log buffer lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_logs_at_debug() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .without_time()
+        .with_target(false)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    (logs, guard)
+}
+
+#[tokio::test]
+async fn shutdown_drain_treats_aborted_spawns_as_expected_cancellation() {
+    let mut spawns = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        spawns.spawn(std::future::pending::<()>());
+    }
+    // Let every spawn reach its first await point so the abort below lands on
+    // *running* tasks, which is the shape a real shutdown drains.
+    tokio::task::yield_now().await;
+    spawns.abort_all();
+
+    let (logs, _guard) = capture_logs_at_debug();
+    drain_background_spawns(&mut spawns).await;
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("cancelled during shutdown"),
+        "expected debug-level cancellation traces, captured:\n{captured}"
+    );
+    assert!(
+        !captured.contains("ERROR"),
+        "normal shutdown must not report cancellations at error level:\n{captured}"
+    );
+    assert!(
+        !captured.contains("panicked"),
+        "cancelled tasks are not panics:\n{captured}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drain_reports_a_panicking_spawn_at_error_level() {
+    let mut spawns = tokio::task::JoinSet::new();
+    // Not aborted: a real panic must still be attributable after the change to
+    // silence expected cancellation.
+    spawns.spawn(async {
+        panic!("spawn drain test panic");
+    });
+
+    let (logs, _guard) = capture_logs_at_debug();
+    drain_background_spawns(&mut spawns).await;
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("ERROR") && captured.contains("failed during shutdown"),
+        "a panicking spawn must be surfaced at error level:\n{captured}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_drain_stays_bounded_when_a_spawn_ignores_cancellation() {
+    let mut spawns = tokio::task::JoinSet::new();
+    // `spawn_blocking` work cannot be cancelled by `abort`, so the drain can
+    // only end at its own deadline. The body parks on a channel the test
+    // releases afterwards, keeping runtime shutdown prompt on the green path
+    // and making a wrong "wait for the spawn" drain hang rather than pass.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    spawns.spawn_blocking(move || {
+        let _ = release_rx.recv();
+    });
+    spawns.abort_all();
+
+    let drain_task = tokio::spawn(async move {
+        drain_background_spawns(&mut spawns).await;
+    });
+    // Let the drain start and register its deadline timer before the clock
+    // jumps; the auto-advance alone does not fire it while a blocking task is
+    // in flight.
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(3)).await;
+    // The deadline now fired; give the woken drain task the polls it needs to
+    // observe the elapsed timeout and drop the set.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+
+    let drained = drain_task.is_finished();
+    drop(release_tx);
+    assert!(
+        drained,
+        "the drain must stop at its deadline instead of waiting for a spawn that ignores cancellation"
+    );
+    drain_task.abort();
+}

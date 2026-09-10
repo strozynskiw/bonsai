@@ -3712,6 +3712,45 @@ fn prepare_termination_shutdown(app: &mut AppState) {
     app.reduce(AppAction::SetTaskState(TaskState::Exiting));
 }
 
+/// Drain the background spawn set after `abort_all` during shutdown.
+///
+/// Aborting makes *every* outstanding task finish as a cancellation, which is
+/// the expected outcome of a normal shutdown; reporting those at error level
+/// made clean exits look like crashes (session 119 logged four phantom
+/// "panicked during shutdown" errors). Only genuinely unexpected join failures
+/// are surfaced at error level, carrying the task id when there is one, so a
+/// real panic stays attributable. Cancellation is still traced at debug level:
+/// silent by default, but present when someone is diagnosing shutdown.
+///
+/// Bounded by `BACKGROUND_SPAWNS_DRAIN_TIMEOUT` — a task that ignores
+/// cancellation (a blocking body parked in `spawn_blocking`, say) must not be
+/// able to hang shutdown.
+async fn drain_background_spawns(spawns: &mut tokio::task::JoinSet<()>) {
+    const BACKGROUND_SPAWNS_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+    let drain_start = Instant::now();
+    while let Ok(Some(result)) = tokio::time::timeout(
+        BACKGROUND_SPAWNS_DRAIN_TIMEOUT.saturating_sub(drain_start.elapsed()),
+        spawns.join_next(),
+    )
+    .await
+    {
+        match result {
+            Ok(()) => {}
+            Err(err) if err.is_cancelled() => {
+                tracing::debug!(%err, "background spawn task cancelled during shutdown");
+            }
+            Err(err) => {
+                let task_id = err.id();
+                tracing::error!(
+                    %err,
+                    task_id = ?task_id,
+                    "background spawn task failed during shutdown"
+                );
+            }
+        }
+    }
+}
+
 /// Everything that runs once the frame loop breaks: log shutdown stats,
 /// snapshot the final context report, stop background tasks, mark the
 /// session complete, restore the terminal, flush final persistence, and
@@ -3757,18 +3796,7 @@ async fn shutdown_tui(
     // Drain all long-lived background spawns before touching any shared
     // state they might still access (terminal, session, peer bus).
     background_spawns.abort_all();
-    const BACKGROUND_SPAWNS_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-    let drain_start = Instant::now();
-    while let Ok(Some(result)) = tokio::time::timeout(
-        BACKGROUND_SPAWNS_DRAIN_TIMEOUT.saturating_sub(drain_start.elapsed()),
-        background_spawns.join_next(),
-    )
-    .await
-    {
-        if let Err(err) = result {
-            tracing::error!(%err, "background spawn task panicked during shutdown");
-        }
-    }
+    drain_background_spawns(&mut background_spawns).await;
 
     // SessionEnd: capped independently of any hook's own configured
     // timeout — shutdown must never hang on a misbehaving hook.
