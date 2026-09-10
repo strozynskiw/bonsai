@@ -713,7 +713,11 @@ mod tests {
         let terminal = terminals
             .start(
                 "/bin/sh",
-                "printf terminal-output; sleep 30",
+                // The first write is deliberately delayed so the readiness poll
+                // below — not scheduling luck — is what satisfies the assertion.
+                // A fixed sleep here raced the PTY reader on a loaded host, which
+                // is how this test failed on CI.
+                "sleep 0.2; printf terminal-output; sleep 30",
                 std::path::Path::new("/"),
                 60,
                 None,
@@ -728,15 +732,33 @@ mod tests {
             false,
         );
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
         let listed = tool
             .execute(serde_json::json!({"action": "list"}))
             .await
             .expect("list should succeed");
-        let tailed = tool
-            .execute(serde_json::json!({"action": "tail", "task_id": terminal.id}))
-            .await
-            .expect("tail should succeed");
+        // The child's output reaches the normalized screen asynchronously, so
+        // poll the tail until the marker is there (deadline-bounded, the same
+        // shape `tool::terminal`'s snapshot test uses) instead of sleeping and
+        // hoping. The assertions below still state the full contract.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let tailed = loop {
+            let tailed = tool
+                .execute(serde_json::json!({"action": "tail", "task_id": terminal.id}))
+                .await
+                .expect("tail should succeed");
+            if matches!(
+                &tailed,
+                ToolOutput::UntrustedContext { content, .. }
+                    if content.contains("terminal-output")
+            ) {
+                break tailed;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the PTY fixture's output never reached the normalized screen: {tailed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         let waited = tool
             .execute(serde_json::json!({
                 "action": "wait",
