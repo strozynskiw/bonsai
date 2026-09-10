@@ -30,7 +30,7 @@ Nineteen connections ship in the binary, in this registry/picker order:
 | `openai` | OpenAI API | openai-chat | api-key | `openai/gpt-5.6` | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` |
 | `openai-compatible` | OpenAI Compatible | openai-chat | optional-api-key | — (discovered) | `OPENAI_COMPATIBLE_API_KEY` / `…_MODEL` / `…_BASE_URL` |
 | `anthropic-compatible` | Anthropic Compatible | anthropic-messages | optional-api-key | — (discovered) | `ANTHROPIC_COMPATIBLE_API_KEY` / `…_MODEL` / `…_BASE_URL` |
-| `deepseek` | DeepSeek API | openai-chat | api-key | `deepseek/deepseek-v4-flash` | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` |
+| `deepseek` | DeepSeek API | openai-chat | api-key | `deepseek/deepseek-flash` | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` |
 | `qwencloud` | Qwen Cloud API | openai-chat | api-key | `qwencloud/qwen3.7-plus` | `DASHSCOPE_API_KEY` / `DASHSCOPE_MODEL` / `DASHSCOPE_BASE_URL` |
 | `qwencloud-token-plan` | Qwen Cloud Token Plan | openai-chat | api-key | `qwencloud-token-plan/qwen3.7-max` | `DASHSCOPE_TOKEN_PLAN_API_KEY` / `…_MODEL` / `…_BASE_URL` |
 

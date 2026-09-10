@@ -2,9 +2,12 @@
 #
 # `/refresh` combines the authenticated `/models` response (current account
 # availability) with the Models.dev `deepseek` rows (prices, limits, and
-# capabilities). The values below are offline fallbacks. The deliberate 32K
-# output safety cap, two effective reasoning levels, and time-dependent prices
-# are pinned; models.dev cannot represent recurring peak windows.
+# capabilities), which lag the rename: models.dev has no V4.1 row yet — its
+# nearest entry (`deepseek-v4-flash`) still describes the retired pre-V4.1 Flash
+# as text-only with superseded rates. The V4.1 values therefore come from
+# DeepSeek's own docs: flash is pinned end to end, while pro pins only the
+# rates, output cap, and reasoning levels models.dev cannot represent (its
+# context window and capabilities still refresh).
 #
 # Context caching is automatic, on-disk, and strictly prefix-based: a request
 # hits the cache only when it fully matches a cached prefix unit (docs:
@@ -16,15 +19,16 @@
 # needs to hit. Verified live (deepseek-v4-flash, 4-turn read/write task): 65%
 # input cache reuse, reported via prompt_cache_hit_tokens.
 #
-# Reasoning: v4 has a thinking mode toggled per request. Curl-verified against
+# Reasoning: V4.1 has a thinking mode toggled per request. Curl-verified against
 # api.deepseek.com — it accepts `thinking: {type: enabled|disabled}` AND
-# `reasoning_effort: <low|medium|high|max>`, including both together (unlike GLM
+# `reasoning_effort: <low|high|max>`, including both together (unlike GLM
 # 5.2), with the chain-of-thought returned in `reasoning_content`. That wire
 # shape is exactly what bonsai's `zai-thinking` codec emits (toggle + effort
 # together), so reuse it rather than add a duplicate DeepSeek-specific codec.
-# The API documents `high` and `max` as the effective levels. `low` and
-# `medium` are compatibility aliases for `high`, while `xhigh` aliases `max`,
-# so only the two distinct choices are offered. reasoning_content IS echoed
+# V4.1 folds the requested effort onto three model efforts (docs:
+# guides/thinking_mode — `low` maps to low, `medium` and `xhigh` map to high,
+# `ultra` maps to max), so only the published `low`/`high`/`max` values are
+# offered. Thinking is on by default at `high`. reasoning_content IS echoed
 # back on assistant tool-call messages (the direct API requires it; plain
 # assistant messages accept-but-ignore it — see the connection's
 # reasoning_content_echo flag). Legacy deepseek-chat / deepseek-reasoner were
@@ -32,8 +36,21 @@
 
 [[targets]]
 connection = "deepseek"
-model = "deepseek/deepseek-v4-flash"
-remote_model = "deepseek-v4-flash"
+model = "deepseek/deepseek-flash"
+remote_model = "deepseek-flash"
+display_name = "DeepSeek V4.1 Flash"
+# DeepSeek-V4.1-Flash is GA as of 2026-09-10 and the wire name is now
+# `deepseek-flash`; `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are
+# retired but still accepted, their requests served by V4.1 Flash (docs:
+# quick_start/pricing footnote 1, guides/vision). The aliases keep sessions,
+# configs, and stale live caches stored under the old names resolving to this
+# target instead of minting a shadow entry.
+aliases = [
+  "deepseek/deepseek-v4-flash",
+  "deepseek-v4-flash",
+  "deepseek/deepseek-v4-flash-vision-exp",
+  "deepseek-v4-flash-vision-exp",
+]
 recommended = true
 default = true
 recommended_effort = "high"
@@ -44,18 +61,18 @@ context_window = 1000000
 # and the rumination containment lever (same pattern as glm-5.2's 12000): with
 # thinking enabled an uncapped turn can burn the entire allowance on
 # chain-of-thought. 32000 matches the reference-agent output clamp and still
-# leaves room for thinking plus a large diff. The field pin keeps Models.dev's
-# 384K maximum from clobbering the deliberate cap while leaving capabilities
-# refreshable.
-pinned_fields = ["output-limit", "pricing", "reasoning"]
+# leaves room for thinking plus a large diff. The pin keeps Models.dev's 384K
+# maximum from clobbering the deliberate cap.
+pinned = true
 output_limit = 32000
-features = ["tool-call", "reasoning", "structured-output"]
-# Native off-peak and peak pay-as-you-go pricing (docs: quick_start/pricing;
-# the V4.1-Flash rates below were announced by team email 2026-09-08 and take
-# effect 2026-09-10 04:00 UTC — the docs page updates at launch). Automatic
-# caching has no separate write charge, so no cache_write_micros is set. The
-# recurring UTC windows live on the connection because both V4 models share
-# them.
+# V4.1 Flash accepts images in `user` messages as OpenAI-style `image_url` data
+# URLs (docs: guides/vision) — the shape this transport already emits. The
+# retired vision-exp id was the same model for image input; this supersedes it.
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+# Native off-peak and peak pay-as-you-go pricing (docs: quick_start/pricing,
+# read 2026-09-10). Automatic caching has no separate write charge, so no
+# cache_write_micros is set. The recurring UTC windows live on the connection
+# because both V4 models share them.
 pricing = { input_micros_per_million = 150000, output_micros_per_million = 600000, cache_read_micros_per_million = 3000 }
 peak_pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 6000 }
 
@@ -65,7 +82,7 @@ type = "toggle"
 
 [[targets.reasoning_options]]
 type = "effort"
-values = ["high", "max"]
+values = ["low", "high", "max"]
 
 [[targets]]
 connection = "deepseek"
@@ -79,9 +96,11 @@ recommended_effort = "high"
 pinned_fields = ["output-limit", "pricing", "reasoning"]
 output_limit = 32000
 features = ["tool-call", "reasoning", "structured-output"]
-# From the V4.1-Flash launch (2026-09-10 04:00 UTC) until V4.1 Pro ships, all
-# deepseek-v4-pro requests are served by V4.1 Flash and billed at Flash's price
-# (team email 2026-09-08), so this mirrors the flash table above.
+# V4 Pro is being retired, and every `deepseek-v4-pro` request is routed to V4.1
+# Flash and billed at Flash's price from 2026-09-14 04:00 UTC (12:00 Beijing;
+# docs: quick_start/pricing footnote 2). The V4.1-Flash launch already had pro
+# served by Flash, so this mirrors the flash table rather than pro's own, higher
+# published column. Kept as a selector so pro-pinned sessions keep resolving.
 pricing = { input_micros_per_million = 150000, output_micros_per_million = 600000, cache_read_micros_per_million = 3000 }
 peak_pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 6000 }
 
@@ -90,4 +109,4 @@ type = "toggle"
 
 [[targets.reasoning_options]]
 type = "effort"
-values = ["high", "max"]
+values = ["low", "high", "max"]

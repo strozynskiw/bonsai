@@ -4909,15 +4909,15 @@ default_base_url = "http://localhost:11434/v1"
         let connection = catalog.connection(&deepseek_id).unwrap();
         assert_eq!(
             connection.default_model.as_ref().map(ModelId::as_str),
-            Some("deepseek/deepseek-v4-flash")
+            Some("deepseek/deepseek-flash")
         );
         assert_eq!(
             catalog.available_models_for_connection(&deepseek_id, Vec::new()),
-            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+            vec!["deepseek-flash", "deepseek-v4-pro"]
         );
 
         for (model, input, output, cache_read) in [
-            ("deepseek/deepseek-v4-flash", 150_000, 600_000, 3_000),
+            ("deepseek/deepseek-flash", 150_000, 600_000, 3_000),
             ("deepseek/deepseek-v4-pro", 150_000, 600_000, 3_000),
         ] {
             let resolved = catalog
@@ -4945,6 +4945,7 @@ default_base_url = "http://localhost:11434/v1"
                 vec![
                     ReasoningSelection::Default,
                     ReasoningSelection::Off,
+                    ReasoningSelection::Low,
                     ReasoningSelection::High,
                     ReasoningSelection::Max,
                 ],
@@ -4957,16 +4958,36 @@ default_base_url = "http://localhost:11434/v1"
             ] {
                 assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
             }
+            // V4.1 Flash takes images; V4 Pro does not, and is routed to Flash
+            // anyway. Claiming vision on pro would send images the API rejects.
+            assert_eq!(
+                resolved.features.contains(&ModelFeature::Attachment),
+                model == "deepseek/deepseek-flash",
+                "{model}: vision capability"
+            );
+            if model == "deepseek/deepseek-flash" {
+                // DeepSeek renamed the wire model to `deepseek-flash`; the
+                // picker must not fall back to the raw id.
+                assert_eq!(
+                    resolved.display_name.as_ref(),
+                    "DeepSeek V4.1 Flash",
+                    "{model}: display name"
+                );
+            }
             assert_eq!(
                 resolved.prompt_cache_policy,
                 PromptCachePolicy::RollingHistory
             );
         }
 
+        // The canonical id plus one retired alias and one unknown id: the alias
+        // collapses onto the target it now resolves to, the unknown id is kept
+        // as a live-only entry.
         catalog
             .write_live_availability(
                 &deepseek_id,
                 LiveModelAvailability::from_remote_ids([
+                    "deepseek-flash".to_string(),
                     "deepseek-v4-flash".to_string(),
                     "deepseek-v4-turbo".to_string(),
                 ]),
@@ -4974,32 +4995,35 @@ default_base_url = "http://localhost:11434/v1"
             .unwrap();
         assert_eq!(
             catalog.available_models_for_connection(&deepseek_id, Vec::new()),
-            vec!["deepseek-v4-flash", "deepseek-v4-turbo"],
-            "live refresh must add unseen models and retire absent ones"
+            vec!["deepseek-flash", "deepseek-v4-turbo"],
+            "live refresh must add unseen models, retire absent ones, and collapse aliases"
         );
 
+        // models.dev has no V4.1 row: its nearest entry still describes the
+        // retired pre-V4.1 Flash (text-only, superseded rates). A refresh must
+        // not drag the pinned V4.1 target back to that stale metadata.
         catalog.replace_models_dev_metadata(
             parse_models_dev_catalog(
                 "deepseek-refresh.json",
                 r#"{
                     "deepseek": {
                         "models": {
-                            "deepseek-v4-flash": {
-                                "id": "deepseek-v4-flash",
-                                "name": "DeepSeek V4 Flash refreshed",
+                            "deepseek-flash": {
+                                "id": "deepseek-flash",
+                                "name": "DeepSeek V4 Flash",
                                 "reasoning": true,
                                 "reasoning_options": [
                                     { "type": "effort", "values": ["minimal", "xhigh"] }
                                 ],
                                 "tool_call": true,
                                 "structured_output": true,
-                                "attachment": true,
+                                "attachment": false,
                                 "cost": {
-                                    "input": 0.15,
-                                    "output": 0.30,
-                                    "cache_read": 0.003
+                                    "input": 0.14,
+                                    "output": 0.28,
+                                    "cache_read": 0.0028
                                 },
-                                "limit": { "context": 1100000, "output": 384000 }
+                                "limit": { "context": 900000, "output": 384000 }
                             }
                         }
                     }
@@ -5008,10 +5032,19 @@ default_base_url = "http://localhost:11434/v1"
             .unwrap(),
         );
         let refreshed = catalog
-            .resolve(&deepseek_id, &model_id("deepseek/deepseek-v4-flash"))
+            .resolve(&deepseek_id, &model_id("deepseek/deepseek-flash"))
             .unwrap();
 
-        assert_eq!(refreshed.context_window, Some(1_100_000));
+        assert_eq!(
+            refreshed.display_name.as_ref(),
+            "DeepSeek V4.1 Flash",
+            "the V4.1 name is pinned while models.dev lags on the rename"
+        );
+        assert_eq!(
+            refreshed.context_window,
+            Some(1_000_000),
+            "the pinned V4.1 window survives the stale row"
+        );
         assert_eq!(
             refreshed.output_limit,
             Some(32_000),
@@ -5029,13 +5062,14 @@ default_base_url = "http://localhost:11434/v1"
         );
         assert!(
             refreshed.features.contains(&ModelFeature::Attachment),
-            "capabilities remain refreshable"
+            "V4.1 vision is pinned; the models.dev row still claims text-only"
         );
         assert_eq!(
             refreshed.reasoning_selections(),
             vec![
                 ReasoningSelection::Default,
                 ReasoningSelection::Off,
+                ReasoningSelection::Low,
                 ReasoningSelection::High,
                 ReasoningSelection::Max,
             ],
@@ -5048,6 +5082,57 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
+    fn deepseek_live_and_retired_ids_resolve_to_the_v4_1_target() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let deepseek_id = connection_id("deepseek");
+
+        // `deepseek-flash` is what the live listing now returns; `deepseek-v4-flash`
+        // and `deepseek-v4-flash-vision-exp` were retired at the V4.1 launch and
+        // their requests are served by V4.1 Flash. Every one of them must land on
+        // the catalog target instead of minting a shadow entry — an unmapped live
+        // id with no models.dev row gets no reasoning options, which is why a
+        // refresh used to leave only "default" in the effort pane. The vision-exp
+        // ids must also keep the V4.1 vision capability, so a session pinned to one
+        // still sends images.
+        for alias in [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek/deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "deepseek/deepseek-v4-flash-vision-exp",
+        ] {
+            let resolved = catalog
+                .resolve_connection_model(&deepseek_id, alias)
+                .unwrap_or_else(|| panic!("{alias} must resolve to the V4.1 target"));
+            assert_eq!(
+                resolved.model_id.as_str(),
+                "deepseek/deepseek-flash",
+                "{alias}"
+            );
+            assert_eq!(
+                resolved.remote_model_id.as_ref(),
+                "deepseek-flash",
+                "{alias}"
+            );
+            assert!(
+                resolved.features.contains(&ModelFeature::Attachment),
+                "{alias} must inherit V4.1 vision"
+            );
+            assert_eq!(
+                resolved.reasoning_selections(),
+                vec![
+                    ReasoningSelection::Default,
+                    ReasoningSelection::Off,
+                    ReasoningSelection::Low,
+                    ReasoningSelection::High,
+                    ReasoningSelection::Max,
+                ],
+                "{alias} must keep the published V4.1 effort levels"
+            );
+        }
+    }
+
+    #[test]
     fn deepseek_builtin_applies_each_peak_window_to_both_models() {
         let catalog = ModelCatalog::load_builtin().unwrap();
         let deepseek_id = connection_id("deepseek");
@@ -5057,7 +5142,7 @@ default_base_url = "http://localhost:11434/v1"
             input_cache: None,
         };
         let mut actual = Vec::new();
-        for model in ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"] {
+        for model in ["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"] {
             let resolved = catalog
                 .resolve(&deepseek_id, &model_id(model))
                 .expect("DeepSeek model resolves");

@@ -546,7 +546,7 @@ mod tests {
             .session_mut("deepseek")
             .model_reasoning
             .insert(
-                "deepseek/deepseek-v4-flash".to_string(),
+                "deepseek/deepseek-flash".to_string(),
                 ReasoningSelection::High,
             );
 
@@ -556,11 +556,12 @@ mod tests {
             "DeepSeek API",
             &session_store,
             factory.metadata(),
-            "deepseek/deepseek-v4-flash".to_string(),
+            "deepseek/deepseek-flash".to_string(),
         );
 
         for expected in [
             ReasoningSelection::Off,
+            ReasoningSelection::Low,
             ReasoningSelection::High,
             ReasoningSelection::Max,
         ] {
@@ -570,11 +571,9 @@ mod tests {
                 option.supported_reasoning
             );
         }
-        assert!(
-            !option
-                .supported_reasoning
-                .contains(&ReasoningSelection::Low)
-        );
+        // `low`, `high`, and `max` are the three model efforts DeepSeek
+        // documents; `medium`/`xhigh` fold onto high and `ultra` onto max, so
+        // they must not show up as separate choices.
         assert!(
             !option
                 .supported_reasoning

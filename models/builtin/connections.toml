@@ -371,7 +371,7 @@ model_env = "DEEPSEEK_MODEL"
 # Keep regional/private deployments configurable without duplicating the
 # provider: DEEPSEEK_BASE_URL overrides it for authorization and refresh.
 base_url_env = "DEEPSEEK_BASE_URL"
-default_model = "deepseek/deepseek-v4-flash"
+default_model = "deepseek/deepseek-flash"
 default_endpoint_path = "chat/completions"
 default_token_counter = "tiktoken"
 # Daily peak windows published for the V4 API rates effective 2026-08-16
