@@ -1,3 +1,4 @@
+pub(crate) mod ansi;
 pub(crate) mod env;
 pub(crate) mod format;
 pub(crate) mod slug;

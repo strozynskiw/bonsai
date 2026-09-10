@@ -1421,21 +1421,13 @@ fn detect_prompt_state(output: &str) -> TerminalPromptState {
     }
 }
 
+/// Detection-line view of terminal output: every control character goes away,
+/// newlines and tabs included, because callers compare single lines.
 fn strip_ansi_sequences(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
-            for control in chars.by_ref() {
-                if ('@'..='~').contains(&control) {
-                    break;
-                }
-            }
-        } else if !ch.is_control() {
-            output.push(ch);
-        }
-    }
-    output
+    crate::util::ansi::strip_terminal_controls(input)
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect()
 }
 
 #[cfg(test)]
