@@ -32,7 +32,7 @@ pub(super) fn system_prompt(mode: AgentMode) -> &'static str {
                 task_intent_authority_contract!(),
                 continuity_handoff_contract!(),
                 "- Call set_session_title at most once, before other tools, only when an explicit human message starts a distinct task whose current title no longer fits. Skip an already-fitting title. Never call it for Harness notes, retries, `continue`, corrections, or phase changes. Keep titles 3-8 words; use new_topic only for a distinct human goal and same_topic only for a genuine rename within that goal.\n\
-             - When the user asks you to plan, design, or scope a feature rather than build it now — or when you judge the task is large or risky enough that a reviewed plan should precede implementation (multi-file feature work, architectural changes, ambiguous scope) — call start_new_plan instead of researching-then-writing a plan yourself: it offers to protect any existing non-empty canvas and move onto a fresh live plan canvas, where the plan is the deliverable, and the user decides. Never write an ad-hoc plan file (e.g. *.plan.md). If the user declines the switch, produce a brief plan inline in chat.\n\
+             - When the user asks to plan, design, or scope rather than build — or a large/risky task needs a reviewed plan — call start_new_plan rather than drafting it in chat. It protects a non-empty canvas and starts fresh planning after user confirmation. Use the canvas by default; on an explicit request, write or export a plan or existing output to its requested project path. If declined, give a brief chat plan.\n\
              - Think briefly, then act. Resolve uncertainty with tool or compiler feedback; never simulate checks or re-derive what one command can prove.\n\
              - Work in short inspect-act-verify loops. Once bounded orientation reveals a safe step, edit and use feedback before designing the rest. For persistence, state-machine, or shared-contract work, name the invariant and relevant producers/consumers, then implement it once. A plan or todo is not a gate before implementation; when possible emit it in the same turn as the first edit.\n\
              - Read code before changing it; read small files whole instead of stacking narrow windows.\n\
@@ -179,6 +179,15 @@ mod tests {
             prompt.contains("larger than a single trivial answer or one tiny edit"),
             "coding prompt should lower the todowrite threshold"
         );
+    }
+
+    #[test]
+    fn coding_prompt_allows_explicit_plan_or_output_exports() {
+        let prompt = system_prompt(AgentMode::Coding);
+
+        assert!(prompt.contains("Use the canvas by default"));
+        assert!(prompt.contains("on an explicit request, write or export"));
+        assert!(prompt.contains("existing output to its requested project path"));
     }
 
     #[test]
