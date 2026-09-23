@@ -978,6 +978,12 @@ impl Provider for OpenAiCompatibleProvider {
         if !self.api_key.trim().is_empty() {
             builder = builder.header("Authorization", format!("Bearer {}", self.api_key));
         }
+        // OpenCode Go requires a stable conversation identifier for routing and
+        // prompt-cache affinity. The persisted cache key remains stable across
+        // provider rebuilds and session resumes, unlike a per-request UUID.
+        if self.provider_id == OPENCODE_METADATA.id.as_ref() {
+            builder = builder.header("x-opencode-session", &self.prompt_cache_key);
+        }
         if let Some(header) = &self.prompt_cache_header {
             let header =
                 reqwest::header::HeaderName::from_bytes(header.as_bytes()).map_err(|error| {
@@ -1693,6 +1699,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opencode_go_sends_stable_conversation_session_header() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer sk-opencode"))
+            .and(header("x-opencode-session", "bonsai-opencode-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let session = provider_session("sk-opencode", &server.uri(), "deepseek-v4-flash");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let mut provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN,
+        );
+        provider.set_conversation_cache_key("bonsai-opencode-session");
+
+        let response = provider
+            .chat_stream(
+                &[user_message("hello")],
+                &[],
+                CancellationToken::new(),
+                std::sync::Arc::new(crate::output::StdoutSink),
+            )
+            .await
+            .expect("OpenCode Go-shaped stream succeeds");
+        assert_eq!(response.content, "ok");
+    }
+
+    #[tokio::test]
     async fn xai_cache_route_uses_conversation_header_not_body_field() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1749,6 +1797,11 @@ mod tests {
             .await
             .expect("xAI-shaped stream succeeds");
         assert_eq!(response.content, "ok");
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests[0].headers.get("x-opencode-session").is_none(),
+            "OpenCode Go's routing header must not leak to other compatible providers"
+        );
     }
 
     /// The OpenCode Go gateway 400s a DeepSeek request whose assistant
