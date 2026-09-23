@@ -3,10 +3,123 @@
 # merges that live availability with Models.dev in Rust. These targets are the
 # offline baseline for the current Chat Completions coding lineup.
 #
-# GPT-5.6 Sol/Terra/Luna, GPT-5.5, and GPT-5.4 have a 1.05M context window, but
-# prompts above 272K input tokens reprice the entire request. Keep a price-safe
-# 272K target and an explicit `-1m` target for each model. Models.dev context
-# tiers refresh both prices independently; the bundled prices remain fallbacks.
+# GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna, GPT-5.5, and GPT-5.4 have a
+# 1.05M context window, but prompts above 272K input tokens reprice the entire
+# request. Keep a price-safe 272K target and an explicit `-1m` target for each
+# model. Models.dev context tiers refresh both prices independently; the
+# bundled prices remain fallbacks.
+
+[[targets]]
+connection = "openai"
+model = "openai/gpt-6-astra"
+remote_model = "gpt-6-astra"
+recommended = true
+recommended_effort = "medium"
+token_counter = "tiktoken"
+pinned_fields = ["context-window"]
+context_window = 272000
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 10000000, output_micros_per_million = 50000000, cache_read_micros_per_million = 1000000, cache_write_micros_per_million = 12500000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 20000000, output_micros_per_million = 75000000, cache_read_micros_per_million = 2000000, cache_write_micros_per_million = 25000000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+# No "none": GPT-6 Astra rejects an explicit disable (the Codex catalog agrees).
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "openai"
+model = "openai/gpt-6-astra-1m"
+metadata_model = "openai/gpt-6-astra"
+remote_model = "gpt-6-astra"
+display_name = "GPT-6 Astra · 1M context"
+recommended_effort = "medium"
+token_counter = "tiktoken"
+pinned_fields = ["display-name", "context-window"]
+context_window = 1050000
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 10000000, output_micros_per_million = 50000000, cache_read_micros_per_million = 1000000, cache_write_micros_per_million = 12500000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 20000000, output_micros_per_million = 75000000, cache_read_micros_per_million = 2000000, cache_write_micros_per_million = 25000000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "openai"
+model = "openai/gpt-6-sol"
+remote_model = "gpt-6-sol"
+recommended = true
+recommended_effort = "medium"
+token_counter = "tiktoken"
+pinned_fields = ["context-window"]
+context_window = 272000
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 10000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 5000000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "openai"
+model = "openai/gpt-6-sol-1m"
+metadata_model = "openai/gpt-6-sol"
+remote_model = "gpt-6-sol"
+display_name = "GPT-6 Sol · 1M context"
+recommended_effort = "medium"
+token_counter = "tiktoken"
+pinned_fields = ["display-name", "context-window"]
+context_window = 1050000
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 10000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 5000000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "openai"
+model = "openai/gpt-6-luna"
+remote_model = "gpt-6-luna"
+roles = ["cheap"]
+recommended_effort = "medium"
+token_counter = "tiktoken"
+pinned_fields = ["context-window"]
+context_window = 272000
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 100000, output_micros_per_million = 500000, cache_read_micros_per_million = 10000, cache_write_micros_per_million = 125000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 200000, output_micros_per_million = 750000, cache_read_micros_per_million = 20000, cache_write_micros_per_million = 250000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "openai"
+model = "openai/gpt-6-luna-1m"
+metadata_model = "openai/gpt-6-luna"
+remote_model = "gpt-6-luna"
+display_name = "GPT-6 Luna · 1M context"
+recommended_effort = "medium"
+token_counter = "tiktoken"
+pinned_fields = ["display-name", "context-window"]
+context_window = 1050000
+output_limit = 128000
+features = ["tool-call", "reasoning", "structured-output", "attachment"]
+pricing = { input_micros_per_million = 100000, output_micros_per_million = 500000, cache_read_micros_per_million = 10000, cache_write_micros_per_million = 125000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 200000, output_micros_per_million = 750000, cache_read_micros_per_million = 20000, cache_write_micros_per_million = 250000 } }]
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
 
 [[targets]]
 connection = "openai"
@@ -21,8 +134,8 @@ pinned_fields = ["context-window"]
 context_window = 272000
 output_limit = 128000
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
-pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
-pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 10000000, output_micros_per_million = 45000000, cache_read_micros_per_million = 1000000, cache_write_micros_per_million = 12500000 } }]
+pricing = { input_micros_per_million = 4000000, output_micros_per_million = 20000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 5000000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 8000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 800000, cache_write_micros_per_million = 10000000 } }]
 
 [[targets.reasoning_options]]
 type = "toggle"
@@ -43,8 +156,8 @@ pinned_fields = ["display-name", "context-window"]
 context_window = 1050000
 output_limit = 128000
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
-pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
-pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 10000000, output_micros_per_million = 45000000, cache_read_micros_per_million = 1000000, cache_write_micros_per_million = 12500000 } }]
+pricing = { input_micros_per_million = 4000000, output_micros_per_million = 20000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 5000000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 8000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 800000, cache_write_micros_per_million = 10000000 } }]
 
 [[targets.reasoning_options]]
 type = "toggle"
@@ -63,8 +176,8 @@ pinned_fields = ["context-window"]
 context_window = 272000
 output_limit = 128000
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
-pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000, cache_write_micros_per_million = 3125000 }
-pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 5000000, output_micros_per_million = 22500000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 } }]
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 5000000 } }]
 
 [[targets.reasoning_options]]
 type = "toggle"
@@ -85,8 +198,8 @@ pinned_fields = ["display-name", "context-window"]
 context_window = 1050000
 output_limit = 128000
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
-pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000, cache_write_micros_per_million = 3125000 }
-pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 5000000, output_micros_per_million = 22500000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 } }]
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 4000000, output_micros_per_million = 18000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 5000000 } }]
 
 [[targets.reasoning_options]]
 type = "toggle"
@@ -106,8 +219,8 @@ pinned_fields = ["context-window"]
 context_window = 272000
 output_limit = 128000
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
-pricing = { input_micros_per_million = 1000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
-pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 2000000, output_micros_per_million = 9000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 } }]
+pricing = { input_micros_per_million = 200000, output_micros_per_million = 1200000, cache_read_micros_per_million = 20000, cache_write_micros_per_million = 250000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 400000, output_micros_per_million = 1800000, cache_read_micros_per_million = 40000, cache_write_micros_per_million = 500000 } }]
 
 [[targets.reasoning_options]]
 type = "toggle"
@@ -128,8 +241,8 @@ pinned_fields = ["display-name", "context-window"]
 context_window = 1050000
 output_limit = 128000
 features = ["tool-call", "reasoning", "structured-output", "attachment"]
-pricing = { input_micros_per_million = 1000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
-pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 2000000, output_micros_per_million = 9000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 } }]
+pricing = { input_micros_per_million = 200000, output_micros_per_million = 1200000, cache_read_micros_per_million = 20000, cache_write_micros_per_million = 250000 }
+pricing_tiers = [{ minimum_input_tokens = 272001, pricing = { input_micros_per_million = 400000, output_micros_per_million = 1800000, cache_read_micros_per_million = 40000, cache_write_micros_per_million = 500000 } }]
 
 [[targets.reasoning_options]]
 type = "toggle"

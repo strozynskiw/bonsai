@@ -1,6 +1,51 @@
-# not-shipped: glm-5.1 — Z.AI's Coding Plan supports only GLM-5.2, GLM-5-Turbo, and GLM-4.7
-# not-shipped: glm-4.5-air — Z.AI's Coding Plan supports only GLM-5.2, GLM-5-Turbo, and GLM-4.7
+# not-shipped: glm-5.1 — superseded by GLM-5.3; the Coding Plan does not list it either
+# not-shipped: glm-4.5-air — older GLM-4.5 tier, outside the Coding Plan lineup
 # not-shipped: glm-5v-turbo — Vision Understanding is an MCP benefit, not a Coding Plan model
+# not-shipped: glm-5.3-highspeed — speed-tier slug for the same model; the direct API's live listing carries no highspeed id
+# not-shipped: glm-5.2-highspeed — speed-tier slug for the same model; the direct API's live listing carries no highspeed id
+
+# GLM-5.3 landed on the plan after the older "5.2 / 5-Turbo / 4.7 only" note. It
+# mirrors the direct-Z.AI entry: Z.AI maps minimal -> disabled thinking and
+# medium/xhigh -> high/max, while low stays a native GLM-5.3 effort.
+[[targets]]
+connection = "zai-coding-plan"
+model = "zai-coding-plan/glm-5.3"
+metadata_model = "zai-coding-plan/glm-5.3"
+remote_model = "glm-5.3"
+token_counter = "heuristic"
+reasoning_codec = "zai-thinking"
+recommended_effort = "max"
+discouraged_efforts = ["minimal", "medium", "xhigh"]
+context_window = 1000000
+# Rumination clamp shared with GLM-5.2 (session 262: a 71k-token thinking turn
+# with zero actions); the plan also diverges from models.dev's 131K output.
+pinned = true
+output_limit = 12000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "zai-coding-plan"
+model = "zai-coding-plan/glm-5.3-flash"
+metadata_model = "zai-coding-plan/glm-5.3-flash"
+remote_model = "glm-5.3-flash"
+token_counter = "heuristic"
+reasoning_codec = "zai-thinking"
+recommended_effort = "max"
+discouraged_efforts = ["minimal", "medium", "xhigh"]
+context_window = 1000000
+# Rumination clamp shared with GLM-5.2 (see the glm-5.3 entry).
+pinned = true
+output_limit = 12000
+features = ["tool-call", "reasoning", "structured-output", "temperature", "attachment"]
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 [[targets]]
 connection = "zai-coding-plan"

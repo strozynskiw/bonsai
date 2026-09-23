@@ -766,6 +766,7 @@ mod tests {
                 env_var_model: Some("CODEX_MODEL"),
                 env_var_base_url: Some("CODEX_BASE_URL"),
                 seed_models: &[
+                    "gpt-6-astra",
                     "gpt-5.6-sol",
                     "gpt-5.6-terra",
                     "gpt-5.6-luna",
@@ -790,9 +791,15 @@ mod tests {
                 seed_models: &[
                     "claude-sonnet-4-5",
                     "claude-sonnet-5",
+                    "claude-sonnet-4-6",
                     "claude-opus-5",
+                    "claude-opus-5-5",
                     "claude-opus-4-8",
+                    "claude-opus-4-7",
+                    "claude-opus-4-6",
+                    "claude-opus-4-5",
                     "claude-fable-5",
+                    "claude-fable-5-1",
                     "claude-haiku-4-5",
                     "claude-opus-4-1",
                 ],

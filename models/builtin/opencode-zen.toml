@@ -299,12 +299,16 @@ type = "effort"
 values = ["low", "medium", "high", "xhigh", "max"]
 
 [[targets]]
-context_window = 1000000
+# Zen bills Claude Sonnet 4 at a higher tier above 200K input tokens while the
+# catalog prices it flat, so keep the low-tier working window and price
+# together (same treatment as claude-sonnet-4-5 below).
+context_window = 200000
 output_limit = 64000
 connection = "opencode-zen"
 model = "opencode-zen/claude-sonnet-4"
 metadata_model = "opencode/claude-sonnet-4"
 remote_model = "claude-sonnet-4"
+pinned = true
 pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000, cache_write_micros_per_million = 3750000 }
 
 [[targets.reasoning_options]]
@@ -397,12 +401,15 @@ type = "effort"
 values = ["minimal", "low", "medium", "high"]
 
 [[targets]]
-context_window = 1048576
+# Gemini 3 Pro switches to its high price tier above 200K input tokens; keep
+# the low-tier working window and price together, as gemini-3.1-pro does.
+context_window = 200000
 output_limit = 65536
 connection = "opencode-zen"
 model = "opencode-zen/gemini-3-pro"
 metadata_model = "opencode/gemini-3-pro"
 remote_model = "gemini-3-pro"
+pinned = true
 pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000 }
 
 [[targets.reasoning_options]]

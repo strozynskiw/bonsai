@@ -1919,7 +1919,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 220);
+        assert_eq!(catalog.targets.len(), 241);
         assert!(
             catalog
                 .connections
@@ -2034,7 +2034,9 @@ mod tests {
             "the official Zen gateway price overrides inherited metadata"
         );
         for (model, context_window) in [
+            ("opencode-zen/claude-sonnet-4", 200_000),
             ("opencode-zen/claude-sonnet-4-5", 200_000),
+            ("opencode-zen/gemini-3-pro", 200_000),
             ("opencode-zen/gemini-3.1-pro", 200_000),
             ("opencode-zen/gpt-5.4", 272_000),
             ("opencode-zen/gpt-5.5", 272_000),
@@ -2218,7 +2220,7 @@ mod tests {
             .find(|target| target.model.as_str() == "minimax-coding-plan/MiniMax-M3")
             .unwrap();
         assert_eq!(minimax_api.context_window, Some(512_000));
-        assert_eq!(minimax_plan.context_window, Some(1_000_000));
+        assert_eq!(minimax_plan.context_window, Some(1_048_576));
         assert_eq!(
             minimax_api
                 .pricing
@@ -2721,7 +2723,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 220);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 241);
 
         let cases = [
             EquivalenceCase {
@@ -4249,6 +4251,12 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.available_models_for_connection(&openai_id, Vec::new()),
             vec![
+                "gpt-6-astra",
+                "openai/gpt-6-astra-1m",
+                "gpt-6-sol",
+                "openai/gpt-6-sol-1m",
+                "gpt-6-luna",
+                "openai/gpt-6-luna-1m",
                 "gpt-5.6-sol",
                 "openai/gpt-5.6-1m",
                 "gpt-5.6-terra",
@@ -4265,12 +4273,18 @@ default_base_url = "http://localhost:11434/v1"
         );
 
         let cases = [
-            ("openai/gpt-5.6-sol", 272_000, 5_000_000, 30_000_000),
-            ("openai/gpt-5.6-1m", 1_050_000, 10_000_000, 45_000_000),
-            ("openai/gpt-5.6-terra", 272_000, 2_500_000, 15_000_000),
-            ("openai/gpt-5.6-terra-1m", 1_050_000, 5_000_000, 22_500_000),
-            ("openai/gpt-5.6-luna", 272_000, 1_000_000, 6_000_000),
-            ("openai/gpt-5.6-luna-1m", 1_050_000, 2_000_000, 9_000_000),
+            ("openai/gpt-6-astra", 272_000, 10_000_000, 50_000_000),
+            ("openai/gpt-6-astra-1m", 1_050_000, 20_000_000, 75_000_000),
+            ("openai/gpt-6-sol", 272_000, 2_000_000, 10_000_000),
+            ("openai/gpt-6-sol-1m", 1_050_000, 4_000_000, 15_000_000),
+            ("openai/gpt-6-luna", 272_000, 100_000, 500_000),
+            ("openai/gpt-6-luna-1m", 1_050_000, 200_000, 750_000),
+            ("openai/gpt-5.6-sol", 272_000, 4_000_000, 20_000_000),
+            ("openai/gpt-5.6-1m", 1_050_000, 8_000_000, 30_000_000),
+            ("openai/gpt-5.6-terra", 272_000, 2_000_000, 12_000_000),
+            ("openai/gpt-5.6-terra-1m", 1_050_000, 4_000_000, 18_000_000),
+            ("openai/gpt-5.6-luna", 272_000, 200_000, 1_200_000),
+            ("openai/gpt-5.6-luna-1m", 1_050_000, 400_000, 1_800_000),
             ("openai/gpt-5.5", 272_000, 5_000_000, 30_000_000),
             ("openai/gpt-5.5-1m", 1_050_000, 10_000_000, 45_000_000),
             ("openai/gpt-5.4", 272_000, 2_500_000, 15_000_000),
@@ -4300,12 +4314,23 @@ default_base_url = "http://localhost:11434/v1"
             ] {
                 assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
             }
-            assert!(
-                resolved
-                    .reasoning_selections()
-                    .contains(&ReasoningSelection::Off),
-                "{model}"
-            );
+            if model.contains("gpt-6-astra") {
+                // Astra offers no Off toggle: models.dev lists effort only
+                // (low…max) and the Codex catalog agrees.
+                assert!(
+                    !resolved
+                        .reasoning_selections()
+                        .contains(&ReasoningSelection::Off),
+                    "{model}"
+                );
+            } else {
+                assert!(
+                    resolved
+                        .reasoning_selections()
+                        .contains(&ReasoningSelection::Off),
+                    "{model}"
+                );
+            }
         }
 
         let legacy = catalog
@@ -4646,7 +4671,16 @@ default_base_url = "http://localhost:11434/v1"
             })
             .collect::<Vec<_>>();
         plan_models.sort_unstable();
-        assert_eq!(plan_models, ["glm-4.7", "glm-5-turbo", "glm-5.2"]);
+        assert_eq!(
+            plan_models,
+            [
+                "glm-4.7",
+                "glm-5-turbo",
+                "glm-5.2",
+                "glm-5.3",
+                "glm-5.3-flash"
+            ]
+        );
     }
 
     #[test]
@@ -5177,6 +5211,7 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.target_remote_models_for_connection(&codex_id),
             vec![
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -5186,6 +5221,7 @@ default_base_url = "http://localhost:11434/v1"
             ]
         );
         for remote_model in [
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -5208,6 +5244,11 @@ default_base_url = "http://localhost:11434/v1"
             .expect("legacy 1M selector must route existing sessions safely");
         assert_eq!(legacy.model_id.as_str(), "openai/gpt-5.5");
         assert_eq!(legacy.remote_model_id.as_ref(), "gpt-5.5");
+        let live_only_gpt6 = catalog
+            .resolve_connection_model(&codex_id, "codex/gpt-6-astra")
+            .expect("the live-only GPT-6 selector must route existing sessions safely");
+        assert_eq!(live_only_gpt6.model_id.as_str(), "openai/gpt-6-astra");
+        assert_eq!(live_only_gpt6.remote_model_id.as_ref(), "gpt-6-astra");
     }
 
     #[test]

@@ -222,7 +222,7 @@ impl ModelsDevModel {
         }
         // Vision from either signal: models.dev entries are sometimes
         // internally inconsistent (e.g. `attachment: false` with `image` in
-        // input modalities — kimi-for-coding/k3). A false positive surfaces
+        // input modalities — kimi-code-plan-global/k3). A false positive surfaces
         // as a provider-side error; a false negative silently drops images,
         // so trust whichever field claims support.
         if self.attachment || self.accepts_image_input() {
@@ -1394,14 +1394,14 @@ mod tests {
     #[test]
     fn image_input_modality_grants_attachment_despite_false_flag() {
         // models.dev entries can be internally inconsistent — e.g.
-        // kimi-for-coding/k3 ships attachment=false alongside an `image`
+        // kimi-code-plan-global/k3 ships attachment=false alongside an `image`
         // input modality. The modality must win so images aren't silently
         // blocked for a vision-capable model.
         let catalog = parse_models_dev_catalog(
             "models-dev.json",
             r#"
             {
-              "kimi-for-coding": {
+              "kimi-code-plan-global": {
                 "models": {
                   "k3": {
                     "id": "k3",
@@ -1420,10 +1420,12 @@ mod tests {
         )
         .unwrap();
 
-        let k3 = catalog.model(&model_id("kimi-for-coding/k3")).unwrap();
+        let k3 = catalog
+            .model(&model_id("kimi-code-plan-global/k3"))
+            .unwrap();
         assert!(k3.features().contains(&ModelFeature::Attachment));
         let text_only = catalog
-            .model(&model_id("kimi-for-coding/text-only"))
+            .model(&model_id("kimi-code-plan-global/text-only"))
             .unwrap();
         assert!(!text_only.features().contains(&ModelFeature::Attachment));
     }

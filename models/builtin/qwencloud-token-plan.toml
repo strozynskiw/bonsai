@@ -50,6 +50,42 @@ pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_r
 [[targets.reasoning_options]]
 type = "toggle"
 
+# GA successors to the 3.8-max-preview row above: models.dev now carries both
+# plan rows, so their windows come from there instead of the preview floor.
+[[targets]]
+connection = "qwencloud-token-plan"
+model = "qwencloud-token-plan/qwen3.8-max"
+remote_model = "qwen3.8-max"
+metadata_model = "alibaba-token-plan/qwen3.8-max"
+recommended = true
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 1000000
+# Same deliberate 32K reference-agent output clamp as the qwencloud targets.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets]]
+connection = "qwencloud-token-plan"
+model = "qwencloud-token-plan/qwen3.8-flash"
+remote_model = "qwen3.8-flash"
+metadata_model = "alibaba-token-plan/qwen3.8-flash"
+roles = ["cheap"]
+token_counter = "qwen3"
+reasoning_codec = "kimi-thinking"
+context_window = 1000000
+# Same deliberate 32K reference-agent output clamp as the qwencloud targets.
+pinned = true
+output_limit = 32000
+pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
 [[targets]]
 connection = "qwencloud-token-plan"
 model = "qwencloud-token-plan/qwen3.7-plus"

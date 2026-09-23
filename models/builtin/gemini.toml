@@ -231,3 +231,24 @@ type = "toggle"
 [[targets.reasoning_options]]
 type = "effort"
 values = ["low", "medium", "high"]
+
+# Gemini's live listing advertises more than the coding lineup above. These are
+# served but deliberately absent: retired generations, previews superseded by
+# the GA rows, floating `-latest` aliases that move under a pinned catalog, and
+# non-text surfaces (Live API, Omni, open-weight Gemma).
+# not-shipped: gemini-2.0-flash — retired 2.0 generation
+# not-shipped: gemini-2.0-flash-001 — retired 2.0 generation snapshot
+# not-shipped: gemini-2.0-flash-lite — retired 2.0 generation
+# not-shipped: gemini-2.0-flash-lite-001 — retired 2.0 generation snapshot
+# not-shipped: gemini-2.5-flash-lite — 2.5 Pro and Flash already cover that generation
+# not-shipped: gemini-3-flash-preview — superseded by the GA 3.5/3.6 Flash rows
+# not-shipped: gemini-3-pro-preview — superseded by the 3.1 Pro rows
+# not-shipped: gemini-3.1-flash-lite-preview — superseded by the GA 3.5 Flash-Lite row
+# not-shipped: gemini-3.1-flash-live-preview — Live API audio surface, not a text coding model
+# not-shipped: gemini-omni-flash-preview — omni audio/video preview, not a text coding model
+# not-shipped: gemini-flash-latest — floating alias; the pinned 3.6 Flash row tracks the same model
+# not-shipped: gemini-flash-lite-latest — floating alias; the pinned 3.5 Flash-Lite row tracks the same model
+# not-shipped: gemini-pro-latest — floating alias; the pinned 3.1 Pro rows track the same model
+# not-shipped: gemma-4-26b-a4b-it — open-weight Gemma, outside the Gemini coding lineup
+# not-shipped: gemma-4-31b-it — open-weight Gemma, outside the Gemini coding lineup
+# not-shipped: antigravity-preview-05-2026 — Antigravity agent surface, not a Gemini model row

@@ -8,6 +8,29 @@
 # GPT-5.4 also reports a 1M maximum, but not a distinct remote model. Keep the
 # working-window cap so flat per-target cost accounting never silently applies
 # low-context prices to a long-context request.
+#
+# GPT-6 ships as the single `gpt-6-astra` slug. models.dev also carries
+# gpt-6-sol / gpt-6-luna, but the Codex catalog does not list them, so they stay
+# off this connection until the backend serves them.
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-6-astra"
+remote_model = "gpt-6-astra"
+# Live-only until this target existed: sessions picked the synthesized
+# `codex/gpt-6-astra` id and must keep routing to the same wire model.
+aliases = ["codex/gpt-6-astra"]
+recommended_effort = "medium"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+pinned_fields = ["context-window"]
+context_window = 272000
+output_limit = 128000
+pricing = { input_micros_per_million = 10000000, output_micros_per_million = 50000000, cache_read_micros_per_million = 1000000, cache_write_micros_per_million = 12500000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max", "ultra"]
 
 [[targets]]
 connection = "codex"
@@ -21,7 +44,7 @@ token_counter = "tiktoken"
 pinned_fields = ["context-window"]
 context_window = 272000
 output_limit = 128000
-pricing = { input_micros_per_million = 5000000, output_micros_per_million = 30000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+pricing = { input_micros_per_million = 4000000, output_micros_per_million = 20000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 5000000 }
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -37,7 +60,7 @@ token_counter = "tiktoken"
 pinned_fields = ["context-window"]
 context_window = 272000
 output_limit = 128000
-pricing = { input_micros_per_million = 2500000, output_micros_per_million = 15000000, cache_read_micros_per_million = 250000, cache_write_micros_per_million = 3125000 }
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 12000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2500000 }
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -53,7 +76,7 @@ token_counter = "tiktoken"
 pinned_fields = ["context-window"]
 context_window = 272000
 output_limit = 128000
-pricing = { input_micros_per_million = 1000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 1250000 }
+pricing = { input_micros_per_million = 200000, output_micros_per_million = 1200000, cache_read_micros_per_million = 20000, cache_write_micros_per_million = 250000 }
 
 [[targets.reasoning_options]]
 type = "effort"

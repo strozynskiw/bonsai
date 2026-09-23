@@ -35,7 +35,8 @@ use crate::util::tool_args::normalize_tool_call_arguments_json;
 const CODEX_FALLBACK_CLIENT_VERSION: &str = "0.150.0";
 const CODEX_CLIENT_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const CODEX_MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
-const CODEX_FALLBACK_MODELS: [&str; 6] = [
+const CODEX_FALLBACK_MODELS: [&str; 7] = [
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -2083,6 +2084,7 @@ mod tests {
         assert_eq!(
             codex_fallback_models(),
             vec![
+                "gpt-6-astra".to_string(),
                 "gpt-5.6-sol".to_string(),
                 "gpt-5.6-terra".to_string(),
                 "gpt-5.6-luna".to_string(),
