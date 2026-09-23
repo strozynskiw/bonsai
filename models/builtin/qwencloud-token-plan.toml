@@ -28,12 +28,12 @@ pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_r
 type = "toggle"
 
 # The plan's flagship draw: Token Plan-EXCLUSIVE, absent from the
-# pay-as-you-go /models listing (verified live) and not yet on models.dev.
-# Specs are unverified pending a real Token Plan key — the 256K window is the
-# conservative max-preview-lineage floor (qwen3.6-max-preview shipped 262144);
-# claiming the family's 1M and being wrong would overflow compaction budgets.
-# Not the default for the same reason: a default model must be serving-proven
-# (a /models listing is not serving proof).
+# pay-as-you-go /models listing (verified live). models.dev carries a 1M row for
+# it too, but serving on the plan is still unverified pending a real Token Plan
+# key — the 256K window is the conservative max-preview-lineage floor
+# (qwen3.6-max-preview shipped 262144); claiming the family's 1M and being wrong
+# would overflow compaction budgets. Not the default for the same reason: a
+# default model must be serving-proven (a /models listing is not serving proof).
 [[targets]]
 connection = "qwencloud-token-plan"
 model = "qwencloud-token-plan/qwen3.8-max-preview"

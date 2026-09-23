@@ -179,8 +179,9 @@ base_url_env = "ZAI_CODING_PLAN_BASE_URL"
 default_model = "zai-coding-plan/glm-5.2"
 default_endpoint_path = "chat/completions"
 default_token_counter = "heuristic"
-# The Coding Plan documentation is authoritative: it currently supports only
-# GLM-5.2, GLM-5-Turbo, and GLM-4.7. Avoid models.dev's false plan candidates.
+# The Coding Plan documentation is authoritative for the served lineup
+# (GLM-5.3, GLM-5.3-Flash, GLM-5.2, GLM-5-Turbo, GLM-4.7); models.dev's plan
+# block also carries ids the plan does not serve, so discovery stays static.
 discovery = "static"
 prompt_cache = true
 prompt_cache_policy = "implicit-prefix"
