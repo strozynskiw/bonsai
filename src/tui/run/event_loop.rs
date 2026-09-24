@@ -654,7 +654,7 @@ fn steer_active_run(app: &mut AppState, tasks: &TaskController) -> bool {
     app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
     push_transient_notice(
         app,
-        "Steering queued message; background subagents continue",
+        "Steering with all queued messages; background subagents continue",
     );
     true
 }
@@ -4756,19 +4756,12 @@ async fn start_pending_queued_run_if_idle(
         return false;
     }
 
-    // A steer replaces the just-interrupted foreground turn and therefore has
-    // priority over older Enter-queued work. Keep those older messages pending
-    // for the turn after the steer instead of appending them behind the urgent
-    // instruction in the same model request.
-    let steer_id = app
-        .queued_inputs
-        .iter()
-        .find(|queued| matches!(queued.delivery, FollowUpDelivery::Steer))
-        .map(|queued| queued.id);
+    // A steer takes the whole queue with it: every queued message enters the
+    // chat in FIFO order in the same run, instead of leaving older Enter-queued
+    // work pending behind the urgent instruction for a later run.
     let mut queued_messages = app
         .queued_inputs
         .iter()
-        .filter(|queued| steer_id.is_none_or(|steer_id| queued.id == steer_id))
         .map(|queued| {
             let submission = queued.content.submission();
             // An empty snapshot (defensive: content should always mirror the

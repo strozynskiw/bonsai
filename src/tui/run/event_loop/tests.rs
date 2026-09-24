@@ -5880,7 +5880,7 @@ async fn pending_queued_run_does_not_resend_primary_message() {
 }
 
 #[tokio::test]
-async fn pending_steer_runs_before_and_separately_from_enter_queue() {
+async fn pending_steer_dispatches_all_queued_messages_in_one_run() {
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
@@ -5919,14 +5919,21 @@ async fn pending_steer_runs_before_and_separately_from_enter_queue() {
         .await
     );
 
+    // A steer takes the whole queue into the chat: the older Enter-queued
+    // message is dispatched immediately (its transcript row converts), and the
+    // steer itself is pre-seeded into the same run instead of staying pending
+    // for a later one.
+    assert!(
+        !app.queued_inputs
+            .iter()
+            .any(|queued| queued.text == "later work")
+    );
     assert!(matches!(
-        app.queued_inputs.as_slice(),
-        [QueuedInput {
-            id: 1,
-            text,
-            delivery: FollowUpDelivery::Queue,
-            ..
-        }] if text == "later work"
+        app.transcript.as_slice(),
+        [
+            TranscriptItem::UserMessage { text: first },
+            TranscriptItem::QueuedUserMessage { text: second, .. }
+        ] if first == "later work" && second == "urgent correction"
     ));
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -5940,7 +5947,10 @@ async fn pending_steer_runs_before_and_separately_from_enter_queue() {
     .expect("steer run should finish");
     assert_eq!(
         requests.lock().await.as_slice(),
-        &[vec!["urgent correction".to_string()]]
+        &[vec![
+            "later work".to_string(),
+            "urgent correction".to_string()
+        ]]
     );
 }
 
