@@ -597,14 +597,13 @@ impl AnthropicCompatibleProvider {
         };
         let wire_messages =
             transform::messages_for_project_state_layout(messages, project_state_layout);
-        // Vision safety net: mirror of the OpenAI-chat strip — a text-only
-        // Anthropic-compatible endpoint rejects image blocks with a 400, and
-        // images already in history would otherwise wedge every later turn.
-        let wire_messages = if self.supports_vision {
-            wire_messages
-        } else {
-            transform::strip_image_parts_for_wire(wire_messages.as_ref())
-        };
+        // Image safety net: mirror of the OpenAI-chat sanitize — a text-only
+        // Anthropic-compatible endpoint rejects image blocks with a 400, an
+        // unsupported media type (e.g. `image/svg+xml`) 400s even vision
+        // models, and images already in history would otherwise wedge every
+        // later turn.
+        let wire_messages =
+            transform::sanitize_image_parts_for_wire(wire_messages.as_ref(), self.supports_vision);
         let (system, mut anthropic_messages) =
             transform_messages_with_thinking(wire_messages.as_ref(), Some(&thinking))?;
         drop(thinking);

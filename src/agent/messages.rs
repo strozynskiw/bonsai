@@ -203,15 +203,24 @@ pub(super) fn user_message_with_images(
         },
     ));
     for image in images {
-        let data_uri = format!("data:{};base64,{}", image.mime, image.base64);
-        parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-            ChatCompletionRequestMessageContentPartImage {
-                image_url: ImageUrl {
-                    url: data_uri,
-                    detail: None,
+        // Ingest gate: a media type no wire target accepts (e.g. an SVG pasted
+        // as `image/svg+xml`) must never enter the history, where it would
+        // ride along with every later context request as a guaranteed 400.
+        let part = match crate::provider::transform::unsupported_media_type_placeholder(&image.mime)
+        {
+            Some(placeholder) => ChatCompletionRequestUserMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText { text: placeholder },
+            ),
+            None => ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageUrl {
+                        url: format!("data:{};base64,{}", image.mime, image.base64),
+                        detail: None,
+                    },
                 },
-            },
-        ));
+            ),
+        };
+        parts.push(part);
     }
     ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
         content: ChatCompletionRequestUserMessageContent::Array(parts),
@@ -248,5 +257,34 @@ mod provenance_tests {
         .unwrap();
         assert_eq!(peer["role"], "user");
         assert_eq!(peer["name"], "bonsai_peer");
+    }
+}
+
+#[cfg(test)]
+mod image_message_tests {
+    use super::*;
+
+    fn attachment(mime: &str) -> ImageAttachment {
+        ImageAttachment {
+            mime: mime.to_string(),
+            base64: "QUJD".to_string(),
+            byte_len: 3,
+        }
+    }
+
+    #[test]
+    fn unsupported_attachment_media_type_becomes_placeholder_text() {
+        let message = user_message_with_images("look at this", &[attachment("image/svg+xml")]);
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(!json.contains("data:image/svg+xml"));
+        assert!(!json.contains("image_url"));
+        assert!(json.contains("unsupported image format"));
+    }
+
+    #[test]
+    fn supported_attachment_media_type_stays_an_image_part() {
+        let message = user_message_with_images("look at this", &[attachment("image/png")]);
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("data:image/png;base64,QUJD"));
     }
 }

@@ -280,14 +280,12 @@ impl CodexProvider {
             messages,
             transform::ProjectStateWireLayout::AppendOnly,
         );
-        // Vision safety net: mirror of the OpenAI-chat/Anthropic strip — an
-        // image already in history must not 400 every later turn when the
-        // active model rejects image input.
-        let wire_messages = if self.supports_vision {
-            wire_messages
-        } else {
-            transform::strip_image_parts_for_wire(wire_messages.as_ref())
-        };
+        // Image safety net: mirror of the OpenAI-chat/Anthropic sanitize — an
+        // image already in history must not 400 every later turn, whether the
+        // active model rejects image input or the image's media type is
+        // unsupported everywhere (e.g. `image/svg+xml`).
+        let wire_messages =
+            transform::sanitize_image_parts_for_wire(wire_messages.as_ref(), self.supports_vision);
         // IMPORTANT OFFICIAL-CODEX PARITY: emit the native Responses items
         // exactly. A synthetic developer "cache checkpoint" was live-tested
         // and pinned reuse to only the original ~14k prefix instead of letting
