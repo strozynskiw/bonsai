@@ -1919,7 +1919,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 241);
+        assert_eq!(catalog.targets.len(), 243);
         assert!(
             catalog
                 .connections
@@ -2723,7 +2723,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 241);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 243);
 
         let cases = [
             EquivalenceCase {
@@ -4251,6 +4251,8 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.available_models_for_connection(&openai_id, Vec::new()),
             vec![
+                "gpt-6.1-sol",
+                "openai/gpt-6.1-sol-1m",
                 "gpt-6-astra",
                 "openai/gpt-6-astra-1m",
                 "gpt-6-sol",
@@ -4273,6 +4275,8 @@ default_base_url = "http://localhost:11434/v1"
         );
 
         let cases = [
+            ("openai/gpt-6.1-sol", 272_000, 2_000_000, 10_000_000),
+            ("openai/gpt-6.1-sol-1m", 1_050_000, 4_000_000, 15_000_000),
             ("openai/gpt-6-astra", 272_000, 10_000_000, 50_000_000),
             ("openai/gpt-6-astra-1m", 1_050_000, 20_000_000, 75_000_000),
             ("openai/gpt-6-sol", 272_000, 2_000_000, 10_000_000),
@@ -4314,9 +4318,9 @@ default_base_url = "http://localhost:11434/v1"
             ] {
                 assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
             }
-            if model.contains("gpt-6-astra") {
-                // Astra offers no Off toggle: models.dev lists effort only
-                // (low…max) and the Codex catalog agrees.
+            if model.contains("gpt-6-astra") || model.contains("gpt-6.1-sol") {
+                // Astra and 6.1 Sol offer no Off toggle: models.dev lists
+                // effort only (low…max) and the Codex catalog agrees for Astra.
                 assert!(
                     !resolved
                         .reasoning_selections()
