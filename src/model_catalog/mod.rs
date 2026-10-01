@@ -1919,7 +1919,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 243);
+        assert_eq!(catalog.targets.len(), 244);
         assert!(
             catalog
                 .connections
@@ -2723,7 +2723,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 243);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 244);
 
         let cases = [
             EquivalenceCase {
@@ -5215,6 +5215,7 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.target_remote_models_for_connection(&codex_id),
             vec![
+                "gpt-6.1-sol",
                 "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
@@ -5225,6 +5226,7 @@ default_base_url = "http://localhost:11434/v1"
             ]
         );
         for remote_model in [
+            "gpt-6.1-sol",
             "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",

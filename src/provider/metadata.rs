@@ -766,6 +766,7 @@ mod tests {
                 env_var_model: Some("CODEX_MODEL"),
                 env_var_base_url: Some("CODEX_BASE_URL"),
                 seed_models: &[
+                    "gpt-6.1-sol",
                     "gpt-6-astra",
                     "gpt-5.6-sol",
                     "gpt-5.6-terra",

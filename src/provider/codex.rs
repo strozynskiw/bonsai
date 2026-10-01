@@ -27,15 +27,15 @@ use crate::session::ProviderSession;
 use crate::util::tool_args::normalize_tool_call_arguments_json;
 
 /// Floor for the spoofed `version` header, not just an absence fallback: the
-/// backend version-gates lite-served models (gpt-5.6-*) at roughly 0.145 —
-/// below that, /responses answers 404 "Model not found" for them (and 400
-/// "requires a newer version of Codex" further back) even though /models
-/// lists them. A detected CLI older than this floor must not drag the header
-/// down (verified live: 0.144.1 → 404, 0.150.0 → 200).
-const CODEX_FALLBACK_CLIENT_VERSION: &str = "0.150.0";
+/// backend version-gates both listing and routing of newly served models. A
+/// detected CLI older than this floor must not shrink `/models` or make a
+/// listed Responses Lite model fail at request time (verified live: 0.158.0
+/// hides GPT-6.1 Sol, while 0.159.0 lists it).
+const CODEX_FALLBACK_CLIENT_VERSION: &str = "0.159.0";
 const CODEX_CLIENT_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const CODEX_MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
-const CODEX_FALLBACK_MODELS: [&str; 7] = [
+const CODEX_FALLBACK_MODELS: [&str; 8] = [
+    "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -2082,6 +2082,7 @@ mod tests {
         assert_eq!(
             codex_fallback_models(),
             vec![
+                "gpt-6.1-sol".to_string(),
                 "gpt-6-astra".to_string(),
                 "gpt-5.6-sol".to_string(),
                 "gpt-5.6-terra".to_string(),
@@ -2114,12 +2115,12 @@ mod tests {
             CODEX_FALLBACK_CLIENT_VERSION
         );
         assert_eq!(
-            floored_client_version(Some("0.150.0".to_string())),
-            "0.150.0"
+            floored_client_version(Some("0.158.0".to_string())),
+            CODEX_FALLBACK_CLIENT_VERSION
         );
         assert_eq!(
-            floored_client_version(Some("0.151.2".to_string())),
-            "0.151.2"
+            floored_client_version(Some("0.159.3".to_string())),
+            "0.159.3"
         );
         assert_eq!(floored_client_version(None), CODEX_FALLBACK_CLIENT_VERSION);
     }

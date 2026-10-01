@@ -9,9 +9,26 @@
 # working-window cap so flat per-target cost accounting never silently applies
 # low-context prices to a long-context request.
 #
-# GPT-6 ships as the single `gpt-6-astra` slug. models.dev also carries
-# gpt-6-sol / gpt-6-luna, but the Codex catalog does not list them, so they stay
-# off this connection until the backend serves them.
+# Codex 0.159 exposes GPT-6.1 Sol. This entry remains useful offline;
+# authenticated `/models` still controls live visibility and Responses Lite
+# routing.
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-6.1-sol"
+remote_model = "gpt-6.1-sol"
+recommended = true
+recommended_effort = "medium"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+pinned_fields = ["context-window"]
+context_window = 272000
+output_limit = 128000
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 10000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 2500000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max", "ultra"]
 
 [[targets]]
 connection = "codex"
