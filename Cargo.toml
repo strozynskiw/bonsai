@@ -25,31 +25,31 @@ dbg_macro = "deny"
 
 [dependencies]
 async-openai = { version = "0.42.1", features = ["chat-completion", "model"] }
-reqwest = { version = "0.13.4", features = ["stream", "json", "gzip", "brotli"] }
+reqwest = { version = "0.13.5", features = ["stream", "json", "gzip", "brotli"] }
 http = "1"
-tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal", "net"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal", "net"] }
 tokio-util = "0.7"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
-toml = "1.1.2"
+toml = "1.1.6"
 directories = "6.0.0"
-keyring = "4.1.4"
+keyring = "4.2.0"
 anyhow = "1.0.104"
-thiserror = "2.0.18"
+thiserror = "2.0.21"
 crossterm = "0.29.0"
 ratatui = "0.30.2"
 async-trait = "0.1"
-futures = "0.3.33"
+futures = "0.3.34"
 dotenvy = "0.15.7"
-tiktoken-rs = { version = "0.12.0", default-features = false }
-tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+tiktoken-rs = { version = "0.12.1", default-features = false }
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
 base64 = "0.23.1"
 blake3 = "1"
 ring = "0.17.14"
-semver = "1.0.27"
+semver = "1.0.28"
 sha2 = "0.11.0"
-glob = "0.3.3"
+glob = "0.3.4"
 # Release-archive unpacking for native self-update (src/update.rs). flate2
 # defaults to its pure-Rust backend; no C zlib dependency.
 flate2 = "1"
@@ -61,10 +61,10 @@ htmd = "0.5"
 # reqwest's default `charset` feature; declared directly so WebFetch owns it.
 encoding_rs = "0.8"
 walkdir = "2.5.0"
-ignore = "0.4.30"
-grep-searcher = "0.1.16"
+ignore = "0.4.33"
+grep-searcher = "0.1.17"
 grep-regex = "0.1.14"
-regex = "1.11.1"
+regex = "1.13.1"
 nix = { version = "0.31.3", features = ["process", "signal", "time", "poll", "fs", "term", "user"] }
 portable-pty = "0.9.0"
 tree-sitter = "0.27.0"
@@ -93,9 +93,9 @@ png = "0.18.1"
 # MCP client (M5.2). client + stdio child-process transport + Streamable HTTP
 # over the reqwest we already ship. rmcp has renamed transport features
 # between minor versions — re-verify these exact names at the next bump.
-rmcp = { version = "3.2.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.5.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 tempfile = "3.27.0"
-uuid = { version = "1.23.4", features = ["v7"] }
+uuid = { version = "1.27.0", features = ["v7"] }
 nucleo-matcher = "0.3.1"
 notify = "8.2.0"
 
@@ -107,5 +107,5 @@ wiremock = "0.6.5"
 # Paused-clock control (`start_paused`) for deterministic timeout tests.
 tokio = { version = "1", features = ["test-util"] }
 # In-process fake MCP server for src/mcp/tests.rs (M5.2).
-rmcp = { version = "3.2.0", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io"] }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
