@@ -13,8 +13,9 @@ usage() {
 Usage: e2e/verifier.sh [options] [-- bonsai-args...]
 
 Options:
-  --state-root PATH          Use an explicit isolated state root (e2e only)
+  --state-root PATH          Use a trusted harness state root (e2e only)
   --evidence-dir PATH        Write the evidence manifest under PATH
+  --allow-reusable-roots     Opt into caller-owned roots (trusted harness only)
   --binary PATH              Bonsai binary to launch
   --provider-base-url URL    Loopback/dead OpenAI-compatible test endpoint
   --enable-opencode-test-key Seed a fixed synthetic OpenCode key
@@ -49,7 +50,45 @@ canonical_prospective_dir() {
   parent="$(dirname "$path")"
   leaf="$(basename "$path")"
   canonical_parent="$(canonical_prospective_dir "$parent")"
-  printf '%s/%s\n' "$canonical_parent" "$leaf"
+  case "$leaf" in
+    .) printf '%s\n' "$canonical_parent" ;;
+    ..) dirname "$canonical_parent" ;;
+    *) printf '%s/%s\n' "$canonical_parent" "$leaf" ;;
+  esac
+}
+
+# Reusable roots may contain aliases into user state. Reject links anywhere in
+# their existing tree, including evidence files, before mkdir/truncation.
+require_unlinked_tree() {
+  local path="$1" links
+  [[ ! -L "$path" ]] || die "refusing symlinked verifier path: $path"
+  if [[ -d "$path" ]]; then
+    links="$(find "$path" -type l -print -quit)"
+    [[ -z "$links" ]] || die "refusing symlink inside verifier state: $links"
+    links="$(find "$path" -type f -links +1 -print -quit)"
+    [[ -z "$links" ]] || die "refusing hard link inside verifier state: $links"
+  fi
+}
+
+# Portable across macOS and Linux. Never steal a stale lock: an interrupted
+# harness must explicitly clean it up before reusing the root.
+acquire_root_lock() {
+  local root="$1" lock="${1}${2:-.verifier-lock}" attempts=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    [[ -d "$lock" && ! -L "$lock" ]] || die "cannot lock verifier root: $root"
+    attempts=$((attempts + 1))
+    (( attempts < 300 )) || die "verifier root is busy: $root"
+    sleep 0.1
+  done
+  root_locks+=("$lock")
+}
+
+release_root_locks() {
+  local index
+  # Release retention protection last, after nested root locks are removed.
+  for (( index=${#root_locks[@]}-1; index>=0; index-- )); do
+    rmdir "${root_locks[index]}"
+  done
 }
 
 require_loopback_provider() {
@@ -71,13 +110,19 @@ sha256_file() {
 }
 
 prune_retained_runs() {
-  local runs_root="$1" retained=0 run
+  local runs_root="$1" retained=0 run lock
   while IFS= read -r run; do
-    [[ -e "$run/.active" ]] && continue
-    retained=$((retained + 1))
-    if (( retained > MAX_RETAINED_RUNS )); then
-      rm -rf "$run"
+    [[ "$run" != *.verifier-retention-lock ]] || continue
+    lock="${run}.verifier-retention-lock"
+    # Reuse holds the same lifecycle lock through evidence finalization.
+    mkdir "$lock" 2>/dev/null || continue
+    if [[ ! -e "$run/.active" && -f "$run/.completed" ]]; then
+      retained=$((retained + 1))
+      if (( retained > MAX_RETAINED_RUNS )); then
+        rm -rf "$run"
+      fi
     fi
+    rmdir "$lock"
   done < <(find "$runs_root" -mindepth 1 -maxdepth 1 -type d -print | sort -r)
 }
 
@@ -87,6 +132,8 @@ binary="${BONSAI_VERIFIER_BIN:-$REPO_ROOT/target/debug/bonsai}"
 provider_base_url="${BONSAI_VERIFIER_PROVIDER_BASE_URL:-http://127.0.0.1:9/v1}"
 opencode_api_key=""
 allow_shared_state=false
+allow_reusable_roots=false
+root_locks=()
 bonsai_args=()
 
 while (( $# > 0 )); do
@@ -119,6 +166,10 @@ while (( $# > 0 )); do
       allow_shared_state=true
       shift
       ;;
+    --allow-reusable-roots)
+      allow_reusable_roots=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -134,6 +185,13 @@ while (( $# > 0 )); do
   esac
 done
 
+# This gate precedes allocation, mkdir, lock creation, and evidence truncation.
+if [[ -n "$state_root" || -n "$evidence_dir" ]]; then
+  [[ "$allow_reusable_roots" == true ]] \
+    || die "caller-supplied roots require --allow-reusable-roots (trusted harness only)"
+fi
+umask 077
+trap release_root_locks EXIT
 [[ -x "$binary" ]] || die "Bonsai binary is not executable: $binary (run cargo build first)"
 require_loopback_provider "$provider_base_url"
 
@@ -149,10 +207,6 @@ else
   : "${evidence_dir:=$state_root/evidence}"
 fi
 
-mkdir -p "$state_root" "$evidence_dir"
-state_root="$(cd "$state_root" && pwd -P)"
-evidence_dir="$(cd "$evidence_dir" && pwd -P)"
-
 parent_bonsai_home="${BONSAI_HOME:-}"
 if [[ -z "$parent_bonsai_home" && -n "${HOME:-}" ]]; then
   parent_bonsai_home="$HOME/.bonsai"
@@ -160,14 +214,59 @@ fi
 if [[ -n "$parent_bonsai_home" ]]; then
   parent_bonsai_home="$(canonical_prospective_dir "$parent_bonsai_home")"
 fi
+state_root="$(canonical_prospective_dir "$state_root")"
+evidence_dir="$(canonical_prospective_dir "$evidence_dir")"
 shared_state=false
 if [[ -n "$parent_bonsai_home" ]] \
-  && same_or_nested_path "$state_root" "$parent_bonsai_home"; then
+  && { same_or_nested_path "$state_root" "$parent_bonsai_home" \
+    || same_or_nested_path "$parent_bonsai_home" "$state_root"; }; then
   if [[ "$allow_shared_state" != true ]]; then
-    die "refusing verifier state inside parent BONSAI_HOME ($parent_bonsai_home); omit --state-root or pass --allow-shared-state explicitly"
+    die "refusing verifier state overlapping parent BONSAI_HOME ($parent_bonsai_home); omit --state-root or pass --allow-shared-state explicitly"
   fi
   shared_state=true
 fi
+if [[ "$allow_shared_state" != true ]]; then
+  require_unlinked_tree "$state_root"
+  require_unlinked_tree "$evidence_dir"
+  state_root="$(canonical_prospective_dir "$state_root")"
+  evidence_dir="$(canonical_prospective_dir "$evidence_dir")"
+  if [[ -n "$parent_bonsai_home" ]] \
+    && { same_or_nested_path "$evidence_dir" "$parent_bonsai_home" \
+      || same_or_nested_path "$parent_bonsai_home" "$evidence_dir"; }; then
+    die "refusing verifier evidence overlapping parent BONSAI_HOME ($parent_bonsai_home)"
+  fi
+fi
+if [[ "$allow_reusable_roots" == true ]]; then
+  # Protect marked retained ancestors before reopening their state/evidence.
+  # Retention must claim the same sibling lock before checking or deleting.
+  retained_ancestors=()
+  for root in "$state_root" "$evidence_dir"; do
+    ancestor="$root"
+    while [[ "$ancestor" != / ]]; do
+      if [[ -f "$ancestor/.completed" || -e "$ancestor/.active" ]]; then
+        retained_ancestors+=("$ancestor")
+      fi
+      ancestor="$(dirname "$ancestor")"
+    done
+  done
+  if (( ${#retained_ancestors[@]} > 0 )); then
+    while IFS= read -r ancestor; do
+      acquire_root_lock "$ancestor" .verifier-retention-lock
+    done < <(printf '%s\n' "${retained_ancestors[@]}" | sort -u)
+  fi
+  # Sorted acquisition prevents deadlocks when callers share both roots.
+  while IFS= read -r root; do
+    mkdir -p "$(dirname "$root")"
+    acquire_root_lock "$root"
+  done < <(printf '%s\n' "$state_root" "$evidence_dir" | sort -u)
+  if [[ "$allow_shared_state" != true ]]; then
+    require_unlinked_tree "$state_root"
+    require_unlinked_tree "$evidence_dir"
+  fi
+fi
+mkdir -p "$state_root" "$evidence_dir"
+state_root="$(cd "$state_root" && pwd -P)"
+evidence_dir="$(cd "$evidence_dir" && pwd -P)"
 
 isolated_home="$state_root/home"
 if [[ "$shared_state" == true ]]; then
@@ -214,6 +313,8 @@ fi
   printf 'state_root=%s\n' "$state_root"
   printf 'bonsai_home=%s\n' "$isolated_bonsai_home"
   printf 'evidence_dir=%s\n' "$evidence_dir"
+  printf 'reusable_roots=%s\n' "$allow_reusable_roots"
+  printf 'shared_state=%s\n' "$shared_state"
   printf 'provider_base_url=%s\n' "$provider_base_url"
   printf 'argv='
   printf '%q ' "$binary_path"
@@ -242,13 +343,14 @@ finalize() {
     fi
   } >> "$manifest"
   if [[ -n "$owned_run" ]]; then
+    touch "$owned_run/.completed"
     rm -f "$owned_run/.active"
     prune_retained_runs "$(dirname "$owned_run")"
   fi
 }
 trap 'exit 129' HUP
 trap 'exit 143' TERM
-trap 'exit_code=$?; finalize "$exit_code"' EXIT
+trap 'exit_code=$?; finalize "$exit_code"; release_root_locks' EXIT
 
 isolated_env=(
   env -i
@@ -267,6 +369,7 @@ isolated_env=(
   TMP="$isolated_tmp"
   TEMP="$isolated_tmp"
   BONSAI_DOTENV=0
+  BONSAI_DISABLE_KEYRING=1
   BONSAI_DISABLE_MODELS_FETCH=1
   BONSAI_MEMORY_EMBEDDINGS=off
   OPENAI_COMPATIBLE_BASE_URL="$provider_base_url"

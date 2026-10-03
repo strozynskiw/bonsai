@@ -30,8 +30,11 @@ Then in the agent, use `bash interactive:true`:
 ```
 
 Do not launch `./target/debug/bonsai` directly for surface verification. The
-wrapper refuses a parent/shared `BONSAI_HOME` unless destructive shared-state
-testing is explicitly requested with `--allow-shared-state`.
+wrapper disables native provider/Codex keyring access and refuses any custom
+state/evidence root without `--allow-reusable-roots`. That switch is reserved for
+the trusted sequential e2e harness, not ad hoc verification. Parent/shared
+`BONSAI_HOME` additionally requires the destructive `--allow-shared-state` switch.
+Use no root options: the wrapper owns fresh mode-0700 roots by construction.
 
 This returns a `pty-N` ID. Resize it to a workable dimension immediately:
 
@@ -118,6 +121,9 @@ assertion into an `e2e/cases/` script.
 
 - Each run writes only below its wrapper-owned state root. Completed ad-hoc
   evidence is retained under `target/tui-verification/runs/` (newest 20 runs).
+  Retention never deletes active or unregistered allocations. Trusted reusable
+  roots are serialized through exit/manifest finalization; stale locks are never
+  stolen automatically.
 - The parent session's terminal send calls and normalized reads are the input
   and screen replay record; the wrapper manifest records binary/worktree
   identity, child exit state, and the isolated database checksum. Batch runs

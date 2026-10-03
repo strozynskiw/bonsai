@@ -33,11 +33,30 @@ Each case runs against a throwaway, no-dependency environment (`e2e_begin` in
 | `BONSAI_DISABLE_MODELS_FETCH=1` | no models.dev network fetch; built-in catalog only |
 | `OPENAI_COMPATIBLE_BASE_URL` + `_MODEL` | seeds an *authorized* provider; normally a dead address, overridden by turn tests with the loopback mock |
 
-`verifier.sh` also disables repository dotenv loading, admits only synthetic
-test credentials, and refuses a state root inside the parent `BONSAI_HOME`
-unless `--allow-shared-state` is explicit. With no options it creates a unique
-retained run under `target/tui-verification/runs/`; the newest 20 completed runs
-are retained. Concurrent launches therefore never share a database.
+`verifier.sh` also disables native OS credential-store access (including Codex
+fallback) and repository dotenv loading, and admits only synthetic test keys.
+With no root options it creates fresh wrapper-owned state/evidence under
+`target/tui-verification/runs/`; concurrent default launches never share a database.
+Only positively completed, inactive runs count toward the newest-20 retention
+limit; active and unregistered runs are never removed.
+
+Caller-supplied `--state-root` or `--evidence-dir` requires
+`--allow-reusable-roots`, a **trusted harness only** capability. Without it the
+wrapper fails before creating directories or truncating evidence. `lib.sh` opts
+in only for its private mode-0700 case root, intentionally shared by sequential
+resume/classification launches, with distinct per-launch evidence directories.
+Canonical state/evidence roots are locked through child exit and manifest
+finalization. Reuse also locks marked retained ancestors against both ad hoc
+and suite pruning, so completed evidence cannot be deleted during a live reuse.
+Locks wait up to 30 seconds, then fail closed. A killed wrapper may
+leave a sibling `.verifier-lock` directory: remove it manually only after proving
+the owning launch is no longer active. Locks are never automatically stolen.
+
+The wrapper rejects symlinks and hard links in reusable trees and parent-home
+aliases (including dot components). `--allow-shared-state` is a separate,
+destructive opt-in and never bypasses the reusable-root gate. Deliberate same-user
+tampering with opted-in harness roots is outside this trust boundary; use no root
+options for ad hoc verification. Never opt user directories into harness reuse.
 
 Every suite run writes replay evidence under
 `target/tui-verification/e2e/<run>/`: per-launch binary/worktree identity and

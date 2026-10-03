@@ -36,6 +36,7 @@ e2e_begin() {
   E2E_NAME="$1"
   E2E_FAIL=0
   E2E_HOME="$(mktemp -d)"
+  chmod 700 "$E2E_HOME"
   E2E_BONSAI_HOME="$E2E_HOME/bonsai"
   local evidence_root="${E2E_RUN_EVIDENCE_ROOT:-$E2E_REPO_ROOT/target/tui-verification/e2e}"
   mkdir -p "$evidence_root"
@@ -75,8 +76,8 @@ e2e_done() {
 # ---- driver ---------------------------------------------------------------
 
 # tui_start [cols rows ready_regex]: launch bonsai in a fresh pane and block
-# until `ready_regex` renders. The env is injected inline (proven to work) so
-# the pane process is bonsai itself — a clean /quit then kills the pane.
+# until `ready_regex` renders. Only this private case root opts into reuse;
+# verifier.sh serializes launches and each launch has distinct evidence.
 tui_start() {
   local cols="${1:-140}" rows="${2:-40}" ready="${3:-(Coding|Planning) ·}"
   local provider_base_url="${E2E_PROVIDER_BASE_URL:-http://127.0.0.1:9/v1}"
@@ -86,6 +87,7 @@ tui_start() {
   printf -v launch_evidence '%s/launches/%04d' "$E2E_EVIDENCE" "$E2E_LAUNCH_SEQUENCE"
   mkdir -p "$launch_evidence"
   local -a launch_args=(
+    --allow-reusable-roots
     --state-root "$E2E_HOME"
     --evidence-dir "$launch_evidence"
     --provider-base-url "$provider_base_url"

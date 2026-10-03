@@ -12,6 +12,24 @@ ROOT="$(cd .. && pwd)"
 E2E_RUN_EVIDENCE_ROOT="$ROOT/target/tui-verification/e2e/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 export E2E_RUN_EVIDENCE_ROOT
 mkdir -p "$E2E_RUN_EVIDENCE_ROOT"
+touch "$E2E_RUN_EVIDENCE_ROOT/.active"
+
+finalize_evidence() {
+  local retained=0 run lock
+  touch "$E2E_RUN_EVIDENCE_ROOT/.completed"
+  rm -f "$E2E_RUN_EVIDENCE_ROOT/.active"
+  while IFS= read -r run; do
+    [[ "$run" != *.verifier-retention-lock ]] || continue
+    lock="${run}.verifier-retention-lock"
+    mkdir "$lock" 2>/dev/null || continue
+    if [[ ! -e "$run/.active" && -f "$run/.completed" ]]; then
+      retained=$((retained + 1))
+      [[ "$retained" -le 20 ]] || rm -rf "$run"
+    fi
+    rmdir "$lock"
+  done < <(find "$(dirname "$E2E_RUN_EVIDENCE_ROOT")" -mindepth 1 -maxdepth 1 -type d -print | sort -r)
+}
+trap finalize_evidence EXIT
 
 if ! command -v tmux >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/tmux ]; then
   echo "error: tmux not found. Install it with: brew install tmux" >&2
@@ -47,9 +65,4 @@ echo "================================================"
 echo "e2e summary: $pass passed, $fail failed"
 echo "evidence: $E2E_RUN_EVIDENCE_ROOT"
 [ "$fail" -gt 0 ] && printf '  failed: %s\n' "${failed[*]}"
-retained=0
-while IFS= read -r run; do
-  retained=$((retained + 1))
-  [ "$retained" -le 20 ] || rm -rf "$run"
-done < <(find "$(dirname "$E2E_RUN_EVIDENCE_ROOT")" -mindepth 1 -maxdepth 1 -type d -print | sort -r)
 exit "$fail"

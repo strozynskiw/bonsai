@@ -32,3 +32,25 @@ jobs:
       run: cargo check --locked --all-targets
     - name: Run tests
       run: cargo test --locked
+
+  tui-isolation:
+    name: TUI isolation
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install TUI test driver
+      run: sudo apt-get update && sudo apt-get install -y tmux
+    - name: Check verifier shell syntax
+      run: bash -n e2e/verifier.sh e2e/lib.sh e2e/run.sh e2e/tests/verifier_isolation.sh
+    - name: Verify native keyring isolation
+      run: cargo test --locked isolated_verifier
+    - name: Verify isolated real TUI
+      run: ./e2e/run.sh cases/00_startup.sh cases/08_state_isolation.sh
+    - name: Retain TUI replay evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: tui-isolation-evidence
+        path: target/tui-verification/e2e/
+        if-no-files-found: error
+        retention-days: 14

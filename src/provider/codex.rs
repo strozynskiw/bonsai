@@ -1099,8 +1099,14 @@ fn codex_keyring_account(codex_home: &Path) -> String {
 }
 
 async fn read_codex_auth_keyring(codex_home: &Path) -> Result<Option<CodexCredential>> {
+    if crate::session::CredentialStore::native_access_disabled() {
+        return Ok(None);
+    }
     let account = codex_keyring_account(codex_home);
     let serialized = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+        if crate::session::CredentialStore::native_access_disabled() {
+            return Ok(None);
+        }
         let entry = keyring::Entry::new(CODEX_KEYRING_SERVICE, &account)
             .context("OS credential store is unavailable for Codex")?;
         match entry.get_password() {
@@ -1339,6 +1345,33 @@ mod tests {
             codex_keyring_account(Path::new("/tmp/codex-home")),
             "cli|c790889e29f35b54"
         );
+    }
+
+    #[tokio::test]
+    async fn isolated_verifier_skips_codex_native_keyring_fallback() {
+        crate::util::test_env::with_var_async("BONSAI_DISABLE_KEYRING", Some("1"), async {
+            let home = tempfile::tempdir().unwrap();
+            assert!(
+                read_codex_auth_keyring(home.path())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            // An absent file must not escape into the native keyring, while
+            // isolated file credentials remain available.
+            assert!(read_codex_auth_file(home.path()).await.unwrap().is_none());
+            tokio::fs::write(
+                home.path().join("auth.json"),
+                json!({"tokens": {"access_token": "synthetic", "account_id": "isolated"}})
+                    .to_string(),
+            )
+            .await
+            .unwrap();
+            let credential = read_codex_auth_file(home.path()).await.unwrap().unwrap();
+            assert_eq!(credential.access_token, "synthetic");
+            assert_eq!(credential.account_id.as_deref(), Some("isolated"));
+        })
+        .await;
     }
 
     #[tokio::test]

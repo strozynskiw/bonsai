@@ -24,7 +24,6 @@ mod file;
 
 use file::FileCredentialBackend;
 
-#[cfg(not(test))]
 const KEYRING_SERVICE: &str = "dev.bonsai.provider";
 
 /// Where a runtime provider secret came from.
@@ -450,8 +449,17 @@ impl CredentialStore {
     pub(crate) fn with_home(bonsai_home: &Path) -> Self {
         Self {
             file: Arc::new(FileCredentialBackend::new(bonsai_home)),
-            keyring: native_credential_backend(),
+            keyring: if Self::native_access_disabled() {
+                Arc::new(DisabledCredentialBackend)
+            } else {
+                native_credential_backend()
+            },
         }
+    }
+
+    /// Whether verifier isolation forbids all native credential entry access.
+    pub(crate) fn native_access_disabled() -> bool {
+        std::env::var_os("BONSAI_DISABLE_KEYRING").as_deref() == Some(std::ffi::OsStr::new("1"))
     }
 
     fn backend(&self, source: &CredentialSource) -> Result<Arc<dyn CredentialBackend>> {
@@ -533,7 +541,24 @@ impl Default for CredentialStore {
     }
 }
 
-#[cfg(not(test))]
+/// Fail closed before constructing or contacting a native credential entry.
+#[derive(Debug)]
+struct DisabledCredentialBackend;
+
+impl CredentialBackend for DisabledCredentialBackend {
+    fn set(&self, _provider_id: &str, _secret: &str) -> Result<()> {
+        anyhow::bail!("OS credential store access is disabled")
+    }
+
+    fn get(&self, _provider_id: &str) -> Result<Option<String>> {
+        anyhow::bail!("OS credential store access is disabled")
+    }
+
+    fn delete(&self, _provider_id: &str) -> Result<CredentialDeleteOutcome> {
+        anyhow::bail!("OS credential store access is disabled")
+    }
+}
+
 #[derive(Debug)]
 struct NativeCredentialBackend;
 
@@ -547,15 +572,16 @@ fn native_credential_backend() -> Arc<dyn CredentialBackend> {
     Arc::new(MemoryCredentialBackend::default())
 }
 
-#[cfg(not(test))]
 impl NativeCredentialBackend {
     fn entry(provider_id: &str) -> Result<keyring::Entry> {
+        if CredentialStore::native_access_disabled() {
+            anyhow::bail!("OS credential store access is disabled");
+        }
         keyring::Entry::new(KEYRING_SERVICE, provider_id)
             .with_context(|| format!("OS credential store is unavailable for {provider_id}"))
     }
 }
 
-#[cfg(not(test))]
 impl CredentialBackend for NativeCredentialBackend {
     fn set(&self, provider_id: &str, secret: &str) -> Result<()> {
         Self::entry(provider_id)?
@@ -646,6 +672,56 @@ impl CredentialBackend for MemoryCredentialBackend {
 mod tests {
     use super::*;
     use crate::session::SessionStore;
+
+    #[tokio::test]
+    async fn isolated_verifier_disables_all_native_credential_operations() {
+        crate::util::test_env::with_var_async("BONSAI_DISABLE_KEYRING", Some("1"), async {
+            let home = tempfile::tempdir().unwrap();
+            let store = CredentialStore::with_home(home.path());
+            // Exercise the production backend too, not the test memory stand-in.
+            let native = NativeCredentialBackend;
+            assert!(native.set("test", "synthetic").is_err());
+            assert!(native.get("test").is_err());
+            assert!(native.delete("test").is_err());
+            assert!(
+                store
+                    .set(&CredentialSource::Keyring, "test", "synthetic")
+                    .await
+                    .is_err()
+            );
+            assert!(store.get(&CredentialSource::Keyring, "test").await.is_err());
+            assert!(
+                store
+                    .delete(&CredentialSource::Keyring, "test")
+                    .await
+                    .is_err()
+            );
+            store
+                .set(&CredentialSource::File, "test", "synthetic")
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .get(&CredentialSource::File, "test")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("synthetic")
+            );
+            assert_eq!(
+                store.delete(&CredentialSource::File, "test").await.unwrap(),
+                CredentialDeleteOutcome::Deleted
+            );
+            assert!(
+                store
+                    .get(&CredentialSource::File, "test")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn memory_store_round_trips_and_deletes_without_exposing_debug_data() {
