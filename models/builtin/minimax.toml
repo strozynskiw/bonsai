@@ -65,8 +65,11 @@ remote_model = "MiniMax-M2"
 endpoint_path = "v1/messages"
 token_counter = "anthropic-count-tokens"
 max_tokens = 16000
-context_window = 196608
-output_limit = 128000
+context_window = 204800
+output_limit = 131072
+# models.dev's M2 row lists only input/output rates while MiniMax publishes
+# M2 cache rates, so keep them explicit.
+pinned_fields = ["pricing"]
 pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 30000, cache_write_micros_per_million = 375000 }
 reasoning_options = []
 
