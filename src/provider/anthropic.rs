@@ -2715,6 +2715,121 @@ mod tests {
         assert_eq!(count_cache_control(&second), 3);
     }
 
+    /// Compare the actual serialized prefix, retaining message boundaries and
+    /// cache markers; stripping those would hide the regression in #27.
+    fn rolling_history_wire_prefix(body: &Value) -> Vec<u8> {
+        let messages = body["messages"].as_array().unwrap();
+        let last_message = messages.last().unwrap();
+        assert_eq!(last_message["role"], "user");
+        let blocks = last_message["content"].as_array().unwrap();
+        let (state, history) = blocks.split_last().unwrap();
+        assert!(is_project_state_block(state));
+        assert!(state.get("cache_control").is_none());
+        assert_eq!(
+            history.last().unwrap()["cache_control"],
+            json!({"type": "ephemeral"}),
+            "the checkpoint must stay on the stable block merged before state"
+        );
+
+        let wire = serde_json::to_vec(body).unwrap();
+        let state_bytes = serde_json::to_vec(state).unwrap();
+        let state_start = wire
+            .windows(state_bytes.len())
+            .position(|bytes| bytes == state_bytes)
+            .expect("the serialized request must contain its mutable state block");
+        wire[..state_start].to_vec()
+    }
+
+    #[test]
+    fn rolling_history_wire_bytes_stay_stable_with_merged_user_messages() {
+        let provider = rolling_history_cache_provider();
+        let request = |state: &str| {
+            provider
+                .request_body(
+                    &[
+                        system_message("stable instructions"),
+                        user_message("Read LICENSE"),
+                        user_message("Report its license — keep it brief."),
+                        named_user_message(
+                            crate::context::PROJECT_STATE_MESSAGE_NAME,
+                            &transform::volatile_context_user_text(state),
+                        ),
+                    ],
+                    &[sample_tool()],
+                )
+                .unwrap()
+        };
+        let state = format!("{VOLATILE_HEADING}\n- git: clean");
+        let first = request(&state);
+        let repeated = request(&state);
+        let updated = request(&format!("{VOLATILE_HEADING}\n- git: dirty"));
+
+        assert_eq!(first["messages"].as_array().unwrap().len(), 1);
+        let blocks = first["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3, "both user messages and state must merge");
+        assert_eq!(blocks[0]["text"], "Read LICENSE");
+        assert_eq!(blocks[1]["text"], "Report its license — keep it brief.");
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&repeated).unwrap(),
+            "an unchanged request must be byte-identical"
+        );
+        assert_ne!(first, updated, "the updated state must reach the wire");
+        assert_eq!(
+            rolling_history_wire_prefix(&first),
+            rolling_history_wire_prefix(&updated),
+            "changing mutable state must preserve the serialized history prefix"
+        );
+    }
+
+    #[test]
+    fn rolling_history_wire_bytes_stay_stable_with_merged_parallel_tool_results() {
+        let provider = rolling_history_cache_provider();
+        let request = |state: &str| {
+            provider
+                .request_body(
+                    &[
+                        system_message("stable instructions"),
+                        user_message("Read LICENSE and README.md"),
+                        tool_call_message("call-1", "read", r#"{"path":"LICENSE"}"#),
+                        tool_call_message("call-2", "read", r#"{"path":"README.md"}"#),
+                        tool_result_message("call-1", "MIT License\nCopyright \"Bonsai\""),
+                        tool_result_message("call-2", "# Bonsai\nRust TUI — coding agent"),
+                        named_user_message(
+                            crate::context::PROJECT_STATE_MESSAGE_NAME,
+                            &transform::volatile_context_user_text(state),
+                        ),
+                    ],
+                    &[sample_tool()],
+                )
+                .unwrap()
+        };
+        let state = format!("{VOLATILE_HEADING}\n- read coverage: LICENSE");
+        let first = request(&state);
+        let repeated = request(&state);
+        let updated = request(&format!(
+            "{VOLATILE_HEADING}\n- read coverage: LICENSE, README.md"
+        ));
+
+        assert_eq!(first["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(first["messages"][1]["content"].as_array().unwrap().len(), 2);
+        let blocks = first["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3, "both tool results and state must merge");
+        assert_eq!(blocks[0]["tool_use_id"], "call-1");
+        assert_eq!(blocks[1]["tool_use_id"], "call-2");
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&repeated).unwrap(),
+            "an unchanged request must be byte-identical"
+        );
+        assert_ne!(first, updated, "the updated state must reach the wire");
+        assert_eq!(
+            rolling_history_wire_prefix(&first),
+            rolling_history_wire_prefix(&updated),
+            "changing mutable state must preserve the serialized tool-result prefix"
+        );
+    }
+
     #[test]
     fn project_state_cache_detection_accepts_every_envelope_generation() {
         for prefix in [
