@@ -1169,10 +1169,14 @@ pub(super) fn image_user_message(
     let image_part = match crate::provider::transform::unsupported_media_type_placeholder(mime_type)
     {
         Some(placeholder) => ChatCompletionRequestUserMessageContentPart::Text(
-            ChatCompletionRequestMessageContentPartText { text: placeholder },
+            ChatCompletionRequestMessageContentPartText {
+                prompt_cache_breakpoint: None,
+                text: placeholder,
+            },
         ),
         None => ChatCompletionRequestUserMessageContentPart::ImageUrl(
             ChatCompletionRequestMessageContentPartImage {
+                prompt_cache_breakpoint: None,
                 image_url: ImageUrl {
                     url: format!("data:{mime_type};base64,{base64_data}"),
                     detail: None,
@@ -1184,6 +1188,7 @@ pub(super) fn image_user_message(
         content: ChatCompletionRequestUserMessageContent::Array(vec![
             ChatCompletionRequestUserMessageContentPart::Text(
                 ChatCompletionRequestMessageContentPartText {
+                    prompt_cache_breakpoint: None,
                     text: "Here is the image content you requested to view:".to_string(),
                 },
             ),

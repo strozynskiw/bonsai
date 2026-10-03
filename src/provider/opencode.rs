@@ -2017,6 +2017,7 @@ mod tests {
             content: ChatCompletionRequestUserMessageContent::Array(vec![
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
+                        prompt_cache_breakpoint: None,
                         image_url: ImageUrl {
                             url: "data:image/png;base64,AAAA".to_string(),
                             detail: None,
@@ -2038,6 +2039,7 @@ mod tests {
             content: ChatCompletionRequestUserMessageContent::Array(vec![
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
+                        prompt_cache_breakpoint: None,
                         image_url: ImageUrl {
                             url: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=".to_string(),
                             detail: None,

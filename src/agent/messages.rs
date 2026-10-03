@@ -199,6 +199,7 @@ pub(super) fn user_message_with_images(
         Vec::with_capacity(1 + images.len());
     parts.push(ChatCompletionRequestUserMessageContentPart::Text(
         ChatCompletionRequestMessageContentPartText {
+            prompt_cache_breakpoint: None,
             text: text.to_string(),
         },
     ));
@@ -209,10 +210,14 @@ pub(super) fn user_message_with_images(
         let part = match crate::provider::transform::unsupported_media_type_placeholder(&image.mime)
         {
             Some(placeholder) => ChatCompletionRequestUserMessageContentPart::Text(
-                ChatCompletionRequestMessageContentPartText { text: placeholder },
+                ChatCompletionRequestMessageContentPartText {
+                    prompt_cache_breakpoint: None,
+                    text: placeholder,
+                },
             ),
             None => ChatCompletionRequestUserMessageContentPart::ImageUrl(
                 ChatCompletionRequestMessageContentPartImage {
+                    prompt_cache_breakpoint: None,
                     image_url: ImageUrl {
                         url: format!("data:{};base64,{}", image.mime, image.base64),
                         detail: None,
@@ -278,6 +283,7 @@ mod image_message_tests {
         let json = serde_json::to_string(&message).unwrap();
         assert!(!json.contains("data:image/svg+xml"));
         assert!(!json.contains("image_url"));
+        assert!(!json.contains("prompt_cache_breakpoint"));
         assert!(json.contains("unsupported image format"));
     }
 
@@ -286,5 +292,6 @@ mod image_message_tests {
         let message = user_message_with_images("look at this", &[attachment("image/png")]);
         let json = serde_json::to_string(&message).unwrap();
         assert!(json.contains("data:image/png;base64,QUJD"));
+        assert!(!json.contains("prompt_cache_breakpoint"));
     }
 }
