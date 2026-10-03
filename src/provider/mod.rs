@@ -17,7 +17,7 @@ pub(crate) mod test_utils;
 mod think_tags;
 mod token;
 mod tool_calls;
-mod transform;
+pub(crate) mod transform;
 mod usage;
 
 pub use auth::{AuthInput, AuthorizeOutcome};
@@ -42,7 +42,7 @@ pub(crate) use request_preview::{
 pub(crate) use token::PromptEstimatorCacheKey;
 pub use token::{
     EstimateConfidence, ModelPricing, ModelPricingSchedule, ModelPricingTier, PromptEstimate,
-    PromptEstimator, TokenCounterKind,
+    PromptEstimator, TokenCounterKind, UtcPricingWindow,
 };
 
 use std::error::Error as StdError;

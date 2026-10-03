@@ -75,6 +75,7 @@ impl AgentTool {
         &self,
         args: serde_json::Value,
         cancellation: CancellationToken,
+        remaining_billed_tokens: Option<u64>,
     ) -> Result<ToolOutput> {
         let AgentToolArgs {
             agent,
@@ -93,6 +94,11 @@ impl AgentTool {
             );
         }
         if run_in_background && self.runner.has_background_wake() {
+            if remaining_billed_tokens.is_some() {
+                anyhow::bail!(
+                    "run_in_background is unavailable while a cumulative billed-token hard limit is configured; run the subagent synchronously so its allowance can be enforced and absorbed before more work starts."
+                );
+            }
             if grants_mutation {
                 anyhow::bail!(
                     "run_in_background is only supported for read-only subagents; run mutating subagents synchronously so permission prompts and edits stay in the active turn."
@@ -117,7 +123,11 @@ impl AgentTool {
         }
         let (result, usage, usage_turns, delegated_read_evidence) = self
             .runner
-            .run_new(resolved.into_run_spec(prompt), cancellation)
+            .run_new_with_billed_token_budget(
+                resolved.into_run_spec(prompt),
+                cancellation,
+                remaining_billed_tokens,
+            )
             .await;
         let (text, status) = match result {
             Ok(text) => (text, crate::output::ToolExecutionStatus::Succeeded),
@@ -420,7 +430,8 @@ read-only scans. Custom agents receive only their declared tools. All paths must
         // No execution context here, so no parent token is available — fall back
         // to a detached one. The run loop always calls `execute_with_context`,
         // which forwards the real token.
-        self.run_delegation(args, CancellationToken::new()).await
+        self.run_delegation(args, CancellationToken::new(), None)
+            .await
     }
 
     async fn execute_with_context(
@@ -431,6 +442,7 @@ read-only scans. Custom agents receive only their declared tools. All paths must
         // Forward the parent's cancellation token so a user cancel reaches the
         // nested run's own cooperative checks, not only via future-drop.
         let cancellation = context.cancellation_token().unwrap_or_default();
-        self.run_delegation(args, cancellation).await
+        self.run_delegation(args, cancellation, context.remaining_billed_tokens())
+            .await
     }
 }

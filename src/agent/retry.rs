@@ -268,6 +268,18 @@ impl Agent {
     pub(super) fn session_budget_exhaustion(
         &self,
     ) -> Option<crate::run_budget::RunBudgetExhaustion> {
+        if let (Some(limit_tokens), Some(used_tokens)) = (
+            self.budget.max_session_billed_tokens,
+            self.usage.exact_session_billed_tokens(),
+        ) && used_tokens >= limit_tokens
+        {
+            return Some(
+                crate::run_budget::RunBudgetExhaustion::SessionBilledTokens {
+                    limit_tokens,
+                    used_tokens,
+                },
+            );
+        }
         if let Some(limit) = self.budget.max_session_turns {
             let used = self.usage.session_turn_count();
             if used >= limit {

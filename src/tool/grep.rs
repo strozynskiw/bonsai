@@ -13,7 +13,8 @@ use crate::tool::schema::{
     string_enum_property, string_property,
 };
 use crate::tool::{
-    ExistingProjectPath, ProjectPathResolver, ReadTracker, Tool, ToolOutput, output, search,
+    ExistingProjectPath, PathEvidence, ProjectPathResolver, ReadTracker, Tool, ToolOutput,
+    ToolPathError, output, search,
 };
 
 /// Default cap on grep's joined model-visible output, so one broad content
@@ -70,6 +71,8 @@ struct GrepArgs {
     /// Cap on the joined output in characters. Default [`MAX_GREP_OUTPUT_CHARS`].
     #[serde(default = "default_max_chars")]
     max_chars: usize,
+    #[serde(default)]
+    recheck: bool,
 }
 
 fn default_limit() -> usize {
@@ -144,6 +147,7 @@ fn coerce_grep_aliases(args: &mut serde_json::Value) -> Vec<RepairNote> {
 pub struct GrepTool {
     project_root: PathBuf,
     read_tracker: ReadTracker,
+    path_evidence: Option<PathEvidence>,
 }
 
 impl GrepTool {
@@ -151,7 +155,13 @@ impl GrepTool {
         Self {
             project_root,
             read_tracker,
+            path_evidence: None,
         }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        self.path_evidence = Some(path_evidence);
+        self
     }
 
     fn matches_type(path: &std::path::Path, type_: &Option<String>) -> bool {
@@ -260,6 +270,12 @@ impl Tool for GrepTool {
                         None,
                     ),
                 ),
+                (
+                    "recheck",
+                    boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["pattern"],
         )
@@ -274,8 +290,21 @@ impl Tool for GrepTool {
         search::ensure_pattern_present(&args.pattern)?;
         search::ensure_limit_nonzero(args.limit)?;
 
-        let resolved_roots = resolve_search_roots(&self.project_root, args.path.as_deref())?;
+        let resolved_roots = resolve_search_roots(
+            &self.project_root,
+            self.path_evidence.as_ref(),
+            args.path.as_deref(),
+            args.recheck,
+        )?;
+        if resolved_roots.roots.is_empty()
+            && let Some(reused) = resolved_roots.reused_missing_paths.first()
+        {
+            return Ok(ToolOutput::MissingPathReuse {
+                text: reused.render_reuse(),
+            });
+        }
         let skipped_missing_paths = resolved_roots.skipped_missing_paths;
+        let reused_missing_paths = resolved_roots.reused_missing_paths;
 
         let respect_gitignore = search::respect_gitignore("BONSAI_GREP_RESPECT_GITIGNORE");
         let glob_pattern = search::compile_glob(args.glob.as_deref(), None)?;
@@ -400,6 +429,7 @@ impl Tool for GrepTool {
         if matches.is_empty() {
             let mut result = "No matches found".to_string();
             append_skipped_missing_paths(&mut result, &skipped_missing_paths);
+            append_reused_missing_paths(&mut result, &reused_missing_paths);
             return Ok(ToolOutput::Text(result));
         }
         let body = matches.join("\n");
@@ -412,6 +442,7 @@ impl Tool for GrepTool {
             result.push_str(&search::format_truncation(args.limit, None));
         }
         append_skipped_missing_paths(&mut result, &skipped_missing_paths);
+        append_reused_missing_paths(&mut result, &reused_missing_paths);
         // Content mode is the only path that returns file *contents* — text the
         // agent did not deliberately open, swept from across the tree. Frame it
         // as untrusted data (P3) so the "not instructions" boundary rides along
@@ -432,6 +463,7 @@ impl Tool for GrepTool {
 struct ResolvedSearchRoots {
     roots: Vec<ExistingProjectPath>,
     skipped_missing_paths: Vec<String>,
+    reused_missing_paths: Vec<crate::tool::MissingPathEvidence>,
 }
 
 /// Resolve the `path` argument into one or more existing search roots.
@@ -442,13 +474,26 @@ struct ResolvedSearchRoots {
 /// spaces still works. If that fails, every existing whitespace-separated token
 /// becomes a search root and missing tokens are reported in the tool output. If
 /// no token resolves, the original single-path error is surfaced.
-fn resolve_search_roots(project_root: &Path, raw: Option<&str>) -> Result<ResolvedSearchRoots> {
-    let resolver = || ProjectPathResolver::new(project_root).action("search");
+fn resolve_search_roots(
+    project_root: &Path,
+    path_evidence: Option<&PathEvidence>,
+    raw: Option<&str>,
+    recheck: bool,
+) -> Result<ResolvedSearchRoots> {
+    let resolver = || {
+        let resolver = ProjectPathResolver::new(project_root)
+            .action("search")
+            .recheck(recheck);
+        path_evidence
+            .map(|evidence| resolver.path_evidence(evidence))
+            .unwrap_or(resolver)
+    };
 
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return Ok(ResolvedSearchRoots {
             roots: vec![resolver().resolve_existing_or_project_root(None)?],
             skipped_missing_paths: Vec::new(),
+            reused_missing_paths: Vec::new(),
         });
     };
 
@@ -457,6 +502,7 @@ fn resolve_search_roots(project_root: &Path, raw: Option<&str>) -> Result<Resolv
             return Ok(ResolvedSearchRoots {
                 roots: vec![path],
                 skipped_missing_paths: Vec::new(),
+                reused_missing_paths: Vec::new(),
             });
         }
         Err(err) => err,
@@ -466,21 +512,48 @@ fn resolve_search_roots(project_root: &Path, raw: Option<&str>) -> Result<Resolv
     if tokens.len() > 1 {
         let mut roots = Vec::with_capacity(tokens.len());
         let mut skipped_missing_paths = Vec::new();
+        let mut reused_missing_paths = Vec::new();
         for token in tokens {
             match resolver().resolve_existing(token) {
                 Ok(path) => roots.push(path),
+                Err(ToolPathError::ReusedMissingPath { evidence }) => {
+                    reused_missing_paths.push(evidence);
+                }
                 Err(_) => skipped_missing_paths.push(token.to_string()),
             }
         }
-        if !roots.is_empty() {
+        if !roots.is_empty() || !reused_missing_paths.is_empty() {
             return Ok(ResolvedSearchRoots {
                 roots,
                 skipped_missing_paths,
+                reused_missing_paths,
             });
         }
     }
 
     Err(single_err.into())
+}
+
+fn append_reused_missing_paths(
+    result: &mut String,
+    reused_missing_paths: &[crate::tool::MissingPathEvidence],
+) {
+    if reused_missing_paths.is_empty() {
+        return;
+    }
+    let paths = reused_missing_paths
+        .iter()
+        .map(|evidence| evidence.project_relative_path().display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!(
+        "[reused missing-path evidence] Skipped missing search roots: {paths}. Pass recheck: true after creating or restoring them."
+    );
+    let _ = write!(
+        result,
+        "\n\n{}",
+        crate::tool::wrap_untrusted_content("project path evidence", &body)
+    );
 }
 
 fn append_skipped_missing_paths(result: &mut String, skipped_missing_paths: &[String]) {
@@ -1053,5 +1126,31 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn grep_mixed_roots_keeps_results_when_missing_evidence_is_reused() {
+        let fixture = TestFixture::new();
+        fixture.create_file("src/a.rs", "needle\n");
+        let evidence = crate::tool::PathEvidence::new(&fixture.project_root).unwrap();
+        let tool = GrepTool::new(fixture.project_root.clone(), fixture.read_tracker.clone())
+            .with_path_evidence(evidence);
+
+        let first = tool
+            .execute(json!({"pattern": "needle", "path": "src stale"}))
+            .await
+            .unwrap();
+        assert!(grep_body(first).contains("Skipped missing search path: stale"));
+
+        let second = tool
+            .execute(json!({"pattern": "needle", "path": "src ./stale"}))
+            .await
+            .unwrap();
+        let output = grep_body(second);
+        assert!(output.contains("src/a.rs"), "output: {output}");
+        assert!(
+            output.contains("[reused missing-path evidence]"),
+            "output: {output}"
+        );
     }
 }

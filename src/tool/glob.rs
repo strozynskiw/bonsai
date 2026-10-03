@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::tool::schema::{
     bounded_integer_property, closed_object, parse_args, path_property, string_property,
 };
-use crate::tool::{ProjectPathResolver, Tool, ToolOutput, search};
+use crate::tool::{PathEvidence, ProjectPathResolver, Tool, ToolOutput, ToolPathError, search};
 
 #[derive(Deserialize)]
 struct GlobArgs {
@@ -17,6 +17,8 @@ struct GlobArgs {
     path: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
+    #[serde(default)]
+    recheck: bool,
 }
 
 fn default_limit() -> usize {
@@ -25,11 +27,20 @@ fn default_limit() -> usize {
 
 pub struct GlobTool {
     project_root: PathBuf,
+    path_evidence: Option<PathEvidence>,
 }
 
 impl GlobTool {
     pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root }
+        Self {
+            project_root,
+            path_evidence: None,
+        }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        self.path_evidence = Some(path_evidence);
+        self
     }
 }
 
@@ -68,6 +79,12 @@ impl Tool for GlobTool {
                         None,
                     ),
                 ),
+                (
+                    "recheck",
+                    crate::tool::schema::boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["pattern"],
         )
@@ -79,9 +96,20 @@ impl Tool for GlobTool {
         search::ensure_pattern_present(&args.pattern)?;
         search::ensure_limit_nonzero(args.limit)?;
 
-        let search_path = ProjectPathResolver::new(&self.project_root)
+        let mut resolver = ProjectPathResolver::new(&self.project_root)
             .action("search")
-            .resolve_existing_or_project_root(args.path.as_deref())?;
+            .recheck(args.recheck);
+        if let Some(evidence) = self.path_evidence.as_ref() {
+            resolver = resolver.path_evidence(evidence);
+        }
+        let search_path = match resolver.resolve_existing_or_project_root(args.path.as_deref()) {
+            Err(ToolPathError::ReusedMissingPath { evidence }) => {
+                return Ok(ToolOutput::MissingPathReuse {
+                    text: evidence.render_reuse(),
+                });
+            }
+            result => result?,
+        };
 
         let respect_gitignore = search::respect_gitignore("BONSAI_GLOB_RESPECT_GITIGNORE");
 

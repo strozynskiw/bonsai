@@ -18,6 +18,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Test migration immutability guard
+        run: bash scripts/test_check_migrations_immutable.sh
+      - name: Verify released migrations are immutable
+        run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null || true)
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "::notice::No previous release tag; skipping migration history check."
+            exit 0
+          fi
+          bash scripts/check-migrations-immutable.sh --history "$PREVIOUS_TAG" HEAD
       - name: Set up Node.js for TypeScript acceptance
         uses: actions/setup-node@v7
         with:
@@ -137,7 +149,7 @@ jobs:
             )
           fi
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bonsai-${{ matrix.target }}
           path: |
@@ -159,7 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: .
           format: spdx-json
@@ -187,7 +199,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bonsai-*
           merge-multiple: true
@@ -299,7 +311,7 @@ jobs:
           printf '%s\n' "$TAG" > homebrew-release-metadata/tag
           printf '%s\n' "$RELEASE_SHA" > homebrew-release-metadata/sha
       - name: Upload Homebrew release metadata
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: homebrew-release-metadata
           path: homebrew-release-metadata

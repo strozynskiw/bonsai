@@ -12,7 +12,7 @@ use crate::tool::output::cap_text;
 use crate::tool::schema::{
     bounded_integer_property, closed_object, parse_args, string_enum_property, string_property,
 };
-use crate::tool::{ProjectPathResolver, Tool, ToolOutput, search};
+use crate::tool::{PathEvidence, ProjectPathResolver, Tool, ToolOutput, ToolPathError, search};
 
 const MAX_OUTPUT_CHARS: usize = 20_000;
 
@@ -30,6 +30,8 @@ struct SymbolSearchArgs {
     language: String,
     #[serde(default = "default_limit")]
     limit: usize,
+    #[serde(default)]
+    recheck: bool,
 }
 
 fn default_language() -> String {
@@ -48,11 +50,20 @@ struct SymbolMatch {
 
 pub struct SymbolSearchTool {
     project_root: PathBuf,
+    path_evidence: Option<PathEvidence>,
 }
 
 impl SymbolSearchTool {
     pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root }
+        Self {
+            project_root,
+            path_evidence: None,
+        }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        self.path_evidence = Some(path_evidence);
+        self
     }
 }
 
@@ -99,6 +110,12 @@ impl Tool for SymbolSearchTool {
                     "limit",
                     bounded_integer_property("Maximum number of symbols to return", Some(1), None),
                 ),
+                (
+                    "recheck",
+                    crate::tool::schema::boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &[],
         )
@@ -114,9 +131,20 @@ impl Tool for SymbolSearchTool {
 
         let kind_filter = parse_symbol_kind(args.kind.as_deref())?;
 
-        let search_path = ProjectPathResolver::new(&self.project_root)
+        let mut resolver = ProjectPathResolver::new(&self.project_root)
             .action("search")
-            .resolve_existing_or_project_root(args.path.as_deref())?;
+            .recheck(args.recheck);
+        if let Some(evidence) = self.path_evidence.as_ref() {
+            resolver = resolver.path_evidence(evidence);
+        }
+        let search_path = match resolver.resolve_existing_or_project_root(args.path.as_deref()) {
+            Err(ToolPathError::ReusedMissingPath { evidence }) => {
+                return Ok(ToolOutput::MissingPathReuse {
+                    text: evidence.render_reuse(),
+                });
+            }
+            result => result?,
+        };
 
         let single_file = search_path.canonical_path().is_file();
         let single_file_language = single_file

@@ -1232,6 +1232,7 @@ async fn eviction_replaces_closed_episode_with_card_marker() {
         .unwrap();
 
     assert_eq!(evicted, 1);
+    assert_eq!(agent.episode_eviction_count(), 1);
     assert!(agent.messages.len() < before_len);
     assert_wire_valid(&agent.messages);
 
@@ -1554,6 +1555,35 @@ async fn pointer_archived_with_its_target_does_not_block_episode_eviction() {
 
     assert_eq!(evicted, 1);
     assert_eq!(episodes_of(&store)[0].status(), EpisodeStatus::Evicted);
+}
+
+#[tokio::test]
+async fn successor_human_request_precedes_following_harness_controls() {
+    let (mut agent, store, _fixture) = episode_agent_with_responses(vec![]);
+    push_user_turn(&mut agent, "work on topic A");
+    set_title(&mut agent, "call-ta", "Topic A");
+    push_bulky_tool_group(&mut agent, "call-a1", "src/a.rs", 20_000);
+    push_bulky_tool_group(&mut agent, "call-a2", "src/b.rs", 20_000);
+    push_user_turn(&mut agent, "now switch to topic B");
+    agent.push_harness_note("ambient control for topic B");
+    set_title(&mut agent, "call-tb", "Topic B");
+
+    let episodes = episodes_of(&store);
+    assert_eq!(episodes.len(), 2);
+    assert_eq!(episodes[1].goal(), "now switch to topic B");
+    let successor_start = agent
+        .message_ids
+        .iter()
+        .position(|id| id == episodes[1].start_stable_id())
+        .unwrap();
+    assert!(matches!(
+        agent.messages[successor_start],
+        ChatCompletionRequestMessage::User(ref user) if user.name.is_none()
+    ));
+    assert!(matches!(
+        agent.messages.get(successor_start + 1),
+        Some(ChatCompletionRequestMessage::System(_))
+    ));
 }
 
 #[tokio::test]

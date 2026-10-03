@@ -2,6 +2,7 @@
 """Loopback OpenAI-compatible stream used by real-surface TUI tests."""
 
 import json
+import socket
 import sys
 import threading
 import time
@@ -11,6 +12,16 @@ from pathlib import Path
 
 class StreamingServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # http.server's bind calls socket.getfqdn(host), a reverse-DNS lookup
+        # that can stall for tens of seconds on hosts without working mDNS.
+        # Loopback binds never need a hostname, so bind directly.
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
 
     def __init__(self, address):
         super().__init__(address, StreamingHandler)

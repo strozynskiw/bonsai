@@ -174,18 +174,12 @@ impl PlanDoc {
     }
 
     /// Appends a phase unless one with the same name (case-insensitive)
-    /// already exists. New phases append in arrival order.
+    /// already exists. Test fixture convenience over the production
+    /// `add_phase_with_tasks_checked` path so fixtures exercise the same
+    /// validation the plan tools use; duplicates and blanks are not created.
     #[cfg(test)]
     fn add_phase(&mut self, name: &str) {
-        let name = name.trim();
-        if name.is_empty() || self.query().phase_index(name).is_some() {
-            return;
-        }
-        self.phases.push(PlanPhase {
-            name: name.to_string(),
-            tasks: Vec::new(),
-        });
-        self.revision += 1;
+        let _ = self.add_phase_with_tasks_checked(name, &[]);
     }
 
     /// Validates and appends a phase with its initial task checklist in one
@@ -296,31 +290,12 @@ impl PlanDoc {
     }
 
     /// Appends a task to the named phase unless an identical one already exists
-    /// in it. The phase must already exist.
+    /// in it. Test fixture convenience over the production
+    /// `insert_task_to_phase` path so fixtures exercise the same validation
+    /// the plan tools use.
     #[cfg(test)]
     fn add_task_to_phase(&mut self, phase: &str, text: &str) -> anyhow::Result<String> {
-        let text = text.trim();
-        if text.is_empty() {
-            anyhow::bail!("task text must not be empty");
-        }
-        let index = self
-            .query()
-            .phase_index(phase)
-            .ok_or_else(|| anyhow::anyhow!("No plan phase named '{}' found.", phase.trim()))?;
-        let tasks = &mut self.phases[index].tasks;
-        if tasks.iter().any(|task| task.text == text) {
-            return Ok(format!(
-                "Task already exists in phase ({} tasks).",
-                tasks.len()
-            ));
-        }
-        tasks.push(PlanTask {
-            text: text.to_string(),
-            done: false,
-        });
-        let count = self.phases[index].tasks.len();
-        self.revision += 1;
-        Ok(format!("Task added to phase ({count} tasks)."))
+        self.insert_task_to_phase(phase, text, InsertPosition::End, None)
     }
 
     /// Inserts a task into the named phase at a position relative to that

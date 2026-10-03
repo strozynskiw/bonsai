@@ -29,11 +29,13 @@ fn running_tool(id: &str) -> ToolActivity {
         id: id.to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"sleep 1"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
         started_at: std::time::Instant::now(),
         finished_at: None,
+        timing: Default::default(),
     }
 }
 
@@ -42,11 +44,13 @@ fn finished_tool(id: &str) -> ToolActivity {
         id: id.to_string(),
         name: "read".to_string(),
         arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Succeeded,
         result: Some("ok".to_string()),
         diff: None,
         started_at: std::time::Instant::now(),
         finished_at: Some(std::time::Instant::now()),
+        timing: Default::default(),
     }
 }
 

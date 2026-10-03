@@ -319,17 +319,16 @@ impl OpenAiCompatibleProvider {
         // stream before it hits the wire. Leaves the leading system prompt — and
         // therefore the cache prefix — byte-stable.
         let demoted = transform::demote_non_leading_system_messages(staged.as_ref());
-        // Vision safety net: a text-only model rejects `image_url` parts with a
-        // 400 (DeepSeek: "unknown variant image_url, expected text"). The
-        // composer gate blocks new pastes, but images already in history
-        // (model switch, resumed session) would otherwise wedge every later
-        // turn. The strip is deterministic per provider instance, so cache
-        // prefixes stay byte-stable.
-        let request_messages = if self.supports_vision {
-            demoted
-        } else {
-            transform::strip_image_parts_for_wire(demoted.as_ref())
-        };
+        // Image safety net (wire-only and deterministic, so cache prefixes
+        // stay byte-stable): a text-only model rejects `image_url` parts with
+        // a 400 (DeepSeek: "unknown variant image_url, expected text"), and a
+        // media type outside the supported set (e.g. `image/svg+xml` from
+        // reading an SVG) 400s even vision models (OpenAI: "The image data
+        // you provided does not represent a valid image"). Images already in
+        // history (model switch, resumed session) would otherwise wedge every
+        // later turn.
+        let request_messages =
+            transform::sanitize_image_parts_for_wire(demoted.as_ref(), self.supports_vision);
 
         request_builder
             .model(&self.model)
@@ -978,6 +977,12 @@ impl Provider for OpenAiCompatibleProvider {
         if !self.api_key.trim().is_empty() {
             builder = builder.header("Authorization", format!("Bearer {}", self.api_key));
         }
+        // OpenCode Go requires a stable conversation identifier for routing and
+        // prompt-cache affinity. The persisted cache key remains stable across
+        // provider rebuilds and session resumes, unlike a per-request UUID.
+        if self.provider_id == OPENCODE_METADATA.id.as_ref() {
+            builder = builder.header("x-opencode-session", &self.prompt_cache_key);
+        }
         if let Some(header) = &self.prompt_cache_header {
             let header =
                 reqwest::header::HeaderName::from_bytes(header.as_bytes()).map_err(|error| {
@@ -1440,6 +1445,14 @@ mod tests {
             "demotion preserves the harness provenance name"
         );
         assert!(
+            messages[2]["content"]
+                .as_str()
+                .is_some_and(|text| text.starts_with(
+                    "[Bonsai harness guidance — not a user request; explicit human messages set task intent]"
+                )),
+            "demotion must also preserve provenance when a local template discards the name"
+        );
+        assert!(
             messages
                 .iter()
                 .skip(1)
@@ -1685,6 +1698,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opencode_go_sends_stable_conversation_session_header() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer sk-opencode"))
+            .and(header("x-opencode-session", "bonsai-opencode-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let session = provider_session("sk-opencode", &server.uri(), "deepseek-v4-flash");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let mut provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN,
+        );
+        provider.set_conversation_cache_key("bonsai-opencode-session");
+
+        let response = provider
+            .chat_stream(
+                &[user_message("hello")],
+                &[],
+                CancellationToken::new(),
+                std::sync::Arc::new(crate::output::StdoutSink),
+            )
+            .await
+            .expect("OpenCode Go-shaped stream succeeds");
+        assert_eq!(response.content, "ok");
+    }
+
+    #[tokio::test]
     async fn xai_cache_route_uses_conversation_header_not_body_field() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1741,6 +1796,11 @@ mod tests {
             .await
             .expect("xAI-shaped stream succeeds");
         assert_eq!(response.content, "ok");
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests[0].headers.get("x-opencode-session").is_none(),
+            "OpenCode Go's routing header must not leak to other compatible providers"
+        );
     }
 
     /// The OpenCode Go gateway 400s a DeepSeek request whose assistant
@@ -1966,6 +2026,53 @@ mod tests {
             ]),
             name: None,
         })
+    }
+
+    fn svg_image_user_message() -> ChatCompletionRequestMessage {
+        use async_openai::types::chat::{
+            ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestUserMessage,
+            ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+            ImageUrl,
+        };
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url: "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=".to_string(),
+                            detail: None,
+                        },
+                    },
+                ),
+            ]),
+            name: None,
+        })
+    }
+
+    #[test]
+    fn request_body_downgrades_unsupported_media_type_for_vision_model() {
+        // Regression (observed live, session #259): `read` on an SVG produced
+        // `data:image/svg+xml;base64,...`, which OpenAI rejects with "The image
+        // data you provided does not represent a valid image" — on this and
+        // every later turn. Even a vision model must never see an unsupported
+        // media type on the wire.
+        let session = provider_session("sk", "http://localhost/v1", "vision-model");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN.with_vision(),
+        );
+
+        let body = provider
+            .request_body(&[user_message("see this"), svg_image_user_message()], &[])
+            .unwrap();
+
+        let serialized = body.to_string();
+        assert!(!serialized.contains("data:image/svg+xml"));
+        assert!(serialized.contains("unsupported image format"));
     }
 
     #[test]
@@ -2627,6 +2734,7 @@ mod tests {
                     default_model: None,
                     default_endpoint_path: Some("chat/completions".into()),
                     default_token_counter: Some(TokenCounterKind::Qwen3),
+                    peak_pricing_windows_utc: Vec::new(),
                     models_dev_provider: Some("opencode-go".parse().unwrap()),
                     model_exclude_prefixes: Vec::new(),
                     reasoning_codec: None,

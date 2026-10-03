@@ -1,0 +1,239 @@
+id = "intent_continuity"
+seed = 406
+repetitions = 1
+
+[budgets]
+max_logical_turns = 20
+max_provider_attempts = 24
+max_duration_ms = 15000
+
+[[tasks]]
+id = "additive_steering_extends_original_work"
+fixture = "fixtures/tiny_project"
+prompt = "Update README.md with the release qualification result."
+queued_messages = ["Also update docs/cli.md with the same qualification result; preserve the original README work."]
+
+[tasks.mock]
+final_response = "Updated both requested documents without dropping the original task."
+final_request_contains = [
+  "Update README.md with the release qualification result.",
+  "Also update docs/cli.md with the same qualification result",
+]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"docs/cli.md"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nintent continuity: release qualified\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"docs/cli.md","content":"# CLI\n\nintent continuity: release qualified\n"}'''
+
+[[tasks.graders]]
+type = "changed-files"
+exact = ["README.md", "docs/cli.md"]
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection", "workspace-mutation"]
+forbidden = ["interaction", "external-access"]
+forbidden_attempts = ["interaction", "external-access"]
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["without dropping the original task"]
+
+[[tasks]]
+id = "superseding_steering_prevents_old_mutation"
+fixture = "fixtures/tiny_project"
+prompt = "Replace README.md with a migration notice."
+queued_messages = ["Stop the requested mutation. Review README.md only and explain its current purpose; do not modify any files."]
+
+[tasks.mock]
+final_response = "Stopped the old mutation and reviewed the existing README without changing it."
+final_request_contains = [
+  "Replace README.md with a migration notice.",
+  "Stop the requested mutation.",
+]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+
+[[tasks.graders]]
+type = "changed-files"
+exact = []
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection"]
+forbidden = ["workspace-mutation", "command-execution", "interaction"]
+forbidden_attempts = ["workspace-mutation", "command-execution", "interaction"]
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["Stopped the old mutation"]
+
+[[tasks]]
+id = "status_request_updates_then_continues"
+fixture = "fixtures/tiny_project"
+prompt = "Add a continuity result to README.md and finish the edit."
+queued_messages = ["Give a concise status update, then continue and finish the original README task."]
+
+[tasks.mock]
+final_response = "Status: inspected the file. Then I continued and finished the original README task."
+final_request_contains = [
+  "Add a continuity result to README.md",
+  "Give a concise status update, then continue",
+]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nstatus steering preserved the original task\n"}'''
+
+[[tasks.graders]]
+type = "changed-files"
+exact = ["README.md"]
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection", "workspace-mutation"]
+forbidden = ["interaction", "external-access"]
+forbidden_attempts = ["interaction", "external-access"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["status steering preserved the original task"]
+
+[[tasks]]
+id = "compaction_preserves_steered_intent"
+fixture = "fixtures/tiny_project"
+prompt = "Carry the release qualification through context pressure and finish README.md."
+queued_messages = ["Additive detail: the final README line must include CONTINUITY_NONCE_182; continue the original work."]
+mock_context_window_tokens = 32000
+min_compactions = 1
+disable_episodes = true
+
+[tasks.mock]
+final_response = "Finished the original task with CONTINUITY_NONCE_182 after compaction."
+tool_turn_content_chars = 12000
+final_request_contains = ["CONTINUITY_NONCE_182"]
+forbidden_request_substrings = ["messages were omitted to fit the context window"]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"pressure/one.txt","content":"phase one\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"pressure/two.txt","content":"phase two\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"pressure/three.txt","content":"phase three\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"pressure/four.txt","content":"phase four\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"pressure/five.txt","content":"phase five\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"pressure/six.txt","content":"phase six\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nrelease qualified: CONTINUITY_NONCE_182\n"}'''
+
+[[tasks.graders]]
+type = "changed-files"
+exact = [
+  "README.md",
+  "pressure/five.txt",
+  "pressure/four.txt",
+  "pressure/one.txt",
+  "pressure/six.txt",
+  "pressure/three.txt",
+  "pressure/two.txt",
+]
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection", "workspace-mutation"]
+forbidden = ["interaction", "external-access"]
+forbidden_attempts = ["interaction", "external-access"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["CONTINUITY_NONCE_182"]
+
+[[tasks]]
+id = "episode_recall_restores_task_evidence"
+fixture = "fixtures/tiny_project"
+prompt = "Finish topic A and wait for the next request."
+mock_context_window_tokens = 64000
+min_episode_evictions = 1
+max_compactions = 0
+cancel_after_provider_attempts = 4
+resume_after_interruption = true
+resume_prompt = "Now switch to topic B, recall topic A, and report its archived detail without restarting topic A."
+
+[tasks.mock]
+final_response = "Recovered the existing topic A evidence without replaying its work: INTENT_ARCHIVE_182."
+tool_turn_content_chars = 6000
+wait_for_cancellation_after_tool_turns = 3
+forbidden_request_substrings = ["<content elided:"]
+final_request_contains = ["[Episode archived]", "INTENT_ARCHIVE_182"]
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "set_session_title"
+arguments = '{"title":"Topic A","episode_action":"new_topic"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"topic-a/detail.txt","content":"the archived detail is INTENT_ARCHIVE_182\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"topic-a/notes.txt","content":"topic A is already complete\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "set_session_title"
+arguments = '{"title":"Topic B","episode_action":"new_topic"}'
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "recall"
+arguments = '{"episode":1}'
+
+[[tasks.graders]]
+type = "changed-files"
+exact = ["topic-a/detail.txt", "topic-a/notes.txt"]
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection", "workspace-mutation", "local-state"]
+forbidden = ["interaction", "external-access"]
+forbidden_attempts = ["interaction", "external-access"]
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["without replaying its work", "INTENT_ARCHIVE_182"]

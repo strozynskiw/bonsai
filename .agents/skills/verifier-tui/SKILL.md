@@ -14,9 +14,10 @@ so a reviewer can replay what was observed.
 
 ## Launching
 
-Build first, then start bonsai in an interactive PTY with the same isolated
-environment the `e2e/` suite uses (no network, no real keys, a seeded
-authorized provider so the TUI opens to chat, not the setup wizard):
+Build first, then start the repository's verifier entry point in an interactive
+PTY. The wrapper allocates the state root, scrubs the inherited environment,
+disables dotenv/model discovery, seeds only the dead mock provider, and retains
+the isolated database plus binary/worktree/exit evidence automatically:
 
 ```sh
 cargo build
@@ -25,12 +26,12 @@ cargo build
 Then in the agent, use `bash interactive:true`:
 
 ```
-env BONSAI_HOME=$(mktemp -d) BONSAI_DISABLE_MODELS_FETCH=1 \
-  OPENAI_COMPATIBLE_BASE_URL='http://127.0.0.1:9/v1' \
-  OPENAI_COMPATIBLE_MODEL='mock-model' \
-  OPENAI_COMPATIBLE_API_KEY='e2e-test' \
-  ./target/debug/bonsai
+./e2e/verifier.sh
 ```
+
+Do not launch `./target/debug/bonsai` directly for surface verification. The
+wrapper refuses a parent/shared `BONSAI_HOME` unless destructive shared-state
+testing is explicitly requested with `--allow-shared-state`.
 
 This returns a `pty-N` ID. Resize it to a workable dimension immediately:
 
@@ -38,8 +39,9 @@ This returns a `pty-N` ID. Resize it to a workable dimension immediately:
 terminal { action: "resize", terminal_id: "pty-1", rows: 40, cols: 140 }
 ```
 
-Wait for the composer meta line to render (the `(Agent|Plan) ·` regex),
-polling with `terminal read` every ~1s.
+Wait once for a semantic terminal change, then read the normalized screen and
+check for the composer meta line (`(Coding|Planning) ·`). Use a bounded wakeable
+`terminal wait`; do not poll redraws.
 
 ## Driving the TUI
 
@@ -54,15 +56,17 @@ and a terminal send of `M-m` is `\x1bm`:
 | Escape | `\x1b` | false |
 | Ctrl+C (interrupt) | use `terminal { action: "interrupt", ... }` | — |
 
-After each send, allow a short settle (0.5–1s), then `terminal read` to
-capture the updated screen.
+After each send, use one wakeable `terminal wait` (up to ~3 seconds), then one
+`terminal read` to capture the updated normalized screen. The wait is keyed to
+semantic screen versions, so spinner/redraw noise does not cause a polling loop.
 
 ### Reading the surface
 
 The `terminal read` output includes a `Normalized screen:` section — the
 vt100-parsed pane content. Use it to check:
 
-- **Composer meta line** (bottom): `● Agent · <model> · <effort> · <provider> [· <policy>]`.
+- **Composer meta line** (bottom): `● Coding · <model> · <effort> · <provider> [· <policy>]`
+  (the persona label is `Planning` on the plan agent).
   The execution-mode policy marker is appended only when non-default
   (`auto-accept` amber, `yolo` red); `default` is quiet. Note the `· default`
   earlier on the line is the *reasoning effort*, not the policy.
@@ -78,29 +82,28 @@ vt100-parsed pane content. Use it to check:
 
 ### Wait + poll pattern
 
-The screen doesn't update instantly. After sending a key sequence, poll with
-`terminal read` until the expected substring appears (or a timeout elapses).
-A ~3s timeout with ~0.5s polls works reliably:
+The screen does not update instantly. Park once on the terminal's current
+semantic version, then inspect the screen after the wake or deadline:
 
 ```
-send keys → sleep 0.5s → read → check for expected substring → repeat until found or timeout
+send keys → terminal wait (wait_seconds: 3) → terminal read → assert
 ```
 
 ## Worked example: execution-mode regression test
 
 The M3.1 checklist, driven through the terminal tool:
 
-1. **Launch** and wait for `● Agent ·` in the meta line
+1. **Launch** and wait for `● Coding ·` in the meta line
 2. **`/autonomy auto-accept`** → meta line shows `· auto-accept`, no `· yolo`
 3. **`/yolo on`** → meta line shows `· yolo`, no `· auto-accept` (this is the regression guard — yolo must not collapse to auto-accept)
 4. **`/autonomy ask`** → neither marker (quiet)
 5. **`/autonomy yolo`** → meta line shows `· yolo` (yolo selectable directly)
 6. **Alt+M** from ask → cycles to `· conservative` (Alt+M walks ask → conservative → balanced → auto-accept; never yolo)
-7. **Tab** → switches to `Plan ·` agent
+7. **Shift+Tab** (`S-Tab`) → switches to the `Planning` agent
 
 Covers: default is quiet → `/autonomy auto-accept` → `/yolo on` is distinct
 (not auto-accept) → `/autonomy ask` clears → `/autonomy yolo` selects directly
-→ Alt+M cycles → Tab switches agent.
+→ Alt+M cycles → Shift+Tab switches agent.
 
 ## Batch testing (CI)
 
@@ -113,13 +116,17 @@ assertion into an `e2e/cases/` script.
 
 ## Notes
 
-- Each run launches the real app, which writes a session to `$BONSAI_HOME`.
-  The mktemp dir is ephemeral; it disappears when the PTY exits.
+- Each run writes only below its wrapper-owned state root. Completed ad-hoc
+  evidence is retained under `target/tui-verification/runs/` (newest 20 runs).
+- The parent session's terminal send calls and normalized reads are the input
+  and screen replay record; the wrapper manifest records binary/worktree
+  identity, child exit state, and the isolated database checksum. Batch runs
+  persist all of those artifacts together under `target/tui-verification/e2e/`.
 - `terminal send` writes raw bytes — there is no key-name abstraction.
   Common escapes: `\x1b` (Escape), `\x1bm` (Alt+M), `\t` (Tab), `\r` (Enter
   without append_enter), `\x03` (Ctrl+C, or use the interrupt action).
-- Give the app a beat after launch (~3s to reach chat-ready) and after each
-  `send` (~1s) before reading, or you race the render.
+- Use wakeable `terminal wait`, never repeated fixed-delay reads, to settle the
+  app after launch or input.
 - The `Normalized screen:` in terminal read output strips ANSI escapes. If
   you need color data, use a separate approach (the e2e/ suite captures with
   `tmux capture-pane -e` for ANSI).

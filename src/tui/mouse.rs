@@ -883,11 +883,13 @@ mod tests {
                     id: "call-1".to_string(),
                     name: "bash".to_string(),
                     arguments: "{}".to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
+                    timing: Default::default(),
                 }],
             }));
         let area = Rect::new(0, 0, 80, 24);
@@ -917,11 +919,13 @@ mod tests {
                     id: "call-1".to_string(),
                     name: "bash".to_string(),
                     arguments: "{}".to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
+                    timing: Default::default(),
                 }],
             }));
         let area = Rect::new(0, 0, 80, 24);
@@ -951,11 +955,13 @@ mod tests {
                     id: "call-1".to_string(),
                     name: "bash".to_string(),
                     arguments: "{\"command\":\"echo hi\"}".to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: Some("ok".to_string()),
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
+                    timing: Default::default(),
                 }],
             }));
         let area = Rect::new(0, 0, 80, 24);

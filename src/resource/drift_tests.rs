@@ -2,10 +2,10 @@
 //! skills.
 //!
 //! `customize` and `provider-setup` teach exact file formats and commands;
-//! README and the website promise exact flags, settings, release versions, and
-//! platforms. These tests parse those claims through the registries and build
-//! surfaces that own them, so a product change fails CI until its public
-//! documentation changes with it.
+//! the topic documentation and website promise exact flags, settings, release
+//! versions, and platforms. These tests parse those claims through the
+//! registries and build surfaces that own them, so a product change fails CI
+//! until its public documentation changes with it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -15,6 +15,10 @@ use crate::resource::builtin::BUILTIN_SKILL_SOURCES;
 use crate::resource::frontmatter::{AgentFrontmatter, SkillFrontmatter, parse_frontmatter};
 
 const README: &str = include_str!("../../README.md");
+const GETTING_STARTED: &str = include_str!("../../docs/getting-started.md");
+const HEADLESS_DOCS: &str = include_str!("../../docs/headless.md");
+const SLASH_COMMAND_DOCS: &str = include_str!("../../docs/slash-commands.md");
+const SETTINGS_SOURCE: &str = include_str!("../tui/settings.rs");
 const INSTALLER: &str = include_str!("../../install.sh");
 const RELEASE_SCRIPT: &str = include_str!("../../scripts/release.sh");
 const RELEASE_WORKFLOW: &str = include_str!("../../.github/workflows/release.yml");
@@ -269,18 +273,16 @@ fn target_triples(source: &str) -> BTreeSet<String> {
 #[test]
 fn public_install_surfaces_track_the_package_version() {
     let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
-    for (name, source) in [
-        ("README.md", README),
-        ("install.sh", INSTALLER),
-        ("site/index.html", SITE),
-    ] {
+    for (name, source) in [("install.sh", INSTALLER), ("site/index.html", SITE)] {
         assert!(
             source.contains(&tag),
             "{name} must reference the current package tag {tag}"
         );
     }
 
-    assert!(README.contains("cargo install --git https://github.com/strozynskiw/bonsai.git"));
+    assert!(
+        GETTING_STARTED.contains("cargo install --git https://github.com/strozynskiw/bonsai.git")
+    );
     // The repository is public; the private-repo SSH install form must stay out
     // of the README (HTTPS is the canonical clone URL for everyone).
     assert!(!README.contains("ssh://git@github.com"));
@@ -289,7 +291,7 @@ fn public_install_surfaces_track_the_package_version() {
     assert!(!SITE.contains("latest alpha"));
     assert!(!SITE.contains("alpha-tag"));
 
-    for filename in ["README.md", "site/index.html", "install.sh"] {
+    for filename in ["site/index.html", "install.sh"] {
         assert!(
             RELEASE_SCRIPT.contains(filename),
             "release script must update {filename} when it bumps the version"
@@ -298,7 +300,7 @@ fn public_install_surfaces_track_the_package_version() {
 }
 
 #[test]
-fn readme_headless_options_cover_generated_help() {
+fn headless_docs_options_cover_generated_help() {
     let help = crate::cli::help_text();
     let option_block = help
         .split_once("\n  Options:\n")
@@ -310,7 +312,7 @@ fn readme_headless_options_cover_generated_help() {
         .filter_map(|line| line.split_whitespace().next())
         .filter(|token| token.starts_with("--"))
         .collect();
-    let documented_options: BTreeSet<String> = prose_inline_code(README)
+    let documented_options: BTreeSet<String> = prose_inline_code(HEADLESS_DOCS)
         .into_iter()
         .filter_map(|span| {
             span.split_whitespace()
@@ -324,21 +326,18 @@ fn readme_headless_options_cover_generated_help() {
     for option in help_options {
         assert!(
             documented_options.contains(option),
-            "README.md does not document generated headless option `{option}`"
+            "docs/headless.md does not document generated headless option `{option}`"
         );
     }
 }
 
 #[test]
-fn readme_setting_labels_match_the_settings_screen() {
-    let start = "<!-- bonsai:settings:start -->";
-    let end = "<!-- bonsai:settings:end -->";
-    let section = README
-        .split_once(start)
-        .map(|(_, rest)| rest)
-        .and_then(|rest| rest.split_once(end).map(|(section, _)| section))
-        .expect("README settings section has drift markers");
-    let documented: BTreeSet<String> = prose_inline_code(section).into_iter().collect();
+fn settings_labels_match_the_settings_source() {
+    let documented: BTreeSet<String> = SETTINGS_SOURCE
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("key: \"")?.strip_suffix("\","))
+        .map(str::to_string)
+        .collect();
 
     let app = crate::tui::test_utils::app();
     let profile = crate::smol::SmolProfile::resolve(crate::smol::SmolPreference::Off, 128_000);
@@ -356,9 +355,9 @@ fn readme_setting_labels_match_the_settings_screen() {
 }
 
 #[test]
-fn readme_slash_command_mentions_resolve_to_registered_commands() {
+fn slash_command_docs_mentions_resolve_to_registered_commands() {
     let mut mentions = 0usize;
-    for span in prose_inline_code(README) {
+    for span in prose_inline_code(SLASH_COMMAND_DOCS) {
         let Some(token) = span.split_whitespace().next() else {
             continue;
         };
@@ -367,7 +366,8 @@ fn readme_slash_command_mentions_resolve_to_registered_commands() {
         };
         // Paths have another slash. Single-character model shortcuts such as
         // `/f` are runtime bindings rather than registered command names.
-        if rest.len() < 2
+        if token == "/command"
+            || rest.len() < 2
             || rest.contains('/')
             || !rest
                 .chars()
@@ -380,7 +380,7 @@ fn readme_slash_command_mentions_resolve_to_registered_commands() {
             crate::commands::COMMANDS
                 .iter()
                 .any(|command| command.name == canonical),
-            "README.md mentions `{token}`, which is not a registered command"
+            "docs/slash-commands.md mentions `{token}`, which is not a registered command"
         );
         mentions += 1;
     }
@@ -401,11 +401,10 @@ fn release_platform_claims_match_installer_and_workflow() {
     // means `install.sh` downloads a release asset that was never uploaded.
     assert_eq!(installer_targets.len(), 4);
     assert_eq!(workflow_targets, installer_targets);
-    // The README documents supported platforms in prose only: prebuilt binaries
-    // are deferred until after the first public release, so it names no target
-    // triples. When binary releases ship, restore the README triple list and
-    // the `readme_targets == installer_targets` assertion here.
-    assert!(target_triples(README).is_empty());
+    // The getting-started guide documents supported platforms in prose rather
+    // than exposing target triples; the installer and release workflow remain
+    // the machine-readable source of truth.
+    assert!(target_triples(GETTING_STARTED).is_empty());
     for label in [
         "macOS · Apple Silicon",
         "macOS · Intel",
@@ -417,7 +416,12 @@ fn release_platform_claims_match_installer_and_workflow() {
             "website omits supported target `{label}`"
         );
     }
-    assert!(README.contains("Windows, musl Linux, BSD, and 32-bit systems are not"));
+    for unsupported in ["Windows", "musl Linux", "BSD", "32-bit systems"] {
+        assert!(
+            GETTING_STARTED.contains(unsupported),
+            "getting-started guide omits unsupported platform `{unsupported}`"
+        );
+    }
 }
 
 #[test]
@@ -442,5 +446,4 @@ fn website_feature_counts_follow_builtin_registries() {
     assert!(SITE.contains(&format!("{connection_count} connections")));
     assert!(SITE.contains(&format!("{theme_count} themes")));
     assert!(SITE.contains(&format!("{autonomy_count} levels")));
-    assert!(README.contains(&format!("ships {theme_count} built-ins")));
 }

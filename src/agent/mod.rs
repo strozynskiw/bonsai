@@ -346,22 +346,27 @@ struct ToolRegistrySet {
 }
 
 /// Run-time limits set once at construction or tuned via [`Agent::set_run_budget`].
-/// Nine fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+/// Grouped into a sub-struct following the `ToolRegistrySet` pattern.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionBudget {
     pub(crate) max_iterations: usize,
     pub(crate) max_generation_duration: Option<Duration>,
     pub(crate) max_streamed_chars: Option<usize>,
     pub(crate) max_tool_duration: Option<Duration>,
+    pub(crate) max_session_billed_tokens: Option<u64>,
     pub(crate) max_session_turns: Option<usize>,
     pub(crate) max_session_output_chars: Option<usize>,
     pub(crate) max_session_active_seconds: Option<u64>,
     pub(crate) max_session_cost_micros: Option<u64>,
+    pub(crate) alert_session_billed_tokens: Option<u64>,
+    pub(crate) alert_session_turns: Option<usize>,
+    pub(crate) alert_session_active_seconds: Option<u64>,
+    pub(crate) alert_session_cost_micros: Option<u64>,
     pub(crate) context_budget_tokens: usize,
 }
 
 /// Volatile advisory strings rendered into the uncached project-context tail.
-/// Five fields; grouped into a sub-struct following the `ToolRegistrySet` pattern.
+/// Grouped into a sub-struct following the `ToolRegistrySet` pattern.
 #[derive(Debug, Clone)]
 pub(crate) struct Advisories {
     pub(crate) repair_advisory: String,
@@ -369,6 +374,7 @@ pub(crate) struct Advisories {
     pub(crate) planning_advisory: String,
     pub(crate) subagent_status_advisory: String,
     pub(crate) last_volatile_context_message: Option<String>,
+    pub(crate) last_execution_policy_snapshot: Option<String>,
 }
 
 /// Cached prompt estimates, performance snapshots, and provider-cache warnings
@@ -427,12 +433,17 @@ pub(crate) struct ReadEvidenceMap {
     pub(crate) delegated_overlap_advised: HashSet<String>,
 }
 
+type ProviderFallbackModelObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     /// One-shot delegated-run backup. Present only for subagents with a
     /// persisted fallback assignment and consumed on the first provider failure
     /// after the primary exhausts its normal retries.
     provider_fallback: Option<crate::tool::SubagentProviderConfig>,
+    /// Delegated-run hook that keeps external run metadata aligned when a
+    /// provider fallback changes the model that actually executes the task.
+    provider_fallback_model_observer: Option<ProviderFallbackModelObserver>,
     /// Persisted provider cache-routing identity for this conversation. Kept
     /// outside the concrete provider so model/provider rebuilds reuse it.
     conversation_cache_key: String,
@@ -472,6 +483,7 @@ pub struct Agent {
     lsp_hub: Option<Arc<LspHub>>,
     todo_store: Option<SharedTodoStore>,
     completion: CompletionGuardState,
+    read_only_task_progress: ReadOnlyTaskProgress,
     /// Runtime-owned review/repair/final-gate sequence for the active task.
     finalization: FinalizationState,
     messages: Vec<ChatCompletionRequestMessage>,
@@ -489,6 +501,9 @@ pub struct Agent {
     system_prompt_suffix: Option<String>,
     /// Structured version of `system_context`, when constructed by runtime.
     project_context: Option<ProjectContextSnapshot>,
+    /// Fresh, canonical path-scoped steering coverage. Updates are appended as
+    /// trusted system rows; they never rewrite the provider's cached prefix.
+    scoped_steering: crate::context::ScopedSteeringState,
     advisories: Advisories,
     /// Workspace root used to validate and expand live `@path` mentions.
     project_root: PathBuf,
@@ -540,8 +555,13 @@ pub struct Agent {
     /// Context rewrite applied before the next provider turn, consumed into
     /// that turn's usage diagnostics.
     pending_context_rewrite: PendingContextRewrite,
+    /// Cumulative count; unlike final episode status this survives later recall.
+    episode_eviction_count: usize,
+    /// Close-time eviction is required by deterministic lifecycle harnesses.
+    eager_episode_eviction: bool,
     yolo_mode: YoloMode,
     sandbox: CommandSandbox,
+    workspace_trust: crate::workspace_trust::WorkspaceTrust,
     project_info_runtime: Option<Arc<ProjectInfoRuntime>>,
     /// Self-review-before-done policy and per-turn arming state.
     self_review: SelfReviewState,
@@ -681,10 +701,21 @@ impl Agent {
         self.budget.max_generation_duration = budget.max_generation_duration();
         self.budget.max_streamed_chars = budget.max_output_chars;
         self.budget.max_tool_duration = budget.max_tool_duration();
+        self.budget.max_session_billed_tokens = budget.max_session_billed_tokens;
         self.budget.max_session_turns = budget.max_session_turns;
         self.budget.max_session_output_chars = budget.max_session_output_chars;
         self.budget.max_session_active_seconds = budget.max_session_active_seconds;
         self.budget.max_session_cost_micros = budget.max_session_cost_micros;
+        self.budget.alert_session_billed_tokens = budget.alert_session_billed_tokens;
+        self.budget.alert_session_turns = budget.alert_session_turns;
+        self.budget.alert_session_active_seconds = budget.alert_session_active_seconds;
+        self.budget.alert_session_cost_micros = budget.alert_session_cost_micros;
+    }
+
+    /// Override only the per-run turn limit while preserving cumulative
+    /// session limits and alerts.
+    pub(crate) fn set_run_max_turns(&mut self, max_turns: usize) {
+        self.budget.max_iterations = max_turns;
     }
 
     /// Set the timing policy used between retryable provider attempts.
@@ -1067,6 +1098,10 @@ impl Agent {
         self.smol_mode
     }
 
+    pub(crate) const fn episode_eviction_count(&self) -> usize {
+        self.episode_eviction_count
+    }
+
     pub(crate) const fn pure_mode(&self) -> bool {
         self.pure_mode
     }
@@ -1204,6 +1239,25 @@ impl Agent {
         id
     }
 
+    fn refresh_execution_policy_snapshot(&mut self) -> bool {
+        let snapshot = policy_snapshot::ExecutionPolicySnapshot::from_runtime(
+            &self.yolo_mode,
+            &self.sandbox,
+            self.workspace_trust,
+            self.interaction.as_deref(),
+        );
+        if self.advisories.last_execution_policy_snapshot.as_deref() == Some(snapshot.content()) {
+            return false;
+        }
+        self.advisories.last_execution_policy_snapshot = Some(snapshot.content().to_string());
+        self.push_message(execution_policy_message(snapshot.content()));
+        true
+    }
+
+    pub(crate) fn execution_policy_snapshot(&self) -> Option<&str> {
+        self.advisories.last_execution_policy_snapshot.as_deref()
+    }
+
     fn next_context_message_id(&mut self) -> String {
         let id = format_context_message_id(self.next_message_id);
         self.next_message_id = self.next_message_id.saturating_add(1);
@@ -1221,6 +1275,7 @@ impl Agent {
         self.message_ids = vec![format_context_message_id(0)];
         self.next_message_id = 1;
         self.advisories.last_volatile_context_message = None;
+        self.advisories.last_execution_policy_snapshot = None;
         self.read_evidence.inspection_events.clear();
         self.read_evidence.mention_read_evidence.clear();
         self.last_retryable_turn = false;
@@ -1296,6 +1351,7 @@ impl Agent {
         self.messages = messages;
         self.message_ids = message_ids;
         self.next_message_id = next_message_id;
+        self.advisories.last_execution_policy_snapshot = None;
         self.advisories.last_volatile_context_message = self
             .messages
             .iter()
@@ -1874,6 +1930,7 @@ mod messages;
 mod output;
 mod perf;
 mod persona;
+mod policy_snapshot;
 mod prompts;
 mod read_persistence;
 mod retry;
@@ -1889,7 +1946,7 @@ mod verification;
 use batching::*;
 use compaction::*;
 pub use completion::{CompletionFailureOutcome, CompletionGap, CompletionGuardFailure};
-use completion::{CompletionGuardState, CompletionGuardVerdict};
+use completion::{CompletionGuardState, CompletionGuardVerdict, ReadOnlyTaskProgress};
 pub(crate) use completion::{CompletionGuardTrace, TaskCompletionContract};
 use finalization::{FinalizationState, FinalizationStep};
 use messages::*;

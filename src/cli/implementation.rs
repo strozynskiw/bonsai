@@ -501,6 +501,7 @@ fn parse_eval_args(args: &[String]) -> anyhow::Result<crate::eval::EvalCliConfig
 
     while let Some(arg) = args.get(index) {
         match arg.as_str() {
+            "--qualification" => config.qualification = true,
             "--suite" => {
                 index += 1;
                 let value = args
@@ -1278,6 +1279,7 @@ mod tests {
                 config: crate::eval::EvalCliConfig {
                     suite: std::path::PathBuf::from("custom.toml"),
                     mode: crate::eval::EvalMode::Live,
+                    qualification: false,
                     provider: Some("anthropic".to_string()),
                     model: Some("claude-sonnet-4-5".to_string()),
                     effort: Some(crate::provider::ReasoningSelection::High),

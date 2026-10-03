@@ -390,8 +390,18 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *cursor = move_index(*cursor, delta, 1);
             }
         }
+        AppAction::BudgetWarningMove(delta) => {
+            if let Some(ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning {
+                cursor,
+                ..
+            })) = &mut app.modal
+            {
+                *cursor = move_index(*cursor, delta, 1);
+            }
+        }
         AppAction::PlanOpenChoiceSubmit
         | AppAction::StartPlanChoiceSubmit
+        | AppAction::BudgetWarningSubmit
         | AppAction::PlanDeleteConfirmSubmit
         | AppAction::SessionDeleteConfirmSubmit => {
             // Runtime effect: `tui::runtime_actions` owns storage-backed

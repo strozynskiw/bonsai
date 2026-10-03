@@ -523,10 +523,7 @@ mod tests {
             metadata.default_base_url.as_ref(),
             "https://api.deepseek.com"
         );
-        assert_eq!(
-            metadata.default_model.as_ref(),
-            "deepseek/deepseek-v4-flash"
-        );
+        assert_eq!(metadata.default_model.as_ref(), "deepseek/deepseek-flash");
         assert_eq!(metadata.endpoint_path.as_ref(), "chat/completions");
         assert_eq!(
             metadata.env_var_api_key.as_deref(),
@@ -539,7 +536,7 @@ mod tests {
         );
         assert_eq!(
             metadata.seed_model_list(),
-            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+            vec!["deepseek-flash", "deepseek-v4-pro"]
         );
         assert!(metadata.capabilities.supports_prompt_cache);
         assert!(metadata.capabilities.echoes_reasoning_content);

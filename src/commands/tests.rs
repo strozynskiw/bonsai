@@ -2010,6 +2010,7 @@ fn every_registered_command_declares_its_busy_behavior() {
         ("/permissions", RunNow),
         ("/config", Block),
         ("/doctor", Block),
+        ("/lsp", Block),
         ("/mcp", Block),
         ("/hooks", Block),
         ("/mode", RunNow),

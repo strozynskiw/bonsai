@@ -919,7 +919,10 @@ async fn completion_guard_retries_once_then_rejects_open_todos() {
     );
     assert!(matches!(
         failure.gaps.as_slice(),
-        [crate::agent::CompletionGap::InProgressTodos(1)]
+        [
+            crate::agent::CompletionGap::InProgressTodos(1),
+            crate::agent::CompletionGap::RequestedActionMissing
+        ]
     ));
     assert_eq!(
         requests.lock().await.len(),
@@ -2912,7 +2915,7 @@ async fn background_subagent_launch_pauses_parent_until_wake() {
 
     let result = agent
         .run(
-            "review this",
+            "delegate this review to the configured subagents",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )
@@ -3064,7 +3067,11 @@ async fn successful_rust_edit_injects_new_lsp_errors_once() {
     .unwrap();
 
     let result = agent
-        .run("break rust", CancellationToken::new(), Arc::new(StdoutSink))
+        .run(
+            "write the invalid Rust implementation",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
         .await
         .unwrap();
 
@@ -3086,6 +3093,84 @@ async fn successful_rust_edit_injects_new_lsp_errors_once() {
             .count(),
         1
     );
+}
+
+#[test]
+fn scoped_steering_path_and_bash_mutation_classification_is_fail_closed() {
+    let malformed_write = test_tool_call("write", "write", r#"{"content":"x"}"#);
+    assert!(super::super::run_loop::scoped_instruction_paths(&malformed_write).is_empty());
+
+    let read_only_bash = test_tool_call("read", "bash", r#"{"command":"cat README.md"}"#);
+    assert!(!super::super::run_loop::tool_call_may_mutate_workspace(
+        &read_only_bash
+    ));
+
+    let verification_bash = test_tool_call("test", "bash", r#"{"command":"cargo test"}"#);
+    assert!(!super::super::run_loop::tool_call_may_mutate_workspace(
+        &verification_bash
+    ));
+
+    let mutating_bash = test_tool_call("format", "bash", r#"{"command":"cargo fmt --all"}"#);
+    assert!(super::super::run_loop::tool_call_may_mutate_workspace(
+        &mutating_bash
+    ));
+
+    let malformed_bash = test_tool_call("bad", "bash", r#"{"parallel":true}"#);
+    assert!(super::super::run_loop::tool_call_may_mutate_workspace(
+        &malformed_bash
+    ));
+}
+
+#[tokio::test]
+async fn nested_steering_is_injected_before_a_planned_mutation_and_requires_retry() {
+    let fixture = TestFixture::new();
+    std::fs::create_dir_all(fixture.project_root.join("nested")).unwrap();
+    std::fs::write(
+        fixture.project_root.join("nested/AGENTS.md"),
+        "nested mutation rule",
+    )
+    .unwrap();
+    let provider = MockProvider::new(vec![
+        write_file_response("call-1", "nested/new.rs", "fn first() {}\n"),
+        write_file_response("call-2", "nested/new.rs", "fn second() {}\n"),
+        finished_response("done"),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        write_registry(&fixture.project_root),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+
+    let result = agent
+        .run(
+            "write nested/new.rs",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+    assert_eq!(
+        std::fs::read_to_string(fixture.project_root.join("nested/new.rs")).unwrap(),
+        "fn second() {}\n",
+        "the mutation planned before nested steering was active must not execute",
+    );
+    let requests = requests.lock().await;
+    let second = requests.get(1).expect("mutation retry request");
+    assert!(second.iter().any(|message| {
+        matches!(message, ChatCompletionRequestMessage::System(_))
+            && message_content(message).contains("nested mutation rule")
+    }));
+    assert!(second.iter().any(|message| {
+        matches!(message, ChatCompletionRequestMessage::Tool(_))
+            && message_content(message).contains("retry the mutation")
+    }));
 }
 
 #[tokio::test]

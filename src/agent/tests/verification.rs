@@ -1644,6 +1644,11 @@ async fn coding_run_finishes_review_repairs_before_starting_one_final_gate() {
         model_tool_response("call-write", "write", r#"{"path":"src.rs"}"#),
         model_finished_response("implementation complete"),
         model_tool_response("call-repair", "write", r#"{"path":"src.rs"}"#),
+        model_tool_response(
+            "call-duplicate-review",
+            "agent",
+            r#"{"agent":"review","prompt":"review the repaired implementation"}"#,
+        ),
         model_finished_response("Fixed the invariant violation from review."),
         model_tool_response("call-test", "bash", r#"{"command":"cargo test"}"#),
         model_finished_response("verified"),
@@ -1676,7 +1681,20 @@ async fn coding_run_finishes_review_repairs_before_starting_one_final_gate() {
         .unwrap();
 
     assert_eq!(result, AgentRunResult::Completed("verified".to_string()));
-    assert_eq!(requests.lock().await.len(), 6);
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 7);
+    let duplicate_review_result = requests[4]
+        .iter()
+        .find(|message| {
+            matches!(message, ChatCompletionRequestMessage::Tool(_))
+                && message_content(message).contains("automatic review pass is already complete")
+        })
+        .map(message_content);
+    assert!(
+        duplicate_review_result.is_some(),
+        "the rejected duplicate review result must be returned before repairs complete: {:?}",
+        requests[4]
+    );
     assert_eq!(agent.self_review_runs().len(), 1);
     assert_eq!(
         agent.self_review_runs()[0].disposition,

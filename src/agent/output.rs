@@ -84,6 +84,7 @@ pub(super) fn tool_context_detail(tool_call: &ToolCall, output: &ToolOutput) -> 
         | ToolOutput::Read { .. }
         | ToolOutput::ReadReuse { .. }
         | ToolOutput::ReadDelta { .. }
+        | ToolOutput::MissingPathReuse { .. }
         | ToolOutput::TextWithUsage { .. }
         | ToolOutput::WaitStarted { .. } => ToolContextResult::Text {
             rendered: rendered_summary,

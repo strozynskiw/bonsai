@@ -14,7 +14,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TUI="$HERE/tui.sh"
-META='(Agent|Plan) ·'   # uniquely identifies the composer meta line
+META='(Coding|Planning) ·'   # uniquely identifies the composer meta line
 fail=0
 
 meta() { "$TUI" line "$META" | tail -1; }
@@ -44,7 +44,7 @@ echo "launching TUI…"
 trap '"$TUI" stop' EXIT
 
 echo "fresh start (default level is 'balanced', shown in the bar):"
-check  "an agent is shown"            "Agent ·"
+check  "an agent is shown"            "Coding ·"
 check  "balanced marker shown"        "· balanced"
 refute "no auto-accept marker"        "auto-accept"
 refute "no yolo marker"               "· yolo"
@@ -80,9 +80,9 @@ echo "Alt+M cycles the confined ladder (ask -> conservative), never yolo:"
 check  "Alt+M -> conservative"        "· conservative"
 refute "Alt+M never lands on yolo"    "· yolo"
 
-echo "Tab switches the agent axis (orthogonal to autonomy):"
-"$TUI" keys Tab
-check  "Tab -> Plan agent"            "Plan ·"
+echo "Shift+Tab switches the agent axis (orthogonal to autonomy):"
+"$TUI" keys S-Tab
+check  "Shift+Tab -> Planning agent"  "Planning ·"
 
 echo
 if [ "$fail" = 0 ]; then echo "PASS"; else echo "FAIL"; fi

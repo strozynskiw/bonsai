@@ -494,7 +494,6 @@ pub(crate) fn target_triple() -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
     use ring::signature::{Ed25519KeyPair, KeyPair as _};
 
     use super::*;

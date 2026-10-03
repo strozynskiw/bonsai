@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::task_intent::TaskPromptKind;
 
 const MAX_GOAL_CHARS: usize = 4_096;
 const MAX_REASON_DETAIL_CHARS: usize = 1_024;
@@ -169,17 +170,45 @@ impl Storage {
         let Some(latest) = self.latest_task_run_inner(session_id).await? else {
             return Ok(None);
         };
-        if latest.is_active() {
-            return Ok(Some(latest));
+        self.retry_task_run(latest).await.map(Some)
+    }
+
+    /// Retry the newest task whose persisted goal is not a bare continuation
+    /// directive. This repairs sessions created by older runtimes that stored
+    /// `continue` or `try again` as independent goals instead of preserving the
+    /// established task identity.
+    pub async fn retry_latest_substantive_task_run(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<TaskRun>> {
+        let rows = sqlx::query(
+            "SELECT * FROM task_runs WHERE session_id = ? ORDER BY started_at_ms DESC, id DESC",
+        )
+        .bind(session_id.as_i64())
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("Failed to load task history for session {session_id}"))?;
+
+        for row in rows {
+            let task = task_run_from_row(row)?;
+            if !TaskPromptKind::classify(&task.goal).is_continuation() {
+                return self.retry_task_run(task).await.map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    async fn retry_task_run(&self, task: TaskRun) -> Result<TaskRun> {
+        if task.is_active() {
+            return Ok(task);
         }
         self.start_task_run_with_goal_id(
-            session_id,
-            latest.episode_seq,
-            &latest.goal_id,
-            &latest.goal,
+            task.session_id,
+            task.episode_seq,
+            &task.goal_id,
+            &task.goal,
         )
         .await
-        .map(Some)
     }
 
     async fn start_task_run_with_goal_id(

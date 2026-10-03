@@ -9,6 +9,66 @@ use super::{EvalReport, TaskReport};
 
 const BASELINE_SCHEMA_VERSION: u32 = 1;
 
+/// Validate matrix membership independently of aggregate scores.
+/// Missing, duplicate, or failed cells cannot be averaged away.
+pub(crate) fn validate_qualification_cells(report: &EvalReport) -> Result<()> {
+    let repetitions = report.suite.repetitions;
+    if repetitions == 0 || report.tasks.len() != repetitions.saturating_mul(8) {
+        anyhow::bail!("Qualification requires eight cells for every repetition");
+    }
+    let actual = report
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
+    if actual.len() != report.tasks.len() {
+        anyhow::bail!("Qualification contains duplicate cells");
+    }
+    for language in ["rust", "typescript", "python", "go"] {
+        for condition in ["available", "unavailable"] {
+            for repetition in 1..=repetitions {
+                let base = format!("{language}-lsp-{condition}");
+                let id = if repetitions == 1 {
+                    base
+                } else {
+                    format!("{base}-run-{repetition}")
+                };
+                if !actual.contains(id.as_str()) {
+                    anyhow::bail!("Qualification missing cell {id}");
+                }
+            }
+        }
+    }
+    for task in &report.tasks {
+        if !task.passed || task.status != super::TaskStatus::Completed || !task.budget.passed() {
+            anyhow::bail!(
+                "Qualification cell {} did not complete successfully",
+                task.id
+            );
+        }
+        for stage in [
+            "lsp-condition",
+            "inspect",
+            "edit",
+            "native-verify",
+            "independent-review",
+        ] {
+            let name = format!("qualification-{stage}");
+            let mut matches = task
+                .graders
+                .iter()
+                .filter(|grader| grader.grader_type == name);
+            if !matches.next().is_some_and(|grader| grader.passed) || matches.next().is_some() {
+                anyhow::bail!(
+                    "Qualification cell {} lacks unique successful {stage} evidence",
+                    task.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Metrics captured for one eval run or stored as its comparison reference.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct EvalBaselineMetrics {
@@ -569,6 +629,14 @@ mod tests {
             baseline: None,
             output_dir: "out".to_string(),
         }
+    }
+
+    #[test]
+    fn qualification_rejects_perfect_aggregate_without_cells() {
+        assert!(validate_qualification_cells(&report(100.0)).is_err());
+        let mut repeated = report(100.0);
+        repeated.suite.repetitions = 2;
+        assert!(validate_qualification_cells(&repeated).is_err());
     }
 
     #[test]

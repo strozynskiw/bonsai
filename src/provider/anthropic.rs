@@ -45,9 +45,15 @@ pub static ANTHROPIC_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         &[
             "claude-sonnet-4-5",
             "claude-sonnet-5",
+            "claude-sonnet-4-6",
             "claude-opus-5",
+            "claude-opus-5-5",
             "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
             "claude-fable-5",
+            "claude-fable-5-1",
             "claude-haiku-4-5",
             "claude-opus-4-1",
         ],
@@ -591,14 +597,13 @@ impl AnthropicCompatibleProvider {
         };
         let wire_messages =
             transform::messages_for_project_state_layout(messages, project_state_layout);
-        // Vision safety net: mirror of the OpenAI-chat strip — a text-only
-        // Anthropic-compatible endpoint rejects image blocks with a 400, and
-        // images already in history would otherwise wedge every later turn.
-        let wire_messages = if self.supports_vision {
-            wire_messages
-        } else {
-            transform::strip_image_parts_for_wire(wire_messages.as_ref())
-        };
+        // Image safety net: mirror of the OpenAI-chat sanitize — a text-only
+        // Anthropic-compatible endpoint rejects image blocks with a 400, an
+        // unsupported media type (e.g. `image/svg+xml`) 400s even vision
+        // models, and images already in history would otherwise wedge every
+        // later turn.
+        let wire_messages =
+            transform::sanitize_image_parts_for_wire(wire_messages.as_ref(), self.supports_vision);
         let (system, mut anthropic_messages) =
             transform_messages_with_thinking(wire_messages.as_ref(), Some(&thinking))?;
         drop(thinking);
@@ -777,6 +782,7 @@ fn is_project_state_block(block: &Value) -> bool {
                 // Legacy prefix: resumed sessions persisted before the
                 // `Harness note:` envelope still carry it.
                 text.starts_with(crate::context::PROJECT_STATE_UPDATE_PREFIX)
+                    || text.starts_with(crate::context::PREVIOUS_PROJECT_STATE_UPDATE_PREFIX)
                     || text.starts_with(crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX)
             })
 }
@@ -2707,6 +2713,20 @@ mod tests {
         assert!(second_blocks[1].get("cache_control").is_none());
         assert!(is_project_state_block(&second_blocks[1]));
         assert_eq!(count_cache_control(&second), 3);
+    }
+
+    #[test]
+    fn project_state_cache_detection_accepts_every_envelope_generation() {
+        for prefix in [
+            crate::context::PROJECT_STATE_UPDATE_PREFIX,
+            crate::context::PREVIOUS_PROJECT_STATE_UPDATE_PREFIX,
+            crate::context::LEGACY_PROJECT_STATE_UPDATE_PREFIX,
+        ] {
+            assert!(is_project_state_block(&json!({
+                "type": "text",
+                "text": format!("{prefix}\n\n## Volatile state\n- git: clean")
+            })));
+        }
     }
 
     #[test]

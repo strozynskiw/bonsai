@@ -55,7 +55,7 @@ impl Tool for SetSessionTitleTool {
     }
 
     fn description(&self) -> &str {
-        "Set or update the current session title. Declare new_topic only for a distinct user goal; use same_topic for corrections, retries, continuations, review findings, commits, and phase or wording refinements."
+        "Set the title once when an explicit human message introduces a distinct task and the current title no longer fits. Never call this for harness notes, retries, continuations, phase changes, or an unchanged title. Use new_topic only for a distinct human goal; same_topic only for a genuine rename within the current goal."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -91,6 +91,15 @@ impl Tool for SetSessionTitleTool {
         let Some(session_id) = *self.active_session_id.lock().await else {
             anyhow::bail!("No active persisted session is available");
         };
+        let Some(current) = self.storage.session_summary(session_id).await? else {
+            anyhow::bail!("No active persisted session is available");
+        };
+        if current.summary.trim() == title {
+            anyhow::bail!(
+                "Session title is already '{title}'. Do not call set_session_title again for this \
+                 task; continue with the next substantive action."
+            );
+        }
         self.storage.set_session_summary(session_id, title).await?;
         Ok(ToolOutput::Text(format!("Session title set to: {title}")))
     }
@@ -202,5 +211,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sessions[0].summary, "Session picker work");
+    }
+
+    #[tokio::test]
+    async fn set_session_title_rejects_unchanged_title() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))
+            .await
+            .unwrap();
+        let session_id = storage
+            .start_session(
+                temp_dir.path(),
+                "codex",
+                "test-model",
+                ReasoningSelection::default(),
+            )
+            .await
+            .unwrap();
+        storage
+            .set_session_summary(session_id, "Isolate TUI verification")
+            .await
+            .unwrap();
+        let tool = SetSessionTitleTool::new(storage, Arc::new(Mutex::new(Some(session_id))));
+
+        let error = tool
+            .execute(json!({
+                "title": " Isolate TUI verification ",
+                "episode_action": "same_topic"
+            }))
+            .await
+            .expect_err("an unchanged title should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("already 'Isolate TUI verification'")
+        );
     }
 }

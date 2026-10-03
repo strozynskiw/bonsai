@@ -1,7 +1,7 @@
 [[targets]]
 connection = "kimi-coding-plan"
 model = "kimi-coding-plan/k3"
-metadata_model = "kimi-for-coding/k3"
+metadata_model = "kimi-code-plan-global/k3"
 remote_model = "k3"
 recommended = true
 token_counter = "tiktoken"
@@ -18,7 +18,7 @@ values = ["low", "high", "max"]
 [[targets]]
 connection = "kimi-coding-plan"
 model = "kimi-coding-plan/k3-256k"
-metadata_model = "kimi-for-coding/k3-256k"
+metadata_model = "kimi-code-plan-global/k3-256k"
 remote_model = "k3-256k"
 token_counter = "tiktoken"
 reasoning_codec = "openai-chat-completions"
@@ -34,10 +34,13 @@ values = ["low", "high", "max"]
 [[targets]]
 connection = "kimi-coding-plan"
 model = "kimi-coding-plan/kimi-for-coding"
-# The subscription alias is documented by Kimi Code but has no models.dev row;
-# keep its serving-proven K2.7 limits and zero subscription pricing explicit.
+# The subscription alias is documented by Kimi Code; its models.dev row now
+# tracks the newest K3 window (1M) while the active route keeps the K2.7
+# limits, so keep the conservative window and zero pricing pinned until a live
+# /models refresh proves the alias moved — an oversized window 400s, a small
+# one only compacts early.
 pinned = true
-metadata_model = "kimi-for-coding/k2p7"
+metadata_model = "kimi-code-plan-global/kimi-for-coding"
 remote_model = "kimi-for-coding"
 recommended = true
 default = true
@@ -50,11 +53,11 @@ reasoning_options = []
 [[targets]]
 connection = "kimi-coding-plan"
 model = "kimi-coding-plan/kimi-for-coding-highspeed"
-# The high-speed route serves the same K2.7 model under a distinct wire id.
-metadata_model = "kimi-for-coding/k2p7"
+# The high-speed route serves the same K2.7 model under a distinct wire id and
+# models.dev carries a matching row, so no pin is needed.
+metadata_model = "kimi-code-plan-global/kimi-for-coding-highspeed"
 remote_model = "kimi-for-coding-highspeed"
 token_counter = "tiktoken"
-pinned = true
 context_window = 262144
 output_limit = 32768
 pricing = { input_micros_per_million = 0, output_micros_per_million = 0, cache_read_micros_per_million = 0, cache_write_micros_per_million = 0 }

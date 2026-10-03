@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# Pre-commit hook: existing migration files are immutable.
-# Adding new migration files is allowed; modifying or deleting existing ones is not.
 set -euo pipefail
 
-CHANGED=$(git diff --cached --diff-filter=MD --name-only -- migrations/ 2>/dev/null || true)
-if [ -n "$CHANGED" ]; then
-  echo "error: existing migration files were modified or deleted:"
-  echo "$CHANGED" | sed 's/^/  /'
-  echo ""
-  echo "Migrations are immutable once committed. Create a new migration instead."
-  exit 1
-fi
+bash scripts/check-migrations-immutable.sh --staged

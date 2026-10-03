@@ -63,6 +63,41 @@ impl HeadlessSink {
         self.recorder.take()
     }
 
+    pub(crate) fn tool_finished_at(
+        &self,
+        id: &str,
+        result: &str,
+        status: crate::output::ToolExecutionStatus,
+        finished_at_ms: i64,
+    ) {
+        self.recorder
+            .tool_finished_at(id, result, status, None, finished_at_ms);
+        self.record_tool_finished_output(id, result, status, None);
+    }
+
+    fn record_tool_finished_output(
+        &self,
+        id: &str,
+        result: &str,
+        status: crate::output::ToolExecutionStatus,
+        diff: Option<&crate::diff::FileDiff>,
+    ) {
+        self.completion_evidence
+            .record_tool_result(id, result, status, diff);
+        let state = status.label();
+        self.emit_tool_progress(&format!("[tool:{id} {state}] {result}"));
+        if let Some(diff) = diff {
+            self.emit_tool_progress(&format!("[diff:{} ready]", diff.path));
+        }
+        let _ = self.write_stream_event(&StreamToolFinishedEvent {
+            event_type: "tool_finished",
+            id,
+            result,
+            status,
+            diff,
+        });
+    }
+
     pub(crate) fn finish(&self, output: &HeadlessFinalOutput) -> Result<()> {
         match self.format {
             OutputFormat::Text => {
@@ -338,17 +373,7 @@ impl OutputSink for HeadlessSink {
 
     fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
         self.recorder.tool_finished(id, result, status, None);
-        self.completion_evidence
-            .record_tool_result(id, result, status, None);
-        let state = status.label();
-        self.emit_tool_progress(&format!("[tool:{id} {state}] {result}"));
-        let _ = self.write_stream_event(&StreamToolFinishedEvent {
-            event_type: "tool_finished",
-            id,
-            result,
-            status,
-            diff: None,
-        });
+        self.record_tool_finished_output(id, result, status, None);
     }
 
     fn tool_finished_with_diff(
@@ -360,18 +385,7 @@ impl OutputSink for HeadlessSink {
     ) {
         self.recorder
             .tool_finished(id, result, status, Some(diff.clone()));
-        self.completion_evidence
-            .record_tool_result(id, result, status, Some(&diff));
-        let state = status.label();
-        self.emit_tool_progress(&format!("[tool:{id} {state}] {result}"));
-        self.emit_tool_progress(&format!("[diff:{} ready]", diff.path));
-        let _ = self.write_stream_event(&StreamToolFinishedEvent {
-            event_type: "tool_finished",
-            id,
-            result,
-            status,
-            diff: Some(&diff),
-        });
+        self.record_tool_finished_output(id, result, status, Some(&diff));
     }
 
     fn workspace_changed(&self, paths: &[String], intent: &str) {
@@ -607,8 +621,12 @@ mod tests {
             crate::storage::TaskTerminalReasonCode::BudgetExhausted,
             "Run-time budget exhausted.",
         ));
-        output.budget_exhaustion =
-            Some(crate::run_budget::RunBudgetExhaustion::RunTime { limit_seconds: 300 });
+        output.budget_exhaustion = Some(
+            crate::run_budget::RunBudgetExhaustion::SessionBilledTokens {
+                limit_tokens: 100_000,
+                used_tokens: 100_000,
+            },
+        );
         output.completion_report = crate::completion_report::CompletionReport::from_evidence(
             crate::completion_report::CompletionStatus::BudgetExhausted,
             crate::completion_report::CompletionEvidenceSnapshot::default(),
@@ -630,11 +648,12 @@ mod tests {
         assert_eq!(value["session_lifecycle"], "interrupted");
         assert_eq!(value["task_outcome"], "blocked");
         assert_eq!(value["task_terminal_reason"]["code"], "budget_exhausted");
-        assert_eq!(value["budget_exhaustion"]["kind"], "run_time");
-        assert_eq!(value["budget_exhaustion"]["limit_seconds"], 300);
+        assert_eq!(value["budget_exhaustion"]["kind"], "session_billed_tokens");
+        assert_eq!(value["budget_exhaustion"]["limit_tokens"], 100_000);
+        assert_eq!(value["budget_exhaustion"]["used_tokens"], 100_000);
         assert_eq!(
             value["completion_report"]["usage"]["budget_exhaustion"]["kind"],
-            "run_time"
+            "session_billed_tokens"
         );
         assert!(read_buffer(&stderr_buffer).is_empty());
     }

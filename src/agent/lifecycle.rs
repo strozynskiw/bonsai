@@ -176,6 +176,14 @@ impl Agent {
             return;
         }
         self.restore_context_messages_with_ids_inner(messages, ids);
+        self.scoped_steering.reset();
+        for message in &self.messages {
+            if is_scoped_steering_message(message)
+                && let Some(text) = try_message_content_string(message)
+            {
+                self.scoped_steering.restore_rendered_update(&text);
+            }
+        }
         self.normalize_project_state_cache_strategy(ProjectStateNormalization::RestoredHistory);
         self.rebuild_recalled_memory_from_messages();
     }
@@ -227,6 +235,8 @@ impl Agent {
 
     pub(crate) fn session_budget_usage(&self) -> crate::run_budget::SessionBudgetUsage {
         crate::run_budget::SessionBudgetUsage {
+            exact_billed_tokens: self.usage.exact_session_billed_tokens(),
+            billed_token_limit: self.budget.max_session_billed_tokens,
             turns: self.usage.session_turn_count(),
             turn_limit: self.budget.max_session_turns,
             output_chars: self.usage.session_output_chars(),
@@ -235,6 +245,10 @@ impl Agent {
             active_limit_seconds: self.budget.max_session_active_seconds,
             exact_cost_micros: self.usage.exact_session_cost_micros(),
             cost_limit_micros: self.budget.max_session_cost_micros,
+            billed_token_alert: self.budget.alert_session_billed_tokens,
+            turn_alert: self.budget.alert_session_turns,
+            active_alert_seconds: self.budget.alert_session_active_seconds,
+            cost_alert_micros: self.budget.alert_session_cost_micros,
         }
     }
 
@@ -517,6 +531,14 @@ impl Agent {
         self.provider_fallback = Some(fallback);
     }
 
+    /// Observe the effective delegated model whenever runtime fallback changes it.
+    pub(crate) fn set_provider_fallback_model_observer(
+        &mut self,
+        observer: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    ) {
+        self.provider_fallback_model_observer = Some(observer);
+    }
+
     /// Switch permanently to the configured backup for the rest of this run.
     /// Returns its display label when a backup was available.
     pub(super) fn activate_provider_fallback(&mut self) -> Option<String> {
@@ -539,6 +561,9 @@ impl Agent {
                 self.set_context_budget_tokens(fallback.context_budget_tokens);
                 self.set_prompt_estimator(fallback.prompt_estimator);
             }
+        }
+        if let Some(observer) = &self.provider_fallback_model_observer {
+            observer(&label);
         }
         Some(label)
     }

@@ -191,6 +191,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor }) => {
             render_start_plan_choice(f, modal, *cursor)
         }
+        ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning {
+            usage, cursor, ..
+        }) => render_budget_warning(f, modal, *usage, *cursor),
         ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { plan }) => {
             render_plan_delete_confirm(f, modal, plan)
         }

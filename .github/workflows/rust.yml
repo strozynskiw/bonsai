@@ -16,19 +16,19 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
-    - name: Check
-      run: cargo check --locked --all-targets
+      with:
+        fetch-depth: 0
     - name: Verify migrations are immutable
       run: |
         if [ "${{ github.event_name }}" = "pull_request" ]; then
-          CHANGED=$(git diff --diff-filter=M --name-only ${{ github.event.pull_request.base.sha }}...HEAD -- migrations/)
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
         else
-          CHANGED=$(git diff --diff-filter=M --name-only HEAD~1...HEAD -- migrations/)
+          BASE_SHA="${{ github.event.before }}"
         fi
-        if [ -n "$CHANGED" ]; then
-          echo "::error::Existing migration files were modified: $CHANGED"
-          echo "Migrations are immutable once committed. Create a new migration instead."
-          exit 1
-        fi
+        bash scripts/check-migrations-immutable.sh --history "$BASE_SHA" HEAD
+    - name: Test migration immutability guard
+      run: bash scripts/test_check_migrations_immutable.sh
+    - name: Check
+      run: cargo check --locked --all-targets
     - name: Run tests
       run: cargo test --locked

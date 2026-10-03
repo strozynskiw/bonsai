@@ -222,14 +222,21 @@ impl Storage {
 }
 
 /// Decode a little-endian f32 blob, rejecting corrupt rows whose byte length
-/// disagrees with `dims` (no bytemuck in tree; `chunks_exact` is enough).
+/// disagrees with `dims` (no bytemuck in tree; `as_chunks` is enough once the
+/// length check rules out a trailing partial chunk).
 fn decode_vector(blob: &[u8], dims: i64) -> Option<Vec<f32>> {
     if dims < 0 || blob.len() != (dims as usize) * 4 {
         return None;
     }
+    let (chunks, remainder) = blob.as_chunks::<4>();
+    debug_assert!(
+        remainder.is_empty(),
+        "length check above guarantees a whole number of f32s"
+    );
     Some(
-        blob.chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        chunks
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect(),
     )
 }

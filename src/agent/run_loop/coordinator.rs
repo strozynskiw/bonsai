@@ -6,10 +6,17 @@ pub(super) async fn run(
     cancellation: RunCancellation,
     sink: SharedSink,
     queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
+    session_title_policy: SessionTitleRunPolicy,
 ) -> Result<AgentRunResult> {
-    TurnCoordinator::new(agent, cancellation, sink, queued_messages)
-        .run()
-        .await
+    TurnCoordinator::new(
+        agent,
+        cancellation,
+        sink,
+        queued_messages,
+        session_title_policy,
+    )
+    .run()
+    .await
 }
 
 /// Owns the mutable state and policy decisions for one agent run.
@@ -44,6 +51,7 @@ impl TurnState {
 
 #[derive(Default)]
 struct TurnPolicies {
+    session_title: SessionTitleGuard,
     planning_research: PlanningResearchGuard,
     delegated_read: DelegatedReadGuard,
     repeated_inspection: RepeatedInspectionGuard,
@@ -56,7 +64,16 @@ struct TurnPolicies {
 }
 
 impl TurnPolicies {
+    fn new(session_title_policy: SessionTitleRunPolicy) -> Self {
+        Self {
+            session_title: SessionTitleGuard::new(session_title_policy),
+            ..Self::default()
+        }
+    }
+
     fn reset_for_user_steering(&mut self) {
+        self.session_title
+            .reset(SessionTitleRunPolicy::ContinuationOrAutomatic);
         self.planning_research.reset();
         self.delegated_read.reset();
         self.repeated_inspection.reset();
@@ -69,6 +86,7 @@ impl TurnPolicies {
     }
 
     fn observe_tool_execution(&mut self, execution: &ToolExecutionOutcome) {
+        self.session_title.observe(&execution.tool_observations);
         self.repeated_failure
             .observe(&execution.tool_observations, execution.reset_loop_guards);
         if execution
@@ -79,6 +97,8 @@ impl TurnPolicies {
             self.empty_response_nudges = 0;
         }
         if execution.reset_loop_guards {
+            self.session_title
+                .reset(SessionTitleRunPolicy::ContinuationOrAutomatic);
             self.planning_research.reset();
             self.delegated_read.reset();
             self.repeated_inspection.reset();
@@ -119,9 +139,17 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         cancellation: RunCancellation,
         sink: SharedSink,
         queued_messages: Option<&'receiver mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
+        session_title_policy: SessionTitleRunPolicy,
     ) -> Self {
-        let tool_schema = agent.active_tool_schema();
-        let tool_registry = agent.tool_registry.clone();
+        let state = TurnState {
+            policies: TurnPolicies::new(session_title_policy),
+            ..TurnState::default()
+        };
+        let tool_registry = state
+            .policies
+            .session_title
+            .project_registry(agent.tool_registry_for_current_task());
+        let tool_schema = agent.tool_schema_for_registry(&tool_registry);
         Self {
             agent,
             cancellation_token: cancellation.foreground_token(),
@@ -132,8 +160,17 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             cancelled_queued_message_ids: HashSet::new(),
             tool_schema,
             tool_registry,
-            state: TurnState::default(),
+            state,
         }
+    }
+
+    fn refresh_tool_registry(&mut self) {
+        self.tool_registry = self
+            .state
+            .policies
+            .session_title
+            .project_registry(self.agent.tool_registry_for_current_task());
+        self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
     }
 
     async fn run(mut self) -> Result<AgentRunResult> {
@@ -176,6 +213,10 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
     }
 
     async fn advance_turn(&mut self) -> Result<TurnOutcome> {
+        if self.agent.take_read_only_conclusion_turn() {
+            self.tool_registry = Arc::new(ToolRegistry::new());
+            self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
+        }
         if self.cancellation_token.is_cancelled() {
             if self.detached_subagent_cancellation.is_cancelled() {
                 self.agent.cancel_running_subagents();
@@ -216,6 +257,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         if user_steered {
             self.state.policies.reset_for_user_steering();
             self.agent.set_planning_advisory(None);
+            self.refresh_tool_registry();
         }
 
         self.agent.caches.last_perf_report = None;
@@ -418,6 +460,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 
     async fn execute_tool_turn(&mut self, response: StreamedResponse) -> Result<TurnOutcome> {
         let policies = &mut self.state.policies;
+        let session_title_action = policies.session_title.action_for(&response.tool_calls);
+        let session_title_rejection =
+            resolve_guard(self.agent, "session_title", session_title_action, &response)?;
         let planning_research_action = self
             .agent
             .planning_research_action(&response.tool_calls, &mut policies.planning_research);
@@ -508,6 +553,8 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 &response.tool_calls,
                 &self.tool_registry,
                 ToolRejections {
+                    session_title: session_title_rejection.unwrap_or_default(),
+                    scoped_steering: HashMap::new(),
                     precomputed_read,
                     precomputed_read_delta,
                     auto_background,
@@ -528,6 +575,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )
             .await?;
         self.state.policies.observe_tool_execution(&tool_execution);
+        self.refresh_tool_registry();
         if tool_execution.tool_observations.iter().any(|observation| {
             matches!(
                 observation.status,
@@ -607,7 +655,16 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 
         // Harness notes are appended after tool results so they remain the
         // final model-visible message without invalidating the prompt prefix.
-        if let Some(transition) = implementation_stall.transition {
+        if let Some(nudge) = self.agent.read_only_conclusion_nudge(&response.tool_calls) {
+            tracing::info!(
+                target: "bonsai::guard",
+                guard = "read_only_conclusion",
+                action = "nudge",
+                "guard bounded read-only inspection"
+            );
+            self.agent.push_harness_note(nudge);
+            self.agent.emit_context_updated(&self.sink);
+        } else if let Some(transition) = implementation_stall.transition {
             let turns = self
                 .state
                 .policies

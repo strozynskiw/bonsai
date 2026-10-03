@@ -9,10 +9,12 @@ use anyhow::{Context, Result};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool};
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{AgentMode, AgentRunResult};
+use crate::agent::{
+    AgentMode, AgentRunResult, QueuedUserMessage, QueuedUserMessageCommand, UserInput,
+};
 use crate::background::BackgroundTaskRegistry;
 use crate::context;
 use crate::headless::{ProviderSelection, select_provider};
@@ -104,7 +106,23 @@ mod outcome_tests {
 /// Returns an error if the suite fails to load/validate, the provider cannot be
 /// set up, output directories cannot be created, or report files fail to write.
 pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
-    let suite = EvalSuite::load(&config.suite)?;
+    let mut suite = EvalSuite::load(&config.suite)?;
+    let mut tool_versions = std::collections::BTreeMap::new();
+    if config.qualification {
+        if config.mode == EvalMode::Live {
+            anyhow::bail!(
+                "Live qualification is not yet enabled: provenance and reviewed baseline promotion are unfinished; no provider calls were made"
+            );
+        }
+        if config.baseline.is_some() {
+            anyhow::bail!("Qualification cannot use legacy mock baseline profiles");
+        }
+        if config.task.is_some() {
+            anyhow::bail!("Qualification requires the complete task selection");
+        }
+        expand_qualification_matrix(&mut suite)?;
+        tool_versions = qualification_preflight(config.mode).await?;
+    }
     let selected_tasks = select_tasks(&suite, config.task.as_deref())?;
     let seed = config.seed.unwrap_or(suite.seed);
     let run_id = run_id(config.mode, seed);
@@ -187,14 +205,33 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
         .map(|baseline| baseline.compare(&report))
         .transpose()?;
 
+    if config.qualification {
+        super::baseline::validate_qualification_cells(&report)?; // matrix gate
+        if config.mode == EvalMode::Mock {
+            println!(
+                "mock qualification: deterministic framework validation only, never live evidence"
+            );
+        }
+        super::report::write_qualification_bundle(
+            &report,
+            &suite.path,
+            &suite.base_dir.join("fixtures/language_acceptance"),
+            &run_dir.join("qualification.json"),
+            &tool_versions,
+        )?;
+    }
     let report_path = run_dir.join("report.json");
     let summary_path = run_dir.join("summary.md");
-    let report_json = serde_json::to_string_pretty(&report)?;
+    let report_json = super::report::sanitized_report_json(&report)?;
     write_file(&report_path, &format!("{report_json}\n"), "report")?;
-    write_file(&summary_path, &format_eval_summary(&report), "summary")?;
+    write_file(
+        &summary_path,
+        &crate::redact::redact(&format_eval_summary(&report)),
+        "summary",
+    )?;
 
     if config.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{report_json}");
     } else {
         println!(
             "eval {}: {}/{} tasks passed ({:.1}%)",
@@ -223,9 +260,81 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
         run_dir,
         passed_tasks: report.score.passed,
         total_tasks: report.score.total,
-        fail_on_task_failure: config.fail_on_task_failure,
+        fail_on_task_failure: config.fail_on_task_failure || config.qualification,
         baseline_regression,
     })
+}
+
+async fn qualification_preflight(
+    mode: EvalMode,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut versions = std::collections::BTreeMap::new();
+    for (command, args) in [
+        ("cargo", vec!["--version"]),
+        ("node", vec!["--version"]),
+        ("npm", vec!["--version"]),
+        ("python3", vec!["--version"]),
+        ("go", vec!["version"]),
+        ("rust-analyzer", vec!["--version"]),
+        ("typescript-language-server", vec!["--version"]),
+        ("pyright", vec!["--version"]),
+        ("gopls", vec!["version"]),
+    ] {
+        if mode == EvalMode::Mock
+            && matches!(
+                command,
+                "rust-analyzer" | "typescript-language-server" | "pyright" | "gopls"
+            )
+        {
+            continue;
+        }
+        let mut child = tokio::process::Command::new(command);
+        child.args(args).kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(10), child.output())
+            .await
+            .with_context(|| format!("Qualification infrastructure timeout: {command}"))?
+            .with_context(|| format!("Qualification missing required tool: {command}"))?;
+        if !output.status.success() {
+            anyhow::bail!("Qualification required tool failed: {command}");
+        }
+        versions.insert(
+            command.to_string(),
+            crate::redact::redact(&String::from_utf8_lossy(&output.stdout))
+                .trim()
+                .to_string(),
+        );
+    }
+    Ok(versions)
+}
+
+fn expand_qualification_matrix(suite: &mut EvalSuite) -> Result<()> {
+    let languages = ["rust", "typescript", "python", "go"];
+    if suite.tasks.len() != languages.len() {
+        anyhow::bail!("Qualification requires exactly four language tasks");
+    }
+    let mut matrix = Vec::with_capacity(8);
+    for language in languages {
+        let expected_fixture = format!("fixtures/language_acceptance/{language}");
+        let task = suite
+            .tasks
+            .iter()
+            .find(|task| task.fixture == expected_fixture)
+            .with_context(|| format!("Qualification is missing the {language} fixture"))?;
+        if task.shared_workspace_peer.is_some() || task.expected_status != TaskStatus::Completed {
+            anyhow::bail!("Qualification tasks must complete independently");
+        }
+        for (condition, label) in [
+            (EvalLspCondition::Available, "available"),
+            (EvalLspCondition::Unavailable, "unavailable"),
+        ] {
+            let mut cell = task.clone();
+            cell.id = format!("{language}-lsp-{label}");
+            cell.lsp_condition = condition;
+            matrix.push(cell);
+        }
+    }
+    suite.tasks = matrix;
+    suite.validate()
 }
 
 fn select_tasks<'a>(suite: &'a EvalSuite, task_id: Option<&str>) -> Result<Vec<&'a EvalTask>> {
@@ -256,11 +365,56 @@ enum ProviderSetup {
         registry: Arc<ProviderRegistry>,
         session_store: Box<SessionStore>,
         selection: ProviderSelection,
-        model_catalog: Box<crate::model_catalog::ModelCatalog>,
+        model_catalog: Arc<crate::model_catalog::ModelCatalog>,
     },
 }
 
 impl ProviderSetup {
+    fn review_factory(
+        &self,
+        stats: Arc<EvalProviderStats>,
+        max_attempts: Option<usize>,
+        seed: u64,
+    ) -> Result<crate::tool::SubagentProviderFactory> {
+        let factory: crate::tool::SubagentProviderFactory = match self {
+            Self::Mock => {
+                let script: MockScript = toml::from_str("final_response = 'No findings.'")?;
+                Arc::new(move |_, _| {
+                    let provider = Box::new(MockEvalProvider::new(script.clone(), seed));
+                    Box::pin(async move {
+                        crate::tool::SubagentProviderConfig::new(
+                            provider,
+                            DEFAULT_CONTEXT_WINDOW_TOKENS as usize,
+                            PromptEstimator::heuristic(),
+                            MOCK_MODEL.to_string(),
+                        )
+                    })
+                })
+            }
+            Self::Live {
+                registry,
+                session_store,
+                model_catalog,
+                ..
+            } => crate::model_resolution::subagent_provider_factory(
+                registry.clone(),
+                Arc::new(Mutex::new(session_store.as_ref().clone())),
+                Some(model_catalog.clone()),
+                Default::default(),
+            ),
+        };
+        Ok(Arc::new(move |name, _| {
+            let future = factory(name, Default::default());
+            let stats = stats.clone();
+            Box::pin(async move {
+                let mut config = future.await;
+                config.provider =
+                    Box::new(CountingProvider::new(config.provider, stats, max_attempts));
+                config
+            })
+        }))
+    }
+
     async fn new(config: &EvalCliConfig) -> Result<Self> {
         match config.mode {
             EvalMode::Mock => Ok(Self::Mock),
@@ -325,7 +479,7 @@ impl ProviderSetup {
                     registry,
                     session_store: Box::new(session_store),
                     selection,
-                    model_catalog: Box::new(model_catalog),
+                    model_catalog: Arc::new(model_catalog),
                 })
             }
         }
@@ -508,8 +662,12 @@ struct EvalAgentBuild<'a> {
     /// Force the episode store on even when the explicit environment kill
     /// switch is set, so episode-specific tasks stay deterministic in CI.
     enable_episodes: bool,
+    /// Force the episode store off so pressure-compaction scenarios cannot be
+    /// satisfied by relevance-driven episode eviction instead.
+    disable_episodes: bool,
     profile: EvalAgentProfile,
     session_title: &'a str,
+    lsp_condition: EvalLspCondition,
 }
 
 struct EvalAgentHarness {
@@ -518,6 +676,7 @@ struct EvalAgentHarness {
     background_tasks: Arc<BackgroundTaskRegistry>,
     sink: Arc<EvalSink>,
     session_id: SessionId,
+    lsp_hub: Arc<crate::lsp::LspHub>,
 }
 
 async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness> {
@@ -556,10 +715,23 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         ))
     });
     let project_context = context::isolated_project_context_snapshot(config.worktree_path);
+    let path_evidence = crate::tool::PathEvidence::new(config.worktree_path)?;
     let project_info_runtime = Arc::new(crate::tool::ProjectInfoRuntime::new(Some(
         config.provider_setup.project_info_provider_state(),
     )));
-    let lsp_hub = Arc::new(crate::lsp::LspHub::new(config.worktree_path.to_path_buf()));
+    let lsp_hub = Arc::new(
+        crate::lsp::LspHub::with_registry(
+            config.worktree_path.to_path_buf(),
+            if matches!(config.provider_setup, ProviderSetup::Mock)
+                && config.lsp_condition == EvalLspCondition::Available
+            {
+                EvalLspCondition::mock_registry()
+            } else {
+                config.lsp_condition.registry(config.worktree_path)
+            },
+        )
+        .with_path_evidence(path_evidence.clone()),
+    );
     let workspace_locks = if config.enable_peer_context {
         crate::tool::WorkspaceLockContext::new(
             config.worktree_path.to_path_buf(),
@@ -571,12 +743,28 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
     };
     // One shared store backs the recall tool and the agent ledger; enabled by
     // default or forced on for episode-asserting eval tasks.
-    let episode_store = (config.enable_episodes || crate::episode::episodes_enabled())
-        .then(crate::episode::SharedEpisodeStore::default);
-    let (tool_registry, planning_registry, smol_registry, _subagent_runner) =
+    let episode_store = (!config.disable_episodes
+        && (config.enable_episodes || crate::episode::episodes_enabled()))
+    .then(crate::episode::SharedEpisodeStore::default);
+    let (provider, provider_stats) = config.provider_setup.build_provider(
+        config.mock_script,
+        config.seed,
+        config.max_provider_attempts,
+    )?;
+    let review_factory = if config.lsp_condition != EvalLspCondition::Inherited {
+        Some(config.provider_setup.review_factory(
+            provider_stats.clone(),
+            config.max_provider_attempts,
+            config.seed,
+        )?)
+    } else {
+        None
+    };
+    let (tool_registry, planning_registry, smol_registry, subagent_runner) =
         crate::bootstrap::build_tool_registries(crate::bootstrap::ToolRegistryDeps {
             project_root: config.worktree_path.to_path_buf(),
             read_tracker: read_tracker.clone(),
+            path_evidence,
             lsp_hub: lsp_hub.clone(),
             project_info_runtime: project_info_runtime.clone(),
             permissions,
@@ -598,7 +786,7 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
             skills: crate::resource::skill::shared_registry(
                 crate::resource::skill::SkillRegistry::empty(),
             ),
-            subagent_provider_factory: None,
+            subagent_provider_factory: review_factory,
             subagent_background_wake: false,
             peer_wake_when_done: false,
             subagents: Arc::new(crate::subagent::SubagentRegistry::new()),
@@ -615,11 +803,6 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
             episode_store: episode_store.clone(),
         });
 
-    let (provider, provider_stats) = config.provider_setup.build_provider(
-        config.mock_script,
-        config.seed,
-        config.max_provider_attempts,
-    )?;
     let mut agent_builder = crate::agent::Agent::builder(
         provider,
         tool_registry,
@@ -628,22 +811,42 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         config.worktree_path.to_path_buf(),
     )
     .smol_registry(smol_registry)
+    .eager_episode_eviction(config.enable_episodes)
     .project_context_snapshot(project_context)
     .project_info_runtime(project_info_runtime)
-    .lsp_hub(lsp_hub)
+    .lsp_hub(lsp_hub.clone())
     .yolo_mode(yolo_mode)
-    .self_review_mode(crate::self_review::SelfReviewMode::Off)
+    .subagent_runner(subagent_runner)
+    .self_review_mode(if config.lsp_condition == EvalLspCondition::Inherited {
+        crate::self_review::SelfReviewMode::Off
+    } else {
+        crate::self_review::SelfReviewMode::On
+    })
     // Scripted mock turns cannot wait on a dynamic background-task id, so
     // keep known-slow verification bash calls foreground and deterministic.
     .auto_background_verification(false);
+    if config.lsp_condition != EvalLspCondition::Inherited {
+        let command = if config.worktree_path.join("Cargo.toml").exists() {
+            "cargo test --locked"
+        } else if config.worktree_path.join("package.json").exists() {
+            "npm test"
+        } else if config.worktree_path.join("go.mod").exists() {
+            "go test ./..."
+        } else {
+            "python3 -m unittest discover -s tests -v"
+        };
+        let mut runtime_config = crate::config::Config::empty();
+        runtime_config.verification.test = Some(vec![command.to_string()]);
+        agent_builder = agent_builder.config(Arc::new(runtime_config));
+    }
     if let Some(max_turns) = config.max_logical_turns {
         agent_builder = agent_builder.max_iterations(max_turns);
     }
     if config.profile == EvalAgentProfile::Smol {
         agent_builder = agent_builder.smol_preference(crate::smol::SmolPreference::On);
     }
-    if let Some(episode_store) = episode_store {
-        agent_builder = agent_builder.episode_store(episode_store);
+    if let Some(episode_store) = &episode_store {
+        agent_builder = agent_builder.episode_store(episode_store.clone());
     }
     let mut agent = agent_builder.build()?;
     let conversation_cache_key = config.storage.conversation_cache_key(session_id).await?;
@@ -667,6 +870,7 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         background_tasks,
         sink: Arc::new(EvalSink::default()),
         session_id,
+        lsp_hub,
     })
 }
 
@@ -699,6 +903,8 @@ async fn run_shared_workspace_peer(
         mock_context_window_tokens: None,
         enable_peer_context: true,
         enable_episodes: false,
+        disable_episodes: false,
+        lsp_condition: EvalLspCondition::Inherited,
         profile: EvalAgentProfile::Full,
         session_title: &session_title,
     })
@@ -752,6 +958,19 @@ async fn run_task(
     let worktree_path = run_dir.join("worktrees").join(task_run_id);
     let fixture_path = SafeRelativePath::parse(&task.fixture, "fixture")?.join(&suite.base_dir);
     copy_dir_all(&fixture_path, &worktree_path)?;
+    if task.lsp_condition != EvalLspCondition::Inherited {
+        // Keep review baselines inside this task, never the enclosing source checkout.
+        // Untracked fixture signatures let the existing review path detect edits.
+        let output = tokio::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&worktree_path)
+            .output()
+            .await
+            .context("Initialize isolated qualification review repository")?;
+        if !output.status.success() {
+            anyhow::bail!("Cannot initialize qualification review repository");
+        }
+    }
 
     let session_title = format!("eval primary: {task_run_id}");
     let mut harness = build_eval_agent(EvalAgentBuild {
@@ -765,10 +984,34 @@ async fn run_task(
         mock_context_window_tokens: task.mock_context_window_tokens,
         enable_peer_context: task.shared_workspace_peer.is_some(),
         enable_episodes: task.min_episode_evictions.is_some(),
+        disable_episodes: task.disable_episodes,
         profile: task.profile,
+        lsp_condition: task.lsp_condition,
         session_title: &session_title,
     })
     .await?;
+    let lsp_evidence = if task.lsp_condition != EvalLspCondition::Inherited {
+        let relative = match task.fixture.rsplit('/').next() {
+            Some("rust") => "src/lib.rs",
+            Some("typescript") => "src/cart.ts",
+            Some("python") => "src/pricing/__init__.py",
+            Some("go") => "calc/calc.go",
+            _ => anyhow::bail!("Unknown qualification language"),
+        };
+        let query = harness
+            .lsp_hub
+            .workspace_symbol_with_recheck(relative, "", false)
+            .await;
+        Some(match task.lsp_condition {
+            EvalLspCondition::Available => query.is_ok(),
+            EvalLspCondition::Unavailable => {
+                matches!(query, Err(crate::lsp::LspError::RecoveryUnavailable { .. }))
+            }
+            EvalLspCondition::Inherited => false,
+        })
+    } else {
+        None
+    };
     let session_id = harness.session_id;
     let provider_stats = harness.provider_stats.clone();
     let background_tasks = harness.background_tasks.clone();
@@ -792,13 +1035,37 @@ async fn run_task(
             })
         })
     };
+    let run = async {
+        if task.queued_messages.is_empty() {
+            return agent
+                .run(&task.prompt, cancellation_token, sink.clone())
+                .await;
+        }
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        for (index, text) in task.queued_messages.iter().enumerate() {
+            let id = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+            sender
+                .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+                    id,
+                    display_text: text.clone(),
+                    transcript_text: text.clone(),
+                    input: UserInput::from_text(text),
+                }))
+                .map_err(|_| anyhow::anyhow!("Eval queued-message channel closed"))?;
+        }
+        drop(sender);
+        agent
+            .run_with_queue_control(
+                UserInput::from_text(&task.prompt),
+                cancellation_token.into(),
+                sink.clone(),
+                receiver,
+            )
+            .await
+    };
     let mut run_result = if let Some(max_duration_ms) = budgets.max_duration_ms {
-        match tokio::time::timeout(
-            Duration::from_millis(max_duration_ms),
-            agent.run(&task.prompt, cancellation_token, sink.clone()),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_millis(max_duration_ms), run).await {
             Ok(result) => result,
             Err(_) => Err(anyhow::anyhow!(
                 "Eval task exceeded the {} ms duration budget",
@@ -806,9 +1073,7 @@ async fn run_task(
             )),
         }
     } else {
-        agent
-            .run(&task.prompt, cancellation_token, sink.clone())
-            .await
+        run.await
     };
     if let Some(task) = cancellation_task {
         task.abort();
@@ -881,8 +1146,23 @@ async fn run_task(
         ),
         Err(err) => (TaskStatus::Error, String::new(), Some(err.to_string())),
     };
+    if task.lsp_condition != EvalLspCondition::Inherited {
+        let evidence = serde_json::json!({
+            "task": task_run_id,
+            "lsp_condition": task.lsp_condition,
+            "lsp_passed": lsp_evidence,
+            "verification": agent.verification_runs(),
+            "review": agent.self_review_runs(),
+        });
+        write_file(
+            &run_dir.join(format!("{task_run_id}-private-evidence.json")),
+            &serde_json::to_string_pretty(&evidence)?,
+            "private stage evidence",
+        )?;
+    }
     let usage_totals = agent.usage_totals();
     let completion_guard = agent.completion_guard_trace();
+    let execution_policy = agent.execution_policy_snapshot().map(str::to_owned);
     let usage = UsageReport::from_totals(usage_totals);
     let usage_turns = agent.context_report().usage_turns;
     let repair_turns = agent
@@ -902,7 +1182,7 @@ async fn run_task(
     let budget = EvalBudgetReport::evaluate(budgets, budget_metrics, usage);
     let task_effects = eval_sink.task_effects();
     let primary_changed_files = task_effects.changed_files.clone();
-    let grader_results = grade_task(
+    let mut grader_results = grade_task(
         &task.graders,
         &worktree_path,
         &suite.base_dir,
@@ -910,15 +1190,53 @@ async fn run_task(
         &task_effects,
     )
     .await;
+    if let Some(lsp_passed) = lsp_evidence {
+        let review_passed = agent.self_review_runs().last().is_some_and(|review| {
+            review.tool_call_id.is_some()
+                && review.status == crate::self_review::SelfReviewRunStatus::Succeeded
+                && review.findings == crate::self_review::SelfReviewFindingCounts::default()
+                && review
+                    .result
+                    .as_deref()
+                    .is_some_and(|result| result.trim() == "No findings.")
+        });
+        for (stage, passed) in [
+            ("lsp-condition", lsp_passed),
+            (
+                "inspect",
+                task_effects
+                    .tool_effects
+                    .contains(&EvalToolEffect::Inspection),
+            ),
+            ("edit", !primary_changed_files.is_empty()),
+            (
+                "native-verify",
+                grader_results
+                    .iter()
+                    .any(|g| g.grader_type == "test-pass" && g.passed),
+            ),
+            ("independent-review", review_passed),
+        ] {
+            grader_results.push(GraderResult {
+                grader_type: format!("qualification-{stage}"),
+                passed,
+                details: format!(
+                    "{stage}: {}",
+                    if passed {
+                        "observed"
+                    } else {
+                        "missing or failed"
+                    }
+                ),
+                duration_ms: 0,
+            });
+        }
+    }
     let compactions = agent.compaction_events().len();
     // Episodes that left live context as a card marker. A later `/ctx` restore
     // flips Evicted to Restored without undoing the fact of the eviction, so
     // both statuses count.
-    let episode_evictions = agent
-        .episode_reports()
-        .iter()
-        .filter(|episode| matches!(episode.status_label.as_str(), "evicted" | "restored"))
-        .count();
+    let episode_evictions = agent.episode_eviction_count();
     storage
         .record_session_file_changes(session_id, &primary_changed_files)
         .await?;
@@ -1002,6 +1320,8 @@ async fn run_task(
     Ok(TaskReport {
         id: task_run_id.to_string(),
         prompt: task.prompt.clone(),
+        resume_prompt: task.resume_prompt.clone(),
+        queued_messages: task.queued_messages.clone(),
         profile: task.profile,
         status,
         expected_status: task.expected_status,
@@ -1010,6 +1330,7 @@ async fn run_task(
         output,
         run_error,
         completion_guard,
+        execution_policy,
         usage,
         usage_turns,
         budget,
@@ -1025,6 +1346,7 @@ async fn run_task(
         shared_workspace,
         changed_files: primary_changed_files,
         tool_effects: task_effects.tool_effects,
+        attempted_tool_effects: task_effects.attempted_tool_effects,
         worktree_path: worktree_path.display().to_string(),
         graders: grader_results,
     })
@@ -1123,6 +1445,168 @@ pub(crate) enum EvalAgentProfile {
     Smol,
 }
 
+/// Per-task server policy; explicit conditions ignore host command overrides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum EvalLspCondition {
+    #[default]
+    Inherited,
+    Available,
+    Unavailable,
+}
+
+impl EvalLspCondition {
+    fn mock_registry() -> crate::lsp::LanguageServerRegistry {
+        use crate::lsp::{LanguageServerRegistry, LanguageServerSpec};
+        let specs = [
+            LanguageServerSpec::rust(),
+            LanguageServerSpec::typescript_javascript(),
+            LanguageServerSpec::python(),
+            LanguageServerSpec::go(),
+        ]
+        .into_iter()
+        .map(|mut spec| {
+            spec.command_env = None;
+            spec.command = "python3".into();
+            spec.args = vec![
+                "-u".into(),
+                "-c".into(),
+                include_str!("../../eval/support/qualification_lsp.py").into(),
+            ];
+            spec
+        })
+        .collect();
+        LanguageServerRegistry::new(specs)
+    }
+
+    fn registry(self, worktree: &Path) -> crate::lsp::LanguageServerRegistry {
+        use crate::lsp::{LanguageServerRegistry, LanguageServerSpec};
+        if self == Self::Inherited {
+            return LanguageServerRegistry::builtin();
+        }
+        let mut specs = vec![
+            LanguageServerSpec::rust(),
+            LanguageServerSpec::typescript_javascript(),
+            LanguageServerSpec::python(),
+            LanguageServerSpec::go(),
+        ];
+        for spec in &mut specs {
+            spec.command_env = None;
+            if self == Self::Unavailable {
+                // A directory cannot execute, even if every server is installed.
+                spec.command = worktree.display().to_string();
+                spec.args.clear();
+            }
+        }
+        LanguageServerRegistry::new(specs)
+    }
+}
+
+#[cfg(test)]
+mod lsp_condition_tests {
+    use super::*;
+
+    #[test]
+    fn qualification_matrix_covers_eight_cells_and_preserves_repetitions() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/suites/language_acceptance.toml");
+        let mut suite = EvalSuite::load(&path).unwrap();
+        suite.repetitions = 3;
+        expand_qualification_matrix(&mut suite).unwrap();
+        assert_eq!(suite.tasks.len(), 8);
+        assert_eq!(suite.repetitions, 3);
+        assert_eq!(
+            suite
+                .tasks
+                .iter()
+                .filter(|task| task.lsp_condition == EvalLspCondition::Available)
+                .count(),
+            4
+        );
+        assert_eq!(
+            suite
+                .tasks
+                .iter()
+                .filter(|task| task.lsp_condition == EvalLspCondition::Unavailable)
+                .count(),
+            4
+        );
+        assert!(expand_qualification_matrix(&mut suite).is_err());
+    }
+
+    #[tokio::test]
+    async fn qualification_rejects_live_before_provider_setup() {
+        let error = run(EvalCliConfig {
+            suite: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("eval/suites/language_acceptance.toml"),
+            qualification: true,
+            mode: EvalMode::Live,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("no provider calls were made"));
+    }
+
+    #[tokio::test]
+    async fn qualification_fake_server_initializes_and_answers_query() {
+        let root = tempfile::TempDir::new().unwrap();
+        fs::write(root.path().join("main.py"), "value = 1\n").unwrap();
+        let hub = crate::lsp::LspHub::with_registry(
+            root.path().to_path_buf(),
+            EvalLspCondition::mock_registry(),
+        );
+        assert!(
+            hub.workspace_symbol_with_recheck("main.py", "", false)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn qualification_matrix_rejects_partial_language_selection() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/suites/language_acceptance.toml");
+        let mut suite = EvalSuite::load(&path).unwrap();
+        suite.tasks.pop();
+        assert!(expand_qualification_matrix(&mut suite).is_err());
+    }
+
+    #[test]
+    fn explicit_conditions_ignore_host_overrides_for_every_language() {
+        let root = tempfile::TempDir::new().unwrap();
+        for condition in [EvalLspCondition::Available, EvalLspCondition::Unavailable] {
+            let registry = condition.registry(root.path());
+            for path in [
+                "src/lib.rs",
+                "src/cart.ts",
+                "src/app.js",
+                "main.py",
+                "main.go",
+            ] {
+                let spec = registry.spec_for_path(Path::new(path)).unwrap();
+                assert!(spec.command_env.is_none());
+                assert_eq!(
+                    spec.command_with_env(|_| Some("host-server-override".into())),
+                    spec.command,
+                );
+                if condition == EvalLspCondition::Unavailable {
+                    assert_eq!(Path::new(&spec.command), root.path());
+                    assert!(std::process::Command::new(&spec.command).spawn().is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_tasks_keep_builtin_server_configuration() {
+        assert_eq!(
+            EvalLspCondition::default().registry(Path::new(".")),
+            crate::lsp::LanguageServerRegistry::builtin(),
+        );
+    }
+}
+
 /// A single eval task: a fixture to copy, a prompt to run, and its graders.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1130,6 +1614,8 @@ struct EvalTask {
     id: String,
     fixture: String,
     prompt: String,
+    #[serde(default)]
+    lsp_condition: EvalLspCondition,
     #[serde(default)]
     profile: EvalAgentProfile,
     #[serde(default)]
@@ -1152,6 +1638,11 @@ struct EvalTask {
     /// absent, the existing context resumes without another user message.
     #[serde(default)]
     resume_prompt: Option<String>,
+    /// Human follow-ups delivered through the in-flight composer queue. The
+    /// runner enqueues them before the first provider turn so the agent merges
+    /// them at the first normal tool/response boundary deterministically.
+    #[serde(default)]
+    queued_messages: Vec<String>,
     #[serde(default)]
     mock_context_window_tokens: Option<usize>,
     #[serde(default)]
@@ -1161,6 +1652,10 @@ struct EvalTask {
     /// deterministically regardless of the BONSAI_EPISODES environment.
     #[serde(default)]
     min_episode_evictions: Option<usize>,
+    /// Disable task episodes so a scenario specifically measures pressure
+    /// compaction rather than episode eviction.
+    #[serde(default)]
+    disable_episodes: bool,
     /// Ceiling on pressure compactions — `0` asserts that relevance-driven
     /// episode eviction alone kept the prompt healthy.
     #[serde(default)]
@@ -1183,6 +1678,13 @@ struct SharedWorkspacePeer {
 impl EvalTask {
     fn validate(&self, suite_base_dir: &Path) -> Result<()> {
         validate_id(&self.id)?;
+        if self.lsp_condition != EvalLspCondition::Inherited && self.shared_workspace_peer.is_some()
+        {
+            anyhow::bail!(
+                "Task '{}' cannot combine explicit LSP conditions with shared-workspace peers",
+                self.id
+            );
+        }
         if self.prompt.trim().is_empty() {
             anyhow::bail!("Task '{}' prompt is required", self.id);
         }
@@ -1244,6 +1746,13 @@ impl EvalTask {
                 anyhow::bail!("Task '{}' resume_prompt must not be blank", self.id);
             }
         }
+        if self
+            .queued_messages
+            .iter()
+            .any(|message| message.trim().is_empty())
+        {
+            anyhow::bail!("Task '{}' queued_messages must not contain blanks", self.id);
+        }
         if self.mock_context_window_tokens == Some(0) {
             anyhow::bail!(
                 "Task '{}' mock_context_window_tokens must be greater than zero",
@@ -1259,6 +1768,12 @@ impl EvalTask {
         if self.min_episode_evictions == Some(0) {
             anyhow::bail!(
                 "Task '{}' min_episode_evictions must be greater than zero",
+                self.id
+            );
+        }
+        if self.disable_episodes && self.min_episode_evictions.is_some() {
+            anyhow::bail!(
+                "Task '{}' cannot disable episodes and require episode evictions",
                 self.id
             );
         }
@@ -1590,6 +2105,7 @@ struct EvalSinkState {
     pending: HashMap<String, EvalToolAction>,
     pending_effects: HashMap<String, EvalToolEffect>,
     observed_tool_effects: HashSet<EvalToolEffect>,
+    attempted_tool_effects: HashSet<EvalToolEffect>,
     read_calls: HashMap<String, EvalReadCall>,
     path_generations: HashMap<String, usize>,
     global_generation: usize,
@@ -1633,9 +2149,16 @@ impl EvalSink {
             .copied()
             .collect::<Vec<_>>();
         tool_effects.sort();
+        let mut attempted_tool_effects = state
+            .attempted_tool_effects
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        attempted_tool_effects.sort();
         EvalTaskEffects {
             changed_files,
             tool_effects,
+            attempted_tool_effects,
         }
     }
 
@@ -1767,6 +2290,7 @@ impl OutputSink for EvalSink {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for call in calls {
             let effect = EvalToolEffect::for_tool_name(&call.name);
+            state.attempted_tool_effects.insert(effect);
             state.pending_effects.insert(call.id.clone(), effect);
             let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
             let path = arguments
@@ -2069,6 +2593,7 @@ mod tests {
                     id: "same".to_string(),
                     fixture: "fixture".to_string(),
                     prompt: "do it".to_string(),
+                    lsp_condition: EvalLspCondition::Inherited,
                     profile: EvalAgentProfile::Full,
                     mock: Some(MockScript {
                         read: Vec::new(),
@@ -2097,9 +2622,11 @@ mod tests {
                     cancel_after_provider_attempts: None,
                     resume_after_interruption: false,
                     resume_prompt: None,
+                    queued_messages: Vec::new(),
                     mock_context_window_tokens: None,
                     min_compactions: None,
                     min_episode_evictions: None,
+                    disable_episodes: false,
                     max_compactions: None,
                     shared_workspace_peer: None,
                 },
@@ -2107,6 +2634,7 @@ mod tests {
                     id: "same".to_string(),
                     fixture: "fixture".to_string(),
                     prompt: "do it again".to_string(),
+                    lsp_condition: EvalLspCondition::Inherited,
                     profile: EvalAgentProfile::Full,
                     mock: Some(MockScript {
                         read: Vec::new(),
@@ -2135,9 +2663,11 @@ mod tests {
                     cancel_after_provider_attempts: None,
                     resume_after_interruption: false,
                     resume_prompt: None,
+                    queued_messages: Vec::new(),
                     mock_context_window_tokens: None,
                     min_compactions: None,
                     min_episode_evictions: None,
+                    disable_episodes: false,
                     max_compactions: None,
                     shared_workspace_peer: None,
                 },
@@ -2163,6 +2693,7 @@ mod tests {
                 id: "no-graders".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "do it".to_string(),
+                lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
                 mock: Some(MockScript {
                     read: Vec::new(),
@@ -2188,9 +2719,11 @@ mod tests {
                 cancel_after_provider_attempts: None,
                 resume_after_interruption: false,
                 resume_prompt: None,
+                queued_messages: Vec::new(),
                 mock_context_window_tokens: None,
                 min_compactions: None,
                 min_episode_evictions: None,
+                disable_episodes: false,
                 max_compactions: None,
                 shared_workspace_peer: None,
             }],
@@ -2215,6 +2748,7 @@ mod tests {
                 id: "missing-read".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "read missing file".to_string(),
+                lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
                 mock: Some(MockScript {
                     read: vec!["missing.txt".to_string()],
@@ -2243,9 +2777,11 @@ mod tests {
                 cancel_after_provider_attempts: None,
                 resume_after_interruption: false,
                 resume_prompt: None,
+                queued_messages: Vec::new(),
                 mock_context_window_tokens: None,
                 min_compactions: None,
                 min_episode_evictions: None,
+                disable_episodes: false,
                 max_compactions: None,
                 shared_workspace_peer: None,
             }],
@@ -2273,6 +2809,7 @@ mod tests {
                 id: "mock-task".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "update readme".to_string(),
+                lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
                 mock: Some(MockScript {
                     read: vec!["README.md".to_string()],
@@ -2307,9 +2844,11 @@ mod tests {
                 cancel_after_provider_attempts: None,
                 resume_after_interruption: false,
                 resume_prompt: None,
+                queued_messages: Vec::new(),
                 mock_context_window_tokens: None,
                 min_compactions: None,
                 min_episode_evictions: None,
+                disable_episodes: false,
                 max_compactions: None,
                 shared_workspace_peer: None,
             }],
@@ -2380,7 +2919,7 @@ mod tests {
     }
 
     #[test]
-    fn intent_authority_suite_repeats_live_tasks_for_full_and_smol_profiles() {
+    fn intent_authority_suite_covers_the_release_intent_matrix() {
         let suite =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/intent_authority.toml");
         let suite = EvalSuite::load(&suite).unwrap();
@@ -2391,17 +2930,42 @@ mod tests {
             suite
                 .tasks
                 .iter()
-                .map(|task| task.profile)
+                .map(|task| (task.id.as_str(), task.profile))
                 .collect::<Vec<_>>(),
             [
-                EvalAgentProfile::Full,
-                EvalAgentProfile::Full,
-                EvalAgentProfile::Smol,
-                EvalAgentProfile::Smol,
+                ("full_explain_without_mutation", EvalAgentProfile::Full),
+                ("smol_explain_without_mutation", EvalAgentProfile::Smol),
+                (
+                    "full_review_findings_without_mutation",
+                    EvalAgentProfile::Full
+                ),
+                ("smol_verify_without_fixing", EvalAgentProfile::Smol),
+                ("full_monitor_until_unchanged", EvalAgentProfile::Full),
+                ("full_diagnose_then_fix", EvalAgentProfile::Full),
+                ("smol_diagnose_then_fix", EvalAgentProfile::Smol),
+                ("full_extend_established_parser", EvalAgentProfile::Full),
             ]
         );
         assert_eq!(repeated_task_id("diagnose", 2, 3), "diagnose-run-2");
         assert_eq!(repeated_task_id("diagnose", 1, 1), "diagnose");
+    }
+
+    #[tokio::test]
+    async fn intent_continuity_suite_runs_every_mock_scenario() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let suite =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/intent_continuity.toml");
+        let outcome = run(EvalCliConfig {
+            suite,
+            out_dir: temp.path().to_path_buf(),
+            fail_on_task_failure: true,
+            ..EvalCliConfig::default()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!((outcome.passed_tasks, outcome.total_tasks), (5, 5));
+        assert!(!outcome.should_fail_process());
     }
 
     #[tokio::test]

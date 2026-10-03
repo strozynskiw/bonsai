@@ -940,6 +940,7 @@ mod tests {
             "/config",
             "/export",
             "/hooks",
+            "/lsp",
             "/mcp",
             "/memory",
             "/providers",

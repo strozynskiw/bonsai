@@ -23,21 +23,36 @@ type SharedConnection = Arc<Mutex<ConnectionRuntime>>;
 #[derive(Debug)]
 enum PendingResponseError {
     Server(LspServerError),
-    Transport(String),
+    Lifecycle(LspLifecycleFailure),
+}
+
+/// Terminal transport failure that can be recovered by replacing the process.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("LSP transport generation {generation} failed: {reason}")]
+pub(crate) struct LspLifecycleFailure {
+    pub(crate) generation: u64,
+    pub(crate) kind: LspLifecycleKind,
+    pub(crate) reason: String,
+}
+
+/// How an LSP transport became unusable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LspLifecycleKind {
+    Closed,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConnectionState {
     Running,
-    Failed(String),
-    Closed(String),
+    Terminal(LspLifecycleFailure),
 }
 
 impl ConnectionState {
-    fn terminal_reason(&self) -> Option<&str> {
+    fn terminal_failure(&self) -> Option<&LspLifecycleFailure> {
         match self {
             Self::Running => None,
-            Self::Failed(reason) | Self::Closed(reason) => Some(reason),
+            Self::Terminal(failure) => Some(failure),
         }
     }
 }
@@ -46,6 +61,47 @@ impl ConnectionState {
 struct ConnectionRuntime {
     state: ConnectionState,
     pending: HashMap<u64, PendingResponse>,
+}
+
+#[derive(Debug)]
+struct PendingRequestGuard {
+    connection: SharedConnection,
+    id: u64,
+    armed: bool,
+}
+
+impl PendingRequestGuard {
+    fn new(connection: SharedConnection, id: u64) -> Self {
+        Self {
+            connection,
+            id,
+            armed: true,
+        }
+    }
+
+    async fn remove(&mut self) {
+        if self.armed {
+            self.connection.lock().await.pending.remove(&self.id);
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let connection = self.connection.clone();
+        let id = self.id;
+        tokio::spawn(async move {
+            connection.lock().await.pending.remove(&id);
+        });
+    }
 }
 
 #[derive(Debug, Error, Clone)]
@@ -72,8 +128,9 @@ pub(crate) struct LspClient {
     diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<LspDiagnostic>>>>,
     documents: Mutex<HashMap<PathBuf, SharedDocumentState>>,
     next_id: AtomicU64,
-    _reader_task: tokio::task::JoinHandle<()>,
-    _child: Option<tokio::process::Child>,
+    generation: u64,
+    reader_task: tokio::task::JoinHandle<()>,
+    child: Mutex<Option<tokio::process::Child>>,
 }
 
 impl std::fmt::Debug for LspClient {
@@ -86,7 +143,11 @@ impl std::fmt::Debug for LspClient {
 }
 
 impl LspClient {
-    pub(crate) async fn spawn(spec: LanguageServerSpec, root: PathBuf) -> Result<Self, LspError> {
+    pub(crate) async fn spawn(
+        spec: LanguageServerSpec,
+        root: PathBuf,
+        generation: u64,
+    ) -> Result<Self, LspError> {
         let command = spec.command();
         let mut process = Command::new(&command);
         process.args(&spec.args).current_dir(&root);
@@ -114,7 +175,7 @@ impl LspClient {
         })?;
         let reader: BoxedReader = Box::new(tokio::io::BufReader::new(stdout));
         let writer: BoxedWriter = Box::new(stdin);
-        let client = Self::new_with_io(spec, root, reader, writer, Some(child)).await?;
+        let client = Self::new_with_io(spec, root, generation, reader, writer, Some(child)).await?;
         client.initialize().await?;
         Ok(client)
     }
@@ -126,7 +187,18 @@ impl LspClient {
         reader: BoxedReader,
         writer: BoxedWriter,
     ) -> Result<Self, LspError> {
-        let client = Self::new_with_io(spec, root, reader, writer, None).await?;
+        Self::connect_for_test_generation(spec, root, 0, reader, writer).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn connect_for_test_generation(
+        spec: LanguageServerSpec,
+        root: PathBuf,
+        generation: u64,
+        reader: BoxedReader,
+        writer: BoxedWriter,
+    ) -> Result<Self, LspError> {
+        let client = Self::new_with_io(spec, root, generation, reader, writer, None).await?;
         client.initialize().await?;
         Ok(client)
     }
@@ -134,6 +206,7 @@ impl LspClient {
     async fn new_with_io(
         spec: LanguageServerSpec,
         root: PathBuf,
+        generation: u64,
         reader: BoxedReader,
         writer: BoxedWriter,
         child: Option<tokio::process::Child>,
@@ -149,6 +222,7 @@ impl LspClient {
             writer.clone(),
             connection.clone(),
             diagnostics.clone(),
+            generation,
         );
         Ok(Self {
             spec,
@@ -158,8 +232,9 @@ impl LspClient {
             diagnostics,
             documents: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            _reader_task: reader_task,
-            _child: child,
+            generation,
+            reader_task,
+            child: Mutex::new(child),
         })
     }
 
@@ -173,11 +248,12 @@ impl LspClient {
         let (tx, rx) = oneshot::channel();
         {
             let mut connection = self.connection.lock().await;
-            if let Some(reason) = connection.state.terminal_reason() {
-                return Err(LspError::Protocol(reason.to_string()));
+            if let Some(failure) = connection.state.terminal_failure() {
+                return Err(LspError::Lifecycle(failure.clone()));
             }
             connection.pending.insert(id, tx);
         }
+        let mut pending_guard = PendingRequestGuard::new(self.connection.clone(), id);
         let message = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -185,19 +261,22 @@ impl LspClient {
             "params": params,
         });
         if let Err(err) = self.send_message(&message).await {
-            self.connection.lock().await.pending.remove(&id);
+            pending_guard.remove().await;
             return Err(err);
         }
         let response = match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(response)) => response,
+            Ok(Ok(response)) => {
+                pending_guard.disarm();
+                response
+            }
             Ok(Err(_)) => {
-                self.connection.lock().await.pending.remove(&id);
+                pending_guard.remove().await;
                 return Err(LspError::Protocol(format!(
                     "LSP request '{method}' was cancelled"
                 )));
             }
             Err(_) => {
-                self.connection.lock().await.pending.remove(&id);
+                pending_guard.remove().await;
                 return Err(LspError::Protocol(format!(
                     "LSP request '{method}' timed out"
                 )));
@@ -205,7 +284,7 @@ impl LspClient {
         };
         response.map_err(|error| match error {
             PendingResponseError::Server(error) => LspError::Server(error),
-            PendingResponseError::Transport(reason) => LspError::Protocol(reason),
+            PendingResponseError::Lifecycle(failure) => LspError::Lifecycle(failure),
         })
     }
 
@@ -352,23 +431,72 @@ impl LspClient {
     }
 
     async fn send_message(&self, message: &Value) -> Result<(), LspError> {
-        if let Some(reason) = self
+        if let Some(failure) = self
             .connection
             .lock()
             .await
             .state
-            .terminal_reason()
-            .map(str::to_string)
+            .terminal_failure()
+            .cloned()
         {
-            return Err(LspError::Protocol(reason));
+            return Err(LspError::Lifecycle(failure));
         }
-        let mut writer = self.writer.lock().await;
-        write_lsp_message(&mut **writer, message)
-            .await
-            .map_err(|source| LspError::Io {
+        let result = {
+            let mut writer = self.writer.lock().await;
+            write_lsp_message(&mut **writer, message).await
+        };
+        if let Err(source) = result {
+            let kind = source.kind();
+            if matches!(
+                kind,
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::UnexpectedEof
+            ) {
+                let failure = LspLifecycleFailure {
+                    generation: self.generation,
+                    kind: LspLifecycleKind::Failed,
+                    reason: format!("language server transport write failed: {source}"),
+                };
+                transition_to_terminal(&self.connection, failure.clone()).await;
+                return Err(LspError::Lifecycle(failure));
+            }
+            return Err(LspError::Io {
                 action: "write LSP message".to_string(),
                 source,
-            })
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn retire(&self) {
+        transition_to_terminal(
+            &self.connection,
+            LspLifecycleFailure {
+                generation: self.generation,
+                kind: LspLifecycleKind::Closed,
+                reason: "language server transport was retired".to_string(),
+            },
+        )
+        .await;
+        self.reader_task.abort();
+        if let Some(mut child) = self.child.lock().await.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
+}
+
+impl Drop for LspClient {
+    fn drop(&mut self) {
+        self.reader_task.abort();
+        if let Ok(mut child) = self.child.try_lock()
+            && let Some(child) = child.as_mut()
+        {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -377,20 +505,25 @@ fn spawn_reader(
     writer: Arc<Mutex<BoxedWriter>>,
     connection: SharedConnection,
     diagnostics: Arc<Mutex<HashMap<PathBuf, Vec<LspDiagnostic>>>>,
+    generation: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let terminal_state = loop {
             let message = match read_lsp_message(&mut *reader).await {
                 Ok(Some(message)) => message,
                 Ok(None) => {
-                    break ConnectionState::Closed(
-                        "language server transport closed its output".to_string(),
-                    );
+                    break LspLifecycleFailure {
+                        generation,
+                        kind: LspLifecycleKind::Closed,
+                        reason: "language server transport closed its output".to_string(),
+                    };
                 }
                 Err(err) => {
-                    break ConnectionState::Failed(format!(
-                        "language server transport failed: {err}"
-                    ));
+                    break LspLifecycleFailure {
+                        generation,
+                        kind: LspLifecycleKind::Failed,
+                        reason: format!("language server transport failed: {err}"),
+                    };
                 }
             };
             if let Some(id) = message.get("id").and_then(Value::as_u64)
@@ -430,22 +563,24 @@ fn spawn_reader(
                 }
             }
         };
-        let reason = terminal_state
-            .terminal_reason()
-            .unwrap_or("language server transport stopped")
-            .to_string();
-        let pending = {
-            let mut connection = connection.lock().await;
-            connection.state = terminal_state;
-            std::mem::take(&mut connection.pending)
-        };
-        for (_, responder) in pending {
-            if let Err(_err) = responder.send(Err(PendingResponseError::Transport(reason.clone())))
-            {
-                tracing::debug!("LSP drain responder dropped on transport death");
-            }
-        }
+        transition_to_terminal(&connection, terminal_state).await;
     })
+}
+
+async fn transition_to_terminal(connection: &SharedConnection, failure: LspLifecycleFailure) {
+    let pending = {
+        let mut connection = connection.lock().await;
+        if connection.state.terminal_failure().is_some() {
+            return;
+        }
+        connection.state = ConnectionState::Terminal(failure.clone());
+        std::mem::take(&mut connection.pending)
+    };
+    for (_, responder) in pending {
+        if let Err(_err) = responder.send(Err(PendingResponseError::Lifecycle(failure.clone()))) {
+            tracing::debug!("LSP drain responder dropped on transport death");
+        }
+    }
 }
 
 fn response_for_server_request(method: &str) -> Value {
@@ -563,10 +698,7 @@ mod tests {
             buffer: &[u8],
         ) -> Poll<std::io::Result<usize>> {
             if self.fail_next.swap(false, Ordering::SeqCst) {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "injected LSP writer failure",
-                )));
+                return Poll::Ready(Err(std::io::Error::other("injected LSP writer failure")));
             }
             self.bytes.lock().unwrap().extend_from_slice(buffer);
             Poll::Ready(Ok(buffer.len()))
@@ -590,6 +722,7 @@ mod tests {
         LspClient::new_with_io(
             LanguageServerSpec::rust(),
             root.to_path_buf(),
+            0,
             Box::new(BufReader::new(reader)),
             Box::new(writer),
             None,
@@ -676,6 +809,7 @@ mod tests {
         let client = LspClient::new_with_io(
             LanguageServerSpec::rust(),
             temp.path().to_path_buf(),
+            0,
             client_reader,
             client_writer,
             None,
@@ -721,6 +855,7 @@ mod tests {
         let client = LspClient::new_with_io(
             LanguageServerSpec::rust(),
             temp.path().to_path_buf(),
+            0,
             Box::new(BufReader::new(server_to_client_client)),
             Box::new(client_to_server_client),
             None,
@@ -754,10 +889,17 @@ mod tests {
             "{first_message}"
         );
         assert!(first_message.contains("line 1 column"), "{first_message}");
+        assert!(matches!(
+            first,
+            LspError::Lifecycle(LspLifecycleFailure {
+                kind: LspLifecycleKind::Failed,
+                ..
+            })
+        ));
         {
             let connection = client.connection.lock().await;
             assert!(connection.pending.is_empty());
-            assert!(matches!(connection.state, ConnectionState::Failed(_)));
+            assert!(matches!(connection.state, ConnectionState::Terminal(_)));
         }
 
         let second = tokio::time::timeout(
@@ -782,6 +924,7 @@ mod tests {
         let client = LspClient::new_with_io(
             LanguageServerSpec::rust(),
             temp.path().to_path_buf(),
+            0,
             Box::new(BufReader::new(server_to_client_client)),
             Box::new(client_to_server_client),
             None,
@@ -808,9 +951,16 @@ mod tests {
         server.await.unwrap();
 
         assert!(error.to_string().contains("closed its output"), "{error}");
+        assert!(matches!(
+            error,
+            LspError::Lifecycle(LspLifecycleFailure {
+                kind: LspLifecycleKind::Closed,
+                ..
+            })
+        ));
         let connection = client.connection.lock().await;
         assert!(connection.pending.is_empty());
-        assert!(matches!(connection.state, ConnectionState::Closed(_)));
+        assert!(matches!(connection.state, ConnectionState::Terminal(_)));
     }
 
     #[tokio::test]
@@ -916,7 +1066,7 @@ mod tests {
             .display()
             .to_string();
 
-        let error = LspClient::spawn(spec, temp.path().to_path_buf())
+        let error = LspClient::spawn(spec, temp.path().to_path_buf(), 0)
             .await
             .unwrap_err();
         let message = error.to_string();

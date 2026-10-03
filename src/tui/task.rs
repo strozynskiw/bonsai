@@ -29,11 +29,13 @@ use crate::storage::{
     SessionId, Storage, TaskOutcome, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode,
 };
 use crate::subagent::SubagentRegistry;
+use crate::task_intent::TaskPromptKind;
 use crate::tui::app::TranscriptItem;
 use crate::tui::event::{
     CommandOutcomeEvent, CommandOutputEvent, ModalKind, ProviderRunSelection, RuntimeEvent, UiError,
 };
 use crate::tui::pickers::ModelOption;
+use crate::tui::run::{ReviewCanvasPreflightDeps, protect_canvas_before_review};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
@@ -50,6 +52,7 @@ enum ReviewWorkflow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskRunIntent {
     Start(String),
+    ContinueLatestOrStart(String),
     ContinueActive,
     RetryLatest,
 }
@@ -760,10 +763,15 @@ impl TaskController {
         } else {
             input.text.clone()
         };
+        let task_run_intent = if TaskPromptKind::classify(&input.text).is_continuation() {
+            TaskRunIntent::ContinueLatestOrStart(task_goal)
+        } else {
+            TaskRunIntent::Start(task_goal)
+        };
         self.spawn_agent_task(
             persona,
             queued_messages,
-            TaskRunIntent::Start(task_goal),
+            task_run_intent,
             Some(completion),
             move |run_token, queue_receiver| async move {
                 let mut guard = agent.lock().await;
@@ -825,10 +833,7 @@ impl TaskController {
                 let mut guard = agent.lock().await;
                 // Give plan-implementation runs a larger budget — phases may
                 // need more turns than a typical conversation.
-                guard.set_run_budget(crate::run_budget::RunBudget {
-                    max_turns: Some(PLAN_PHASE_MAX_TURNS),
-                    ..Default::default()
-                });
+                guard.set_run_max_turns(PLAN_PHASE_MAX_TURNS);
                 let has_plan = guard
                     .implement_plan_from_with_context(&plan, phase, context_mode)
                     .await;
@@ -849,33 +854,39 @@ impl TaskController {
     /// a review instruction, then dispatches the run loop. The agent stays in
     /// `Review` mode with read-only tools. When the scope has no changes the
     /// run loop is skipped.
-    pub async fn start_review(
+    pub(in crate::tui) async fn start_review(
         &mut self,
+        app: &mut crate::tui::app::AppState,
         agent: Arc<tokio::sync::Mutex<Agent>>,
         scope: crate::agent::ReviewScope,
         sink: SharedSink,
+        preflight: ReviewCanvasPreflightDeps<'_>,
     ) -> Result<bool, UiError> {
-        self.start_review_workflow(agent, scope, sink, ReviewWorkflow::General)
+        self.start_review_workflow(app, agent, scope, sink, preflight, ReviewWorkflow::General)
             .await
     }
 
     /// Begin the curated `/security-review` workflow in the same enforced
     /// read-only review persona.
-    pub async fn start_security_review(
+    pub(in crate::tui) async fn start_security_review(
         &mut self,
+        app: &mut crate::tui::app::AppState,
         agent: Arc<tokio::sync::Mutex<Agent>>,
         scope: crate::agent::ReviewScope,
         sink: SharedSink,
+        preflight: ReviewCanvasPreflightDeps<'_>,
     ) -> Result<bool, UiError> {
-        self.start_review_workflow(agent, scope, sink, ReviewWorkflow::Security)
+        self.start_review_workflow(app, agent, scope, sink, preflight, ReviewWorkflow::Security)
             .await
     }
 
     async fn start_review_workflow(
         &mut self,
+        app: &mut crate::tui::app::AppState,
         agent: Arc<tokio::sync::Mutex<Agent>>,
         scope: crate::agent::ReviewScope,
         sink: SharedSink,
+        preflight: ReviewCanvasPreflightDeps<'_>,
         workflow: ReviewWorkflow,
     ) -> Result<bool, UiError> {
         if self.active.is_some() {
@@ -895,6 +906,10 @@ impl TaskController {
         if !has_changes {
             return Ok(false);
         }
+
+        protect_canvas_before_review(app, preflight)
+            .await
+            .map_err(|err| UiError::new("Review setup failed", format!("{err:#}")))?;
 
         let completion = CompletionRunContext {
             agent: agent.clone(),
@@ -1350,6 +1365,20 @@ async fn begin_task_run(
             .start_task_run(session_id, None, &goal)
             .await
             .map(|task| Some(task.id)),
+        TaskRunIntent::ContinueLatestOrStart(fallback_goal) => {
+            match runtime
+                .storage
+                .retry_latest_substantive_task_run(session_id)
+                .await?
+            {
+                Some(task) => Ok(Some(task.id)),
+                None => runtime
+                    .storage
+                    .start_task_run(session_id, None, &fallback_goal)
+                    .await
+                    .map(|task| Some(task.id)),
+            }
+        }
         TaskRunIntent::ContinueActive => runtime
             .storage
             .active_task_run(session_id)
@@ -1922,6 +1951,64 @@ mod tests {
             session.latest_task.and_then(|task| task.outcome),
             Some(TaskOutcome::Succeeded)
         );
+    }
+
+    #[tokio::test]
+    async fn continuation_task_run_reuses_the_latest_persisted_goal() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let first = fixture
+            .storage
+            .start_task_run(session_id, None, "Fix issue 173")
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .finish_task_run(first.id, TaskOutcome::Succeeded, None)
+            .await
+            .unwrap();
+        for placeholder in ["continue", "try again"] {
+            let poisoned = fixture
+                .storage
+                .start_task_run(session_id, None, placeholder)
+                .await
+                .unwrap();
+            let reason = TaskTerminalReason::new(
+                TaskTerminalReasonCode::ExecutionFailure,
+                "Legacy runtime stored a continuation as a new task.",
+            );
+            fixture
+                .storage
+                .finish_task_run(poisoned.id, TaskOutcome::Failed, Some(&reason))
+                .await
+                .unwrap();
+        }
+        let runtime = SessionRuntimeBudget {
+            storage: fixture.storage.clone(),
+            active_session_id: Arc::new(tokio::sync::Mutex::new(Some(session_id))),
+            max_active_duration: None,
+            activity: SessionActivityGate::new(fixture.storage.clone()),
+            subagents: Arc::new(SubagentRegistry::new()),
+        };
+
+        let resumed_id = begin_task_run(
+            Some(&runtime),
+            Some(session_id),
+            TaskRunIntent::ContinueLatestOrStart("try again".to_string()),
+        )
+        .await
+        .unwrap()
+        .expect("continuation should have a task run");
+        let resumed = fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resumed.id, resumed_id);
+        assert_eq!(resumed.goal_id, first.goal_id);
+        assert_eq!(resumed.goal, "Fix issue 173");
     }
 
     #[tokio::test]

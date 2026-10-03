@@ -27,7 +27,7 @@ jobs:
             echo "No mock eval summary generated." >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload eval report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bonsai-eval-mock
@@ -57,7 +57,7 @@ jobs:
             echo "No live eval summary generated." >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload live eval report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bonsai-eval-live

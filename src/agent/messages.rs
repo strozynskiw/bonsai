@@ -67,6 +67,26 @@ pub(super) fn trusted_context_message(text: &str) -> ChatCompletionRequestMessag
     system_message_from_content(text.to_string())
 }
 
+const SCOPED_STEERING_MESSAGE_NAME: &str = "bonsai_scoped_steering";
+
+/// A trusted path-scoped steering update with durable provenance. The name is
+/// checked when restoring a persisted conversation so user-authored content can
+/// never impersonate instruction coverage.
+pub(super) fn scoped_steering_message(text: &str) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+        content: text.to_string().into(),
+        name: Some(SCOPED_STEERING_MESSAGE_NAME.to_string()),
+    })
+}
+
+pub(super) fn is_scoped_steering_message(message: &ChatCompletionRequestMessage) -> bool {
+    matches!(
+        message,
+        ChatCompletionRequestMessage::System(system)
+            if system.name.as_deref() == Some(SCOPED_STEERING_MESSAGE_NAME)
+    )
+}
+
 /// Build an injected context message with role- and name-level provenance.
 /// Peer/external content remains user-role data even though its source is
 /// structured; only trusted harness/background notes receive system authority.
@@ -95,6 +115,15 @@ pub(super) fn provenance_message(
 /// every assistant/tool message that followed the prior snapshot.
 pub(super) fn project_state_message(text: &str) -> ChatCompletionRequestMessage {
     provenance_message(MessageProvenance::ProjectState, text)
+}
+
+/// Append-only trusted runtime-policy note. A newer note explicitly supersedes
+/// older ones without changing the stable system-message prefix.
+pub(super) fn execution_policy_message(content: &str) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+        content: content.to_string().into(),
+        name: Some("bonsai_execution_policy".to_string()),
+    })
 }
 
 pub(super) fn is_project_state_message(message: &ChatCompletionRequestMessage) -> bool {
@@ -174,15 +203,24 @@ pub(super) fn user_message_with_images(
         },
     ));
     for image in images {
-        let data_uri = format!("data:{};base64,{}", image.mime, image.base64);
-        parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-            ChatCompletionRequestMessageContentPartImage {
-                image_url: ImageUrl {
-                    url: data_uri,
-                    detail: None,
+        // Ingest gate: a media type no wire target accepts (e.g. an SVG pasted
+        // as `image/svg+xml`) must never enter the history, where it would
+        // ride along with every later context request as a guaranteed 400.
+        let part = match crate::provider::transform::unsupported_media_type_placeholder(&image.mime)
+        {
+            Some(placeholder) => ChatCompletionRequestUserMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText { text: placeholder },
+            ),
+            None => ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageUrl {
+                        url: format!("data:{};base64,{}", image.mime, image.base64),
+                        detail: None,
+                    },
                 },
-            },
-        ));
+            ),
+        };
+        parts.push(part);
     }
     ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
         content: ChatCompletionRequestUserMessageContent::Array(parts),
@@ -219,5 +257,34 @@ mod provenance_tests {
         .unwrap();
         assert_eq!(peer["role"], "user");
         assert_eq!(peer["name"], "bonsai_peer");
+    }
+}
+
+#[cfg(test)]
+mod image_message_tests {
+    use super::*;
+
+    fn attachment(mime: &str) -> ImageAttachment {
+        ImageAttachment {
+            mime: mime.to_string(),
+            base64: "QUJD".to_string(),
+            byte_len: 3,
+        }
+    }
+
+    #[test]
+    fn unsupported_attachment_media_type_becomes_placeholder_text() {
+        let message = user_message_with_images("look at this", &[attachment("image/svg+xml")]);
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(!json.contains("data:image/svg+xml"));
+        assert!(!json.contains("image_url"));
+        assert!(json.contains("unsupported image format"));
+    }
+
+    #[test]
+    fn supported_attachment_media_type_stays_an_image_part() {
+        let message = user_message_with_images("look at this", &[attachment("image/png")]);
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("data:image/png;base64,QUJD"));
     }
 }

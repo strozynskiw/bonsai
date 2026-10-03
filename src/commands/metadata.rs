@@ -209,6 +209,12 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
         ),
     },
     CommandMetadata {
+        name: "/lsp",
+        description: "Control language-server processes",
+        usage_hint: Some("restart <path>"),
+        surface: both(),
+    },
+    CommandMetadata {
         name: "/mcp",
         description: "Inspect, control, and authorize MCP servers",
         usage_hint: Some("tools|enable|disable|reload|auth|callback|revoke <server>"),

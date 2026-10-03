@@ -28,6 +28,29 @@ impl Agent {
             &input.text,
         )
         .await?;
+        let target_dirs = expansion
+            .read_evidence
+            .iter()
+            .filter_map(|evidence| {
+                let canonical = evidence.observation().canonical_path();
+                let relative = canonical.strip_prefix(&self.project_root).ok()?;
+                Some(if canonical.is_dir() {
+                    relative.to_path_buf()
+                } else {
+                    relative
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf()
+                })
+            })
+            .collect::<Vec<_>>();
+        let scoped_updates = target_dirs
+            .iter()
+            .flat_map(|target_dir| self.scoped_steering.refresh_target_dir(target_dir))
+            .collect::<Vec<_>>();
+        for update in scoped_updates {
+            self.push_message(scoped_steering_message(&update.render()));
+        }
         let message_id = if input.images.is_empty() {
             self.push_user_message_raw(&expansion.text)
         } else {
@@ -180,6 +203,11 @@ impl Agent {
     /// The layered `.bonsai/config.toml` view, for `/config`.
     pub(crate) fn config(&self) -> &std::sync::Arc<crate::config::Config> {
         &self.config
+    }
+
+    /// The language-server hub, for `/lsp restart`.
+    pub(crate) fn lsp_hub(&self) -> Option<&std::sync::Arc<crate::lsp::LspHub>> {
+        self.lsp_hub.as_ref()
     }
 
     /// The connected MCP hub, for `/mcp enable|disable|reload`. `None`
@@ -501,7 +529,12 @@ impl Agent {
 }
 
 pub(super) fn untrusted_runtime_note(source: &str, body: &str) -> String {
-    let redacted = crate::redact::redact(body);
+    // Runtime notes quote raw command output — background task tails above all.
+    // Strip terminal controls *before* masking secrets: escape bytes can split a
+    // credential into fragments no redaction pattern matches, and stripping
+    // afterwards would re-join them into a live token the model then sees.
+    let stripped = crate::util::ansi::strip_terminal_controls(body);
+    let redacted = crate::redact::redact(stripped.as_ref());
     crate::tool::wrap_untrusted_content(source, redacted.as_ref())
 }
 
@@ -546,6 +579,34 @@ mod tests {
             "{framed}"
         );
         assert!(!framed.contains(&secret), "{framed}");
+        assert!(framed.contains("[REDACTED:GitHub token]"), "{framed}");
+    }
+
+    #[test]
+    fn runtime_note_strips_terminal_controls_from_quoted_command_output() {
+        // A background `bash` task tail quotes the command's own bytes; the
+        // model must not receive the escape sequences that terminal was meant
+        // to consume.
+        let framed = untrusted_runtime_note(
+            "background command completion",
+            "$ cargo test\n\u{1b}[32mok\u{1b}[0m \u{1b}(B\u{1b}[1m1 passed\u{1b}[m\n",
+        );
+
+        assert!(!framed.contains('\u{1b}'), "{framed}");
+        assert!(framed.contains("ok 1 passed"), "{framed}");
+    }
+
+    #[test]
+    fn runtime_note_masks_a_credential_split_by_escape_bytes() {
+        // Stripping after masking would hand the model the re-joined token.
+        let halves = "a1B2c3D4e5".repeat(2);
+        let token = format!("ghp_{halves}{halves}");
+        let framed = untrusted_runtime_note(
+            "background command completion",
+            &format!("key=ghp_{halves}\u{1b}[0m{halves} done"),
+        );
+
+        assert!(!framed.contains(&token), "{framed}");
         assert!(framed.contains("[REDACTED:GitHub token]"), "{framed}");
     }
 }

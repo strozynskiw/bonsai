@@ -13,6 +13,7 @@ pub(crate) mod grep;
 pub(crate) mod lsp;
 pub(crate) mod memory_write;
 mod output;
+pub(crate) mod path_evidence;
 mod path_suggest;
 pub(crate) mod peers;
 pub(crate) mod plan;
@@ -28,7 +29,7 @@ pub(crate) mod registry_assembly;
 mod repo_map;
 mod risk;
 pub(crate) mod schema;
-mod search;
+pub(crate) mod search;
 #[cfg(unix)]
 mod secure_fs;
 pub(crate) mod set_session_title;
@@ -50,16 +51,19 @@ pub(crate) use action_policy::{
 };
 pub use agent::AgentTool;
 pub(crate) use agent::{
-    GRANTABLE_AGENT_TOOLS, SubagentProviderConfig, SubagentProviderFactory, SubagentRunner,
-    SubagentToolRegistryFactory, agents_index_section_with_settings, builtin_agents,
-    builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
+    GRANTABLE_AGENT_TOOLS, SelfReviewRunOptions, SubagentProviderConfig, SubagentProviderFactory,
+    SubagentRunner, SubagentToolRegistryFactory, agents_index_section_with_settings,
+    builtin_agents, builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
 };
-pub(crate) use apply_patch::patched_paths_from_arguments;
+pub(crate) use apply_patch::{patch_target_paths_from_arguments, patched_paths_from_arguments};
 pub use bash::BashTool;
 pub(crate) use bash::command::analyze_command as analyze_bash_command;
+pub(crate) use bash::command::normalize_verification_command;
 pub(crate) use bash::command::single_read_path;
+pub(crate) use bash::direct_verification_is_cacheable;
 pub(crate) use bash::{BashExecutionPolicy, BashOutputBudget, BashRuntimeDeps};
 pub use edit::EditTool;
+pub(crate) use path_evidence::{MissingPathEvidence, PathEvidence};
 pub use project_info::ProjectInfoTool;
 pub(crate) use project_info::{ProjectInfoProviderState, ProjectInfoRuntime};
 pub use read::ReadTool;
@@ -68,7 +72,7 @@ pub use read_evidence::{ReadCoverage, ReadEvidence, ReadWindow};
 pub use read_region::{ReadRegionTool, ReadSymbolTool};
 pub use read_tracker::ReadTracker;
 pub(crate) use repo_map::build_repo_map;
-pub(crate) use risk::{ApprovalLevel, RiskTier};
+pub(crate) use risk::{ApprovalLevel, RiskTier, classify_bash};
 pub use set_session_title::SharedActiveSessionId;
 pub(crate) use set_session_title::normalize_session_title;
 pub use webfetch::WebFetchTool;
@@ -141,6 +145,11 @@ pub enum ToolOutput {
         evidence: ReadEvidence,
         target_call_ids: Vec<String>,
         avoided_chars: usize,
+    },
+    /// A path inspection reused validated negative evidence rather than
+    /// repeating a failing filesystem resolution.
+    MissingPathReuse {
+        text: String,
     },
     TextWithUsage {
         text: String,
@@ -236,6 +245,7 @@ impl ToolOutput {
             Self::Read { text, .. } => text,
             Self::ReadReuse { text, .. } => text,
             Self::ReadDelta { text, .. } => text,
+            Self::MissingPathReuse { text } => text,
             Self::TextWithUsage { text, .. } => text,
             Self::TrustedContext { summary, .. } => summary,
             // The framed content *is* what the model sees; there is no separate
@@ -260,6 +270,7 @@ impl ToolOutput {
             Self::Read { text, .. } => crate::redact::redact_in_place(text),
             Self::ReadReuse { text, .. } => crate::redact::redact_in_place(text),
             Self::ReadDelta { text, .. } => crate::redact::redact_in_place(text),
+            Self::MissingPathReuse { text } => crate::redact::redact_in_place(text),
             Self::TextWithUsage { text, .. } => crate::redact::redact_in_place(text),
             Self::TrustedContext { summary, content } => {
                 crate::redact::redact_in_place(summary);
@@ -294,6 +305,42 @@ impl ToolOutput {
                 diff.redact_secrets();
             }
         }
+    }
+
+    /// Strip ANSI/VT control sequences from the textual fields that carry raw
+    /// command output. Applied at the same run-loop boundary as
+    /// [`Self::redact_secrets`], so the model context, the transcript, `/ctx`,
+    /// and the persisted snapshot all see the same control-free form: those
+    /// bytes only add noise and destabilize text comparisons and cache prefixes.
+    ///
+    /// Byte/char counts in the `bash` command-summary footer are deliberately
+    /// left describing the command's raw output — they are evidence about what
+    /// the command emitted, not a measurement of this stripped text.
+    fn sanitize_terminal_controls(&mut self) {
+        if let Self::Command {
+            rendered,
+            stdout,
+            stderr,
+            ..
+        } = self
+        {
+            crate::util::ansi::strip_terminal_controls_in_place(rendered);
+            crate::util::ansi::strip_terminal_controls_in_place(stdout);
+            crate::util::ansi::strip_terminal_controls_in_place(stderr);
+        }
+    }
+
+    /// Final normalization before any sink observes this result: strip terminal
+    /// controls, then mask credentials.
+    ///
+    /// The order matters and is why this exists as one call. Escape bytes can
+    /// split a credential into fragments no redaction pattern matches
+    /// (`ghp_ac\u{1b}[0mdef`), so masking first would miss the token and
+    /// stripping afterwards would re-join it into a live secret the model then
+    /// sees.
+    pub(crate) fn sanitize_for_context(&mut self) {
+        self.sanitize_terminal_controls();
+        self.redact_secrets();
     }
 
     #[must_use]
@@ -486,6 +533,8 @@ pub(crate) struct ProjectPathResolver<'a> {
     project_root: &'a Path,
     action: &'a str,
     yolo_enabled: bool,
+    path_evidence: Option<&'a PathEvidence>,
+    recheck: bool,
 }
 
 #[derive(Debug, Error)]
@@ -518,6 +567,8 @@ pub(crate) enum ToolPathError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{evidence}")]
+    ReusedMissingPath { evidence: MissingPathEvidence },
     #[error(
         "'{raw}' looks like {count} paths in one argument, but this tool takes a single path. \
          Search one path per call, omit `path` to cover the whole project, or pass a glob \
@@ -584,6 +635,8 @@ impl<'a> ProjectPathResolver<'a> {
             project_root,
             action: "access",
             yolo_enabled: false,
+            path_evidence: None,
+            recheck: false,
         }
     }
 
@@ -597,19 +650,41 @@ impl<'a> ProjectPathResolver<'a> {
         self
     }
 
+    pub(crate) fn path_evidence(mut self, evidence: &'a PathEvidence) -> Self {
+        self.path_evidence = evidence.is_for_root(self.project_root).then_some(evidence);
+        self
+    }
+
+    pub(crate) fn recheck(mut self, recheck: bool) -> Self {
+        self.recheck = recheck;
+        self
+    }
+
     pub(crate) fn resolve_existing(
         self,
         raw_path: &str,
     ) -> std::result::Result<ExistingProjectPath, ToolPathError> {
+        if let Some(evidence) = self
+            .path_evidence
+            .and_then(|cache| cache.reused_missing(raw_path, self.recheck))
+        {
+            return Err(ToolPathError::ReusedMissingPath { evidence });
+        }
         let path = self.project_input_path(raw_path);
         let canonical_root = self.canonical_project_root()?;
         let canonical_path = path.canonicalize().map_err(|source| {
-            self.multi_path_error(raw_path)
-                .unwrap_or_else(|| ToolPathError::PathNotFound {
-                    path: raw_path.to_string(),
-                    hint: path_suggest::nearest_path_hint(self.project_root, raw_path),
-                    source,
-                })
+            if let Some(error) = self.multi_path_error(raw_path) {
+                return error;
+            }
+            let hint = path_suggest::nearest_path_hint(self.project_root, raw_path);
+            if let Some(cache) = self.path_evidence {
+                cache.record_missing(raw_path, hint.clone(), &source);
+            }
+            ToolPathError::PathNotFound {
+                path: raw_path.to_string(),
+                hint,
+                source,
+            }
         })?;
 
         self.ensure_canonical_path_inside_project(&canonical_path, &canonical_root)?;
@@ -624,6 +699,12 @@ impl<'a> ProjectPathResolver<'a> {
         self,
         raw_path: Option<&str>,
     ) -> std::result::Result<ExistingProjectPath, ToolPathError> {
+        if let Some(evidence) = raw_path.and_then(|raw| {
+            self.path_evidence
+                .and_then(|cache| cache.reused_missing(raw, self.recheck))
+        }) {
+            return Err(ToolPathError::ReusedMissingPath { evidence });
+        }
         let path = match raw_path {
             Some(raw_path) => self.project_input_path(raw_path),
             None => self.project_root.to_path_buf(),
@@ -632,12 +713,18 @@ impl<'a> ProjectPathResolver<'a> {
         let canonical_path = path.canonicalize().map_err(|source| {
             raw_path
                 .and_then(|raw| self.multi_path_error(raw))
-                .unwrap_or_else(|| ToolPathError::SearchPathNotFound {
-                    path: path.display().to_string(),
-                    hint: raw_path
+                .unwrap_or_else(|| {
+                    let hint = raw_path
                         .map(|raw| path_suggest::nearest_path_hint(self.project_root, raw))
-                        .unwrap_or_default(),
-                    source,
+                        .unwrap_or_default();
+                    if let (Some(cache), Some(raw)) = (self.path_evidence, raw_path) {
+                        cache.record_missing(raw, hint.clone(), &source);
+                    }
+                    ToolPathError::SearchPathNotFound {
+                        path: path.display().to_string(),
+                        hint,
+                        source,
+                    }
                 })
         })?;
 
@@ -994,6 +1081,10 @@ pub struct ToolExecutionContext {
     /// that spawn nested work (e.g. `agent`) forward it so a parent cancel
     /// reaches the child's own cooperative checks, not only via future-drop.
     cancellation_token: Option<CancellationToken>,
+    /// Exact cache-inclusive token allowance available to nested agent work.
+    /// It is a snapshot, not a shared reservation; callers must serialize
+    /// delegated work whenever a cumulative cap is active.
+    remaining_billed_tokens: Option<u64>,
     background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
 }
 
@@ -1005,6 +1096,7 @@ impl ToolExecutionContext {
             sink,
             origin: None,
             cancellation_token: None,
+            remaining_billed_tokens: None,
             background_wakes: None,
         }
     }
@@ -1018,6 +1110,12 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
         self.origin = Some(origin.into());
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_remaining_billed_tokens(mut self, remaining: Option<u64>) -> Self {
+        self.remaining_billed_tokens = remaining;
         self
     }
 
@@ -1048,6 +1146,11 @@ impl ToolExecutionContext {
     #[must_use]
     pub fn cancellation_token(&self) -> Option<CancellationToken> {
         self.cancellation_token.clone()
+    }
+
+    #[must_use]
+    pub(crate) const fn remaining_billed_tokens(&self) -> Option<u64> {
+        self.remaining_billed_tokens
     }
 
     #[must_use]
@@ -1152,6 +1255,26 @@ impl ToolRegistry {
         self.order.iter().map(String::as_str)
     }
 
+    /// Project a registry without one model-visible tool while preserving the
+    /// remaining registration order and authorization ledger.
+    pub(crate) fn without(self: &Arc<Self>, excluded_name: &str) -> Arc<Self> {
+        if !self.tools.contains_key(excluded_name) {
+            return self.clone();
+        }
+
+        let mut projected = Self::new();
+        projected.set_authorization_ledger(self.authorization_ledger.clone());
+        for name in &self.order {
+            if name == excluded_name {
+                continue;
+            }
+            if let Some(tool) = self.tools.get(name) {
+                projected.register(tool.clone());
+            }
+        }
+        Arc::new(projected)
+    }
+
     /// Build the error for a tool name we don't have. Lists the tools that *are*
     /// available — so a model that reached for one missing in the current mode
     /// (e.g. `bash` while planning, where the registry is read-only) can pick a
@@ -1223,6 +1346,34 @@ mod registry_tests {
     use crate::tool::symbol_search::SymbolSearchTool;
     use std::sync::Arc;
 
+    struct EffectTool {
+        name: &'static str,
+        effect: ToolEffectPolicy,
+    }
+
+    #[async_trait]
+    impl Tool for EffectTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "effect tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn effect_policy(&self) -> ToolEffectPolicy {
+            self.effect
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::Text(String::new()))
+        }
+    }
+
     fn sample_registry() -> ToolRegistry {
         let root = std::path::PathBuf::from(".");
         let tracker = ReadTracker::new();
@@ -1234,6 +1385,25 @@ mod registry_tests {
         registry.register(Arc::new(GrepTool::new(root.clone(), tracker)));
         registry.register(Arc::new(SymbolSearchTool::new(root)));
         registry
+    }
+
+    #[test]
+    fn projected_registry_removes_one_tool_and_preserves_order() {
+        let mut registry = ToolRegistry::new();
+        for name in ["read", "set_session_title", "bash"] {
+            registry.register(Arc::new(EffectTool {
+                name,
+                effect: ToolEffectPolicy::ReadOnly,
+            }));
+        }
+        let registry = Arc::new(registry);
+
+        let projected = registry.without("set_session_title");
+
+        assert_eq!(projected.names().collect::<Vec<_>>(), ["read", "bash"]);
+        assert!(projected.get("set_session_title").is_none());
+        assert!(projected.get("read").is_some());
+        assert!(projected.get("bash").is_some());
     }
 
     #[test]
@@ -2199,5 +2369,79 @@ mod registry_order_tests {
         let registry = ToolRegistry::new();
         let message = registry.unknown_tool_message("anything");
         assert!(message.contains("No tools are available"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod terminal_control_tests {
+    use super::ToolOutput;
+
+    fn command(rendered: &str, stdout: &str, stderr: &str) -> ToolOutput {
+        ToolOutput::Command {
+            rendered: rendered.to_string(),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+            truncation: None,
+        }
+    }
+
+    #[test]
+    fn command_output_loses_terminal_control_sequences() {
+        // Session 119: a failed `cargo fmt --all -- --check` leaked CSI color
+        // fragments (`^[[31m`, `^[(B^[[m`) into the model-facing excerpt.
+        let mut output = command(
+            "error: \u{1b}[31mstyle\u{1b}[0m\n\u{1b}(B\u{1b}[m",
+            "\u{1b}[32mok\u{1b}[0m",
+            "warn: \u{1b}[33mhint\u{1b}[0m",
+        );
+        output.sanitize_terminal_controls();
+
+        let ToolOutput::Command {
+            rendered,
+            stdout,
+            stderr,
+            ..
+        } = output
+        else {
+            panic!("constructed as Command");
+        };
+        assert_eq!(rendered, "error: style\n");
+        assert_eq!(stdout, "ok");
+        assert_eq!(stderr, "warn: hint");
+    }
+
+    #[test]
+    fn other_output_variants_keep_their_bytes() {
+        // A read must stay byte-exact for a source file that contains escape
+        // literals; only command output is normalized.
+        let literal = "const ESC: char = '\\u{1b}';";
+        let mut output = ToolOutput::Text(literal.to_string());
+        output.sanitize_terminal_controls();
+
+        let ToolOutput::Text(text) = output else {
+            panic!("constructed as Text");
+        };
+        assert_eq!(text, literal);
+    }
+
+    #[test]
+    fn context_normalization_masks_a_credential_split_by_escape_bytes() {
+        // Masking before stripping would leave the re-joined token visible.
+        let halves = "a1B2c3D4e5".repeat(2);
+        let token = format!("ghp_{halves}{halves}");
+        let mut output = command(
+            &format!("error: key=ghp_{halves}\u{1b}[0m{halves} leaked"),
+            "",
+            "",
+        );
+        output.sanitize_for_context();
+
+        let ToolOutput::Command { rendered, .. } = output else {
+            panic!("constructed as Command");
+        };
+        assert!(!rendered.contains(&token), "{rendered}");
+        assert!(rendered.contains("[REDACTED:GitHub token]"), "{rendered}");
     }
 }

@@ -9,6 +9,9 @@
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # the e2e/ directory
 ROOT="$(cd .. && pwd)"
+E2E_RUN_EVIDENCE_ROOT="$ROOT/target/tui-verification/e2e/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export E2E_RUN_EVIDENCE_ROOT
+mkdir -p "$E2E_RUN_EVIDENCE_ROOT"
 
 if ! command -v tmux >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/tmux ]; then
   echo "error: tmux not found. Install it with: brew install tmux" >&2
@@ -26,6 +29,11 @@ else
 fi
 
 pass=0; fail=0; failed=()
+if bash tests/verifier_isolation.sh; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); failed+=("verifier_isolation.sh")
+fi
 for c in "${cases[@]}"; do
   if bash "$c"; then
     pass=$((pass + 1))
@@ -37,5 +45,11 @@ done
 echo
 echo "================================================"
 echo "e2e summary: $pass passed, $fail failed"
+echo "evidence: $E2E_RUN_EVIDENCE_ROOT"
 [ "$fail" -gt 0 ] && printf '  failed: %s\n' "${failed[*]}"
+retained=0
+while IFS= read -r run; do
+  retained=$((retained + 1))
+  [ "$retained" -le 20 ] || rm -rf "$run"
+done < <(find "$(dirname "$E2E_RUN_EVIDENCE_ROOT")" -mindepth 1 -maxdepth 1 -type d -print | sort -r)
 exit "$fail"

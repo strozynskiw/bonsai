@@ -121,7 +121,7 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
         ]),
         Line::from(vec![
             Span::styled("Esc", theme::body(theme::palette().text)),
-            Span::styled("       stop + steer foreground  ", theme::dim()),
+            Span::styled("       steer queued message  ", theme::dim()),
             Span::styled("Ctrl+C", theme::body(theme::palette().text)),
             Span::styled(" cancel all / exit", theme::dim()),
         ]),

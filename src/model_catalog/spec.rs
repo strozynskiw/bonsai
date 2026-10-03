@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::model_role::LegacyModelRole;
 use crate::provider::{
     ModelPricing, ModelPricingTier, ReasoningCodec, ReasoningEffort, ReasoningOption,
-    ReasoningSelection, TokenCounterKind,
+    ReasoningSelection, TokenCounterKind, UtcPricingWindow,
 };
 
 use super::*;
@@ -186,6 +186,10 @@ pub(crate) struct ConnectionSpec {
     pub default_endpoint_path: Option<Box<str>>,
     #[serde(default)]
     pub default_token_counter: Option<TokenCounterKind>,
+    /// Recurring UTC windows inherited by targets that declare peak rates.
+    /// Each window is half-open and may wrap across midnight.
+    #[serde(default)]
+    pub peak_pricing_windows_utc: Vec<UtcPricingWindow>,
     /// Models.dev provider namespace used for dynamically discovered models
     /// whose remote ids are bare model names. Defaults to the connection id.
     ///
@@ -271,6 +275,8 @@ pub(crate) struct ConnectionSpecPatch {
     #[serde(default)]
     pub default_token_counter: Option<TokenCounterKind>,
     #[serde(default)]
+    pub peak_pricing_windows_utc: Option<Vec<UtcPricingWindow>>,
+    #[serde(default)]
     pub models_dev_provider: Option<ConnectionId>,
     #[serde(default)]
     pub model_exclude_prefixes: Option<Vec<Box<str>>>,
@@ -318,6 +324,7 @@ impl ConnectionSpecPatch {
             default_model: self.default_model.unwrap_or(None),
             default_endpoint_path: self.default_endpoint_path,
             default_token_counter: self.default_token_counter,
+            peak_pricing_windows_utc: self.peak_pricing_windows_utc.unwrap_or_default(),
             models_dev_provider: self.models_dev_provider,
             model_exclude_prefixes: self.model_exclude_prefixes.unwrap_or_default(),
             reasoning_codec: self.reasoning_codec,
@@ -390,6 +397,9 @@ impl ConnectionSpec {
         }
         if let Some(default_token_counter) = patch.default_token_counter {
             self.default_token_counter = Some(default_token_counter);
+        }
+        if let Some(peak_pricing_windows_utc) = patch.peak_pricing_windows_utc {
+            self.peak_pricing_windows_utc = peak_pricing_windows_utc;
         }
         if let Some(models_dev_provider) = patch.models_dev_provider {
             self.models_dev_provider = Some(models_dev_provider);
@@ -473,6 +483,11 @@ pub(crate) struct TargetSpec {
     pub pricing: Option<ModelPricing>,
     #[serde(default)]
     pub pricing_tiers: Vec<ModelPricingTier>,
+    /// Rates used inside the connection's recurring UTC peak windows.
+    #[serde(default)]
+    pub peak_pricing: Option<ModelPricing>,
+    #[serde(default)]
+    pub peak_pricing_tiers: Vec<ModelPricingTier>,
     #[serde(default)]
     pub roles: Vec<LegacyModelRole>,
     /// Marks a deliberate divergence from refreshed metadata (working-window
@@ -547,6 +562,10 @@ struct RawTargetSpecPatch {
     #[serde(default)]
     pricing_tiers: Option<Vec<ModelPricingTier>>,
     #[serde(default)]
+    peak_pricing: Option<ModelPricing>,
+    #[serde(default)]
+    peak_pricing_tiers: Option<Vec<ModelPricingTier>>,
+    #[serde(default)]
     roles: Option<Vec<LegacyModelRole>>,
     #[serde(default)]
     pinned: Option<bool>,
@@ -579,6 +598,8 @@ pub(crate) struct TargetSpecPatch {
     pub features: Option<Vec<ModelFeature>>,
     pub pricing: Option<ModelPricing>,
     pub pricing_tiers: Option<Vec<ModelPricingTier>>,
+    pub peak_pricing: Option<ModelPricing>,
+    pub peak_pricing_tiers: Option<Vec<ModelPricingTier>>,
     pub roles: Option<Vec<LegacyModelRole>>,
     pub pinned: Option<bool>,
     pub pinned_fields: Option<Vec<ModelMetadataField>>,
@@ -616,6 +637,8 @@ impl<'de> Deserialize<'de> for TargetSpecPatch {
             features: raw.features,
             pricing: raw.pricing,
             pricing_tiers: raw.pricing_tiers,
+            peak_pricing: raw.peak_pricing,
+            peak_pricing_tiers: raw.peak_pricing_tiers,
             roles: raw.roles,
             pinned: raw.pinned,
             pinned_fields: raw.pinned_fields,
@@ -649,6 +672,8 @@ impl TargetSpecPatch {
             features: self.features.unwrap_or_default(),
             pricing: self.pricing,
             pricing_tiers: self.pricing_tiers.unwrap_or_default(),
+            peak_pricing: self.peak_pricing,
+            peak_pricing_tiers: self.peak_pricing_tiers.unwrap_or_default(),
             roles: self.roles.unwrap_or_default(),
             pinned: self.pinned.unwrap_or(false),
             pinned_fields: self.pinned_fields.unwrap_or_default(),
@@ -724,6 +749,12 @@ impl TargetSpec {
         }
         if let Some(pricing_tiers) = patch.pricing_tiers {
             self.pricing_tiers = pricing_tiers;
+        }
+        if let Some(peak_pricing) = patch.peak_pricing {
+            self.peak_pricing = Some(peak_pricing);
+        }
+        if let Some(peak_pricing_tiers) = patch.peak_pricing_tiers {
+            self.peak_pricing_tiers = peak_pricing_tiers;
         }
         if let Some(roles) = patch.roles {
             self.roles = roles;

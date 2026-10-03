@@ -164,7 +164,8 @@ impl Agent {
         match pass {
             EpisodeEvictionPass::CloseTime => {
                 evictions.retain(|eviction| {
-                    eviction.size_boundary
+                    self.eager_episode_eviction
+                        || eviction.size_boundary
                         || clears_episode_rewrite_guard(
                             estimated_episode_savings(eviction),
                             before_tokens,
@@ -337,6 +338,9 @@ impl Agent {
         self.record_context_rewrite(ContextRewriteKind::Episode, before_tokens, after_tokens);
         self.pending_context_rewrite
             .record_episode_evictions(&evicted_seqs);
+        self.episode_eviction_count = self
+            .episode_eviction_count
+            .saturating_add(evicted_seqs.len());
         self.caches.last_prompt_estimate = None;
         self.caches.last_sent_prompt_estimate = None;
         sink.compaction_status(&episode_eviction_status(
@@ -469,7 +473,7 @@ fn episode_eviction_status(evictions: &[EpisodeEviction], saved_tokens: usize) -
                 format!("\"{}\"", single.title)
             };
             format!(
-                "Context lifecycle: episode #{} {title} archived · {saved} tokens → card · restorable via /ctx",
+                "Context: archived episode #{} {title} · {saved} tokens saved",
                 single.seq
             )
         }
@@ -480,7 +484,7 @@ fn episode_eviction_status(evictions: &[EpisodeEviction], saved_tokens: usize) -
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "Context lifecycle: {} episodes archived ({seqs}) · {saved} tokens → cards · restorable via /ctx",
+                "Context: archived {} episodes ({seqs}) · {saved} tokens saved",
                 many.len()
             )
         }
@@ -490,6 +494,40 @@ fn episode_eviction_status(evictions: &[EpisodeEviction], saved_tokens: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn eviction(seq: usize, title: &str) -> EpisodeEviction {
+        EpisodeEviction {
+            seq,
+            title: title.to_string(),
+            start: 0,
+            end: 0,
+            span_tokens: 0,
+            size_boundary: false,
+        }
+    }
+
+    #[test]
+    fn episode_eviction_status_reports_tokens_saved_without_restore_jargon() {
+        let status =
+            episode_eviction_status(&[eviction(9, "Assess pending pull requests")], 22_500);
+
+        assert_eq!(
+            status,
+            "Context: archived episode #9 \"Assess pending pull requests\" · 22.5k tokens saved"
+        );
+        assert!(!status.contains("restorable"));
+    }
+
+    #[test]
+    fn batched_episode_eviction_status_reports_total_tokens_saved() {
+        let status =
+            episode_eviction_status(&[eviction(9, "First"), eviction(10, "Second")], 31_250);
+
+        assert_eq!(
+            status,
+            "Context: archived 2 episodes (#9, #10) · 31.2k tokens saved"
+        );
+    }
 
     #[test]
     fn pressure_batch_rejects_small_rewrite_that_leaves_pressure_active() {

@@ -79,6 +79,80 @@ fn git_detail(call_id: &str, op: &str, rendered: &str) -> ToolContextDetail {
     }
 }
 
+struct MissingReuseTool;
+
+#[async_trait]
+impl Tool for MissingReuseTool {
+    fn name(&self) -> &str {
+        "read"
+    }
+
+    fn description(&self) -> &str {
+        "test cached missing path"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::MissingPathReuse {
+            text: "[reused missing-path evidence]\npath: missing.md".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn missing_path_reuse_records_reused_inspection_telemetry() {
+    let fixture = TestFixture::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MissingReuseTool));
+    let responses = vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call("call-1", "read", r#"{"path":"missing.md"}"#)],
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::Stop,
+            ),
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            content: "done".to_string(),
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::Stop,
+            ),
+            ..StreamedResponse::default()
+        }),
+    ];
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        Arc::new(registry),
+        Arc::new(ToolRegistry::new()),
+        fixture.read_tracker,
+        String::new(),
+        fixture.project_root,
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+
+    agent
+        .run(
+            "read missing path",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    let event = &agent.read_evidence.inspection_events["call-1"];
+    assert_eq!(event.outcome, InspectionOutcome::Reused);
+    assert_eq!(event.reason, InspectionReason::MissingPathEvidence);
+}
+
 #[tokio::test]
 async fn repeated_unchanged_git_diff_recovers_after_one_rejection() {
     let fixture = TestFixture::new();

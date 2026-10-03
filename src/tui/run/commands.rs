@@ -58,6 +58,24 @@ pub(in crate::tui::run) enum IdleSlashCommand<'a> {
     Persistence(PersistenceCommand<'a>),
 }
 
+impl IdleSlashCommand<'_> {
+    pub(in crate::tui::run) const fn dispatches_model_work(self) -> bool {
+        matches!(
+            self,
+            Self::Start
+                | Self::Continue
+                | Self::Test
+                | Self::Build
+                | Self::Retry
+                | Self::Commit
+                | Self::Init
+                | Self::PullRequest
+                | Self::Review
+                | Self::SecurityReview
+        )
+    }
+}
+
 pub(in crate::tui::run) fn idle_slash_command(input: &str) -> Option<IdleSlashCommand<'_>> {
     if let Some(arg) = theme_command_arg(input) {
         return Some(IdleSlashCommand::Theme(arg));
@@ -1997,6 +2015,7 @@ pub(in crate::tui) async fn review_changes(
     agent: Arc<Mutex<Agent>>,
     scope: crate::agent::ReviewScope,
     sink: SharedSink,
+    preflight: ReviewCanvasPreflightDeps<'_>,
 ) -> bool {
     review_changes_with_workflow(
         app,
@@ -2004,6 +2023,7 @@ pub(in crate::tui) async fn review_changes(
         agent,
         scope,
         sink,
+        preflight,
         ReviewCommandWorkflow::General,
     )
     .await
@@ -2016,6 +2036,7 @@ pub(in crate::tui) async fn security_review_changes(
     tasks: &mut TaskController,
     agent: Arc<Mutex<Agent>>,
     sink: SharedSink,
+    preflight: ReviewCanvasPreflightDeps<'_>,
 ) -> bool {
     review_changes_with_workflow(
         app,
@@ -2023,6 +2044,7 @@ pub(in crate::tui) async fn security_review_changes(
         agent,
         crate::agent::ReviewScope::Uncommitted,
         sink,
+        preflight,
         ReviewCommandWorkflow::Security,
     )
     .await
@@ -2040,6 +2062,7 @@ async fn review_changes_with_workflow(
     agent: Arc<Mutex<Agent>>,
     scope: crate::agent::ReviewScope,
     sink: SharedSink,
+    preflight: ReviewCanvasPreflightDeps<'_>,
     workflow: ReviewCommandWorkflow,
 ) -> bool {
     if app.task_state.is_busy() {
@@ -2059,8 +2082,14 @@ async fn review_changes_with_workflow(
     app.reduce(AppAction::Agent(UiEvent::Thinking(activity)));
     sync_agent_self_review_mode(app.self_review_mode, &agent).await;
     let started = match workflow {
-        ReviewCommandWorkflow::General => tasks.start_review(agent, scope, sink).await,
-        ReviewCommandWorkflow::Security => tasks.start_security_review(agent, scope, sink).await,
+        ReviewCommandWorkflow::General => {
+            tasks.start_review(app, agent, scope, sink, preflight).await
+        }
+        ReviewCommandWorkflow::Security => {
+            tasks
+                .start_security_review(app, agent, scope, sink, preflight)
+                .await
+        }
     };
     match started {
         Ok(true) => true,
@@ -2394,6 +2423,33 @@ mod tests {
             Some(IdleSlashCommand::InitWithArgs),
             "a prefixed typo must show init usage rather than reach the agent"
         );
+    }
+
+    #[test]
+    fn model_work_classification_covers_inline_run_commands() {
+        for input in [
+            "/start",
+            "/continue",
+            "/test",
+            "/build",
+            "/retry",
+            "/commit",
+            "/init",
+            "/pr",
+            "/review",
+            "/security-review",
+        ] {
+            assert!(
+                idle_slash_command(input).is_some_and(IdleSlashCommand::dispatches_model_work),
+                "{input} should be gated before model work"
+            );
+        }
+        for input in ["/ctx", "/model", "/settings", "/skills", "/theme"] {
+            assert!(
+                idle_slash_command(input).is_some_and(|command| !command.dispatches_model_work()),
+                "{input} should remain available without a budget warning"
+            );
+        }
     }
 
     #[test]

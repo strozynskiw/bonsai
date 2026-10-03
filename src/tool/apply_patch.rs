@@ -95,8 +95,41 @@ impl PatchOp {
 /// analogue of the single `path` arg the write/edit tools expose. A malformed
 /// patch yields an empty list; diagnostics are best-effort.
 pub(crate) fn patched_paths_from_arguments(arguments: &str) -> Vec<String> {
+    parsed_patch_operations_from_arguments(arguments)
+        .map(|ops| {
+            ops.iter()
+                .filter_map(|op| op.written_path().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every path whose contents or directory entry a patch may change. Unlike
+/// [`patched_paths_from_arguments`], this includes deletions and both sides of
+/// a move so steering coverage is resolved before any mutation.
+pub(crate) fn patch_target_paths_from_arguments(arguments: &str) -> Vec<String> {
+    parsed_patch_operations_from_arguments(arguments)
+        .map(|ops| {
+            let mut paths = Vec::new();
+            for operation in ops {
+                match operation {
+                    PatchOp::Add { path, .. } | PatchOp::Delete { path } => paths.push(path),
+                    PatchOp::Update { path, move_to, .. } => {
+                        paths.push(path);
+                        if let Some(destination) = move_to {
+                            paths.push(destination);
+                        }
+                    }
+                }
+            }
+            paths
+        })
+        .unwrap_or_default()
+}
+
+fn parsed_patch_operations_from_arguments(arguments: &str) -> Option<Vec<PatchOp>> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return Vec::new();
+        return None;
     };
     let input = if value.is_string() {
         value.as_str().map(str::to_string)
@@ -107,16 +140,8 @@ pub(crate) fn patched_paths_from_arguments(arguments: &str) -> Vec<String> {
             .and_then(|v| v.as_str())
             .map(str::to_string)
     };
-    let Some(input) = input else {
-        return Vec::new();
-    };
-    parse_patch(&input)
-        .map(|ops| {
-            ops.iter()
-                .filter_map(|op| op.written_path().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    let input = input?;
+    parse_patch(&input).ok()
 }
 
 #[derive(Debug, PartialEq, Default)]

@@ -81,8 +81,9 @@ pub(super) use commands::{
 };
 pub(super) use event_loop::{open_background_task_list, start_delete_selected_background_task};
 pub(super) use persistence::{
-    PersistenceCommandDeps, PersistenceCommandState, clear_canvas_plan,
-    delete_saved_plan_from_picker, open_saved_plan, protect_canvas_before_new_plan, resume_session,
+    PersistenceCommandDeps, PersistenceCommandState, ReviewCanvasPreflightDeps, clear_canvas_plan,
+    delete_saved_plan_from_picker, open_saved_plan, protect_canvas_before_new_plan,
+    protect_canvas_before_review, resume_session,
 };
 
 /// Project paths and optional recovery identity for an interactive run.

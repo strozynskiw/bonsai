@@ -680,7 +680,8 @@ fn clamp_open_cursor(kind: &mut ModalKind) {
             (cursor, max)
         }
         ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice { cursor, .. })
-        | ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor }) => {
+        | ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor })
+        | ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning { cursor, .. }) => {
             (cursor, 1)
         }
         ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {

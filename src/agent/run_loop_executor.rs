@@ -1163,7 +1163,23 @@ pub(super) fn image_user_message(
     mime_type: &str,
     base64_data: &str,
 ) -> ChatCompletionRequestMessage {
-    let data_uri = format!("data:{mime_type};base64,{base64_data}");
+    // Ingest gate: a media type no wire target accepts (e.g. `image/svg+xml`
+    // from a model-requested `read`) must never enter the history, where it
+    // would ride along with every later context request as a guaranteed 400.
+    let image_part = match crate::provider::transform::unsupported_media_type_placeholder(mime_type)
+    {
+        Some(placeholder) => ChatCompletionRequestUserMessageContentPart::Text(
+            ChatCompletionRequestMessageContentPartText { text: placeholder },
+        ),
+        None => ChatCompletionRequestUserMessageContentPart::ImageUrl(
+            ChatCompletionRequestMessageContentPartImage {
+                image_url: ImageUrl {
+                    url: format!("data:{mime_type};base64,{base64_data}"),
+                    detail: None,
+                },
+            },
+        ),
+    };
     ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
         content: ChatCompletionRequestUserMessageContent::Array(vec![
             ChatCompletionRequestUserMessageContentPart::Text(
@@ -1171,14 +1187,7 @@ pub(super) fn image_user_message(
                     text: "Here is the image content you requested to view:".to_string(),
                 },
             ),
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                ChatCompletionRequestMessageContentPartImage {
-                    image_url: ImageUrl {
-                        url: data_uri,
-                        detail: None,
-                    },
-                },
-            ),
+            image_part,
         ]),
         name: None,
     })
@@ -1195,6 +1204,25 @@ mod tests {
     use crate::tool::schema::{
         array_property, bounded_integer_property, closed_object, string_property,
     };
+
+    #[test]
+    fn image_user_message_downgrades_unsupported_media_type_to_text() {
+        // Regression: `ToolOutput::Image` for an SVG produced
+        // `data:image/svg+xml` here, entered the history, and 400ed every
+        // later request of the session.
+        let message = image_user_message("image/svg+xml", "PHN2Zz4=");
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(!json.contains("data:image/svg+xml"));
+        assert!(!json.contains("image_url"));
+        assert!(json.contains("unsupported image format"));
+    }
+
+    #[test]
+    fn image_user_message_keeps_supported_media_type_as_image_part() {
+        let message = image_user_message("image/png", "AAAA");
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("data:image/png;base64,AAAA"));
+    }
 
     /// Stub tool with a schema rich enough to exercise every repair rule
     /// through the real `parse_tool_arguments` path.

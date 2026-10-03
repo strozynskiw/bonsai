@@ -59,6 +59,11 @@ pub enum PickerModal {
     StartPlanChoice {
         cursor: usize,
     },
+    BudgetWarning {
+        submission: Box<crate::tui::app::ComposerSubmission>,
+        usage: crate::run_budget::SessionBudgetUsage,
+        cursor: usize,
+    },
     ReviewScopePicker {
         cursor: usize,
     },
@@ -571,10 +576,15 @@ pub enum SettingId {
     BudgetGenerationTime,
     BudgetOutput,
     BudgetToolTime,
+    BudgetSessionBilledTokens,
     BudgetSessionTurns,
     BudgetSessionOutput,
     BudgetSessionTime,
     BudgetSessionCost,
+    AlertSessionBilledTokens,
+    AlertSessionTurns,
+    AlertSessionTime,
+    AlertSessionCost,
     SandboxConfinement,
     SandboxNetwork,
     /// Default storage for newly entered provider credentials.
@@ -737,10 +747,14 @@ pub enum UiEvent {
         name: String,
         arguments: String,
         started_at: Instant,
+        /// Authoritative wall-clock start in epoch ms, captured at emission.
+        started_at_ms: i64,
     },
     ToolCallsStarted {
         calls: Vec<ToolCallStart>,
         started_at: Instant,
+        /// Shared authoritative wall-clock start for the emitted batch.
+        started_at_ms: i64,
     },
     ToolOutput {
         id: String,
@@ -752,6 +766,10 @@ pub enum UiEvent {
         result: String,
         status: crate::output::ToolExecutionStatus,
         finished_at: Instant,
+        /// Authoritative wall-clock finish in epoch ms, captured at emission
+        /// (#166). Background/terminal completion carries the time its snapshot
+        /// already holds; `None` lets the reducer stamp receipt time.
+        finished_at_ms: Option<i64>,
     },
     ToolFinishedWithDiff {
         id: String,
@@ -762,6 +780,8 @@ pub enum UiEvent {
         // moved through the channel.
         diff: Box<FileDiff>,
         finished_at: Instant,
+        /// Authoritative wall-clock finish in epoch ms; see [`Self::ToolFinished`].
+        finished_at_ms: Option<i64>,
     },
     /// Ordered output fence used by lifecycle-sensitive tool completions.
     /// Applying it acknowledges that every prior event reached the reducer.
@@ -1111,6 +1131,10 @@ pub enum AppAction {
         content: crate::tui::app::ComposerContent,
         mode: crate::agent::AgentMode,
     },
+    /// Turn an already-queued message into the foreground replacement.
+    PromoteQueuedInputToSteer {
+        id: u64,
+    },
     QueueDeferredCommand {
         input: String,
         label: String,
@@ -1324,6 +1348,8 @@ pub enum AppAction {
     PlanOpenChoiceSubmit,
     StartPlanChoiceMove(i16),
     StartPlanChoiceSubmit,
+    BudgetWarningMove(i16),
+    BudgetWarningSubmit,
     PlanDeleteConfirmSubmit,
     PlanDiscardConfirmSubmit,
     ReviewScopePickerMove(i16),

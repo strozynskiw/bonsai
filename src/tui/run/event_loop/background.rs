@@ -30,6 +30,7 @@ pub(super) fn apply_background_task_event(
             status,
             summary,
             success,
+            finished_at_ms,
             ..
         } => {
             effect.wake_candidate = !matches!(status, BackgroundTaskStatus::Stopped);
@@ -44,6 +45,7 @@ pub(super) fn apply_background_task_event(
                     crate::output::ToolExecutionStatus::Failed
                 },
                 finished_at: Instant::now(),
+                finished_at_ms,
             }));
         }
         BackgroundTaskEvent::Output { .. }
@@ -87,6 +89,11 @@ pub(super) fn apply_background_task_snapshot(
                 crate::output::ToolExecutionStatus::Failed
             },
             finished_at: Instant::now(),
+            // The snapshot's completion clock is authoritative — not the time
+            // this UI pass observed it (#166).
+            finished_at_ms: task
+                .finished_at
+                .and_then(crate::util::time::system_time_to_ms),
         }));
     }
 
@@ -131,6 +138,7 @@ pub(super) fn apply_terminal_event(
             status,
             summary,
             success,
+            finished_at_ms,
             ..
         } => {
             effect.wake_candidate = !matches!(status, TerminalStatus::Stopped);
@@ -145,6 +153,7 @@ pub(super) fn apply_terminal_event(
                     crate::output::ToolExecutionStatus::Failed
                 },
                 finished_at: Instant::now(),
+                finished_at_ms,
             }));
         }
         TerminalEvent::Output { .. }
@@ -280,6 +289,11 @@ pub(super) fn apply_terminal_snapshot(
                 crate::output::ToolExecutionStatus::Failed
             },
             finished_at: Instant::now(),
+            // The snapshot's completion clock is authoritative — not the time
+            // this UI pass observed it (#166).
+            finished_at_ms: terminal
+                .finished_at
+                .and_then(crate::util::time::system_time_to_ms),
         }));
     }
     effect
@@ -380,6 +394,10 @@ pub(super) fn apply_completed_subagent_tool_calls(
                 }
             },
             finished_at: Instant::now(),
+            finished_at_ms: completion
+                .snapshot
+                .finished_at
+                .and_then(crate::util::time::system_time_to_ms),
         }));
         changed = true;
     }

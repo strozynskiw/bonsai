@@ -375,7 +375,6 @@ impl Agent {
             }
             return;
         };
-
         // Size guard: the closing span must hold at least
         // EPISODE_MIN_CLOSED_GROUPS completed groups, one of them a tool
         // group. Too small → the title change renames the episode in place.

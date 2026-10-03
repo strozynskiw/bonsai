@@ -290,6 +290,12 @@ pub(crate) enum CatalogError {
         model_id: ModelId,
         message: String,
     },
+    #[error("target `{connection_id}:{model_id}` has invalid peak pricing: {message}")]
+    InvalidPeakPricing {
+        connection_id: ConnectionId,
+        model_id: ModelId,
+        message: String,
+    },
     #[error("unknown connection `{id}`")]
     UnknownConnection { id: ConnectionId },
     #[error("unknown target `{connection_id}:{model_id}`")]
@@ -694,6 +700,8 @@ impl ModelCatalog {
             features,
             pricing: None,
             pricing_tiers: Vec::new(),
+            peak_pricing: None,
+            peak_pricing_tiers: Vec::new(),
             roles: Vec::new(),
             pinned: false,
             pinned_fields: Vec::new(),
@@ -1592,12 +1600,22 @@ fn resolve_target(
             .map(|base| ModelPricingSchedule::new(base, model.pricing_tiers.clone()))
     });
     let models_dev_pricing = models_dev.and_then(ModelsDevModel::pricing_schedule);
-    let (pricing_schedule, pricing_source) = choose_refreshed_metadata(
+    let (mut pricing_schedule, mut pricing_source) = choose_refreshed_metadata(
         target.pins(ModelMetadataField::Pricing),
         catalog_pricing,
         live_pricing,
         models_dev_pricing,
     );
+    if let Some(peak_pricing) = target.peak_pricing
+        && let Some(schedule) = pricing_schedule.take()
+    {
+        pricing_schedule = Some(schedule.with_peak_pricing(
+            peak_pricing,
+            target.peak_pricing_tiers.clone(),
+            connection.peak_pricing_windows_utc.clone(),
+        ));
+        pricing_source = Some(ModelMetadataSource::Catalog);
+    }
     let pricing = pricing_schedule
         .as_ref()
         .map(|schedule| schedule.pricing_for_context_window(context_window));
@@ -1755,6 +1773,21 @@ fn validate_catalog(
                 });
             }
         }
+        let mut peak_windows = HashSet::new();
+        for window in &connection.peak_pricing_windows_utc {
+            if !peak_windows.insert((window.start_minute(), window.end_minute())) {
+                return Err(CatalogError::InvalidConnection {
+                    id: connection.id.clone(),
+                    message: format!(
+                        "duplicate peak pricing window {:02}:{:02}-{:02}:{:02} UTC",
+                        window.start_minute() / 60,
+                        window.start_minute() % 60,
+                        window.end_minute() / 60,
+                        window.end_minute() % 60,
+                    ),
+                });
+            }
+        }
     }
 
     let mut target_keys = HashSet::new();
@@ -1802,6 +1835,53 @@ fn validate_catalog(
             }
         }
 
+        if target.peak_pricing.is_some() {
+            if target.pricing.is_none() {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: "peak rates require standard pricing".to_string(),
+                });
+            }
+            let has_peak_windows = connections.iter().any(|connection| {
+                connection.id == target.connection
+                    && !connection.peak_pricing_windows_utc.is_empty()
+            });
+            if !has_peak_windows {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: "peak rates require connection peak_pricing_windows_utc".to_string(),
+                });
+            }
+        } else if !target.peak_pricing_tiers.is_empty() {
+            return Err(CatalogError::InvalidPeakPricing {
+                connection_id: target.connection.clone(),
+                model_id: target.model.clone(),
+                message: "peak pricing tiers require base peak pricing".to_string(),
+            });
+        }
+        let mut peak_thresholds = HashSet::new();
+        for tier in &target.peak_pricing_tiers {
+            if tier.minimum_input_tokens == 0 {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: "peak tier thresholds must be greater than zero".to_string(),
+                });
+            }
+            if !peak_thresholds.insert(tier.minimum_input_tokens) {
+                return Err(CatalogError::InvalidPeakPricing {
+                    connection_id: target.connection.clone(),
+                    model_id: target.model.clone(),
+                    message: format!(
+                        "duplicate peak tier threshold {}",
+                        tier.minimum_input_tokens
+                    ),
+                });
+            }
+        }
+
         if target.enabled
             && target.is_default
             && let Some(first) =
@@ -1821,7 +1901,7 @@ fn validate_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ModelPricingTier, ReasoningEffort};
+    use crate::provider::{ModelPricingTier, ReasoningEffort, TokenUsage};
     fn source(name: &'static str, content: &'static str) -> TomlSource<'static> {
         TomlSource { name, content }
     }
@@ -1839,7 +1919,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 218);
+        assert_eq!(catalog.targets.len(), 244);
         assert!(
             catalog
                 .connections
@@ -1954,7 +2034,9 @@ mod tests {
             "the official Zen gateway price overrides inherited metadata"
         );
         for (model, context_window) in [
+            ("opencode-zen/claude-sonnet-4", 200_000),
             ("opencode-zen/claude-sonnet-4-5", 200_000),
+            ("opencode-zen/gemini-3-pro", 200_000),
             ("opencode-zen/gemini-3.1-pro", 200_000),
             ("opencode-zen/gpt-5.4", 272_000),
             ("opencode-zen/gpt-5.5", 272_000),
@@ -2138,7 +2220,7 @@ mod tests {
             .find(|target| target.model.as_str() == "minimax-coding-plan/MiniMax-M3")
             .unwrap();
         assert_eq!(minimax_api.context_window, Some(512_000));
-        assert_eq!(minimax_plan.context_window, Some(1_000_000));
+        assert_eq!(minimax_plan.context_window, Some(1_048_576));
         assert_eq!(
             minimax_api
                 .pricing
@@ -2641,7 +2723,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 218);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 244);
 
         let cases = [
             EquivalenceCase {
@@ -4169,6 +4251,14 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.available_models_for_connection(&openai_id, Vec::new()),
             vec![
+                "gpt-6.1-sol",
+                "openai/gpt-6.1-sol-1m",
+                "gpt-6-astra",
+                "openai/gpt-6-astra-1m",
+                "gpt-6-sol",
+                "openai/gpt-6-sol-1m",
+                "gpt-6-luna",
+                "openai/gpt-6-luna-1m",
                 "gpt-5.6-sol",
                 "openai/gpt-5.6-1m",
                 "gpt-5.6-terra",
@@ -4185,12 +4275,20 @@ default_base_url = "http://localhost:11434/v1"
         );
 
         let cases = [
-            ("openai/gpt-5.6-sol", 272_000, 5_000_000, 30_000_000),
-            ("openai/gpt-5.6-1m", 1_050_000, 10_000_000, 45_000_000),
-            ("openai/gpt-5.6-terra", 272_000, 2_500_000, 15_000_000),
-            ("openai/gpt-5.6-terra-1m", 1_050_000, 5_000_000, 22_500_000),
-            ("openai/gpt-5.6-luna", 272_000, 1_000_000, 6_000_000),
-            ("openai/gpt-5.6-luna-1m", 1_050_000, 2_000_000, 9_000_000),
+            ("openai/gpt-6.1-sol", 272_000, 2_000_000, 10_000_000),
+            ("openai/gpt-6.1-sol-1m", 1_050_000, 4_000_000, 15_000_000),
+            ("openai/gpt-6-astra", 272_000, 10_000_000, 50_000_000),
+            ("openai/gpt-6-astra-1m", 1_050_000, 20_000_000, 75_000_000),
+            ("openai/gpt-6-sol", 272_000, 2_000_000, 10_000_000),
+            ("openai/gpt-6-sol-1m", 1_050_000, 4_000_000, 15_000_000),
+            ("openai/gpt-6-luna", 272_000, 100_000, 500_000),
+            ("openai/gpt-6-luna-1m", 1_050_000, 200_000, 750_000),
+            ("openai/gpt-5.6-sol", 272_000, 4_000_000, 20_000_000),
+            ("openai/gpt-5.6-1m", 1_050_000, 8_000_000, 30_000_000),
+            ("openai/gpt-5.6-terra", 272_000, 2_000_000, 12_000_000),
+            ("openai/gpt-5.6-terra-1m", 1_050_000, 4_000_000, 18_000_000),
+            ("openai/gpt-5.6-luna", 272_000, 200_000, 1_200_000),
+            ("openai/gpt-5.6-luna-1m", 1_050_000, 400_000, 1_800_000),
             ("openai/gpt-5.5", 272_000, 5_000_000, 30_000_000),
             ("openai/gpt-5.5-1m", 1_050_000, 10_000_000, 45_000_000),
             ("openai/gpt-5.4", 272_000, 2_500_000, 15_000_000),
@@ -4220,12 +4318,23 @@ default_base_url = "http://localhost:11434/v1"
             ] {
                 assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
             }
-            assert!(
-                resolved
-                    .reasoning_selections()
-                    .contains(&ReasoningSelection::Off),
-                "{model}"
-            );
+            if model.contains("gpt-6-astra") || model.contains("gpt-6.1-sol") {
+                // Astra and 6.1 Sol offer no Off toggle: models.dev lists
+                // effort only (low…max) and the Codex catalog agrees for Astra.
+                assert!(
+                    !resolved
+                        .reasoning_selections()
+                        .contains(&ReasoningSelection::Off),
+                    "{model}"
+                );
+            } else {
+                assert!(
+                    resolved
+                        .reasoning_selections()
+                        .contains(&ReasoningSelection::Off),
+                    "{model}"
+                );
+            }
         }
 
         let legacy = catalog
@@ -4509,6 +4618,20 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(glm_52.reasoning_codec, ReasoningCodec::ZaiThinking);
         assert_eq!(glm_52.recommended_effort, Some(ReasoningSelection::Max));
 
+        let glm_53 = catalog.resolve(&zai_id, &model_id("zai/glm-5.3")).unwrap();
+        assert_eq!(glm_53.context_window, Some(1_000_000));
+        assert_eq!(glm_53.output_limit, Some(12_000));
+        assert_eq!(glm_53.reasoning_codec, ReasoningCodec::ZaiThinking);
+        assert_eq!(glm_53.recommended_effort, Some(ReasoningSelection::Max));
+
+        let glm_53_flash = catalog
+            .resolve(&zai_id, &model_id("zai/glm-5.3-flash"))
+            .unwrap();
+        assert!(glm_53_flash.features.contains(&ModelFeature::Attachment));
+        assert!(glm_53_flash.features.contains(&ModelFeature::ToolCall));
+        assert_eq!(glm_53_flash.context_window, Some(1_000_000));
+        assert_eq!(glm_53_flash.output_limit, Some(12_000));
+
         let glm_45_x = catalog
             .resolve(&zai_id, &model_id("zai/glm-4.5-x"))
             .unwrap();
@@ -4552,7 +4675,16 @@ default_base_url = "http://localhost:11434/v1"
             })
             .collect::<Vec<_>>();
         plan_models.sort_unstable();
-        assert_eq!(plan_models, ["glm-4.7", "glm-5-turbo", "glm-5.2"]);
+        assert_eq!(
+            plan_models,
+            [
+                "glm-4.7",
+                "glm-5-turbo",
+                "glm-5.2",
+                "glm-5.3",
+                "glm-5.3-flash"
+            ]
+        );
     }
 
     #[test]
@@ -4787,22 +4919,44 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
-    fn deepseek_builtin_refreshes_metadata_without_losing_safety_caps() {
+    fn catalog_rejects_peak_rates_without_connection_windows() {
+        let catalog = load_builtin_catalog().unwrap();
+        let mut connections = catalog.connections;
+        connections
+            .iter_mut()
+            .find(|connection| connection.id.as_str() == "deepseek")
+            .expect("DeepSeek connection")
+            .peak_pricing_windows_utc
+            .clear();
+
+        assert!(matches!(
+            validate_catalog(&connections, &catalog.targets),
+            Err(CatalogError::InvalidPeakPricing {
+                connection_id,
+                message,
+                ..
+            }) if connection_id.as_str() == "deepseek"
+                && message.contains("peak_pricing_windows_utc")
+        ));
+    }
+
+    #[test]
+    fn deepseek_builtin_refreshes_metadata_without_losing_pinned_overrides() {
         let catalog = ModelCatalog::load_builtin().unwrap();
         let deepseek_id = connection_id("deepseek");
         let connection = catalog.connection(&deepseek_id).unwrap();
         assert_eq!(
             connection.default_model.as_ref().map(ModelId::as_str),
-            Some("deepseek/deepseek-v4-flash")
+            Some("deepseek/deepseek-flash")
         );
         assert_eq!(
             catalog.available_models_for_connection(&deepseek_id, Vec::new()),
-            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+            vec!["deepseek-flash", "deepseek-v4-pro"]
         );
 
         for (model, input, output, cache_read) in [
-            ("deepseek/deepseek-v4-flash", 140_000, 280_000, 2_800),
-            ("deepseek/deepseek-v4-pro", 435_000, 870_000, 3_625),
+            ("deepseek/deepseek-flash", 150_000, 600_000, 3_000),
+            ("deepseek/deepseek-v4-pro", 150_000, 600_000, 3_000),
         ] {
             let resolved = catalog
                 .resolve(&deepseek_id, &model_id(model))
@@ -4829,6 +4983,7 @@ default_base_url = "http://localhost:11434/v1"
                 vec![
                     ReasoningSelection::Default,
                     ReasoningSelection::Off,
+                    ReasoningSelection::Low,
                     ReasoningSelection::High,
                     ReasoningSelection::Max,
                 ],
@@ -4841,16 +4996,36 @@ default_base_url = "http://localhost:11434/v1"
             ] {
                 assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
             }
+            // V4.1 Flash takes images; V4 Pro does not, and is routed to Flash
+            // anyway. Claiming vision on pro would send images the API rejects.
+            assert_eq!(
+                resolved.features.contains(&ModelFeature::Attachment),
+                model == "deepseek/deepseek-flash",
+                "{model}: vision capability"
+            );
+            if model == "deepseek/deepseek-flash" {
+                // DeepSeek renamed the wire model to `deepseek-flash`; the
+                // picker must not fall back to the raw id.
+                assert_eq!(
+                    resolved.display_name.as_ref(),
+                    "DeepSeek V4.1 Flash",
+                    "{model}: display name"
+                );
+            }
             assert_eq!(
                 resolved.prompt_cache_policy,
                 PromptCachePolicy::RollingHistory
             );
         }
 
+        // The canonical id plus one retired alias and one unknown id: the alias
+        // collapses onto the target it now resolves to, the unknown id is kept
+        // as a live-only entry.
         catalog
             .write_live_availability(
                 &deepseek_id,
                 LiveModelAvailability::from_remote_ids([
+                    "deepseek-flash".to_string(),
                     "deepseek-v4-flash".to_string(),
                     "deepseek-v4-turbo".to_string(),
                 ]),
@@ -4858,32 +5033,35 @@ default_base_url = "http://localhost:11434/v1"
             .unwrap();
         assert_eq!(
             catalog.available_models_for_connection(&deepseek_id, Vec::new()),
-            vec!["deepseek-v4-flash", "deepseek-v4-turbo"],
-            "live refresh must add unseen models and retire absent ones"
+            vec!["deepseek-flash", "deepseek-v4-turbo"],
+            "live refresh must add unseen models, retire absent ones, and collapse aliases"
         );
 
+        // models.dev has no V4.1 row: its nearest entry still describes the
+        // retired pre-V4.1 Flash (text-only, superseded rates). A refresh must
+        // not drag the pinned V4.1 target back to that stale metadata.
         catalog.replace_models_dev_metadata(
             parse_models_dev_catalog(
                 "deepseek-refresh.json",
                 r#"{
                     "deepseek": {
                         "models": {
-                            "deepseek-v4-flash": {
-                                "id": "deepseek-v4-flash",
-                                "name": "DeepSeek V4 Flash refreshed",
+                            "deepseek-flash": {
+                                "id": "deepseek-flash",
+                                "name": "DeepSeek V4 Flash",
                                 "reasoning": true,
                                 "reasoning_options": [
                                     { "type": "effort", "values": ["minimal", "xhigh"] }
                                 ],
                                 "tool_call": true,
                                 "structured_output": true,
-                                "attachment": true,
+                                "attachment": false,
                                 "cost": {
-                                    "input": 0.15,
-                                    "output": 0.30,
-                                    "cache_read": 0.003
+                                    "input": 0.14,
+                                    "output": 0.28,
+                                    "cache_read": 0.0028
                                 },
-                                "limit": { "context": 1100000, "output": 384000 }
+                                "limit": { "context": 900000, "output": 384000 }
                             }
                         }
                     }
@@ -4892,10 +5070,19 @@ default_base_url = "http://localhost:11434/v1"
             .unwrap(),
         );
         let refreshed = catalog
-            .resolve(&deepseek_id, &model_id("deepseek/deepseek-v4-flash"))
+            .resolve(&deepseek_id, &model_id("deepseek/deepseek-flash"))
             .unwrap();
 
-        assert_eq!(refreshed.context_window, Some(1_100_000));
+        assert_eq!(
+            refreshed.display_name.as_ref(),
+            "DeepSeek V4.1 Flash",
+            "the V4.1 name is pinned while models.dev lags on the rename"
+        );
+        assert_eq!(
+            refreshed.context_window,
+            Some(1_000_000),
+            "the pinned V4.1 window survives the stale row"
+        );
         assert_eq!(
             refreshed.output_limit,
             Some(32_000),
@@ -4905,21 +5092,22 @@ default_base_url = "http://localhost:11434/v1"
             refreshed.pricing,
             Some(ModelPricing {
                 input_micros_per_million: 150_000,
-                output_micros_per_million: 300_000,
+                output_micros_per_million: 600_000,
                 cache_read_micros_per_million: Some(3_000),
                 cache_write_micros_per_million: None,
             }),
-            "unlike the safety cap, prices must update through /refresh"
+            "time-based prices are pinned because models.dev cannot represent them"
         );
         assert!(
             refreshed.features.contains(&ModelFeature::Attachment),
-            "capabilities remain refreshable"
+            "V4.1 vision is pinned; the models.dev row still claims text-only"
         );
         assert_eq!(
             refreshed.reasoning_selections(),
             vec![
                 ReasoningSelection::Default,
                 ReasoningSelection::Off,
+                ReasoningSelection::Low,
                 ReasoningSelection::High,
                 ReasoningSelection::Max,
             ],
@@ -4927,7 +5115,91 @@ default_base_url = "http://localhost:11434/v1"
         );
         assert_eq!(
             refreshed.metadata_sources.pricing,
-            Some(ModelMetadataSource::ModelsDev)
+            Some(ModelMetadataSource::Catalog)
+        );
+    }
+
+    #[test]
+    fn deepseek_live_and_retired_ids_resolve_to_the_v4_1_target() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let deepseek_id = connection_id("deepseek");
+
+        // `deepseek-flash` is what the live listing now returns; `deepseek-v4-flash`
+        // and `deepseek-v4-flash-vision-exp` were retired at the V4.1 launch and
+        // their requests are served by V4.1 Flash. Every one of them must land on
+        // the catalog target instead of minting a shadow entry — an unmapped live
+        // id with no models.dev row gets no reasoning options, which is why a
+        // refresh used to leave only "default" in the effort pane. The vision-exp
+        // ids must also keep the V4.1 vision capability, so a session pinned to one
+        // still sends images.
+        for alias in [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek/deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "deepseek/deepseek-v4-flash-vision-exp",
+        ] {
+            let resolved = catalog
+                .resolve_connection_model(&deepseek_id, alias)
+                .unwrap_or_else(|| panic!("{alias} must resolve to the V4.1 target"));
+            assert_eq!(
+                resolved.model_id.as_str(),
+                "deepseek/deepseek-flash",
+                "{alias}"
+            );
+            assert_eq!(
+                resolved.remote_model_id.as_ref(),
+                "deepseek-flash",
+                "{alias}"
+            );
+            assert!(
+                resolved.features.contains(&ModelFeature::Attachment),
+                "{alias} must inherit V4.1 vision"
+            );
+            assert_eq!(
+                resolved.reasoning_selections(),
+                vec![
+                    ReasoningSelection::Default,
+                    ReasoningSelection::Off,
+                    ReasoningSelection::Low,
+                    ReasoningSelection::High,
+                    ReasoningSelection::Max,
+                ],
+                "{alias} must keep the published V4.1 effort levels"
+            );
+        }
+    }
+
+    #[test]
+    fn deepseek_builtin_applies_each_peak_window_to_both_models() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let deepseek_id = connection_id("deepseek");
+        let usage = TokenUsage {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            input_cache: None,
+        };
+        let mut actual = Vec::new();
+        for model in ["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"] {
+            let resolved = catalog
+                .resolve(&deepseek_id, &model_id(model))
+                .expect("DeepSeek model resolves");
+            let schedule = resolved
+                .pricing_schedule
+                .expect("DeepSeek pricing schedule");
+            actual.push([0, 60, 240, 360, 600].map(|minute| {
+                schedule
+                    .pricing_for_usage_at(usage, minute * 60_000)
+                    .input_micros_per_million
+            }));
+        }
+
+        assert_eq!(
+            actual,
+            vec![
+                [150_000, 300_000, 150_000, 300_000, 150_000],
+                [150_000, 300_000, 150_000, 300_000, 150_000],
+            ]
         );
     }
 
@@ -4943,6 +5215,8 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.target_remote_models_for_connection(&codex_id),
             vec![
+                "gpt-6.1-sol",
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -4952,6 +5226,8 @@ default_base_url = "http://localhost:11434/v1"
             ]
         );
         for remote_model in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -4974,6 +5250,11 @@ default_base_url = "http://localhost:11434/v1"
             .expect("legacy 1M selector must route existing sessions safely");
         assert_eq!(legacy.model_id.as_str(), "openai/gpt-5.5");
         assert_eq!(legacy.remote_model_id.as_ref(), "gpt-5.5");
+        let live_only_gpt6 = catalog
+            .resolve_connection_model(&codex_id, "codex/gpt-6-astra")
+            .expect("the live-only GPT-6 selector must route existing sessions safely");
+        assert_eq!(live_only_gpt6.model_id.as_str(), "openai/gpt-6-astra");
+        assert_eq!(live_only_gpt6.remote_model_id.as_ref(), "gpt-6-astra");
     }
 
     #[test]

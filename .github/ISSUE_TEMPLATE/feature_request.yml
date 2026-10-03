@@ -6,9 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the suggestion. Please check existing issues and the
-        [roadmap](https://github.com/strozynskiw/bonsai/blob/master/ROADMAP.md) first — your idea may already be
-        planned or discussed.
+        Thanks for the suggestion. Please check existing issues and
+        [milestones](https://github.com/strozynskiw/bonsai/milestones) first —
+        your idea may already be planned or discussed.
   - type: textarea
     id: problem
     attributes:

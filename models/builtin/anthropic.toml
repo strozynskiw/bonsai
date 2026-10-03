@@ -22,6 +22,10 @@ min = 1024
 connection = "anthropic"
 model = "anthropic/claude-opus-4-1"
 remote_model = "claude-opus-4-1"
+# Retired from models.dev's anthropic block; keep the row so sessions pinned to
+# it still route, and pin it so the drift check does not adopt another
+# provider's row for the same wire name.
+pinned = true
 endpoint_path = "v1/messages"
 token_counter = "anthropic-count-tokens"
 max_tokens = 16000
@@ -48,6 +52,50 @@ pricing = { input_micros_per_million = 1000000, output_micros_per_million = 5000
 [[targets.reasoning_options]]
 type = "budget_tokens"
 min = 1024
+
+# ---------------------------------------------------------------------------
+# Hybrid-thinking generation (claude-opus-4-5, claude-opus-4-6). These take the
+# legacy `{"type": "enabled", "budget_tokens": N}` envelope *and* the separate
+# `output_config.effort` control, so they need the
+# `anthropic-thinking-with-effort` codec; budget-only drops the effort and
+# `{"type": "adaptive"}` is rejected. Don't fold them into either section.
+# ---------------------------------------------------------------------------
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-opus-4-5"
+remote_model = "claude-opus-4-5"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-thinking-with-effort"
+max_tokens = 16000
+context_window = 200000
+output_limit = 64000
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 25000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+# Effort tops out at high here; xhigh and max arrived with opus-4-7.
+values = ["none", "low", "medium", "high"]
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-opus-4-6"
+remote_model = "claude-opus-4-6"
+# models.dev reports the native 1M window here (same 1M family as the adaptive
+# rows below); an account-scoped live /v1/models listing overrides it if the
+# long window turns out to be beta-gated.
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-thinking-with-effort"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+pricing = { input_micros_per_million = 5000000, output_micros_per_million = 25000000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 6250000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "max"]
 
 # ---------------------------------------------------------------------------
 # Adaptive-thinking generation (claude-sonnet-4-6 and newer). These models
@@ -143,4 +191,54 @@ output_limit = 128000
 type = "effort"
 # No "none": thinking is always on for fable-5 and an explicit
 # `{"type": "disabled"}` returns HTTP 400, so Off must not be offered.
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-opus-4-7"
+remote_model = "claude-opus-4-7"
+recommended_effort = "high"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-opus-5-5"
+remote_model = "claude-opus-5-5"
+recommended_effort = "high"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-fable-5-1"
+remote_model = "claude-fable-5-1"
+recommended_effort = "high"
+endpoint_path = "v1/messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+max_tokens = 16000
+context_window = 1000000
+output_limit = 128000
+
+[[targets.reasoning_options]]
+type = "effort"
+# No "none": thinking is always on for the fable family and an explicit
+# `{"type": "disabled"}` returns HTTP 400.
 values = ["low", "medium", "high", "xhigh", "max"]

@@ -422,6 +422,27 @@ pub(in crate::tui) struct PersistenceCommandState<'a> {
     pub(in crate::tui) signatures: &'a mut PersistedSnapshotSignatures,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(in crate::tui) struct ReviewCanvasPreflightDeps<'a> {
+    storage: &'a Storage,
+    current_session_id: SessionId,
+    plan_store: &'a SharedPlanStore,
+}
+
+impl<'a> ReviewCanvasPreflightDeps<'a> {
+    pub(in crate::tui) const fn new(
+        storage: &'a Storage,
+        current_session_id: SessionId,
+        plan_store: &'a SharedPlanStore,
+    ) -> Self {
+        Self {
+            storage,
+            current_session_id,
+            plan_store,
+        }
+    }
+}
+
 pub(in crate::tui::run) fn persistence_command(input: &str) -> Option<PersistenceCommand<'_>> {
     let trimmed = input.trim();
     let (command, arg) = trimmed
@@ -641,28 +662,31 @@ async fn save_current_plan(
     deps: PersistenceCommandDeps<'_>,
     state: &mut PersistenceCommandState<'_>,
 ) -> Result<()> {
-    let saved = save_current_plan_to_library(app, deps.storage, *state.current_session_id).await?;
+    validate_plan_for_save(&app.plan)?;
+    let saved = save_plan_to_library(
+        &app.plan,
+        deps.storage,
+        *state.current_session_id,
+        app.active_saved_plan_session_id,
+        app.branch.as_deref(),
+    )
+    .await?;
     app.reduce(AppAction::SetActiveSavedPlan(Some(saved.id)));
     push_transient_notice(app, &format!("Saved plan #{}: {}.", saved.id, saved.title));
     Ok(())
 }
 
-/// Validate and freeze the active canvas in the saved-plan library. Both a
-/// manual `/save` and a fresh-plan transition use this path so malformed
-/// canvases are never discarded by automation.
-async fn save_current_plan_to_library(
-    app: &AppState,
+/// Freeze a canvas snapshot in the saved-plan library after the caller applies
+/// the validation policy appropriate to its surface.
+async fn save_plan_to_library(
+    plan: &crate::plan::PlanDoc,
     storage: &Storage,
     current_session_id: SessionId,
+    saved_plan_id: Option<crate::storage::SavedPlanId>,
+    branch: Option<&str>,
 ) -> Result<crate::storage::SavedPlanSummary> {
-    validate_plan_for_save(&app.plan)?;
     storage
-        .save_plan_to_library(
-            current_session_id,
-            app.active_saved_plan_session_id,
-            &app.plan,
-            app.branch.as_deref(),
-        )
+        .save_plan_to_library(current_session_id, saved_plan_id, plan, branch)
         .await
 }
 
@@ -670,10 +694,59 @@ fn validate_plan_for_save(plan: &crate::plan::PlanDoc) -> Result<()> {
     if plan.title.trim().is_empty() {
         anyhow::bail!("Cannot save an untitled plan. Add a plan title first.");
     }
-    if plan.sections.is_empty() && plan.tasks.is_empty() {
-        anyhow::bail!("Cannot save an empty plan. Add at least one section or task first.");
+    if plan.sections.is_empty()
+        && plan.questions.is_empty()
+        && plan.tasks.is_empty()
+        && plan.phases.is_empty()
+        && plan.findings.is_empty()
+    {
+        anyhow::bail!("Cannot save an empty plan. Add plan content first.");
     }
     Ok(())
+}
+
+fn transition_plan_snapshot(plan: &crate::plan::PlanDoc) -> Result<crate::plan::PlanDoc> {
+    let mut snapshot = plan.clone();
+    if snapshot.title.trim().is_empty() {
+        let title = transition_plan_title(&snapshot);
+        snapshot.edit().set_title_checked(&title)?;
+    }
+    Ok(snapshot)
+}
+
+fn transition_plan_title(plan: &crate::plan::PlanDoc) -> String {
+    plan.sections
+        .iter()
+        .find_map(|section| {
+            derive_session_title(&section.heading).or_else(|| derive_session_title(&section.body))
+        })
+        .or_else(|| {
+            plan.questions
+                .iter()
+                .find_map(|question| derive_session_title(question))
+        })
+        .or_else(|| {
+            plan.tasks
+                .iter()
+                .find_map(|task| derive_session_title(&task.text))
+        })
+        .or_else(|| {
+            plan.phases.iter().find_map(|phase| {
+                derive_session_title(&phase.name).or_else(|| {
+                    phase
+                        .tasks
+                        .iter()
+                        .find_map(|task| derive_session_title(&task.text))
+                })
+            })
+        })
+        .or_else(|| {
+            plan.findings.iter().find_map(|finding| {
+                derive_session_title(&finding.issue)
+                    .or_else(|| derive_session_title(&finding.required_fix))
+            })
+        })
+        .unwrap_or_else(|| "Untitled plan".to_string())
 }
 
 /// `/discard` — throw away the canvas plan. An unsaved canvas is cleared
@@ -753,15 +826,54 @@ pub(in crate::tui) async fn protect_canvas_before_new_plan(
     current_session_id: SessionId,
     plan_store: &SharedPlanStore,
 ) -> Result<()> {
+    protect_canvas_before_transition(
+        app,
+        storage,
+        current_session_id,
+        plan_store,
+        "before starting a new plan",
+    )
+    .await
+}
+
+/// Archive and clear the working canvas after review seeding confirms a real
+/// diff. Validation or persistence failures leave the canvas and saved-plan
+/// binding intact so the reviewer is never started against partial state.
+pub(in crate::tui) async fn protect_canvas_before_review(
+    app: &mut AppState,
+    deps: ReviewCanvasPreflightDeps<'_>,
+) -> Result<()> {
+    protect_canvas_before_transition(
+        app,
+        deps.storage,
+        deps.current_session_id,
+        deps.plan_store,
+        "before starting review",
+    )
+    .await
+}
+
+async fn protect_canvas_before_transition(
+    app: &mut AppState,
+    storage: &Storage,
+    current_session_id: SessionId,
+    plan_store: &SharedPlanStore,
+    notice_context: &str,
+) -> Result<()> {
     let plan = plan_store.lock().await.clone();
-    app.plan = plan;
-    if !app.plan.is_empty() {
-        let saved = save_current_plan_to_library(app, storage, current_session_id).await?;
+    app.plan = plan.clone();
+    if !plan.is_empty() {
+        let snapshot = transition_plan_snapshot(&plan)?;
+        let saved = save_plan_to_library(
+            &snapshot,
+            storage,
+            current_session_id,
+            app.active_saved_plan_session_id,
+            app.branch.as_deref(),
+        )
+        .await?;
         app.reduce(AppAction::SetActiveSavedPlan(Some(saved.id)));
-        push_transient_notice(
-            app,
-            &format!("Saved plan #{} before starting a new plan.", saved.id),
-        );
+        push_transient_notice(app, &format!("Saved plan #{} {notice_context}.", saved.id));
     }
     clear_canvas_plan(app, plan_store).await;
     Ok(())
@@ -1289,6 +1401,11 @@ pub(super) fn reconcile_self_review_tool_calls(
             }
             if run.status.is_terminal() {
                 activity.finished_at.get_or_insert_with(Instant::now);
+                let reviewer_duration_ms =
+                    i64::try_from(run.reviewer_duration_ms).unwrap_or(i64::MAX);
+                activity
+                    .timing
+                    .finish(run.started_at_ms.saturating_add(reviewer_duration_ms));
             }
         }
         if let TranscriptItem::ExecutionGroup(group) = &mut *item
@@ -1354,6 +1471,7 @@ fn normalize_lost_terminal(activity: &mut ToolActivity) -> Option<String> {
         .to_string();
     activity.status = ToolStatus::Failed;
     activity.finished_at = Some(Instant::now());
+    activity.timing.finish(crate::util::time::now_ms());
     activity.result = Some(
         "Interactive terminal lost: PTY processes are process-local and cannot be reattached after Bonsai restarts. Start the command again if it is still needed."
             .to_string(),
@@ -1590,6 +1708,7 @@ mod tests {
             Some("Major: persisted finding")
         );
         assert!(group.tools[0].finished_at.is_some());
+        assert_eq!(group.tools[0].timing.finished_at_ms, Some(49));
     }
 
     #[test]
@@ -1629,6 +1748,7 @@ mod tests {
             Some("Reviewer subagent interrupted before its terminal outcome was persisted.")
         );
         assert!(activity.finished_at.is_some());
+        assert_eq!(activity.timing.finished_at_ms, Some(43));
         assert_eq!(
             runs[0].status,
             crate::self_review::SelfReviewRunStatus::ParentInterrupted

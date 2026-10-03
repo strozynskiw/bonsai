@@ -390,6 +390,7 @@ pub(super) struct OutputAccumulators {
     combined: CombinedOutput,
     last_output: LastOutputLines,
     live_output: Option<LiveCommandOutput>,
+    cargo_output: Option<crate::tool::diagnostics::CargoOutputCapture>,
 }
 
 /// The finished captures a command run needs after the streaming loop ends:
@@ -403,6 +404,7 @@ pub(super) struct CollectedOutput {
     pub(super) truncation: Option<OutputTruncationContext>,
     pub(super) total_chars: usize,
     pub(super) last_output_lines: Vec<String>,
+    pub(super) cargo_output: Option<String>,
 }
 
 impl OutputAccumulators {
@@ -410,6 +412,7 @@ impl OutputAccumulators {
         project_root: PathBuf,
         budget: BashOutputBudget,
         context: Option<ToolExecutionContext>,
+        capture_cargo_output: bool,
     ) -> Self {
         Self {
             stdout: BoundedCapture::new(budget.max_output_chars),
@@ -417,10 +420,18 @@ impl OutputAccumulators {
             combined: CombinedOutput::new(project_root, budget),
             last_output: LastOutputLines::new(budget),
             live_output: context.map(|context| LiveCommandOutput::new(context, budget)),
+            cargo_output: capture_cargo_output
+                .then(crate::tool::diagnostics::CargoOutputCapture::new),
         }
     }
 
     pub(super) async fn push(&mut self, stream: OutputStream, text: &str) -> Result<()> {
+        if let Some(cargo_output) = self.cargo_output.as_mut() {
+            match stream {
+                OutputStream::Stdout => cargo_output.push_stdout(text),
+                OutputStream::Stderr => cargo_output.push_stderr(text),
+            }
+        }
         match stream {
             OutputStream::Stdout => self.stdout.push(text),
             OutputStream::Stderr => self.stderr.push(text),
@@ -448,6 +459,7 @@ impl OutputAccumulators {
             combined,
             last_output,
             live_output: _,
+            cargo_output,
         } = self;
         let finalized = combined.finalize().await?;
         Ok(CollectedOutput {
@@ -457,6 +469,84 @@ impl OutputAccumulators {
             truncation: finalized.truncation,
             total_chars: finalized.total_chars,
             last_output_lines: last_output.into_lines(),
+            cargo_output: cargo_output.map(|capture| capture.finish()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compiler_error_record() -> String {
+        serde_json::json!({
+            "reason": "compiler-message",
+            "message": {
+                "level": "error",
+                "message": "missing field",
+                "code": { "code": "E0063" },
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 42,
+                    "column_start": 9,
+                    "is_primary": true
+                }],
+                "rendered": "error[E0063]: missing field\n  --> src/lib.rs:42:9\n"
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn cargo_diagnostic_survives_raw_output_spooling() {
+        let temp = tempfile::tempdir().expect("temp project");
+        let mut output = OutputAccumulators::new(
+            temp.path().to_path_buf(),
+            BashOutputBudget::normal(),
+            None,
+            true,
+        );
+        let filler = format!("{}\n", "x".repeat(MAX_OUTPUT_CHARS));
+        output.push(OutputStream::Stdout, &filler).await.unwrap();
+        output
+            .push(
+                OutputStream::Stdout,
+                &format!("{}\n", compiler_error_record()),
+            )
+            .await
+            .unwrap();
+        output.push(OutputStream::Stdout, &filler).await.unwrap();
+
+        let collected = output.finish().await.unwrap();
+        assert!(collected.truncation.is_some());
+        assert!(
+            !collected.stdout.contains("E0063") && !collected.stderr.contains("E0063"),
+            "the regression requires the diagnostic to be beyond raw stream captures"
+        );
+        let diagnostics = collected
+            .cargo_output
+            .expect("structured Cargo capture should be present");
+        assert!(diagnostics.contains("E0063"), "{diagnostics}");
+        assert!(diagnostics.contains("src/lib.rs:42:9"), "{diagnostics}");
+    }
+
+    #[tokio::test]
+    async fn generic_output_does_not_allocate_a_cargo_capture() {
+        let temp = tempfile::tempdir().expect("temp project");
+        let mut output = OutputAccumulators::new(
+            temp.path().to_path_buf(),
+            BashOutputBudget::normal(),
+            None,
+            false,
+        );
+        output
+            .push(OutputStream::Stdout, "ordinary output\n")
+            .await
+            .unwrap();
+
+        let collected = output.finish().await.unwrap();
+        assert_eq!(collected.body, "ordinary output\n");
+        assert!(collected.cargo_output.is_none());
+        assert!(collected.truncation.is_none());
     }
 }

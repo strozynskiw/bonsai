@@ -279,7 +279,13 @@ fn render_linear_tool(
     } else {
         activity.status.label()
     };
-    let mut label = format!("Tool {} ({status})", activity.name);
+    let mut label = format!("Tool {}", tool_activity_display_name(activity));
+    if activity.name == "agent"
+        && let Some(model) = activity.delegated_model_name()
+    {
+        label.push_str(&format!("  {model}"));
+    }
+    label.push_str(&format!(" ({status})"));
     if let Some((key, value)) = primary_arg_value(&activity.arguments) {
         label.push_str(&format!(": {key}={}", compact_text(&value, 96)));
     }

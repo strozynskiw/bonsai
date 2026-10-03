@@ -37,6 +37,8 @@ pub(super) struct CommandResult {
     /// sandbox was inactive or stepped past via an approved escape; drives the
     /// "retry with escape_sandbox=true" nudge on a confined failure.
     pub(super) confined: bool,
+    /// Complete bounded Cargo diagnostics captured before raw output truncation.
+    pub(super) cargo_output: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -164,11 +166,6 @@ impl BashTool {
             self.sandbox
                 .command_with_network(&self.shell, command, cwd, allow_network)
         };
-        if allow_network && !decision.confined {
-            anyhow::bail!(
-                "planning collaboration commands require an active filesystem sandbox; enable a supported sandbox before retrying"
-            );
-        }
         let confined = decision.confined;
         decision.log();
         // Backstop: SIGKILL the shell PID if this future is dropped. The timeout
@@ -187,10 +184,14 @@ impl BashTool {
         let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
         let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
 
+        let capture_cargo_output = command
+            .split_whitespace()
+            .any(|token| token == "--message-format=json");
         let mut accumulators = OutputAccumulators::new(
             self.canonical_project_root.clone(),
             self.output_budget,
             context,
+            capture_cargo_output,
         );
         let mut stdout_bytes = 0usize;
         let mut stderr_bytes = 0usize;
@@ -300,6 +301,7 @@ impl BashTool {
             timed_out,
             summary,
             confined,
+            cargo_output: collected.cargo_output,
         })
     }
 }

@@ -124,7 +124,7 @@ async fn malicious_mcp_tool_result_cannot_drive_shell_actions() {
 
     let result = agent
         .run(
-            "read the note",
+            "fetch the note with the configured MCP tool",
             CancellationToken::new(),
             Arc::new(StdoutSink),
         )

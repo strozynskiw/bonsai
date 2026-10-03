@@ -431,6 +431,7 @@ mod tests {
                 default_model: None,
                 default_endpoint_path: Some("chat/completions".into()),
                 default_token_counter: Some(crate::provider::TokenCounterKind::Heuristic),
+                peak_pricing_windows_utc: Vec::new(),
                 models_dev_provider: None,
                 model_exclude_prefixes: Vec::new(),
                 reasoning_codec: None,
@@ -466,6 +467,8 @@ mod tests {
                 features: Vec::new(),
                 pricing: None,
                 pricing_tiers: Vec::new(),
+                peak_pricing: None,
+                peak_pricing_tiers: Vec::new(),
                 roles: Vec::new(),
                 pinned: false,
                 pinned_fields: Vec::new(),
@@ -543,7 +546,7 @@ mod tests {
             .session_mut("deepseek")
             .model_reasoning
             .insert(
-                "deepseek/deepseek-v4-flash".to_string(),
+                "deepseek/deepseek-flash".to_string(),
                 ReasoningSelection::High,
             );
 
@@ -553,11 +556,12 @@ mod tests {
             "DeepSeek API",
             &session_store,
             factory.metadata(),
-            "deepseek/deepseek-v4-flash".to_string(),
+            "deepseek/deepseek-flash".to_string(),
         );
 
         for expected in [
             ReasoningSelection::Off,
+            ReasoningSelection::Low,
             ReasoningSelection::High,
             ReasoningSelection::Max,
         ] {
@@ -567,11 +571,9 @@ mod tests {
                 option.supported_reasoning
             );
         }
-        assert!(
-            !option
-                .supported_reasoning
-                .contains(&ReasoningSelection::Low)
-        );
+        // `low`, `high`, and `max` are the three model efforts DeepSeek
+        // documents; `medium`/`xhigh` fold onto high and `ultra` onto max, so
+        // they must not show up as separate choices.
         assert!(
             !option
                 .supported_reasoning

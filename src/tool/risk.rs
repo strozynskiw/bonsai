@@ -1643,6 +1643,10 @@ fn is_low_risk(prog: &str, args: &[&str]) -> bool {
     {
         return true;
     }
+    // `sleep` is a bounded process-local wait under the bash tool timeout.
+    if prog == "sleep" {
+        return true;
+    }
     // `mkdir`/`touch`/`cp`/`ln`/`mv` inside the project are reversible-ish edits;
     // dangerous destinations were escalated before this fast path.
     matches!(prog, "mkdir" | "touch" | "cp" | "ln" | "mv")
@@ -1692,6 +1696,7 @@ mod tests {
         assert_eq!(tier("cut -d: -f1 /etc/passwd"), RiskTier::ReadOnly);
         assert_eq!(tier("tr a-z A-Z < file.txt"), RiskTier::ReadOnly);
         assert_eq!(tier("cargo test --all"), RiskTier::Low);
+        assert_eq!(tier("sleep 1"), RiskTier::Low);
         assert_eq!(tier("npm run build"), RiskTier::Low);
         assert_eq!(tier("cargo build --release"), RiskTier::Medium);
         assert_eq!(tier("make"), RiskTier::Medium);

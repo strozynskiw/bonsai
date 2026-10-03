@@ -283,16 +283,61 @@ pub struct InlineToolSelection {
     pub selected_tool: usize,
 }
 
+/// Persisted wall-clock chronology for one tool call (#166).
+///
+/// Endpoints are epoch milliseconds captured once at the call's lifecycle
+/// events and never moved afterward: [`Self::started_at_ms`] is stamped at
+/// entry, [`Self::finished_at_ms`] at its first terminal transition. Later
+/// completion or duplicate events may refresh presentation data but cannot
+/// rewrite chronology. Clock rollback is evidence, not an error — a negative
+/// signed duration is preserved end-to-end. The monotonic `Instant` fields on
+/// [`ToolActivity`] stay process-local display evidence and never normalize
+/// this record.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolCallTiming {
+    /// Epoch-ms start, captured at lifecycle entry. Batched calls share the
+    /// batch's single capture.
+    pub started_at_ms: Option<i64>,
+    /// Epoch-ms finish, captured at the call's first terminal transition.
+    /// Detached background tasks and interactive terminals carry the
+    /// completion time their snapshot already holds, even when the UI
+    /// observes the event later.
+    pub finished_at_ms: Option<i64>,
+    /// Duration persisted by pre-timing snapshots; retained verbatim while no
+    /// complete wall interval exists so legacy rows round-trip unchanged.
+    pub legacy_duration_ms: Option<i64>,
+}
+
+impl ToolCallTiming {
+    /// Signed persisted duration: `finished_at_ms - started_at_ms`, negative
+    /// when the wall clock moved backward between the endpoints. `None` while
+    /// either endpoint is missing (a running call, or a legacy row whose
+    /// endpoints were never captured).
+    pub fn signed_duration_ms(&self) -> Option<i64> {
+        Some(self.finished_at_ms? - self.started_at_ms?)
+    }
+
+    /// Stamps the wall-clock finish exactly once; later completion events
+    /// never move an already-known endpoint.
+    pub fn finish(&mut self, finished_at_ms: i64) {
+        self.finished_at_ms.get_or_insert(finished_at_ms);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolActivity {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Canonical provider/model identity for a delegated `agent` run.
+    pub delegated_model: Option<String>,
     pub status: ToolStatus,
     pub result: Option<String>,
-    pub diff: Option<crate::diff::FileDiff>,
+    pub diff: Option<Box<crate::diff::FileDiff>>,
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
+    /// Persisted wall-clock chronology; see [`ToolCallTiming`].
+    pub timing: ToolCallTiming,
 }
 
 impl ToolActivity {
@@ -301,11 +346,19 @@ impl ToolActivity {
             id,
             name,
             arguments,
+            delegated_model: None,
             status: ToolStatus::Running,
             result: None,
             diff: None,
             started_at,
             finished_at: None,
+            // The wall start rides the same lifecycle entry as the monotonic
+            // clock so a flush before the first finish still persists a real
+            // start instead of re-anchoring one at snapshot time.
+            timing: ToolCallTiming {
+                started_at_ms: Some(crate::util::time::now_ms()),
+                ..ToolCallTiming::default()
+            },
         }
     }
 
@@ -313,6 +366,13 @@ impl ToolActivity {
         self.finished_at
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(self.started_at)
+    }
+
+    /// Compact model-only label used by delegated-agent transcript surfaces.
+    pub fn delegated_model_name(&self) -> Option<&str> {
+        let model = self.delegated_model.as_deref()?;
+        let model = model.split_once(':').map_or(model, |(_, model)| model);
+        Some(model.rsplit('/').next().unwrap_or(model))
     }
 }
 
@@ -330,6 +390,28 @@ crate::impl_db_enum!(ToolStatus {
     Failed => "failed",
     Interrupted => "interrupted",
 } else Running);
+
+#[cfg(test)]
+mod tool_call_timing_tests {
+    use super::ToolCallTiming;
+
+    #[test]
+    fn finish_stamps_once_and_duration_is_signed() {
+        let mut timing = ToolCallTiming {
+            started_at_ms: Some(1_000),
+            ..ToolCallTiming::default()
+        };
+        // Running: no complete interval yet.
+        assert_eq!(timing.signed_duration_ms(), None);
+
+        // First terminal transition stamps; clock rollback is evidence.
+        timing.finish(750);
+        // A later duplicate completion must not move the endpoint.
+        timing.finish(2_000);
+        assert_eq!(timing.finished_at_ms, Some(750));
+        assert_eq!(timing.signed_duration_ms(), Some(-250));
+    }
+}
 
 impl ToolStatus {
     pub fn label(self) -> &'static str {

@@ -41,6 +41,9 @@ const PLANNING_RESEARCH_REJECTION_LIMIT: usize = 1;
 const REPEATED_FAILED_CALL_LIMIT: usize = 2;
 const REPEATED_FAILED_CALL_REJECTION_LIMIT: usize = 1;
 const FAILED_CALL_WINDOW: usize = 8;
+/// One rejected title-only turn is enough guidance. Repeating the metadata call
+/// after that proves the model is not advancing the human task.
+const SESSION_TITLE_ONLY_REJECTION_LIMIT: usize = 1;
 /// Detects and terminates the coding persona's silent non-progress spirals.
 /// Progress is based on observed effects and deduplicated evidence, never the
 /// spelling of a tool call. The terminal bound is provider-independent: a
@@ -64,6 +67,26 @@ const IMPLEMENTATION_STALL_EVIDENCE_HISTORY: usize = 4;
 enum ModelCallOutcome {
     Response(StreamedResponse),
     Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionTitleRunPolicy {
+    ExplicitHumanTask,
+    ContinuationOrAutomatic,
+}
+
+impl SessionTitleRunPolicy {
+    fn for_human_prompt(prompt: &str) -> Self {
+        if crate::task_intent::TaskPromptKind::classify(prompt).is_continuation() {
+            Self::ContinuationOrAutomatic
+        } else {
+            Self::ExplicitHumanTask
+        }
+    }
+
+    const fn allows_initial_attempt(self) -> bool {
+        matches!(self, Self::ExplicitHumanTask)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -190,15 +213,28 @@ fn build_assistant_message(response: &StreamedResponse) -> Result<ChatCompletion
 impl Agent {
     /// Shared preamble of [`Self::run`] and [`Self::run_with_queue`]: arm the
     /// turn with the fresh user input before either hands off to the run loop.
-    async fn begin_run(&mut self, input: &UserInput, sink: &SharedSink) -> Result<()> {
+    async fn begin_run(
+        &mut self,
+        input: &UserInput,
+        sink: &SharedSink,
+    ) -> Result<SessionTitleRunPolicy> {
         // A human-submitted turn resets the peer hop chain (anti-loop): only
         // auto-wake turns carry hops forward.
         if let Some(bus) = &self.peer_bus {
             bus.begin_turn(crate::peer::TurnOrigin::Human);
         }
         self.begin_verification_observation_window();
+        self.refresh_execution_policy_snapshot();
         self.set_planning_advisory(None);
-        self.begin_inferred_completion_task(&input.text);
+        let continuation_goal = self.begin_inferred_completion_task(&input.text);
+        if let Some(goal) = continuation_goal {
+            self.push_harness_note(&format!(
+                "Continuation handoff: the latest human message resumes the established task; it \
+                 does not create a new goal. Continue from the current workspace, todo, and \
+                 verification state for this prior explicit human request: {goal}. Do not rename \
+                 the session unless a later human message introduces a distinct topic."
+            ));
+        }
         // Volatile project state (git status) refreshes at the top of every
         // run-loop iteration, which covers the first model call too — no
         // begin_run refresh needed. Self-review and memory recall key off the
@@ -212,7 +248,7 @@ impl Agent {
         // state is left behind for a turn the model never sees.
         self.inject_recalled_memory(&input.text).await;
         self.emit_context_updated(sink);
-        Ok(())
+        Ok(SessionTitleRunPolicy::for_human_prompt(&input.text))
     }
 
     pub async fn run(
@@ -221,9 +257,14 @@ impl Agent {
         cancellation_token: CancellationToken,
         sink: SharedSink,
     ) -> Result<AgentRunResult> {
-        self.begin_run(&UserInput::from_text(user_input), &sink)
+        let session_title_policy = self
+            .begin_run(&UserInput::from_text(user_input), &sink)
             .await?;
-        self.run_current_context(cancellation_token, sink).await
+        let result = self
+            .run_current_context_inner(cancellation_token.into(), sink, None, session_title_policy)
+            .await;
+        self.finish_verification_run(&result).await;
+        result
     }
 
     #[cfg(test)]
@@ -245,9 +286,14 @@ impl Agent {
         sink: SharedSink,
         mut queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
     ) -> Result<AgentRunResult> {
-        self.begin_run(&input, &sink).await?;
+        let session_title_policy = self.begin_run(&input, &sink).await?;
         let result = self
-            .run_current_context_inner(cancellation, sink, Some(&mut queued_messages))
+            .run_current_context_inner(
+                cancellation,
+                sink,
+                Some(&mut queued_messages),
+                session_title_policy,
+            )
             .await;
         self.finish_verification_run(&result).await;
         result
@@ -259,7 +305,12 @@ impl Agent {
         sink: SharedSink,
     ) -> Result<AgentRunResult> {
         let result = self
-            .run_current_context_inner(cancellation_token.into(), sink, None)
+            .run_current_context_inner(
+                cancellation_token.into(),
+                sink,
+                None,
+                SessionTitleRunPolicy::ContinuationOrAutomatic,
+            )
             .await;
         self.finish_verification_run(&result).await;
         result
@@ -272,19 +323,32 @@ impl Agent {
         mut queued_messages: mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
     ) -> Result<AgentRunResult> {
         let result = self
-            .run_current_context_inner(cancellation, sink, Some(&mut queued_messages))
+            .run_current_context_inner(
+                cancellation,
+                sink,
+                Some(&mut queued_messages),
+                SessionTitleRunPolicy::ContinuationOrAutomatic,
+            )
             .await;
         self.finish_verification_run(&result).await;
         result
     }
 
-    pub(super) async fn run_current_context_inner(
+    async fn run_current_context_inner(
         &mut self,
         cancellation: RunCancellation,
         sink: SharedSink,
         queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
+        session_title_policy: SessionTitleRunPolicy,
     ) -> Result<AgentRunResult> {
-        let result = coordinator::run(self, cancellation, sink, queued_messages).await;
+        let result = coordinator::run(
+            self,
+            cancellation,
+            sink,
+            queued_messages,
+            session_title_policy,
+        )
+        .await;
         // Every run variant funnels through here, so this is the one terminal
         // outcome line the support lifecycle log needs.
         let outcome = match &result {
@@ -541,12 +605,21 @@ impl Agent {
     ) -> Result<ToolExecutionOutcome> {
         let mut interrupted_mid_tools = false;
         let mut outcome = ToolExecutionOutcome::default();
+        let serialized_tool_names = self.hooks.serialized_tool_names();
+        let serialized_tool_names = if self.budget.max_session_billed_tokens.is_some() {
+            let mut names = serialized_tool_names;
+            names.insert("agent".to_string());
+            names.insert("task".to_string());
+            names
+        } else {
+            serialized_tool_names
+        };
         let planned_batches = tool_call_batches_with_yolo(
             tool_calls,
             tool_registry,
             &self.project_root,
             self.yolo_enabled(),
-            &self.hooks.serialized_tool_names(),
+            &serialized_tool_names,
         );
         // Batching telemetry: how the turn's tool calls were grouped. A
         // serialized batch (width 1) for >1 calls means a conflict forced
@@ -560,6 +633,8 @@ impl Agent {
         );
         let mut batches = planned_batches.into_iter().peekable();
         let mut trusted_contexts = Vec::new();
+        let mut scoped_contexts = Vec::new();
+        let mut changed_scoped_steering = HashSet::new();
         let launch_group_id = tool_calls
             .iter()
             .any(|tool_call| {
@@ -574,6 +649,84 @@ impl Agent {
                 id
             });
         while let Some(batch) = batches.next() {
+            let mut scoped_target_dirs = HashMap::<String, Vec<PathBuf>>::new();
+            for tool_call in &batch {
+                for raw_path in scoped_instruction_paths(tool_call) {
+                    let target_dir = if tool_call.name == "bash" {
+                        let Ok(args) =
+                            serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+                        else {
+                            continue;
+                        };
+                        let Some(tool) = tool_registry.get("bash") else {
+                            continue;
+                        };
+                        let Some(cwd) = tool.execution_cwd(&args).await else {
+                            continue;
+                        };
+                        let canonical_root = self
+                            .project_root
+                            .canonicalize()
+                            .unwrap_or_else(|_| self.project_root.clone());
+                        let Ok(relative) = cwd.strip_prefix(&canonical_root) else {
+                            continue;
+                        };
+                        relative.to_path_buf()
+                    } else {
+                        let Some(target_dir) = scoped_target_dir(&self.project_root, &raw_path)
+                        else {
+                            continue;
+                        };
+                        target_dir
+                    };
+                    let updates = if scoped_instruction_recurses(tool_call) {
+                        match self.scoped_steering.refresh_subtree(&target_dir) {
+                            Ok(updates) => updates,
+                            Err(error) => {
+                                tool_rejections.scoped_steering.insert(
+                                    tool_call.id.clone(),
+                                    format!(
+                                        "Tool rejected because scoped project instruction coverage could not be established: {error}"
+                                    ),
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        self.scoped_steering.refresh_target_dir(&target_dir)
+                    };
+                    for update in updates {
+                        changed_scoped_steering.insert(update.scope().to_path_buf());
+                        scoped_contexts.push(update.render());
+                    }
+                    scoped_target_dirs
+                        .entry(tool_call.id.clone())
+                        .or_default()
+                        .push(target_dir);
+                }
+            }
+            for tool_call in &batch {
+                if !tool_call_may_mutate_workspace(tool_call) {
+                    continue;
+                }
+                let recursive_scope = scoped_instruction_recurses(tool_call);
+                let affected = scoped_target_dirs
+                    .get(&tool_call.id)
+                    .is_some_and(|targets| {
+                        targets.iter().any(|target| {
+                            changed_scoped_steering.iter().any(|scope| {
+                                target.starts_with(scope)
+                                    || (recursive_scope && scope.starts_with(target))
+                            })
+                        })
+                    });
+                if affected {
+                    tool_rejections.scoped_steering.insert(
+                        tool_call.id.clone(),
+                        "Scoped project instructions for this path were loaded or changed before mutation. Review the newly injected system instruction, then retry the mutation so it is planned under fresh steering coverage.".to_string(),
+                    );
+                }
+            }
             tool_rejections
                 .repeated_failure
                 .extend(self.capture_pending_verification_bindings(&batch).await);
@@ -607,6 +760,11 @@ impl Agent {
             };
             let batch_width = batch.len();
             let batch_started = std::time::Instant::now();
+            let remaining_billed_tokens = self.budget.max_session_billed_tokens.and_then(|limit| {
+                self.usage
+                    .exact_session_billed_tokens()
+                    .map(|used| limit.saturating_sub(used))
+            });
             let mut results = if interrupted_mid_tools {
                 interrupted_tool_results(batch)
             } else {
@@ -621,6 +779,7 @@ impl Agent {
                     &self.hooks,
                     self.tool_origin.clone(),
                     self.budget.max_tool_duration,
+                    remaining_billed_tokens,
                 )
                 .await
             };
@@ -787,9 +946,12 @@ impl Agent {
                 }
             }
         }
-        if !trusted_contexts.is_empty() {
+        if !trusted_contexts.is_empty() || !scoped_contexts.is_empty() {
             for content in trusted_contexts {
                 self.push_message(trusted_context_message(&content));
+            }
+            for content in scoped_contexts {
+                self.push_message(scoped_steering_message(&content));
             }
             self.emit_context_updated(sink);
         }
@@ -913,6 +1075,102 @@ fn mutation_paths(tool_call: &ToolCall) -> Vec<String> {
         return Vec::new();
     };
     path_arg(&args).map(str::to_string).into_iter().collect()
+}
+
+pub(super) fn tool_call_may_mutate_workspace(tool_call: &ToolCall) -> bool {
+    if is_mutation_tool(&tool_call.name) {
+        return true;
+    }
+    if tool_call.name != "bash" {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments) else {
+        return true;
+    };
+    let Some(command) = args.get("command").and_then(serde_json::Value::as_str) else {
+        return true;
+    };
+    if crate::tool::direct_verification_is_cacheable(command) {
+        return false;
+    }
+    let analysis = crate::tool::analyze_bash_command(command);
+    crate::tool::classify_bash(&analysis) != crate::tool::RiskTier::ReadOnly
+}
+
+pub(super) fn scoped_instruction_paths(tool_call: &ToolCall) -> Vec<String> {
+    if tool_call.name == "apply_patch" {
+        return crate::tool::patch_target_paths_from_arguments(&tool_call.arguments);
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments) else {
+        return Vec::new();
+    };
+    match tool_call.name.as_str() {
+        "read" | "read_region" | "read_symbol" | "hover" | "write" | "edit" => {
+            path_arg(&args).map(str::to_string).into_iter().collect()
+        }
+        "glob" | "symbol_search" => vec![path_arg(&args).unwrap_or(".").to_string()],
+        // These operations may inspect or mutate files outside the source
+        // path. Resolve the entire explicit workspace before they run.
+        "definition" | "references" | "workspace_symbol" | "diagnostics" | "rename_symbol" => {
+            vec![".".to_string()]
+        }
+        "grep" => path_arg(&args)
+            .unwrap_or(".")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        "git" => vec![path_arg(&args).unwrap_or(".").to_string()],
+        // Shell effects are intentionally unscoped. `workdir` is the narrowest
+        // trustworthy bound; without one the full project may be inspected or
+        // mutated, so steering coverage must conservatively match that scope.
+        "bash" => vec![
+            args.get("workdir")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(".")
+                .to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn scoped_instruction_recurses(tool_call: &ToolCall) -> bool {
+    if tool_call.name == "read" {
+        return serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+            .ok()
+            .and_then(|args| args.get("depth").and_then(serde_json::Value::as_u64))
+            .is_some();
+    }
+    matches!(
+        tool_call.name.as_str(),
+        "glob"
+            | "grep"
+            | "symbol_search"
+            | "definition"
+            | "references"
+            | "workspace_symbol"
+            | "diagnostics"
+            | "rename_symbol"
+            | "git"
+            | "bash"
+    )
+}
+
+fn scoped_target_dir(project_root: &Path, raw_path: &str) -> Option<PathBuf> {
+    let resolved = crate::tool::ProjectPathResolver::new(project_root)
+        .action("resolve scoped project instructions for")
+        .resolve(raw_path)
+        .ok()?;
+    let relative = resolved.project_relative_path?;
+    if resolved.canonical_path.as_deref().is_some_and(Path::is_dir) {
+        Some(relative)
+    } else {
+        Some(
+            relative
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf(),
+        )
+    }
 }
 
 fn path_has_extension(path: &str, extension: &str) -> bool {
@@ -1365,8 +1623,125 @@ fn resolve_guard<T>(
 
 type PlanningResearchAction = GuardAction<String>;
 
+type SessionTitleAction = GuardAction<HashMap<String, String>>;
+
+#[derive(Debug)]
+struct SessionTitleGuard {
+    policy: SessionTitleRunPolicy,
+    handled: bool,
+    title_only_rejections: usize,
+}
+
+impl Default for SessionTitleGuard {
+    fn default() -> Self {
+        Self::new(SessionTitleRunPolicy::ContinuationOrAutomatic)
+    }
+}
+
+impl SessionTitleGuard {
+    const fn new(policy: SessionTitleRunPolicy) -> Self {
+        Self {
+            policy,
+            handled: false,
+            title_only_rejections: 0,
+        }
+    }
+
+    fn project_registry(&self, registry: Arc<ToolRegistry>) -> Arc<ToolRegistry> {
+        if self.policy.allows_initial_attempt() && !self.handled {
+            registry
+        } else {
+            registry.without("set_session_title")
+        }
+    }
+
+    fn action_for(&mut self, tool_calls: &[ToolCall]) -> Option<SessionTitleAction> {
+        let title_calls = tool_calls
+            .iter()
+            .filter(|tool_call| tool_call.name == "set_session_title")
+            .collect::<Vec<_>>();
+        if title_calls.is_empty() {
+            self.title_only_rejections = 0;
+            return None;
+        }
+
+        if self.policy.allows_initial_attempt() && !self.handled {
+            if title_calls.len() == 1 {
+                return None;
+            }
+            let rejected = title_calls
+                .into_iter()
+                .skip(1)
+                .map(|tool_call| (tool_call.id.clone(), self.rejection_message().to_string()))
+                .collect();
+            return Some(GuardAction::Reject(rejected));
+        }
+
+        if title_calls.len() == tool_calls.len() {
+            if self.title_only_rejections >= SESSION_TITLE_ONLY_REJECTION_LIMIT {
+                return Some(GuardAction::Stop(session_title_loop_stop_message()));
+            }
+            self.title_only_rejections = self.title_only_rejections.saturating_add(1);
+        } else {
+            self.title_only_rejections = 0;
+        }
+        Some(GuardAction::Reject(
+            title_calls
+                .into_iter()
+                .map(|tool_call| (tool_call.id.clone(), self.rejection_message().to_string()))
+                .collect(),
+        ))
+    }
+
+    fn observe(&mut self, observations: &[ToolCallObservation]) {
+        if observations.iter().any(|observation| {
+            observation.tool_name == "set_session_title"
+                || observation.status != crate::output::ToolExecutionStatus::Skipped
+        }) {
+            self.handled = true;
+        }
+    }
+
+    fn reset(&mut self, policy: SessionTitleRunPolicy) {
+        *self = Self::new(policy);
+    }
+
+    const fn rejection_message(&self) -> &'static str {
+        match self.policy {
+            SessionTitleRunPolicy::ExplicitHumanTask => session_title_rejection_message(),
+            SessionTitleRunPolicy::ContinuationOrAutomatic => {
+                continuation_title_rejection_message()
+            }
+        }
+    }
+}
+
+const fn session_title_rejection_message() -> &'static str {
+    "set_session_title is limited to one attempt before substantive work in each explicit human \
+     turn. It was already attempted or task work has begun. Do not call it for Harness notes, \
+     retries, `continue`, corrections, or phase changes; perform the pending substantive action now."
+}
+
+const fn continuation_title_rejection_message() -> &'static str {
+    "set_session_title is unavailable on continuation, retry, and automatic runs because no new \
+     human task boundary exists. Preserve the current title and perform the pending substantive \
+     action now."
+}
+
+fn session_title_loop_stop_message() -> String {
+    "Session-title loop guard stopped the run after set_session_title was repeated despite an \
+     explicit rejection. The title is metadata and was already handled, but no substantive task \
+     action followed. Partial workspace and conversation state are preserved."
+        .to_string()
+}
+
 #[derive(Debug, Clone, Default)]
 struct ToolRejections {
+    /// Title calls after the one metadata attempt permitted at a human boundary.
+    session_title: HashMap<String, String>,
+    /// Mutations planned before newly discovered or changed scoped steering was
+    /// active. The update is injected and the model must re-plan the write.
+    scoped_steering: HashMap<String, String>,
     /// Fresh interval coverage resolved before execution. These calls return a
     /// successful compact pointer without touching the filesystem again.
     precomputed_read: HashMap<String, PrecomputedReadReuse>,
@@ -1392,6 +1767,10 @@ struct ToolRejections {
 
 impl ToolRejections {
     fn message_for(&self, tool_call: &ToolCall) -> Option<String> {
+        if let Some(message) = self.session_title.get(&tool_call.id) {
+            return Some(message.clone());
+        }
+
         if let Some(message) = self.planning_research.as_deref()
             && !planning_tool_makes_progress(&tool_call.name)
         {
@@ -1399,6 +1778,10 @@ impl ToolRejections {
         }
 
         if let Some(message) = self.delegated_read.get(&tool_call.id) {
+            return Some(message.clone());
+        }
+
+        if let Some(message) = self.scoped_steering.get(&tool_call.id) {
             return Some(message.clone());
         }
 
@@ -1445,18 +1828,11 @@ struct DelegatedReadOverlap {
 
 impl Agent {
     fn auto_background_verification_calls(&self, tool_calls: &[ToolCall]) -> HashSet<String> {
-        if !self.auto_background_verification || self.verification.active_verification.is_some() {
-            return HashSet::new();
-        }
-        tool_calls
-            .iter()
-            .filter(|call| call.name == "bash")
-            .filter_map(|call| {
-                let value = serde_json::from_str::<serde_json::Value>(&call.arguments).ok()?;
-                let command = value.get("command")?.as_str()?;
-                known_slow_verification(command).then(|| call.id.clone())
-            })
-            .collect()
+        resolve_auto_background_verification_calls(
+            tool_calls,
+            self.auto_background_verification,
+            self.verification.active_verification.is_some(),
+        )
     }
 
     fn delegated_read_action(
@@ -1721,8 +2097,45 @@ impl Agent {
     }
 }
 
-fn known_slow_verification(command: &str) -> bool {
-    let normalized = command.split_whitespace().collect::<Vec<_>>();
+fn resolve_auto_background_verification_calls(
+    tool_calls: &[ToolCall],
+    enabled: bool,
+    verification_active: bool,
+) -> HashSet<String> {
+    if !enabled || verification_active {
+        return HashSet::new();
+    }
+
+    tool_calls
+        .iter()
+        .filter(|call| call.name == "bash")
+        .filter_map(|call| {
+            let serde_json::Value::Object(arguments) =
+                serde_json::from_str::<serde_json::Value>(&call.arguments).ok()?
+            else {
+                return None;
+            };
+            if arguments.contains_key("run_in_background")
+                || ["escape_sandbox", "interactive", "parallel"]
+                    .iter()
+                    .any(|field| {
+                        !matches!(
+                            arguments.get(*field),
+                            None | Some(serde_json::Value::Bool(false))
+                        )
+                    })
+            {
+                return None;
+            }
+            let command = arguments.get("command")?.as_str()?;
+            let normalized = crate::tool::normalize_verification_command(command)?;
+            known_slow_verification(&normalized).then(|| call.id.clone())
+        })
+        .collect()
+}
+
+fn known_slow_verification(command: &[String]) -> bool {
+    let normalized = command.iter().map(String::as_str).collect::<Vec<_>>();
     matches!(normalized.as_slice(), ["cargo", "test", ..])
         || (matches!(normalized.as_slice(), ["cargo", "clippy", ..])
             && normalized.contains(&"--all-targets"))
@@ -2063,7 +2476,7 @@ fn semantic_evidence_for_result(
         }
         // A reuse is explicit proof that the requested bytes were already in
         // context. Counting it would turn unchanged reads back into progress.
-        ToolOutput::ReadReuse { .. } => return None,
+        ToolOutput::ReadReuse { .. } | ToolOutput::MissingPathReuse { .. } => return None,
         ToolOutput::Command {
             stdout,
             stderr,
@@ -3023,6 +3436,8 @@ mod tests {
 
     struct ReadyTool;
 
+    struct BackgroundModeProbeTool;
+
     #[async_trait]
     impl crate::tool::Tool for ReadyTool {
         fn name(&self) -> &str {
@@ -3039,6 +3454,47 @@ mod tests {
 
         async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput> {
             Ok(ToolOutput::Text("completed".to_string()))
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::Tool for BackgroundModeProbeTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+
+        fn description(&self) -> &str {
+            "Report the requested execution mode"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "run_in_background": { "type": "boolean" },
+                    "escape_sandbox": { "type": "boolean" },
+                    "interactive": { "type": "boolean" },
+                    "parallel": { "type": "boolean" }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            })
+        }
+
+        async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+            if args
+                .get("run_in_background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                Ok(ToolOutput::BackgroundTaskStarted {
+                    task_id: "bg-probe".to_string(),
+                    message: "Started background task bg-probe".to_string(),
+                })
+            } else {
+                Ok(ToolOutput::Text("foreground".to_string()))
+            }
         }
     }
 
@@ -3106,6 +3562,7 @@ mod tests {
             Arc::new(crate::hooks::HookEngine::disabled()),
             None,
             Some(Duration::from_millis(10)),
+            None,
         )
         .await;
 
@@ -3136,6 +3593,7 @@ mod tests {
             Arc::new(crate::hooks::HookEngine::disabled()),
             None,
             Some(Duration::ZERO),
+            None,
         )
         .await;
 
@@ -3437,6 +3895,75 @@ mod tests {
         status: crate::output::ToolExecutionStatus,
     ) -> ToolCallObservation {
         ToolCallObservation::new(&call(name, args), status)
+    }
+
+    #[test]
+    fn session_title_guard_rejects_then_stops_a_title_only_loop() {
+        let mut guard = SessionTitleGuard::new(SessionTitleRunPolicy::ContinuationOrAutomatic);
+        let title = call(
+            "set_session_title",
+            r#"{"title":"Isolate TUI verification","episode_action":"same_topic"}"#,
+        );
+        let Some(GuardAction::Reject(rejected)) = guard.action_for(std::slice::from_ref(&title))
+        else {
+            panic!("the first continuation title should be rejected");
+        };
+        assert_eq!(rejected.len(), 1);
+        assert!(matches!(
+            guard.action_for(std::slice::from_ref(&title)),
+            Some(GuardAction::Stop(_))
+        ));
+    }
+
+    #[test]
+    fn session_title_guard_allows_only_one_title_in_the_initial_batch() {
+        let mut guard = SessionTitleGuard::new(SessionTitleRunPolicy::ExplicitHumanTask);
+        let first = call(
+            "set_session_title",
+            r#"{"title":"First","episode_action":"new_topic"}"#,
+        );
+        let mut second = call(
+            "set_session_title",
+            r#"{"title":"Second","episode_action":"new_topic"}"#,
+        );
+        second.id = "call-second".to_string();
+
+        let Some(GuardAction::Reject(rejected)) = guard.action_for(&[first, second]) else {
+            panic!("extra title calls should be rejected");
+        };
+
+        assert!(rejected.contains_key("call-second"));
+    }
+
+    #[test]
+    fn failed_substantive_work_closes_the_title_window() {
+        let mut guard = SessionTitleGuard::new(SessionTitleRunPolicy::ExplicitHumanTask);
+        let failed_read = call("read", r#"{"path":"missing.rs"}"#);
+        guard.observe(&[ToolCallObservation::new(
+            &failed_read,
+            crate::output::ToolExecutionStatus::Failed,
+        )]);
+        let title = call(
+            "set_session_title",
+            r#"{"title":"Late title","episode_action":"new_topic"}"#,
+        );
+
+        assert!(matches!(
+            guard.action_for(&[title]),
+            Some(GuardAction::Reject(_))
+        ));
+    }
+
+    #[test]
+    fn bare_continuation_disables_session_title_attempts() {
+        assert_eq!(
+            SessionTitleRunPolicy::for_human_prompt("continue"),
+            SessionTitleRunPolicy::ContinuationOrAutomatic
+        );
+        assert_eq!(
+            SessionTitleRunPolicy::for_human_prompt("fix it properly"),
+            SessionTitleRunPolicy::ExplicitHumanTask
+        );
     }
 
     #[test]
@@ -4257,7 +4784,7 @@ mod tests {
                         "wait",
                         Arc::new(ToolRegistry::new()),
                         CancellationToken::new(),
-                        None,
+                        crate::tool::SelfReviewRunOptions::default(),
                     )
                     .await
             }
@@ -4340,14 +4867,117 @@ mod tests {
     }
 
     #[test]
-    fn only_known_slow_verification_commands_auto_background() {
-        assert!(known_slow_verification("cargo test --locked"));
-        assert!(known_slow_verification(
-            "cargo clippy --all-targets --all-features -- -D warnings"
+    fn auto_background_resolver_honors_complete_bash_arguments() {
+        let eligible = |arguments: &str, enabled: bool, verification_active: bool| {
+            !resolve_auto_background_verification_calls(
+                &[ToolCall {
+                    id: "call-1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: arguments.to_string(),
+                }],
+                enabled,
+                verification_active,
+            )
+            .is_empty()
+        };
+
+        for arguments in [
+            r#"{"command":"cargo test --locked","run_in_background":true}"#,
+            r#"{"command":"cargo test --locked","run_in_background":false}"#,
+            r#"{"command":"cargo test --locked","escape_sandbox":true}"#,
+            r#"{"command":"cargo test --locked","interactive":true}"#,
+            r#"{"command":"cargo test --locked","parallel":true}"#,
+            r#"{"command":"cargo test --locked","run_in_background":true,"escape_sandbox":true}"#,
+            r#"{"command":"cargo check --locked"}"#,
+            r#"{"command":"cargo test && echo done"}"#,
+            r#"{"command":"cargo test $(touch .pwned)"}"#,
+            r#"{"command":"time -o timings cargo test"}"#,
+        ] {
+            assert!(!eligible(arguments, true, false), "{arguments}");
+        }
+
+        for arguments in [
+            r#"{"command":"cargo test --locked"}"#,
+            r#"{"command":"time env RUST_BACKTRACE=1 cargo test --locked"}"#,
+            r#"{"command":"cargo clippy --all-targets --all-features -- -D warnings","parallel":false}"#,
+            r#"{"command":"cargo build --release --locked","escape_sandbox":false}"#,
+        ] {
+            assert!(eligible(arguments, true, false), "{arguments}");
+        }
+        assert!(!eligible(
+            r#"{"command":"cargo test --locked"}"#,
+            false,
+            false
         ));
-        assert!(known_slow_verification("cargo build --release --locked"));
-        assert!(!known_slow_verification("cargo check --locked"));
-        assert!(!known_slow_verification("cargo clippy -p small"));
-        assert!(!known_slow_verification("cargo build"));
+        assert!(!eligible(
+            r#"{"command":"cargo test --locked"}"#,
+            true,
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_resolver_selected_calls_are_rewritten_and_labelled() {
+        let calls = [
+            ToolCall {
+                id: "auto".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test --locked"}"#.to_string(),
+            },
+            ToolCall {
+                id: "foreground".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test --locked","run_in_background":false}"#
+                    .to_string(),
+            },
+            ToolCall {
+                id: "explicit-background".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test --locked","run_in_background":true}"#
+                    .to_string(),
+            },
+        ];
+        let selected = resolve_auto_background_verification_calls(&calls, true, false);
+        assert_eq!(selected, HashSet::from(["auto".to_string()]));
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(BackgroundModeProbeTool));
+        let registry = Arc::new(registry);
+        let mut results = Vec::new();
+        for call in calls {
+            let (_, output, status) = Agent::execute_single_tool_call(
+                None,
+                call,
+                registry.clone(),
+                ToolRejections {
+                    auto_background: selected.clone(),
+                    ..ToolRejections::default()
+                },
+                Arc::new(crate::output::StdoutSink),
+                CancellationToken::new(),
+                Arc::new(crate::hooks::HookEngine::disabled()),
+                None,
+                None,
+                None,
+            )
+            .await;
+            results.push((output, status));
+        }
+
+        assert!(matches!(
+            &results[0],
+            (ToolOutput::BackgroundTaskStarted { message, .. }, crate::output::ToolExecutionStatus::Started)
+                if message.starts_with("Auto-promoted known slow verification")
+        ));
+        assert!(matches!(
+            &results[1],
+            (ToolOutput::Text(message), crate::output::ToolExecutionStatus::Succeeded)
+                if message == "foreground"
+        ));
+        assert!(matches!(
+            &results[2],
+            (ToolOutput::BackgroundTaskStarted { message, .. }, crate::output::ToolExecutionStatus::Started)
+                if !message.contains("Auto-promoted")
+        ));
     }
 }

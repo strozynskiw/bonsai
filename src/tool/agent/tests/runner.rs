@@ -170,6 +170,33 @@ async fn read_only_agent_can_run_in_background() {
 }
 
 #[tokio::test]
+async fn billed_token_cap_rejects_background_agent_launch() {
+    let tool =
+        agent_tool_with_background_wake(empty_sub_registry(), Arc::new(AgentRegistry::empty()));
+    let context = crate::tool::ToolExecutionContext::new(
+        "call-1".to_string(),
+        Arc::new(crate::output::StdoutSink),
+    )
+    .with_remaining_billed_tokens(Some(100));
+
+    let error = tool
+        .execute_with_context(
+            serde_json::json!({
+                "agent": "explore",
+                "prompt": "where is main",
+                "run_in_background": true
+            }),
+            context,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("cumulative billed-token hard limit"));
+    assert!(tool.runner.subagents().list().is_empty());
+}
+
+#[tokio::test]
 async fn background_without_wake_loop_runs_synchronously() {
     let tool = agent_tool();
     let result = tool

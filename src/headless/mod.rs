@@ -16,6 +16,7 @@ use crate::provider::ProviderRegistry;
 use crate::recovery::{RecoveryMode, RecoveryWorkspace};
 use crate::session::{DEFAULT_PROVIDER_ID, SessionStore};
 use crate::storage::{RecoveryId, SessionId, SessionStatus, Storage};
+use crate::task_intent::TaskPromptKind;
 use crate::todo::TodoStore;
 use crate::tool::ApprovalLevel;
 use crate::tool::SharedActiveSessionId;
@@ -650,9 +651,23 @@ async fn run_inner_with_provider_runtime(
         }
     }
 
-    let task_run = storage
-        .start_task_run(current_session_id, None, &prompt)
-        .await?;
+    let task_run = if TaskPromptKind::classify(&prompt).is_continuation() {
+        match storage
+            .retry_latest_substantive_task_run(current_session_id)
+            .await?
+        {
+            Some(task) => task,
+            None => {
+                storage
+                    .start_task_run(current_session_id, None, &prompt)
+                    .await?
+            }
+        }
+    } else {
+        storage
+            .start_task_run(current_session_id, None, &prompt)
+            .await?
+    };
     let verification = match crate::verification::resolve_slash_command(
         &prompt,
         &project_root,
@@ -1110,6 +1125,7 @@ fn forward_terminal_event(sink: &HeadlessSink, event: crate::terminal::TerminalE
             tool_call_id: Some(id),
             status,
             summary,
+            finished_at_ms,
             ..
         } => {
             let status = match status {
@@ -1127,7 +1143,11 @@ fn forward_terminal_event(sink: &HeadlessSink, event: crate::terminal::TerminalE
                     crate::output::ToolExecutionStatus::Started
                 }
             };
-            sink.tool_finished(&id, &summary, status);
+            if let Some(finished_at_ms) = finished_at_ms {
+                sink.tool_finished_at(&id, &summary, status, finished_at_ms);
+            } else {
+                sink.tool_finished(&id, &summary, status);
+            }
         }
         crate::terminal::TerminalEvent::Started { .. }
         | crate::terminal::TerminalEvent::Output { .. }

@@ -142,7 +142,7 @@ if [ "$tag_only" -eq 1 ]; then
   # references the bump would have rewritten are verified instead.
   [ "$old_version" = "$version" ] ||
     die "--tag requires Cargo.toml to already be at $version (it is at $old_version)"
-  for public_file in README.md site/index.html install.sh; do
+  for public_file in site/index.html install.sh; do
     grep -q -- "$tag" "$public_file" ||
       die "--tag requires $public_file to reference $tag"
   done
@@ -170,7 +170,7 @@ updated_manifest, count = re.subn(
 if count != 1:
     raise SystemExit("could not update Cargo.toml package version")
 public_updates = []
-for filename in ("README.md", "site/index.html", "install.sh"):
+for filename in ("site/index.html", "install.sh"):
     path = pathlib.Path(filename)
     original = path.read_text()
     updated = original.replace(old_tag, new_tag)
@@ -198,8 +198,8 @@ if [ "$run_checks" -eq 1 ] && [ "$tag_only" -eq 0 ]; then
 fi
 
 if [ "$tag_only" -eq 0 ]; then
-  git diff -- Cargo.toml Cargo.lock README.md site/index.html install.sh
-  git add Cargo.toml Cargo.lock README.md site/index.html install.sh
+  git diff -- Cargo.toml Cargo.lock site/index.html install.sh
+  git add Cargo.toml Cargo.lock site/index.html install.sh
   git commit -m "chore(release): prepare $tag"
 fi
 git tag -a "$tag" -m "Release $tag"

@@ -637,43 +637,24 @@ fn handle_paste_event(
     }
 }
 
-/// Replace the active foreground turn with the current draft. Validation runs
-/// before cancellation so an unsupported image or slash command leaves both
-/// the turn and composer intact. An empty draft is an explicit foreground
-/// stop. Detached subagents use their separate cancellation channel and keep
-/// running in either case.
-fn steer_active_run(
-    app: &mut AppState,
-    tasks: &TaskController,
-    registry: &ProviderRegistry,
-    model_catalog: &crate::model_catalog::ModelCatalog,
-) -> bool {
+/// Replace the active foreground turn only after Enter has queued a message.
+/// The newest queued message becomes the steer; the current composer draft is
+/// never submitted by Escape. Detached subagents keep running.
+fn steer_active_run(app: &mut AppState, tasks: &TaskController) -> bool {
     if !matches!(app.task_state, TaskState::Running) {
         return false;
     }
 
-    let has_draft = !app.composer.submission().display_text.trim().is_empty();
-    if has_draft
-        && !enqueue_running_follow_up(
-            app,
-            tasks,
-            FollowUpDelivery::Steer,
-            registry,
-            Some(model_catalog),
-        )
-    {
+    let Some(queued_id) = app.last_queued_input().map(|queued| queued.id) else {
         return false;
-    }
+    };
+    app.reduce(AppAction::PromoteQueuedInputToSteer { id: queued_id });
 
     tasks.interrupt_foreground();
     app.reduce(AppAction::SetTaskState(TaskState::Cancelling));
     push_transient_notice(
         app,
-        if has_draft {
-            "Steering foreground agent; background subagents continue"
-        } else {
-            "Stopping foreground agent; background subagents continue"
-        },
+        "Steering with all queued messages; background subagents continue",
     );
     true
 }
@@ -878,6 +859,74 @@ async fn submit_and_start_run(
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
     }
     false
+}
+
+async fn session_budget_usage_for_alert(
+    agent: &Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    tasks: &TaskController,
+) -> crate::run_budget::SessionBudgetUsage {
+    let active_run_ms = tasks
+        .reconcile_session_activity()
+        .await
+        .ok()
+        .flatten()
+        .map_or(0, |activity| activity.active_run_ms);
+    agent
+        .lock()
+        .await
+        .session_budget_usage()
+        .with_active_run_ms(active_run_ms)
+}
+
+fn compact_command_dispatches_model_work(input: &str) -> bool {
+    let mut parts = input.split_whitespace();
+    if parts.next() != Some("/compact") {
+        return false;
+    }
+    !parts.any(|argument| matches!(argument, "preview" | "deterministic" | "offline"))
+}
+
+fn submitted_input_dispatches_model_work(input: &str) -> bool {
+    if !input.starts_with('/') {
+        return true;
+    }
+    idle_slash_command(input).is_some_and(IdleSlashCommand::dispatches_model_work)
+        || compact_command_dispatches_model_work(input)
+}
+
+async fn open_budget_warning_if_reached(
+    app: &mut AppState,
+    tasks: &TaskController,
+    agent: &Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    submission: crate::tui::app::ComposerSubmission,
+) -> bool {
+    let usage = session_budget_usage_for_alert(agent, tasks).await;
+    if !usage.has_reached_alert() {
+        return false;
+    }
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::BudgetWarning {
+            submission: Box::new(submission),
+            usage,
+            cursor: 0,
+        },
+    )));
+    true
+}
+
+fn take_budget_warning_submission(
+    app: &mut AppState,
+) -> Option<crate::tui::app::ComposerSubmission> {
+    let submission = match app.modal.as_ref() {
+        Some(ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning {
+            submission,
+            cursor: 1,
+            ..
+        })) => Some((**submission).clone()),
+        _ => None,
+    };
+    app.reduce(AppAction::CloseModal);
+    submission
 }
 
 /// Consume the one-shot, plan-scoped natural confirmation. Exact matching is
@@ -1169,7 +1218,18 @@ async fn handle_idle_slash_command(
             }
         }
         IdleSlashCommand::SecurityReview => {
-            security_review_changes(app, tasks, deps.agent.clone(), deps.sink.clone()).await;
+            security_review_changes(
+                app,
+                tasks,
+                deps.agent.clone(),
+                deps.sink.clone(),
+                ReviewCanvasPreflightDeps::new(
+                    deps.storage,
+                    *persistence.current_session_id,
+                    &deps.plan_store,
+                ),
+            )
+            .await;
         }
         IdleSlashCommand::Mode => {
             // Rows are seeded by the reducer from current app state; pass an empty
@@ -3359,6 +3419,61 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                         }
                         match intent {
                             KeyIntent::Action(action) => {
+                                if matches!(action, AppAction::BudgetWarningSubmit) {
+                                    if let Some(submission) =
+                                        take_budget_warning_submission(&mut app)
+                                    {
+                                        let input = submission.display_text.trim().to_string();
+                                        let mut persistence = PersistenceCommandState {
+                                            current_session_id: &mut current_session_id,
+                                            signatures: &mut persisted_signatures,
+                                        };
+                                        if handle_toplevel_submit_command(
+                                            &input,
+                                            &mut app,
+                                            &mut tasks,
+                                            runtime_action_deps!(),
+                                            &mut persistence,
+                                            &subagents,
+                                            &peer_bus,
+                                            &update_config,
+                                        )
+                                        .await
+                                        {
+                                            continue;
+                                        }
+                                        if let Some(command) = idle_slash_command(&input) {
+                                            app.reduce(AppAction::ScrollBottom);
+                                            app.reduce(AppAction::SubmitCommandInput(
+                                                input.clone(),
+                                            ));
+                                            let mut persistence = PersistenceCommandState {
+                                                current_session_id: &mut current_session_id,
+                                                signatures: &mut persisted_signatures,
+                                            };
+                                            handle_idle_slash_command(
+                                                command,
+                                                &input,
+                                                &mut app,
+                                                &mut tasks,
+                                                runtime_action_deps!(),
+                                                &mut persistence,
+                                            )
+                                            .await;
+                                        } else {
+                                            let _ = submit_and_start_run(
+                                                submission,
+                                                &input,
+                                                &mut app,
+                                                &mut tasks,
+                                                runtime_action_deps!(),
+                                                &mut repo_map,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    continue;
+                                }
                                 // The Alt+S keybind opens `/subagents` from the cached
                                 // snapshot; refresh it first so the modal opens to
                                 // current data even though live refresh (above) is
@@ -3404,7 +3519,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 }
                             }
                             KeyIntent::Steer => {
-                                steer_active_run(&mut app, &tasks, &registry, &model_catalog);
+                                steer_active_run(&mut app, &tasks);
                             }
                             intent @ (KeyIntent::Submit | KeyIntent::SubmitReplacement(_)) => {
                                 if let KeyIntent::SubmitReplacement(replacement) = &intent {
@@ -3418,6 +3533,18 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 let submission = app.composer.submission();
                                 let input = submission.display_text.trim().to_string();
                                 if input.is_empty() {
+                                    continue;
+                                }
+                                if matches!(app.task_state, TaskState::Idle)
+                                    && submitted_input_dispatches_model_work(&input)
+                                    && open_budget_warning_if_reached(
+                                        &mut app,
+                                        &tasks,
+                                        &agent,
+                                        submission.clone(),
+                                    )
+                                    .await
+                                {
                                     continue;
                                 }
                                 let mut persistence = PersistenceCommandState {
@@ -3585,6 +3712,45 @@ fn prepare_termination_shutdown(app: &mut AppState) {
     app.reduce(AppAction::SetTaskState(TaskState::Exiting));
 }
 
+/// Drain the background spawn set after `abort_all` during shutdown.
+///
+/// Aborting makes *every* outstanding task finish as a cancellation, which is
+/// the expected outcome of a normal shutdown; reporting those at error level
+/// made clean exits look like crashes (session 119 logged four phantom
+/// "panicked during shutdown" errors). Only genuinely unexpected join failures
+/// are surfaced at error level, carrying the task id when there is one, so a
+/// real panic stays attributable. Cancellation is still traced at debug level:
+/// silent by default, but present when someone is diagnosing shutdown.
+///
+/// Bounded by `BACKGROUND_SPAWNS_DRAIN_TIMEOUT` — a task that ignores
+/// cancellation (a blocking body parked in `spawn_blocking`, say) must not be
+/// able to hang shutdown.
+async fn drain_background_spawns(spawns: &mut tokio::task::JoinSet<()>) {
+    const BACKGROUND_SPAWNS_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+    let drain_start = Instant::now();
+    while let Ok(Some(result)) = tokio::time::timeout(
+        BACKGROUND_SPAWNS_DRAIN_TIMEOUT.saturating_sub(drain_start.elapsed()),
+        spawns.join_next(),
+    )
+    .await
+    {
+        match result {
+            Ok(()) => {}
+            Err(err) if err.is_cancelled() => {
+                tracing::debug!(%err, "background spawn task cancelled during shutdown");
+            }
+            Err(err) => {
+                let task_id = err.id();
+                tracing::error!(
+                    %err,
+                    task_id = ?task_id,
+                    "background spawn task failed during shutdown"
+                );
+            }
+        }
+    }
+}
+
 /// Everything that runs once the frame loop breaks: log shutdown stats,
 /// snapshot the final context report, stop background tasks, mark the
 /// session complete, restore the terminal, flush final persistence, and
@@ -3630,18 +3796,7 @@ async fn shutdown_tui(
     // Drain all long-lived background spawns before touching any shared
     // state they might still access (terminal, session, peer bus).
     background_spawns.abort_all();
-    const BACKGROUND_SPAWNS_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-    let drain_start = Instant::now();
-    while let Ok(Some(result)) = tokio::time::timeout(
-        BACKGROUND_SPAWNS_DRAIN_TIMEOUT.saturating_sub(drain_start.elapsed()),
-        background_spawns.join_next(),
-    )
-    .await
-    {
-        if let Err(err) = result {
-            tracing::error!(%err, "background spawn task panicked during shutdown");
-        }
-    }
+    drain_background_spawns(&mut background_spawns).await;
 
     // SessionEnd: capped independently of any hook's own configured
     // timeout — shutdown must never hang on a misbehaving hook.
@@ -4423,6 +4578,14 @@ async fn maybe_advance_plan_phase(
     if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() {
         return false;
     }
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::BudgetWarning { .. }
+        ))
+    ) {
+        return false;
+    }
     let Some(advance) = app.phase_advance.take() else {
         return false;
     };
@@ -4582,19 +4745,23 @@ async fn start_pending_queued_run_if_idle(
         return false;
     }
 
-    // A steer replaces the just-interrupted foreground turn and therefore has
-    // priority over older Enter-queued work. Keep those older messages pending
-    // for the turn after the steer instead of appending them behind the urgent
-    // instruction in the same model request.
-    let steer_id = app
-        .queued_inputs
-        .iter()
-        .find(|queued| matches!(queued.delivery, FollowUpDelivery::Steer))
-        .map(|queued| queued.id);
+    let warning_submission = app.first_queued_input().map(|queued| {
+        let id = queued.id;
+        (id, queued.content.submission())
+    });
+    if let Some((id, submission)) = warning_submission
+        && open_budget_warning_if_reached(app, tasks, &agent, submission).await
+    {
+        app.reduce(AppAction::CancelQueuedInput { id });
+        return false;
+    }
+
+    // A steer takes the whole queue with it: every queued message enters the
+    // chat in FIFO order in the same run, instead of leaving older Enter-queued
+    // work pending behind the urgent instruction for a later run.
     let mut queued_messages = app
         .queued_inputs
         .iter()
-        .filter(|queued| steer_id.is_none_or(|steer_id| queued.id == steer_id))
         .map(|queued| {
             let submission = queued.content.submission();
             // An empty snapshot (defensive: content should always mirror the

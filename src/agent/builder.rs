@@ -161,9 +161,14 @@ impl Agent {
         builder
             .provider
             .set_conversation_cache_key(&conversation_cache_key);
+        let scoped_steering = crate::context::ScopedSteeringState::new(
+            &builder.project_root,
+            builder.workspace_trust == crate::workspace_trust::WorkspaceTrust::Trusted,
+        );
         let mut agent = Self {
             provider: builder.provider,
             provider_fallback: None,
+            provider_fallback_model_observer: None,
             conversation_cache_key,
             tool_registry: builder.coding_registry.clone(),
             registries: ToolRegistrySet {
@@ -189,6 +194,7 @@ impl Agent {
             lsp_hub: builder.lsp_hub,
             todo_store: None,
             completion: CompletionGuardState::default(),
+            read_only_task_progress: ReadOnlyTaskProgress::default(),
             finalization: FinalizationState::default(),
             messages: vec![system_message],
             budget: SessionBudget {
@@ -196,10 +202,15 @@ impl Agent {
                 max_generation_duration: builder.max_generation_duration,
                 max_streamed_chars: builder.max_streamed_chars,
                 max_tool_duration: builder.max_tool_duration,
+                max_session_billed_tokens: builder.max_session_billed_tokens,
                 max_session_turns: builder.max_session_turns,
                 max_session_output_chars: builder.max_session_output_chars,
                 max_session_active_seconds: builder.max_session_active_seconds,
                 max_session_cost_micros: builder.max_session_cost_micros,
+                alert_session_billed_tokens: builder.alert_session_billed_tokens,
+                alert_session_turns: builder.alert_session_turns,
+                alert_session_active_seconds: builder.alert_session_active_seconds,
+                alert_session_cost_micros: builder.alert_session_cost_micros,
                 context_budget_tokens: builder.context_budget_tokens.max(1),
             },
             context_gc_trigger_percent: builder.context_gc_trigger_percent,
@@ -208,12 +219,14 @@ impl Agent {
             system_context: builder.system_context,
             system_prompt_suffix: builder.system_prompt_suffix,
             project_context: builder.project_context,
+            scoped_steering,
             advisories: Advisories {
                 repair_advisory: String::new(),
                 read_coverage_advisory: String::new(),
                 planning_advisory: String::new(),
                 subagent_status_advisory: String::new(),
                 last_volatile_context_message: None,
+                last_execution_policy_snapshot: None,
             },
             project_root: builder.project_root,
             refresh_volatile: false,
@@ -248,8 +261,11 @@ impl Agent {
             summary_source_stable_ids: HashMap::new(),
             compaction_events: Vec::new(),
             pending_context_rewrite: PendingContextRewrite::default(),
+            episode_eviction_count: 0,
+            eager_episode_eviction: builder.eager_episode_eviction,
             yolo_mode: builder.yolo_mode,
             sandbox: builder.sandbox,
+            workspace_trust: builder.workspace_trust,
             project_info_runtime: builder.project_info_runtime,
             self_review: SelfReviewState::with_mode(builder.self_review),
             self_review_runs: Vec::new(),
@@ -309,12 +325,18 @@ pub(crate) struct AgentBuilder {
     pub(super) max_generation_duration: Option<Duration>,
     pub(super) max_streamed_chars: Option<usize>,
     pub(super) max_tool_duration: Option<Duration>,
+    pub(super) max_session_billed_tokens: Option<u64>,
     pub(super) max_session_turns: Option<usize>,
     pub(super) max_session_output_chars: Option<usize>,
     pub(super) max_session_active_seconds: Option<u64>,
     pub(super) max_session_cost_micros: Option<u64>,
+    pub(super) alert_session_billed_tokens: Option<u64>,
+    pub(super) alert_session_turns: Option<usize>,
+    pub(super) alert_session_active_seconds: Option<u64>,
+    pub(super) alert_session_cost_micros: Option<u64>,
     pub(super) yolo_mode: YoloMode,
     pub(super) sandbox: CommandSandbox,
+    pub(super) workspace_trust: crate::workspace_trust::WorkspaceTrust,
     pub(super) project_info_runtime: Option<Arc<ProjectInfoRuntime>>,
     pub(super) self_review: SelfReviewMode,
     pub(super) interaction: Option<Arc<InteractionService>>,
@@ -334,6 +356,7 @@ pub(crate) struct AgentBuilder {
     /// isolated unit tests); production callers wire it by default unless the
     /// explicit `BONSAI_EPISODES=0` kill switch is set.
     pub(super) episode_store: Option<crate::episode::SharedEpisodeStore>,
+    pub(super) eager_episode_eviction: bool,
 }
 
 impl AgentBuilder {
@@ -364,12 +387,18 @@ impl AgentBuilder {
             max_generation_duration: None,
             max_streamed_chars: None,
             max_tool_duration: None,
+            max_session_billed_tokens: None,
             max_session_turns: None,
             max_session_output_chars: None,
             max_session_active_seconds: None,
             max_session_cost_micros: None,
+            alert_session_billed_tokens: None,
+            alert_session_turns: None,
+            alert_session_active_seconds: None,
+            alert_session_cost_micros: None,
             yolo_mode: YoloMode::new(),
             sandbox: CommandSandbox::disabled(),
+            workspace_trust: crate::workspace_trust::WorkspaceTrust::Trusted,
             project_info_runtime: None,
             self_review: SelfReviewMode::default(),
             interaction: None,
@@ -385,6 +414,7 @@ impl AgentBuilder {
             extensions: Arc::new(crate::extension::status::ExtensionRegistry::new()),
             hooks: Arc::new(crate::hooks::HookEngine::disabled()),
             episode_store: None,
+            eager_episode_eviction: false,
         }
     }
 
@@ -455,10 +485,15 @@ impl AgentBuilder {
         self.max_generation_duration = budget.max_generation_duration();
         self.max_streamed_chars = budget.max_output_chars;
         self.max_tool_duration = budget.max_tool_duration();
+        self.max_session_billed_tokens = budget.max_session_billed_tokens;
         self.max_session_turns = budget.max_session_turns;
         self.max_session_output_chars = budget.max_session_output_chars;
         self.max_session_active_seconds = budget.max_session_active_seconds;
         self.max_session_cost_micros = budget.max_session_cost_micros;
+        self.alert_session_billed_tokens = budget.alert_session_billed_tokens;
+        self.alert_session_turns = budget.alert_session_turns;
+        self.alert_session_active_seconds = budget.alert_session_active_seconds;
+        self.alert_session_cost_micros = budget.alert_session_cost_micros;
         self
     }
 
@@ -489,6 +524,14 @@ impl AgentBuilder {
 
     pub(crate) fn sandbox(mut self, sandbox: CommandSandbox) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    pub(crate) fn workspace_trust(
+        mut self,
+        workspace_trust: crate::workspace_trust::WorkspaceTrust,
+    ) -> Self {
+        self.workspace_trust = workspace_trust;
         self
     }
 
@@ -581,6 +624,11 @@ impl AgentBuilder {
     /// behavior.
     pub(crate) fn episode_store(mut self, store: crate::episode::SharedEpisodeStore) -> Self {
         self.episode_store = Some(store);
+        self
+    }
+
+    pub(crate) fn eager_episode_eviction(mut self, enabled: bool) -> Self {
+        self.eager_episode_eviction = enabled;
         self
     }
 

@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::task_intent::{TaskPromptKind, action_directive, normalized_words};
 
 /// Semantic purpose of the current human task.
 ///
@@ -76,6 +77,8 @@ pub(crate) struct TaskCompletionContract {
     pub(crate) goal_kind: CompletionGoalKind,
     pub(crate) effect: CompletionEffectRequirement,
     pub(crate) verification_required: bool,
+    #[serde(default)]
+    bounded_read_only: bool,
 }
 
 impl Default for TaskCompletionContract {
@@ -91,6 +94,7 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Informational,
             effect: CompletionEffectRequirement::None,
             verification_required: false,
+            bounded_read_only: false,
         }
     }
 
@@ -100,6 +104,7 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::WorkspaceMutation,
             verification_required: false,
+            bounded_read_only: false,
         }
     }
 
@@ -109,6 +114,7 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: false,
+            bounded_read_only: false,
         }
     }
 
@@ -118,18 +124,42 @@ impl TaskCompletionContract {
             goal_kind: CompletionGoalKind::Action,
             effect: CompletionEffectRequirement::AnyAction,
             verification_required: true,
+            bounded_read_only: false,
         }
     }
 
     fn inferred(prompt: &str) -> Self {
         let normalized = normalized_words(prompt);
         let directive = action_directive(&normalized);
+        let continuation = TaskPromptKind::classify(prompt).is_continuation();
+        let explicit_read_only = contains_any_phrase(
+            &normalized,
+            &[
+                "read only",
+                "do not modify",
+                "don t modify",
+                "do not change",
+                "don t change",
+                "do not edit",
+                "don t edit",
+                "do not fix",
+                "don t fix",
+                "without mutation",
+                "without modifying",
+                "without changing",
+                "without editing",
+                "do not run commands",
+                "don t run commands",
+            ],
+        );
         let workspace_mutation = contains_directive_clause(
             directive,
             &[
                 "fix",
                 "implement",
                 "add",
+                "address",
+                "apply",
                 "update",
                 "change",
                 "modify",
@@ -137,9 +167,17 @@ impl TaskCompletionContract {
                 "delete",
                 "remove",
                 "rename",
+                "resolve",
                 "refactor",
                 "write",
                 "edit",
+                "upgrade",
+                "bump",
+                "finish",
+                "finish topic",
+                "record",
+                "preserve",
+                "carry",
                 "napraw",
                 "zaimplementuj",
                 "dodaj",
@@ -152,7 +190,8 @@ impl TaskCompletionContract {
                 "zrefaktoryzuj",
             ],
         );
-        let mutation = workspace_mutation
+        let mutation = continuation
+            || workspace_mutation
             || contains_directive_clause(
                 directive,
                 &[
@@ -198,6 +237,23 @@ impl TaskCompletionContract {
             ],
         );
         let generic_action = contains_directive_clause(directive, &["run", "uruchom"]);
+        let explicit_broad_effect = mutation
+            || verification
+            || generic_action
+            || contains_any_phrase(
+                directive,
+                &[
+                    "ask ",
+                    "delegate ",
+                    "fetch ",
+                    "search the web",
+                    "browse ",
+                    "download ",
+                    "call ",
+                    "finish it",
+                    "complete it",
+                ],
+            );
         let monitoring = contains_directive_clause(
             directive,
             &[
@@ -230,6 +286,8 @@ impl TaskCompletionContract {
             ],
         );
 
+        let explicit_broad_effect = explicit_broad_effect || monitoring;
+
         let intent = if mutation {
             TaskIntent::Mutation
         } else if verification {
@@ -261,6 +319,7 @@ impl TaskCompletionContract {
             },
             effect,
             verification_required: verification,
+            bounded_read_only: explicit_read_only && !explicit_broad_effect,
         }
     }
 
@@ -283,7 +342,55 @@ impl TaskCompletionContract {
             },
             effect,
             verification_required: self.verification_required || other.verification_required,
+            bounded_read_only: self.bounded_read_only && other.bounded_read_only,
         }
+    }
+
+    const fn is_read_only_task(self) -> bool {
+        self.bounded_read_only
+            && matches!(
+                self.intent,
+                TaskIntent::Informational | TaskIntent::Diagnosis | TaskIntent::Review
+            )
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ReadOnlyTaskProgress {
+    inspection_turns: usize,
+    conclusion_nudge_sent: bool,
+    conclusion_turn: bool,
+}
+
+impl ReadOnlyTaskProgress {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(super) fn observe_inspection_turn(
+        &mut self,
+        tool_calls: &[ToolCall],
+    ) -> Option<&'static str> {
+        if tool_calls.is_empty()
+            || tool_calls
+                .iter()
+                .any(|tool_call| tool_call.name == "set_session_title")
+        {
+            return None;
+        }
+        self.inspection_turns = self.inspection_turns.saturating_add(1);
+        if self.inspection_turns >= 8 && !self.conclusion_nudge_sent {
+            self.conclusion_nudge_sent = true;
+            self.conclusion_turn = true;
+            return Some(
+                "Read-only task evidence is sufficient after eight inspection turns. Do not run commands, emit tool-call syntax, or continue broad orientation; produce the requested explanation or review findings now using the evidence already collected.",
+            );
+        }
+        None
+    }
+
+    pub(super) fn take_conclusion_turn(&mut self) -> bool {
+        std::mem::take(&mut self.conclusion_turn)
     }
 }
 
@@ -564,13 +671,48 @@ impl CompletionGuardState {
 }
 
 impl Agent {
-    pub(super) fn begin_inferred_completion_task(&mut self, prompt: &str) {
-        let contract = if self.execution_lane.kind == ExecutionLaneKind::Parent {
-            TaskCompletionContract::inferred(prompt)
+    pub(super) fn tool_registry_for_current_task(&self) -> Arc<ToolRegistry> {
+        self.tool_registry.clone()
+    }
+
+    pub(super) fn begin_inferred_completion_task(&mut self, prompt: &str) -> Option<String> {
+        let prompt_kind = TaskPromptKind::classify(prompt);
+        let continuation_goal = prompt_kind
+            .is_continuation()
+            .then(|| self.latest_explicit_human_goal())
+            .flatten();
+        let mut contract = if self.execution_lane.kind == ExecutionLaneKind::Parent {
+            if prompt_kind.is_continuation() {
+                inherited_continuation_contract(
+                    self.completion.contract,
+                    continuation_goal.as_deref(),
+                )
+            } else {
+                TaskCompletionContract::inferred(prompt)
+            }
         } else {
             TaskCompletionContract::informational()
         };
+        if self.execution_lane.kind == ExecutionLaneKind::Parent && prompt_kind.requests_action() {
+            contract = contract.merge(TaskCompletionContract::action());
+        }
         self.begin_completion_task(contract);
+        continuation_goal
+    }
+
+    fn latest_explicit_human_goal(&self) -> Option<String> {
+        self.messages.iter().rev().find_map(|message| {
+            let ChatCompletionRequestMessage::User(user) = message else {
+                return None;
+            };
+            if user.name.is_some() {
+                return None;
+            }
+            let text = try_message_content_string(message)?;
+            let text = text.trim();
+            (!text.is_empty() && !TaskPromptKind::classify(text).is_continuation())
+                .then(|| one_line_preview(text, 512))
+        })
     }
 
     pub(super) fn begin_completion_task(&mut self, contract: TaskCompletionContract) {
@@ -579,6 +721,7 @@ impl Agent {
             self.verification.verification_runs.len(),
             self.self_review_runs.len(),
         );
+        self.read_only_task_progress.reset();
         self.finalization.begin_task();
     }
 
@@ -595,10 +738,29 @@ impl Agent {
             self.verification.verification_runs.len(),
             self.self_review_runs.len(),
         );
+        self.read_only_task_progress.reset();
         // Queued human steering is explicit authority for more work. It must
         // reopen finalization so a prior green gate blocks only unsolicited
         // model activity, never a newly requested review or verification.
         self.finalization.begin_task();
+    }
+
+    pub(super) fn read_only_conclusion_nudge(
+        &mut self,
+        tool_calls: &[ToolCall],
+    ) -> Option<&'static str> {
+        self.completion
+            .contract
+            .is_read_only_task()
+            .then(|| {
+                self.read_only_task_progress
+                    .observe_inspection_turn(tool_calls)
+            })
+            .flatten()
+    }
+
+    pub(super) fn take_read_only_conclusion_turn(&mut self) -> bool {
+        self.read_only_task_progress.take_conclusion_turn()
     }
 
     pub(super) fn note_completion_action(&mut self) {
@@ -1013,16 +1175,16 @@ fn response_signals(response: &str) -> CompletionResponseSignals {
     }
 }
 
-fn normalized_words(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
-    for character in text.to_lowercase().chars() {
-        if character.is_alphanumeric() {
-            normalized.push(character);
-        } else {
-            normalized.push(' ');
-        }
+fn inherited_continuation_contract(
+    current: TaskCompletionContract,
+    previous_goal: Option<&str>,
+) -> TaskCompletionContract {
+    if current != TaskCompletionContract::informational() {
+        return current;
     }
-    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    previous_goal
+        .map(TaskCompletionContract::inferred)
+        .unwrap_or_else(TaskCompletionContract::action)
 }
 
 fn contains_directive_clause(text: &str, commands: &[&str]) -> bool {
@@ -1063,51 +1225,22 @@ fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(phrase))
 }
 
-fn action_directive(normalized: &str) -> &str {
-    let mut directive = normalized;
-    loop {
-        let mut stripped = None;
-        for prefix in [
-            "please ",
-            "pls ",
-            "can you ",
-            "could you ",
-            "would you ",
-            "i need you to ",
-            "we need to ",
-            "lets ",
-            "let us ",
-            "ok ",
-            "okay ",
-            "no to ",
-            "dobra ",
-            "prosze ",
-            "proszę ",
-            "czy mozesz ",
-            "czy możesz ",
-        ] {
-            if let Some(remainder) = directive.strip_prefix(prefix) {
-                stripped = Some(remainder);
-                break;
-            }
-        }
-        match stripped {
-            Some(remainder) => directive = remainder,
-            None => return directive,
-        }
-    }
-}
-
 fn supersedes_goal(prompt: &str) -> bool {
     let normalized = normalized_words(prompt);
-    contains_any_phrase(
-        &normalized,
+    let directive = action_directive(&normalized);
+    starts_with_command(
+        directive,
         &[
             "instead do",
             "do this instead",
             "new goal",
             "stop that",
             "actually do",
+            "scratch that",
+            "forget that instead",
+            "forget that do",
+            "do not do that",
+            "don t do that",
             "zamiast tego",
             "nowy cel",
             "przestan robic",
@@ -1136,6 +1269,39 @@ mod tests {
     #[test]
     fn informational_answer_without_structured_work_is_complete() {
         assert!(completion_gaps(&evidence(TaskCompletionContract::informational())).is_empty());
+    }
+
+    #[test]
+    fn bare_continue_infers_action_authority() {
+        assert_eq!(
+            TaskCompletionContract::inferred("continue"),
+            TaskCompletionContract::action()
+        );
+    }
+
+    #[test]
+    fn continuation_inherits_the_active_workspace_contract() {
+        let contract = inherited_continuation_contract(
+            TaskCompletionContract::workspace_action(),
+            Some("Explain the API"),
+        );
+
+        assert_eq!(contract, TaskCompletionContract::workspace_action());
+    }
+
+    #[test]
+    fn restored_continuation_recovers_contract_from_prior_goal() {
+        let contract = inherited_continuation_contract(
+            TaskCompletionContract::informational(),
+            Some("Fix the parser and run tests"),
+        );
+
+        assert_eq!(contract.intent, TaskIntent::Mutation);
+        assert_eq!(
+            contract.effect,
+            CompletionEffectRequirement::WorkspaceMutation
+        );
+        assert!(contract.verification_required);
     }
 
     #[test]
@@ -1227,6 +1393,27 @@ mod tests {
     }
 
     #[test]
+    fn read_only_progress_bounds_inspection_and_resets_for_new_tasks() {
+        let inspection = || ToolCall {
+            id: "read".to_string(),
+            name: "read".to_string(),
+            arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+        };
+        let mut progress = ReadOnlyTaskProgress::default();
+
+        for _ in 0..7 {
+            assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
+        }
+        assert!(progress.observe_inspection_turn(&[inspection()]).is_some());
+        assert!(progress.take_conclusion_turn());
+        assert!(!progress.take_conclusion_turn());
+        assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
+
+        progress.reset();
+        assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
+    }
+
+    #[test]
     fn inference_separates_semantic_intent_from_required_effects() {
         assert_eq!(
             TaskCompletionContract::inferred("Explain how this module works"),
@@ -1244,14 +1431,41 @@ mod tests {
             TaskCompletionContract::inferred("NO to zacznij 139"),
             TaskCompletionContract::action()
         );
+        assert_eq!(
+            TaskCompletionContract::inferred("Finish topic A and wait for the next request."),
+            TaskCompletionContract::workspace_action()
+        );
+        assert_eq!(
+            TaskCompletionContract::inferred(
+                "Carry the release qualification through context pressure and finish README.md."
+            ),
+            TaskCompletionContract::workspace_action()
+        );
         let diagnosis = TaskCompletionContract::inferred("Check the parser state");
         assert_eq!(diagnosis.intent, TaskIntent::Diagnosis);
         assert_eq!(diagnosis.effect, CompletionEffectRequirement::AnyAction);
         assert!(!diagnosis.verification_required);
 
-        let review = TaskCompletionContract::inferred("Review the parser module");
+        let review = TaskCompletionContract::inferred(
+            "Review the parser module, but do not modify files or run commands.",
+        );
         assert_eq!(review.intent, TaskIntent::Review);
         assert_eq!(review.effect, CompletionEffectRequirement::AnyAction);
+        assert!(review.is_read_only_task());
+
+        for prompt in [
+            "Apply this patch",
+            "Address the review findings",
+            "Resolve the issue",
+            "Upgrade the dependency",
+            "Bump serde",
+        ] {
+            assert_eq!(
+                TaskCompletionContract::inferred(prompt).intent,
+                TaskIntent::Mutation,
+                "{prompt}"
+            );
+        }
 
         let monitoring = TaskCompletionContract::inferred("Monitor the deployment");
         assert_eq!(monitoring.intent, TaskIntent::Monitoring);
@@ -1306,6 +1520,47 @@ mod tests {
 
         assert_eq!(contract.intent, TaskIntent::Informational);
         assert_eq!(contract.goal_kind, CompletionGoalKind::Action);
+    }
+
+    #[test]
+    fn additive_and_status_steering_preserve_active_work_and_evidence() {
+        let mut state = CompletionGuardState::default();
+        state.begin(TaskCompletionContract::workspace_action(), 2, 3);
+        state.action_observed = true;
+        state.workspace_mutated = true;
+
+        state.merge_steering(
+            "Don't forget that we also need docs, and run the tests",
+            4,
+            5,
+        );
+        assert_eq!(state.contract.intent, TaskIntent::Mutation);
+        assert_eq!(
+            state.contract.effect,
+            CompletionEffectRequirement::WorkspaceMutation
+        );
+        assert!(state.contract.verification_required);
+        assert!(state.action_observed);
+        assert!(state.workspace_mutated);
+
+        state.merge_steering("What is the status?", 6, 7);
+        assert_eq!(state.contract.intent, TaskIntent::Mutation);
+        assert!(state.contract.verification_required);
+        assert!(state.action_observed);
+        assert!(state.workspace_mutated);
+        assert_eq!(state.superseded_goals, 0);
+    }
+
+    #[test]
+    fn contradictory_steering_replaces_the_prior_contract() {
+        let mut state = CompletionGuardState::default();
+        state.begin(TaskCompletionContract::workspace_action(), 2, 3);
+        state.pending_work_started = true;
+        state.merge_steering("Do not do that; explain the API instead", 4, 5);
+
+        assert_eq!(state.contract, TaskCompletionContract::informational());
+        assert!(!state.pending_work_started);
+        assert_eq!(state.superseded_goals, 1);
     }
 
     #[test]

@@ -16,11 +16,122 @@ use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn budget_alert_classification_covers_model_dispatches_only() {
+    for input in [
+        "continue the work",
+        "/continue",
+        "/retry",
+        "/security-review",
+        "/compact",
+        "/compact provider",
+    ] {
+        assert!(
+            submitted_input_dispatches_model_work(input),
+            "{input} should be gated"
+        );
+    }
+    for input in [
+        "/usage",
+        "/ctx",
+        "/model",
+        "/compact preview",
+        "/compact deterministic",
+    ] {
+        assert!(
+            !submitted_input_dispatches_model_work(input),
+            "{input} should remain available"
+        );
+    }
+}
+
+#[tokio::test]
+async fn queued_follow_up_warns_before_starting_after_current_run() {
+    let agent = test_agent(Box::new(CompleteProvider));
+    agent
+        .lock()
+        .await
+        .set_run_budget(crate::run_budget::RunBudget {
+            alert_session_turns: Some(0),
+            ..crate::run_budget::RunBudget::default()
+        });
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.composer.set_text("queued follow-up".to_string());
+    let content = app.composer.content();
+    app.reduce(AppAction::QueueNextInput {
+        id: 1,
+        text: "queued follow-up".to_string(),
+        content,
+        mode: AgentMode::Coding,
+    });
+    app.task_state = TaskState::Idle;
+    let (_map_tx, map_rx) = tokio::sync::watch::channel(None::<String>);
+    let mut repo_map = RepoMapInjector::new(map_rx);
+
+    let started = start_pending_queued_run_if_idle(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        &mut repo_map,
+        &ProviderRegistry::default_registry(),
+        &test_model_catalog(),
+    )
+    .await;
+
+    assert!(!started);
+    assert!(app.queued_inputs.is_empty());
+    assert!(matches!(
+        app.modal,
+        Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::BudgetWarning { ref submission, .. }
+        )) if submission.display_text == "queued follow-up"
+    ));
+}
+
 mod plan_execution;
 use plan_execution::{drain_tasks, two_phase_plan};
 
 fn smol_off() -> crate::smol::SmolProfile {
     crate::smol::SmolProfile::resolve(crate::smol::SmolPreference::Off, 128_000)
+}
+
+#[test]
+fn budget_warning_safe_default_preserves_submission_and_continue_consumes_it_once() {
+    let mut app = app();
+    app.composer.set_text("keep this prompt".to_string());
+    let submission = app.composer.submission();
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::BudgetWarning {
+            submission: Box::new(submission.clone()),
+            usage: crate::run_budget::SessionBudgetUsage {
+                turns: 5,
+                turn_alert: Some(5),
+                ..crate::run_budget::SessionBudgetUsage::default()
+            },
+            cursor: 0,
+        },
+    )));
+
+    assert_eq!(take_budget_warning_submission(&mut app), None);
+    assert_eq!(app.composer.submission(), submission);
+    assert!(app.transcript.is_empty());
+
+    app.reduce(AppAction::OpenModal(ModalKind::Picker(
+        crate::tui::event::PickerModal::BudgetWarning {
+            submission: Box::new(submission.clone()),
+            usage: crate::run_budget::SessionBudgetUsage {
+                turns: 5,
+                turn_alert: Some(5),
+                ..crate::run_budget::SessionBudgetUsage::default()
+            },
+            cursor: 1,
+        },
+    )));
+    assert_eq!(take_budget_warning_submission(&mut app), Some(submission));
+    assert!(take_budget_warning_submission(&mut app).is_none());
 }
 
 struct NullSink;
@@ -415,6 +526,10 @@ fn background_task_snapshot(
 
 fn test_agent(provider: Box<dyn Provider>) -> Arc<Mutex<Agent>> {
     let fixture = TestFixture::new();
+    test_agent_in_project(provider, &fixture)
+}
+
+fn test_agent_in_project(provider: Box<dyn Provider>, fixture: &TestFixture) -> Arc<Mutex<Agent>> {
     Arc::new(Mutex::new(
         Agent::new(
             provider,
@@ -426,6 +541,26 @@ fn test_agent(provider: Box<dyn Provider>) -> Arc<Mutex<Agent>> {
         )
         .expect("test agent should build"),
     ))
+}
+
+fn run_review_git(root: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .status()
+        .expect("review test git command should run");
+    assert!(status.success(), "git command failed: {args:?}");
+}
+
+fn init_review_repo(root: &std::path::Path) {
+    run_review_git(root, &["init", "--quiet"]);
+    run_review_git(root, &["config", "user.email", "test@example.com"]);
+    run_review_git(root, &["config", "user.name", "Test"]);
+    std::fs::write(root.join("review.rs"), "fn baseline() {}\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "bonsai.db*\n").unwrap();
+    run_review_git(root, &["add", "review.rs", ".gitignore"]);
+    run_review_git(root, &["commit", "--quiet", "-m", "baseline"]);
 }
 
 /// Regression: `/self-review <mode>` used to change state silently, which was
@@ -871,6 +1006,36 @@ async fn fresh_plan_protection_saves_then_clears_an_unsaved_canvas() {
 }
 
 #[tokio::test]
+async fn fresh_plan_protection_saves_then_clears_untitled_review_findings() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let mut review = crate::plan::PlanDoc::default();
+    review.edit().add_finding(review_finding(
+        "The payment transition contract drops duplicate callbacks",
+    ));
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(review));
+    let mut app = app();
+
+    protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+        .await
+        .unwrap();
+
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    let saved = storage
+        .saved_plans_for_project(temp_dir.path(), 10)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].title,
+        "The payment transition contract drops duplicate callbacks"
+    );
+    let snapshot = storage.load_saved_plan(saved[0].id).await.unwrap().unwrap();
+    assert_eq!(snapshot.plan.findings.len(), 1);
+}
+
+#[tokio::test]
 async fn fresh_plan_protection_refreshes_linked_plan_in_place() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
@@ -904,35 +1069,202 @@ async fn fresh_plan_protection_refreshes_linked_plan_in_place() {
 }
 
 #[tokio::test]
-async fn fresh_plan_protection_keeps_an_invalid_canvas_intact() {
+async fn fresh_plan_protection_saves_then_clears_an_untitled_task_canvas() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
-    let mut invalid = crate::plan::PlanDoc::default();
-    invalid.edit().add_task("Untitled task");
-    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let mut plan = crate::plan::PlanDoc::default();
+    plan.edit().add_task("Untitled task");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(plan));
     let mut app = app();
 
-    let err = protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+    protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(err.to_string().contains("untitled"));
-    assert_eq!(*plan_store.lock().await, invalid);
-    assert_eq!(app.plan, invalid);
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    let saved = storage
+        .saved_plans_for_project(temp_dir.path(), 10)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].title, "Untitled task");
+    let snapshot = storage.load_saved_plan(saved[0].id).await.unwrap().unwrap();
+    assert_eq!(snapshot.plan.tasks.len(), 1);
+    assert_eq!(snapshot.plan.tasks[0].text, "Untitled task");
+}
+
+#[tokio::test]
+async fn general_review_saves_then_clears_canvas_before_spawn() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    std::fs::write(fixture.project_root.join("review.rs"), "fn changed() {}\n").unwrap();
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let canvas = sample_plan("Archive before review");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(canvas.clone()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.plan = canvas;
+
+    let started = review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        crate::agent::ReviewScope::Uncommitted,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(started);
+    assert!(tasks.is_busy(), "reviewer should spawn after the preflight");
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
     assert!(app.active_saved_plan_session_id.is_none());
+    let saved = storage
+        .saved_plans_for_project(&fixture.project_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].title, "Archive before review");
+    drain_tasks(&mut tasks).await;
+}
+
+#[tokio::test]
+async fn general_review_without_diff_preserves_canvas_and_binding() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let canvas = sample_plan("Keep without diff");
+    let saved = storage
+        .save_plan_to_library(session_id, None, &canvas, None)
+        .await
+        .unwrap();
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(canvas.clone()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.plan = canvas.clone();
+    app.active_saved_plan_session_id = Some(saved.id);
+
+    let started = review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        crate::agent::ReviewScope::Uncommitted,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(!started);
+    assert!(!tasks.is_busy());
+    assert_eq!(app.plan, canvas);
+    assert_eq!(*plan_store.lock().await, canvas);
+    assert_eq!(app.active_saved_plan_session_id, Some(saved.id));
+}
+
+#[tokio::test]
+async fn security_review_starts_with_an_empty_canvas_without_saving() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    std::fs::write(
+        fixture.project_root.join("review.rs"),
+        "fn security_change() {}\n",
+    )
+    .unwrap();
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(crate::plan::PlanDoc::default()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+
+    let started = security_review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(started);
+    assert!(tasks.is_busy());
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    assert!(
+        storage
+            .saved_plans_for_project(&fixture.project_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drain_tasks(&mut tasks).await;
+}
+
+#[tokio::test]
+async fn security_review_save_failure_preserves_canvas_and_skips_spawn() {
+    let fixture = TestFixture::new();
+    init_review_repo(&fixture.project_root);
+    std::fs::write(
+        fixture.project_root.join("review.rs"),
+        "fn security_change() {}\n",
+    )
+    .unwrap();
+    let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
+    let missing_saved_plan_id = crate::storage::SavedPlanId::from_raw(i64::MAX);
+    let plan = sample_plan("Keep after save failure");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(plan.clone()));
+    let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.plan = plan.clone();
+    app.active_saved_plan_session_id = Some(missing_saved_plan_id);
+
+    let started = security_review_changes(
+        &mut app,
+        &mut tasks,
+        agent,
+        Arc::new(NullSink),
+        ReviewCanvasPreflightDeps::new(&storage, session_id, &plan_store),
+    )
+    .await;
+
+    assert!(!started);
+    assert!(
+        !tasks.is_busy(),
+        "reviewer must not spawn after save failure"
+    );
+    assert_eq!(app.task_state, TaskState::Idle);
+    assert_eq!(app.plan, plan);
+    assert_eq!(*plan_store.lock().await, plan);
+    assert_eq!(
+        app.active_saved_plan_session_id,
+        Some(missing_saved_plan_id)
+    );
+    assert!(app.transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Error { error } if error.detail.contains("no longer exists")
+    )));
 }
 
 #[tokio::test]
 async fn start_new_plan_save_failure_keeps_coding_and_skips_continuation() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
-    let mut invalid = crate::plan::PlanDoc::default();
-    invalid.edit().add_task("Untitled task");
-    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let missing_saved_plan_id = crate::storage::SavedPlanId::from_raw(i64::MAX);
+    let plan = sample_plan("Keep after save failure");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(plan.clone()));
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
     let agent = test_agent(Box::new(CompleteProvider));
     let mut app = app();
+    app.active_saved_plan_session_id = Some(missing_saved_plan_id);
     app.pending_start_new_plan = true;
     let mut repo_map = empty_repo_map_injector();
 
@@ -954,8 +1286,12 @@ async fn start_new_plan_save_failure_keeps_coding_and_skips_continuation() {
     assert_eq!(app.task_state, TaskState::Idle);
     assert!(!tasks.is_busy());
     assert!(!app.pending_start_new_plan);
-    assert_eq!(app.plan, invalid);
-    assert_eq!(*plan_store.lock().await, invalid);
+    assert_eq!(app.plan, plan);
+    assert_eq!(*plan_store.lock().await, plan);
+    assert_eq!(
+        app.active_saved_plan_session_id,
+        Some(missing_saved_plan_id)
+    );
 }
 
 fn runtime_action_deps<'a>(
@@ -1734,20 +2070,24 @@ async fn running_enter_queues_normal_text_for_next_turn() {
 }
 
 #[tokio::test]
-async fn running_escape_interrupts_and_stages_immediate_steer() {
+async fn running_escape_interrupts_for_queued_message_without_sending_draft() {
     let (mut tasks, mut runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
     app.composer.set_text("do this now".to_string());
-
-    assert!(steer_active_run(
+    assert!(enqueue_running_follow_up(
         &mut app,
         &tasks,
+        FollowUpDelivery::Queue,
         &crate::provider::ProviderRegistry::default_registry(),
-        &test_model_catalog(),
+        None,
     ));
+    app.composer.set_text("unsent draft".to_string());
+
+    assert!(steer_active_run(&mut app, &tasks));
 
     assert_eq!(app.task_state, TaskState::Cancelling);
+    assert_eq!(app.input(), "unsent draft");
     assert!(matches!(
         app.queued_inputs.as_slice(),
         [QueuedInput {
@@ -1755,6 +2095,14 @@ async fn running_escape_interrupts_and_stages_immediate_steer() {
             delivery: FollowUpDelivery::Steer,
             ..
         }] if text == "do this now"
+    ));
+    assert!(matches!(
+        app.transcript.last(),
+        Some(TranscriptItem::QueuedUserMessage {
+            text,
+            delivery: FollowUpDelivery::Steer,
+            ..
+        }) if text == "do this now"
     ));
     let finished = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -1774,18 +2122,37 @@ async fn running_escape_interrupts_and_stages_immediate_steer() {
 }
 
 #[tokio::test]
+async fn running_escape_without_queued_message_keeps_foreground_active() {
+    let (mut tasks, _runtime_rx) = running_tasks().await;
+    let mut app = app();
+    app.task_state = TaskState::Running;
+    app.composer.set_text("unsent draft".to_string());
+
+    assert!(!steer_active_run(&mut app, &tasks));
+
+    assert_eq!(app.task_state, TaskState::Running);
+    assert_eq!(app.input(), "unsent draft");
+    assert!(app.queued_inputs.is_empty());
+    assert!(tasks.is_busy());
+    tasks.abort();
+}
+
+#[tokio::test]
 async fn escape_steer_reduces_old_completion_before_starting_replacement() {
     let (mut tasks, mut runtime_rx) = running_tasks().await;
     let mut app = app();
     app.task_state = TaskState::Running;
-    app.composer.set_text("do this now".to_string());
+    app.reduce(AppAction::QueueNextInput {
+        id: 1,
+        text: "do this now".to_string(),
+        content: crate::tui::app::ComposerContent {
+            text: "do this now".to_string(),
+            chips: Vec::new(),
+        },
+        mode: AgentMode::Coding,
+    });
 
-    assert!(steer_active_run(
-        &mut app,
-        &tasks,
-        &crate::provider::ProviderRegistry::default_registry(),
-        &test_model_catalog(),
-    ));
+    assert!(steer_active_run(&mut app, &tasks));
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if reap_finished_task(&mut app, &mut tasks).await {
@@ -3970,6 +4337,56 @@ async fn settings_cycle_opts_into_and_persists_a_run_budget() {
 }
 
 #[tokio::test]
+async fn settings_cycle_opts_into_and_persists_a_session_alert() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let session_store = Arc::new(Mutex::new(SessionStore::default()));
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx.clone());
+    let mut current = session_id;
+    let mut signatures = zero_signatures();
+    let mut state = PersistenceCommandState {
+        current_session_id: &mut current,
+        signatures: &mut signatures,
+    };
+    let mut app = app();
+    let rows = crate::tui::settings::seed_settings_rows(&app, smol_off());
+    let cursor = rows
+        .iter()
+        .position(|row| row.id() == Some(crate::tui::event::SettingId::AlertSessionBilledTokens))
+        .expect("settings should include the billed-token alert row");
+    app.reduce(AppAction::OpenModal(ModalKind::Manager(
+        crate::tui::event::ManagerModal::Settings { rows, cursor },
+    )));
+
+    let result = handle_runtime_action(
+        AppAction::SettingsCycle(1),
+        &mut app,
+        &mut tasks,
+        runtime_action_deps(
+            &storage,
+            temp_dir.path(),
+            session_id,
+            session_store,
+            runtime_tx,
+        ),
+        &mut state,
+    )
+    .await;
+
+    assert!(matches!(result, RuntimeActionResult::Handled));
+    assert_eq!(app.run_budget.alert_session_billed_tokens, Some(100_000));
+    assert_eq!(
+        storage
+            .run_budget()
+            .await
+            .unwrap()
+            .alert_session_billed_tokens,
+        Some(100_000)
+    );
+}
+
+#[tokio::test]
 async fn theme_export_writes_starter_file_and_refuses_overwrite() {
     let _theme_guard = crate::tui::theme::TEST_LOCK.lock().await;
     crate::tui::theme::set_theme("forest");
@@ -4398,6 +4815,7 @@ fn background_task_finished_event_updates_attached_tool_and_refreshes_tasks() {
         name: "bash".to_string(),
         arguments: r#"{"command":"sleep 1","run_in_background":true}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     }));
 
     let refresh = apply_background_task_event(
@@ -4409,6 +4827,7 @@ fn background_task_finished_event_updates_attached_tool_and_refreshes_tasks() {
             summary: "done".to_string(),
             success: true,
             version: 2,
+            finished_at_ms: Some(1_700_000_000_000),
         },
     );
 
@@ -4438,6 +4857,7 @@ fn stopped_background_task_finish_does_not_request_wake() {
             summary: "stopped".to_string(),
             success: false,
             version: 2,
+            finished_at_ms: None,
         },
     );
 
@@ -4458,6 +4878,7 @@ fn terminal_wait_and_finish_update_attached_bash_tool() {
         name: "bash".to_string(),
         arguments: r#"{"command":"read answer","interactive":true}"#.to_string(),
         started_at: Instant::now(),
+        started_at_ms: crate::util::time::now_ms(),
     }));
 
     let waiting = apply_terminal_event(
@@ -4485,6 +4906,7 @@ fn terminal_wait_and_finish_update_attached_bash_tool() {
             summary: "terminal complete".to_string(),
             success: true,
             version: 2,
+            finished_at_ms: Some(1_700_000_000_000),
         },
     );
     assert!(finished.wake_candidate);
@@ -4502,11 +4924,13 @@ fn resume_marks_process_local_interactive_terminal_as_lost() {
         id: "call-pty".to_string(),
         name: "bash".to_string(),
         arguments: r#"{"command":"repl","interactive":true}"#.to_string(),
+        delegated_model: None,
         status: ToolStatus::Running,
         result: Some("Started interactive terminal pty-1".to_string()),
         diff: None,
         started_at: now,
         finished_at: None,
+        timing: Default::default(),
     })];
 
     let lost = normalize_lost_interactive_terminals(&mut items);
@@ -4534,6 +4958,7 @@ fn shutdown_background_task_snapshot_finishes_attached_tool_before_persistence()
         name: "bash".to_string(),
         arguments: r#"{"command":"sleep 30","run_in_background":true}"#.to_string(),
         started_at,
+        started_at_ms: crate::util::time::now_ms(),
     }));
     app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
         crate::tui::event::AgentRunOutcome::Completed,
@@ -4576,6 +5001,77 @@ fn shutdown_background_task_snapshot_finishes_attached_tool_before_persistence()
 }
 
 #[test]
+fn snapshot_completions_carry_their_actual_finish_clock() {
+    let mut app = app();
+    let now = Instant::now();
+    app.reduce(AppAction::Agent(UiEvent::ToolStarted {
+        id: "call-bg".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"sleep 30","run_in_background":true}"#.to_string(),
+        started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
+    }));
+    app.task_state = TaskState::Exiting;
+
+    // The task finished while the UI was busy: the persisted completion time
+    // must come from the snapshot's clock, not this frame's receipt time (#166).
+    let finished_at = std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_000);
+    let mut task = background_task_snapshot(
+        "bg-1",
+        BackgroundTaskStatus::Succeeded,
+        Some("call-bg"),
+        "done",
+    );
+    task.finished_at = Some(finished_at);
+    let _ = apply_background_task_snapshot(&mut app, &task);
+    assert_eq!(
+        app.tool_activity("call-bg")
+            .expect("activity")
+            .timing
+            .finished_at_ms,
+        Some(1_700_000_000_000)
+    );
+
+    // Same contract for an interactive terminal's completion.
+    app.reduce(AppAction::Agent(UiEvent::ToolStarted {
+        id: "call-pty".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"repl","interactive":true}"#.to_string(),
+        started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
+    }));
+    let terminal = TerminalSnapshot {
+        id: "pty-1".to_string(),
+        incarnation: "inc".to_string(),
+        command: "repl".to_string(),
+        cwd: std::path::PathBuf::from("/tmp/project"),
+        status: TerminalStatus::Succeeded,
+        started_at: std::time::SystemTime::UNIX_EPOCH,
+        finished_at: Some(finished_at),
+        exit_code: Some(0),
+        timeout_secs: 5,
+        tail: "bye".to_string(),
+        tail_truncated: false,
+        total_output_chars: 3,
+        version: 2,
+        confined: false,
+        tool_call_id: Some("call-pty".to_string()),
+        rows: 24,
+        cols: 80,
+        prompt_state: crate::terminal::TerminalPromptState::Unknown,
+        screen: String::new(),
+    };
+    let _ = apply_terminal_snapshot(&mut app, &terminal);
+    assert_eq!(
+        app.tool_activity("call-pty")
+            .expect("terminal activity")
+            .timing
+            .finished_at_ms,
+        Some(1_700_000_000_000)
+    );
+}
+
+#[test]
 fn completed_detached_subagent_finishes_attached_agent_tool() {
     let mut app = app();
     let started_at = Instant::now();
@@ -4585,6 +5081,7 @@ fn completed_detached_subagent_finishes_attached_agent_tool() {
         arguments: r#"{"agent":"explore","prompt":"Review area","run_in_background":true}"#
             .to_string(),
         started_at,
+        started_at_ms: crate::util::time::now_ms(),
     }));
     assert!(matches!(
         app.tool_activity("call-1").map(|activity| activity.status),
@@ -4601,10 +5098,19 @@ fn completed_detached_subagent_finishes_attached_agent_tool() {
         crate::subagent::SubagentStatus::Succeeded,
         Some("all clear".to_string()),
     );
+    let expected_finished_at_ms = subagents
+        .snapshot(&subtask_id)
+        .and_then(|snapshot| snapshot.finished_at)
+        .and_then(crate::util::time::system_time_to_ms)
+        .expect("finished subagent has a wall-clock endpoint");
 
     assert!(apply_completed_subagent_tool_calls(&mut app, &subagents));
     let activity = app.tool_activity("call-1").expect("tool remains visible");
     assert_eq!(activity.status, ToolStatus::Succeeded);
+    assert_eq!(
+        activity.timing.finished_at_ms,
+        Some(expected_finished_at_ms)
+    );
     assert!(
         activity
             .result
@@ -4638,6 +5144,7 @@ fn completed_subagent_reconciles_after_late_tool_started_event() {
         arguments: r#"{"agent":"explore","prompt":"Review area","run_in_background":true}"#
             .to_string(),
         started_at: Instant::now(),
+        started_at_ms: crate::util::time::now_ms(),
     }));
 
     assert!(apply_completed_subagent_tool_calls(&mut app, &subagents));
@@ -5414,7 +5921,7 @@ async fn pending_queued_run_does_not_resend_primary_message() {
 }
 
 #[tokio::test]
-async fn pending_steer_runs_before_and_separately_from_enter_queue() {
+async fn pending_steer_dispatches_all_queued_messages_in_one_run() {
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
@@ -5453,14 +5960,21 @@ async fn pending_steer_runs_before_and_separately_from_enter_queue() {
         .await
     );
 
+    // A steer takes the whole queue into the chat: the older Enter-queued
+    // message is dispatched immediately (its transcript row converts), and the
+    // steer itself is pre-seeded into the same run instead of staying pending
+    // for a later one.
+    assert!(
+        !app.queued_inputs
+            .iter()
+            .any(|queued| queued.text == "later work")
+    );
     assert!(matches!(
-        app.queued_inputs.as_slice(),
-        [QueuedInput {
-            id: 1,
-            text,
-            delivery: FollowUpDelivery::Queue,
-            ..
-        }] if text == "later work"
+        app.transcript.as_slice(),
+        [
+            TranscriptItem::UserMessage { text: first },
+            TranscriptItem::QueuedUserMessage { text: second, .. }
+        ] if first == "later work" && second == "urgent correction"
     ));
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -5474,7 +5988,10 @@ async fn pending_steer_runs_before_and_separately_from_enter_queue() {
     .expect("steer run should finish");
     assert_eq!(
         requests.lock().await.as_slice(),
-        &[vec!["urgent correction".to_string()]]
+        &[vec![
+            "later work".to_string(),
+            "urgent correction".to_string()
+        ]]
     );
 }
 
@@ -7743,11 +8260,13 @@ fn tool_detail_modal_scroll_is_clamped_to_rendered_content() {
             id: "call-1".to_string(),
             name: "read".to_string(),
             arguments: r#"{"path":"src/main.rs"}"#.to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some(result),
             diff: None,
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         }));
     app.modal = Some(ModalKind::Detail(
         crate::tui::event::DetailModal::ToolDetail {
@@ -7905,6 +8424,7 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
         name: "bash".to_string(),
         arguments: r#"{"command":"sleep 1"}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     })
     .expect("tool start should enqueue");
     tx.send(UiEvent::ToolStarted {
@@ -7912,6 +8432,7 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
         name: "read".to_string(),
         arguments: r#"{"path":"src/main.rs"}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     })
     .expect("second tool start should enqueue");
     tx.send(UiEvent::ToolFinished {
@@ -7919,6 +8440,7 @@ fn ui_event_drain_renders_started_tools_before_queued_finishes() {
         result: "ok".to_string(),
         status: crate::output::ToolExecutionStatus::Succeeded,
         finished_at: now,
+        finished_at_ms: None,
     })
     .expect("tool finish should enqueue");
 
@@ -7960,6 +8482,7 @@ async fn self_review_delivery_barrier_precedes_parent_finalization() {
         name: "agent".to_string(),
         arguments: r#"{"agent":"self-review"}"#.to_string(),
         started_at: now,
+        started_at_ms: crate::util::time::now_ms(),
     })
     .expect("self-review start should enqueue");
     tx.send(UiEvent::ToolFinished {
@@ -7967,6 +8490,7 @@ async fn self_review_delivery_barrier_precedes_parent_finalization() {
         result: "Major: deterministic finding".to_string(),
         status: crate::output::ToolExecutionStatus::Succeeded,
         finished_at: now + Duration::from_millis(1),
+        finished_at_ms: None,
     })
     .expect("self-review finish should enqueue");
     tx.send(UiEvent::OutputDeliveryBarrier(marker))
@@ -9125,4 +9649,135 @@ async fn halt_folds_completed_todos_into_plan_so_continue_resumes_in_place() {
         .await
         .expect("second fold should update the plan");
     assert_eq!(plan.next_phase_with_pending(None), Some(1));
+}
+
+/// Thread-local tracing capture so shutdown tests can assert on what the drain
+/// actually logs. `set_default` (not `init`) keeps it thread-scoped, which is
+/// what the test harness needs — tests in this binary run on separate threads.
+#[derive(Clone, Default)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        let bytes = self.0.lock().expect("captured log buffer lock").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured log buffer lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_logs_at_debug() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .without_time()
+        .with_target(false)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    (logs, guard)
+}
+
+#[tokio::test]
+async fn shutdown_drain_treats_aborted_spawns_as_expected_cancellation() {
+    let mut spawns = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        spawns.spawn(std::future::pending::<()>());
+    }
+    // Let every spawn reach its first await point so the abort below lands on
+    // *running* tasks, which is the shape a real shutdown drains.
+    tokio::task::yield_now().await;
+    spawns.abort_all();
+
+    let (logs, _guard) = capture_logs_at_debug();
+    drain_background_spawns(&mut spawns).await;
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("cancelled during shutdown"),
+        "expected debug-level cancellation traces, captured:\n{captured}"
+    );
+    assert!(
+        !captured.contains("ERROR"),
+        "normal shutdown must not report cancellations at error level:\n{captured}"
+    );
+    assert!(
+        !captured.contains("panicked"),
+        "cancelled tasks are not panics:\n{captured}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drain_reports_a_panicking_spawn_at_error_level() {
+    let mut spawns = tokio::task::JoinSet::new();
+    // Not aborted: a real panic must still be attributable after the change to
+    // silence expected cancellation.
+    spawns.spawn(async {
+        panic!("spawn drain test panic");
+    });
+
+    let (logs, _guard) = capture_logs_at_debug();
+    drain_background_spawns(&mut spawns).await;
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("ERROR") && captured.contains("failed during shutdown"),
+        "a panicking spawn must be surfaced at error level:\n{captured}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_drain_stays_bounded_when_a_spawn_ignores_cancellation() {
+    let mut spawns = tokio::task::JoinSet::new();
+    // `spawn_blocking` work cannot be cancelled by `abort`, so the drain can
+    // only end at its own deadline. The body parks on a channel the test
+    // releases afterwards, keeping runtime shutdown prompt on the green path
+    // and making a wrong "wait for the spawn" drain hang rather than pass.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    spawns.spawn_blocking(move || {
+        let _ = release_rx.recv();
+    });
+    spawns.abort_all();
+
+    let drain_task = tokio::spawn(async move {
+        drain_background_spawns(&mut spawns).await;
+    });
+    // Let the drain start and register its deadline timer before the clock
+    // jumps; the auto-advance alone does not fire it while a blocking task is
+    // in flight.
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(3)).await;
+    // The deadline now fired; give the woken drain task the polls it needs to
+    // observe the elapsed timeout and drop the set.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+
+    let drained = drain_task.is_finished();
+    drop(release_tx);
+    assert!(
+        drained,
+        "the drain must stop at its deadline instead of waiting for a spawn that ignores cancellation"
+    );
+    drain_task.abort();
 }

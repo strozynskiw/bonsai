@@ -322,6 +322,10 @@ pub(crate) enum TerminalEvent {
         summary: String,
         success: bool,
         version: u64,
+        /// The terminal's actual wall-clock completion in epoch ms (#166),
+        /// taken from the snapshot's `finished_at` so a UI that observes the
+        /// event later still persists the real completion time.
+        finished_at_ms: Option<i64>,
     },
     Removed {
         terminal_id: String,
@@ -1011,6 +1015,10 @@ impl TerminalRegistry {
                 summary: record.snapshot.detail(),
                 success: matches!(status, TerminalStatus::Succeeded),
                 version: record.snapshot.version,
+                finished_at_ms: record
+                    .snapshot
+                    .finished_at
+                    .and_then(crate::util::time::system_time_to_ms),
             }
         };
         let _ = self.events.send(event);
@@ -1413,21 +1421,13 @@ fn detect_prompt_state(output: &str) -> TerminalPromptState {
     }
 }
 
+/// Detection-line view of terminal output: every control character goes away,
+/// newlines and tabs included, because callers compare single lines.
 fn strip_ansi_sequences(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
-            for control in chars.by_ref() {
-                if ('@'..='~').contains(&control) {
-                    break;
-                }
-            }
-        } else if !ch.is_control() {
-            output.push(ch);
-        }
-    }
-    output
+    crate::util::ansi::strip_terminal_controls(input)
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect()
 }
 
 #[cfg(test)]
@@ -1749,6 +1749,74 @@ mod tests {
         assert!(finished.confined);
         assert_ne!(finished.status, TerminalStatus::Succeeded);
         assert!(!target.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn seatbelt_confined_pty_supports_interactive_io() {
+        let project = tempfile::TempDir::new().expect("project tempdir should be created");
+        let sandbox = CommandSandbox::new(
+            crate::sandbox::SandboxBackend::test_seatbelt(),
+            project.path(),
+        );
+        sandbox.set_enabled(true);
+        let registry = Arc::new(TerminalRegistry::with_sandbox(sandbox));
+        let started = registry
+            .start(
+                "/bin/sh",
+                "if test -t 0 && test -t 1; then printf 'Seatbelt prompt: '; else printf 'not-a-tty\\n'; exit 1; fi; IFS= read -r answer; printf '\\nreceived:%s\\n' \"$answer\"",
+                project.path(),
+                5,
+                None,
+            )
+            .await
+            .expect("confined PTY fixture should start");
+        assert!(started.confined, "test requires the confined path");
+
+        let prompt_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = registry
+                .snapshot(&started.id)
+                .await
+                .expect("confined PTY fixture should remain registered");
+            if snapshot.prompt_state == TerminalPromptState::WaitingForInput {
+                assert!(
+                    snapshot.tail.contains("Seatbelt prompt:"),
+                    "{}",
+                    snapshot.tail
+                );
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < prompt_deadline,
+                "confined PTY fixture never exposed a prompt: {}",
+                snapshot.tail
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        registry
+            .send(&started.id, "bonsai", true)
+            .await
+            .expect("confined PTY input should succeed");
+        let finished = registry
+            .wait_for_terminal(&started.id, Duration::from_secs(5))
+            .await
+            .expect("confined PTY fixture should remain registered");
+
+        assert!(finished.confined);
+        assert_eq!(finished.status, TerminalStatus::Succeeded);
+        assert!(
+            finished.tail.contains("Seatbelt prompt:"),
+            "{}",
+            finished.tail
+        );
+        assert!(
+            finished.tail.contains("received:bonsai"),
+            "{}",
+            finished.tail
+        );
+        assert!(!finished.tail.contains("not-a-tty"), "{}", finished.tail);
     }
 
     #[cfg(unix)]

@@ -395,11 +395,13 @@ mod tests {
             id: "call-1".to_string(),
             name: "bash".to_string(),
             arguments: "{\"command\":\"date\"}".to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
             started_at: std::time::Instant::now(),
             finished_at: None,
+            timing: Default::default(),
         };
         let item = TranscriptItem::ToolActivity(activity);
         let text = clean_transcript_item(&item);
@@ -418,21 +420,25 @@ mod tests {
                     id: "call-1".to_string(),
                     name: "read".to_string(),
                     arguments: "{}".to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Failed,
                     result: Some("boom".to_string()),
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
+                    timing: Default::default(),
                 },
                 ToolActivity {
                     id: "call-2".to_string(),
                     name: "write".to_string(),
                     arguments: "{}".to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Succeeded,
                     result: None,
                     diff: None,
                     started_at: std::time::Instant::now(),
                     finished_at: None,
+                    timing: Default::default(),
                 },
             ],
         });
@@ -452,11 +458,13 @@ mod tests {
                 id: "call-1".to_string(),
                 name: "read".to_string(),
                 arguments: "{\"file\":\"a\"}".to_string(),
+                delegated_model: None,
                 status: ToolStatus::Running,
                 result: None,
                 diff: None,
                 started_at: std::time::Instant::now(),
                 finished_at: None,
+                timing: Default::default(),
             }],
         });
         let body = body_text_for(&group);

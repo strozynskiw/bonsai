@@ -15,8 +15,9 @@ use crate::tool::schema::{
     bounded_integer_property, closed_object, parse_args, path_property, string_property,
 };
 use crate::tool::{
-    FileOrDirectoryKind, ProjectPathResolver, ReadCoverage, ReadEvidence, ReadTracker, ReadWindow,
-    Tool, ToolOutput, file_or_directory_kind, output, search,
+    FileOrDirectoryKind, PathEvidence, ProjectPathResolver, ReadCoverage, ReadEvidence,
+    ReadTracker, ReadWindow, Tool, ToolOutput, ToolPathError, file_or_directory_kind, output,
+    search,
 };
 
 #[derive(Deserialize)]
@@ -27,6 +28,8 @@ struct ReadArgs {
     #[serde(default = "default_limit")]
     limit: usize,
     depth: Option<usize>,
+    #[serde(default)]
+    recheck: bool,
 }
 
 fn default_offset() -> usize {
@@ -115,6 +118,7 @@ fn line_number(value: &serde_json::Value) -> Option<u64> {
 pub struct ReadTool {
     project_root: PathBuf,
     read_tracker: ReadTracker,
+    path_evidence: Option<PathEvidence>,
 }
 
 impl ReadTool {
@@ -122,7 +126,13 @@ impl ReadTool {
         Self {
             project_root,
             read_tracker,
+            path_evidence: None,
         }
+    }
+
+    pub(crate) fn with_path_evidence(mut self, path_evidence: PathEvidence) -> Self {
+        self.path_evidence = Some(path_evidence);
+        self
     }
 }
 
@@ -173,6 +183,12 @@ impl Tool for ReadTool {
                         "Concrete reason a broad parent reread is essential after delegated full-file coverage; omit for ordinary reads",
                     ),
                 ),
+                (
+                    "recheck",
+                    crate::tool::schema::boolean_property(
+                        "Bypass cached missing-path evidence and check the filesystem again",
+                    ),
+                ),
             ],
             &["path"],
         )
@@ -185,9 +201,20 @@ impl Tool for ReadTool {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let args: ReadArgs = parse_args("read tool", args)?;
 
-        let resolved_path = ProjectPathResolver::new(&self.project_root)
+        let mut resolver = ProjectPathResolver::new(&self.project_root)
             .action("read files")
-            .resolve_existing(&args.path)?;
+            .recheck(args.recheck);
+        if let Some(evidence) = self.path_evidence.as_ref() {
+            resolver = resolver.path_evidence(evidence);
+        }
+        let resolved_path = match resolver.resolve_existing(&args.path) {
+            Err(ToolPathError::ReusedMissingPath { evidence }) => {
+                return Ok(ToolOutput::MissingPathReuse {
+                    text: evidence.render_reuse(),
+                });
+            }
+            result => result?,
+        };
         let canonical_path = resolved_path.canonical_path();
         let canonical_root = resolved_path.canonical_root();
 
@@ -706,8 +733,14 @@ impl ReadTool {
         })
     }
 
+    /// True only for image formats the wire targets accept (see
+    /// [`crate::provider::transform::SUPPORTED_IMAGE_MEDIA_TYPES`]).
+    /// `mime_for_path` maps `.svg` to `image/svg+xml`, but no provider accepts
+    /// that media type — SVG files fall through to the text reader so the
+    /// model gets their editable source instead of a guaranteed 400.
     fn is_image_path(&self, path: &std::path::Path) -> bool {
-        mime_for_path(path).starts_with("image/")
+        crate::provider::transform::SUPPORTED_IMAGE_MEDIA_TYPES
+            .contains(&mime_for_path(path).as_str())
     }
 }
 
@@ -833,7 +866,12 @@ async fn is_binary(path: &std::path::Path) -> Result<bool> {
 }
 
 fn mime_for_path(path: &std::path::Path) -> String {
-    match path.extension().and_then(|ext| ext.to_str()) {
+    // Lowercase the extension so `.PNG`/`.SVG` map like `.png`/`.svg`.
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
         Some("png") => "image/png".to_string(),
         Some("jpg") | Some("jpeg") => "image/jpeg".to_string(),
         Some("gif") => "image/gif".to_string(),
@@ -903,6 +941,15 @@ mod tests {
         assert_eq!(
             mime_for_path(PathBuf::from("image.png").as_path()),
             "image/png"
+        );
+        // Extensions are case-insensitive: `.PNG`/`.SVG` map like `.png`/`.svg`.
+        assert_eq!(
+            mime_for_path(PathBuf::from("image.PNG").as_path()),
+            "image/png"
+        );
+        assert_eq!(
+            mime_for_path(PathBuf::from("diagram.SVG").as_path()),
+            "image/svg+xml"
         );
         assert_eq!(
             mime_for_path(PathBuf::from("photo.jpg").as_path()),
@@ -1478,6 +1525,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_svg_returns_text_not_image() {
+        // Regression (observed live, session #259): an SVG read as
+        // `image/svg+xml` base64 400s every provider ("The image data you
+        // provided does not represent a valid image") and wedges the session.
+        // SVG is editable source text — return it as such.
+        let fixture = TestFixture::new();
+        fixture.create_file(
+            "logo.svg",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        );
+
+        let tool = ReadTool::new(fixture.project_root.clone(), fixture.read_tracker.clone());
+        let result = tool.execute(json!({ "path": "logo.svg" })).await.unwrap();
+
+        let (text, _evidence) = read_output(result);
+        assert!(text.contains("<svg"), "{text}");
+    }
+
+    #[tokio::test]
     async fn test_read_nonexistent() {
         let fixture = TestFixture::new();
 
@@ -1800,5 +1866,35 @@ mod tests {
             !fixture.read_tracker.was_fully_read(&canonical_path).await,
             "a hidden long-line tail must not authorize overwrite"
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_missing_read_reuses_evidence_and_recheck_refreshes() {
+        let fixture = TestFixture::new();
+        let evidence = PathEvidence::new(&fixture.project_root).unwrap();
+        let tool = ReadTool::new(fixture.project_root.clone(), fixture.read_tracker.clone())
+            .with_path_evidence(evidence);
+
+        let first = tool.execute(json!({ "path": "missing.md" })).await;
+        assert!(
+            first.is_err(),
+            "the first miss must keep normal failure behavior"
+        );
+
+        let second = tool
+            .execute(json!({ "path": "./missing.md" }))
+            .await
+            .unwrap();
+        let ToolOutput::MissingPathReuse { text } = second else {
+            panic!("expected missing-path reuse output");
+        };
+        assert!(text.contains("[reused missing-path evidence]"));
+
+        fixture.create_file("missing.md", "restored");
+        let restored = tool
+            .execute(json!({ "path": "missing.md", "recheck": true }))
+            .await
+            .unwrap();
+        assert!(matches!(restored, ToolOutput::Read { .. }));
     }
 }

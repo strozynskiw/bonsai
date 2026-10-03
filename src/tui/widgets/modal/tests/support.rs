@@ -67,11 +67,13 @@ pub(super) fn render_tool_detail_activity_to_buffer(
             id: "call-1".to_string(),
             name: name.to_string(),
             arguments: arguments.to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: Some(result.to_string()),
-            diff,
+            diff: diff.map(Box::new),
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         }));
     app.modal_scroll = scroll;
     terminal
@@ -96,11 +98,13 @@ pub(super) fn render_diff_preview_to_buffer(
             id: "call-1".to_string(),
             name: "edit".to_string(),
             arguments: "{}".to_string(),
+            delegated_model: None,
             status: ToolStatus::Succeeded,
             result: None,
-            diff: Some(diff),
+            diff: Some(Box::new(diff)),
             started_at: now,
             finished_at: Some(now),
+            timing: Default::default(),
         }));
     app.modal_scroll = scroll;
     terminal

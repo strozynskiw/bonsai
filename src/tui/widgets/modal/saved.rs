@@ -185,6 +185,106 @@ pub(super) fn render_start_plan_choice(f: &mut Frame, area: Rect, cursor: usize)
     );
 }
 
+pub(super) fn render_budget_warning(
+    f: &mut Frame,
+    area: Rect,
+    usage: crate::run_budget::SessionBudgetUsage,
+    cursor: usize,
+) {
+    let panel = theme::frame("Session budget alert", true).style(theme::panel());
+    let inner = panel.inner(area);
+    f.render_widget(panel, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let mut lines = vec![Line::from(
+        "A configured cumulative alert has been reached.",
+    )];
+    for alert in usage
+        .alert_states()
+        .into_iter()
+        .filter(|alert| alert.is_reached())
+    {
+        lines.push(Line::from(format_session_alert(alert)));
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(theme::panel())
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    let options = [
+        ("Go back", "Keep the composer unchanged"),
+        ("Continue once", "Run only this retained submission"),
+    ];
+    let cursor = cursor.min(1);
+    let lines = options
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, detail))| {
+            picker_line(
+                idx == cursor,
+                (*label).to_string(),
+                Some((*detail).to_string()),
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(lines).style(theme::panel()), chunks[1]);
+    f.render_widget(
+        Paragraph::new(footer_hint_line(&[("Enter", "choose"), ("Esc", "go back")])),
+        chunks[2],
+    );
+}
+
+fn format_session_alert(alert: crate::run_budget::SessionBudgetAlertState) -> String {
+    use crate::run_budget::SessionBudgetAlertState;
+    let state = if alert.is_reached() {
+        "reached"
+    } else {
+        "next"
+    };
+    match alert {
+        SessionBudgetAlertState::BilledTokens {
+            used_tokens,
+            threshold_tokens,
+        } => format!(
+            "Billed tokens · {}/{} · {state}",
+            used_tokens.map_or_else(|| "unknown".to_string(), |used| used.to_string()),
+            threshold_tokens
+        ),
+        SessionBudgetAlertState::ProviderTurns {
+            used_turns,
+            threshold_turns,
+        } => format!("Provider turns · {used_turns}/{threshold_turns} · {state}"),
+        SessionBudgetAlertState::ActiveTime {
+            used_ms,
+            threshold_seconds,
+        } => format!(
+            "Active time · {}s/{threshold_seconds}s · {state}",
+            used_ms / 1_000
+        ),
+        SessionBudgetAlertState::Cost {
+            used_micros,
+            threshold_micros,
+        } => {
+            let used = used_micros.map_or_else(
+                || "unknown".to_string(),
+                |used| format!("${:.6}", used as f64 / 1_000_000.0),
+            );
+            format!(
+                "Exact cost · {used}/${:.6} · {state}",
+                threshold_micros as f64 / 1_000_000.0
+            )
+        }
+    }
+}
+
 pub(super) fn render_plan_delete_confirm(
     f: &mut Frame,
     area: Rect,

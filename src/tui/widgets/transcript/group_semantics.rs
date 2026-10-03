@@ -261,11 +261,13 @@ mod tests {
                 id: "call-1".to_string(),
                 name: "read".to_string(),
                 arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,
                 started_at,
                 finished_at: Some(started_at + Duration::from_millis(250)),
+                timing: Default::default(),
             }],
         };
 
@@ -284,11 +286,13 @@ mod tests {
                 id: "call-1".to_string(),
                 name: "read".to_string(),
                 arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                delegated_model: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,
                 started_at,
                 finished_at: Some(started_at + Duration::from_millis(20)),
+                timing: Default::default(),
             }],
         };
 

@@ -94,6 +94,19 @@ pub(super) struct UsageTurnDiagnostics {
     pub(super) prefix_hash: Option<String>,
 }
 
+impl UsageTurnDiagnostics {
+    fn pricing_timestamp_ms(&self) -> i64 {
+        let final_attempt_latency = self
+            .provider_attempts
+            .last()
+            .and_then(|attempt| i64::try_from(attempt.latency_ms).ok())
+            .unwrap_or(0);
+        self.created_at_ms
+            .saturating_sub(final_attempt_latency)
+            .max(0)
+    }
+}
+
 /// Token-usage and cost accounting for a session: the most recent response plus
 /// running session totals. Reset together via [`SessionUsage::default`], so no
 /// individual field can be forgotten when clearing or restoring a session.
@@ -179,9 +192,10 @@ impl SessionUsage {
         pricing: Option<&ModelPricingSchedule>,
         diagnostics: UsageTurnDiagnostics,
     ) {
+        let pricing_timestamp_ms = diagnostics.pricing_timestamp_ms();
         let pricing = pricing.map(|schedule| {
             usage
-                .map(|usage| schedule.pricing_for_usage(usage))
+                .map(|usage| schedule.pricing_for_usage_at(usage, pricing_timestamp_ms))
                 .unwrap_or_else(|| schedule.base())
         });
         self.last_usage = usage;
@@ -242,6 +256,30 @@ impl SessionUsage {
             self.no_cache_cost_micros = self.no_cache_cost_micros.saturating_add(no_cache);
             turn.no_cache_cost_micros = Some(no_cache);
         }
+        self.usage_turns.push(turn);
+    }
+
+    /// Persist provider work used only by cumulative safeguards. The detailed
+    /// turn remains available across session restore, but the visible
+    /// last-turn, token, cache, and cost aggregates stay unchanged.
+    pub(super) fn record_safeguard_usage(
+        &mut self,
+        usage: Option<TokenUsage>,
+        pricing: Option<&ModelPricingSchedule>,
+        diagnostics: UsageTurnDiagnostics,
+    ) {
+        debug_assert_eq!(
+            diagnostics.execution_lane.kind,
+            ExecutionLaneKind::Compaction
+        );
+        debug_assert_eq!(diagnostics.rewrite.kind, ContextRewriteKind::Compaction);
+        let pricing_timestamp_ms = diagnostics.pricing_timestamp_ms();
+        let pricing = pricing.map(|schedule| {
+            usage
+                .map(|usage| schedule.pricing_for_usage_at(usage, pricing_timestamp_ms))
+                .unwrap_or_else(|| schedule.base())
+        });
+        let turn = self.usage_turn_for(usage, pricing, diagnostics);
         self.usage_turns.push(turn);
     }
 
@@ -395,10 +433,17 @@ impl SessionUsage {
     }
 
     pub(super) fn restore_turns(&mut self, turns: Vec<UsageTurn>) {
-        if turns.iter().any(|turn| turn.turn_cost_micros.is_none()) {
+        if turns
+            .iter()
+            .any(|turn| turn.turn_cost_micros.is_none() && !is_safeguard_only_compaction(turn))
+            || turns.iter().any(|turn| {
+                is_safeguard_only_compaction(turn)
+                    && (turn.turn_cost_micros.is_none() || turn.no_cache_cost_micros.is_none())
+            })
+        {
             self.cost_complete = false;
         }
-        if let Some((turn_cost, turn_no_cache_cost)) = priced_turn_cost_totals(&turns)
+        if let Some((turn_cost, turn_no_cache_cost)) = visible_priced_turn_cost_totals(&turns)
             && turn_cost == self.cost_micros
         {
             // IMPORTANT ACCOUNTING INVARIANT: persisted per-turn pricing is the
@@ -582,7 +627,47 @@ impl SessionUsage {
 
     /// Cumulative cost only when every provider turn had usage and pricing.
     pub(super) fn exact_session_cost_micros(&self) -> Option<u64> {
-        self.cost_complete.then_some(self.cost_micros)
+        if !self.cost_complete {
+            return None;
+        }
+        if self.usage_turns.is_empty() {
+            return Some(self.cost_micros);
+        }
+        let (visible_cost, safeguard_only_cost) =
+            self.usage_turns
+                .iter()
+                .try_fold((0u64, 0u64), |(visible, safeguard_only), turn| {
+                    let cost = turn.turn_cost_micros?;
+                    if is_safeguard_only_compaction(turn) {
+                        Some((visible, safeguard_only.saturating_add(cost)))
+                    } else {
+                        Some((visible.saturating_add(cost), safeguard_only))
+                    }
+                })?;
+        (visible_cost == self.cost_micros)
+            .then_some(self.cost_micros.saturating_add(safeguard_only_cost))
+    }
+
+    /// Cache-inclusive prompt plus completion tokens only when every persisted
+    /// provider turn reported usage. Hidden provider compaction is persisted as
+    /// safeguard-only work and added after validating the visible aggregates.
+    pub(super) fn exact_session_billed_tokens(&self) -> Option<u64> {
+        let aggregate = self.prompt_tokens.saturating_add(self.completion_tokens);
+        if self.usage_turns.is_empty() {
+            return (aggregate == 0).then_some(0);
+        }
+        let (visible_total, safeguard_only_total) =
+            self.usage_turns
+                .iter()
+                .try_fold((0u64, 0u64), |(visible, safeguard_only), turn| {
+                    let billed = turn.prompt_tokens?.saturating_add(turn.completion_tokens?);
+                    if is_safeguard_only_compaction(turn) {
+                        Some((visible, safeguard_only.saturating_add(billed)))
+                    } else {
+                        Some((visible.saturating_add(billed), safeguard_only))
+                    }
+                })?;
+        (visible_total == aggregate).then_some(aggregate.saturating_add(safeguard_only_total))
     }
 
     /// Foreground parent provider turns durably recorded across resumes.
@@ -626,11 +711,19 @@ impl SessionUsage {
     }
 }
 
-fn priced_turn_cost_totals(turns: &[UsageTurn]) -> Option<(u64, u64)> {
+fn is_safeguard_only_compaction(turn: &UsageTurn) -> bool {
+    turn.lane_kind == ExecutionLaneKind::Compaction
+        && turn.rewrite_kind == ContextRewriteKind::Compaction
+}
+
+fn visible_priced_turn_cost_totals(turns: &[UsageTurn]) -> Option<(u64, u64)> {
     let mut saw_priced_turn = false;
     let mut actual = 0u64;
     let mut no_cache = 0u64;
     for turn in turns {
+        if is_safeguard_only_compaction(turn) {
+            continue;
+        }
         match (turn.turn_cost_micros, turn.no_cache_cost_micros) {
             (Some(turn_actual), Some(turn_no_cache)) => {
                 saw_priced_turn = true;
@@ -652,11 +745,12 @@ fn percent_u64(part: u64, total: u64) -> Option<u64> {
 mod tests {
     use super::{SessionUsage, UsageTurnDiagnostics};
     use crate::agent::{
-        ContextRewriteKind, ExecutionLane, ExecutionLaneKind, UsageTotals, UsageTurn,
-        UsageTurnStatus,
+        ContextRewriteKind, ExecutionLane, ExecutionLaneKind, ProviderAttemptOutcome,
+        ProviderAttemptReport, UsageTotals, UsageTurn, UsageTurnStatus,
     };
     use crate::provider::{
         InputCacheUsage, ModelPricing, ModelPricingSchedule, ModelPricingTier, TokenUsage,
+        UtcPricingWindow,
     };
 
     fn pricing() -> ModelPricing {
@@ -741,6 +835,56 @@ mod tests {
         assert_ne!(
             usage.last_turn_cost_micros,
             Some(base.cost_micros_for_usage(high_tier_usage))
+        );
+    }
+
+    #[test]
+    fn peak_pricing_uses_the_final_provider_attempt_start_time() {
+        let standard = ModelPricing::new(1_000_000, 2_000_000);
+        let peak = ModelPricing::new(3_000_000, 4_000_000);
+        let window: UtcPricingWindow = serde_json::from_value(serde_json::json!({
+            "start": "01:00",
+            "end": "04:00"
+        }))
+        .expect("valid UTC pricing window");
+        let schedule =
+            ModelPricingSchedule::flat(standard).with_peak_pricing(peak, Vec::new(), vec![window]);
+        let turn_usage = TokenUsage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 0,
+            input_cache: None,
+        };
+        let final_attempt = ProviderAttemptReport {
+            attempt: 1,
+            outcome: ProviderAttemptOutcome::Completed,
+            latency_ms: 120_000,
+            assistant_chars: 0,
+            reasoning_chars: 0,
+            finish_reason: Some(crate::provider::FinishReason::Stop),
+            error_class: None,
+            backoff_ms: None,
+            prompt_tokens: Some(1_000_000),
+            completion_tokens: Some(0),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_measured_input_tokens: None,
+        };
+        let mut usage = SessionUsage::default();
+
+        usage.record_with_pricing_schedule(
+            Some(turn_usage),
+            Some(&schedule),
+            UsageTurnDiagnostics {
+                // Completion at 04:01 UTC; the final attempt began at 03:59.
+                created_at_ms: (4 * 60 + 1) * 60_000,
+                provider_attempts: vec![final_attempt],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            usage.last_turn_cost_micros,
+            Some(peak.cost_micros_for_usage(turn_usage))
         );
     }
 
@@ -929,6 +1073,97 @@ mod tests {
 
         assert_eq!(usage.session_turn_count(), 1);
         assert_eq!(usage.session_output_chars(), 26);
+    }
+
+    #[test]
+    fn billed_tokens_are_cache_inclusive_and_require_complete_usage() {
+        let mut usage = SessionUsage::default();
+        usage.restore(100, 25, Some(0), Some(0), None);
+        let mut parent = usage_turn_without_cache(100);
+        parent.completion_tokens = Some(25);
+        let mut nested = usage_turn_without_cache(40);
+        nested.lane_kind = ExecutionLaneKind::SelfReview;
+        nested.lane_id = "review".to_string();
+        nested.completion_tokens = Some(10);
+        usage.restore_turns(vec![parent, nested]);
+        usage.absorb_totals(UsageTotals {
+            prompt_tokens: 40,
+            completion_tokens: 10,
+            cost_micros: Some(0),
+            no_cache_cost_micros: Some(0),
+            input_cache: Some(InputCacheUsage::new(30, 0, 40)),
+        });
+
+        assert_eq!(usage.exact_session_billed_tokens(), Some(175));
+
+        usage.usage_turns[1].completion_tokens = None;
+        assert_eq!(usage.exact_session_billed_tokens(), None);
+    }
+
+    #[test]
+    fn billed_tokens_require_ledger_coverage_of_restored_aggregates() {
+        let mut usage = SessionUsage::default();
+        usage.restore(100, 25, Some(0), Some(0), None);
+
+        assert_eq!(usage.exact_session_billed_tokens(), None);
+
+        let mut turn = usage_turn_without_cache(100);
+        turn.completion_tokens = Some(24);
+        usage.restore_turns(vec![turn]);
+        assert_eq!(usage.exact_session_billed_tokens(), None);
+    }
+
+    #[test]
+    fn restored_hidden_compaction_counts_only_toward_cumulative_safeguards() {
+        let mut usage = SessionUsage::default();
+        usage.restore(100, 25, Some(0), Some(0), None);
+        let mut parent = usage_turn_without_cache(100);
+        parent.completion_tokens = Some(25);
+        parent.turn_cost_micros = Some(0);
+        parent.no_cache_cost_micros = Some(0);
+        let mut compaction = usage_turn_without_cache(42);
+        compaction.seq = 2;
+        compaction.lane_kind = ExecutionLaneKind::Compaction;
+        compaction.lane_id = "compaction".to_string();
+        compaction.completion_tokens = Some(7);
+        compaction.rewrite_kind = ContextRewriteKind::Compaction;
+        compaction.turn_cost_micros = Some(12);
+        compaction.no_cache_cost_micros = Some(15);
+
+        usage.restore_turns(vec![parent, compaction]);
+
+        assert_eq!(usage.totals().prompt_tokens, 100);
+        assert_eq!(usage.totals().completion_tokens, 25);
+        assert_eq!(usage.totals().cost_micros, Some(0));
+        assert_eq!(usage.exact_session_billed_tokens(), Some(174));
+        assert_eq!(usage.exact_session_cost_micros(), Some(12));
+    }
+
+    #[test]
+    fn live_hidden_compaction_cost_is_safeguard_only() {
+        let mut usage = SessionUsage::default();
+        let schedule = ModelPricingSchedule::flat(pricing());
+        let turn_usage = read_heavy();
+        let expected_cost = schedule.base().cost_micros_for_usage(turn_usage);
+
+        usage.record_safeguard_usage(
+            Some(turn_usage),
+            Some(&schedule),
+            UsageTurnDiagnostics {
+                execution_lane: ExecutionLane::compaction("session-7"),
+                rewrite: super::PendingContextRewrite {
+                    kind: ContextRewriteKind::Compaction,
+                    ..super::PendingContextRewrite::default()
+                },
+                ..UsageTurnDiagnostics::default()
+            },
+        );
+
+        assert_eq!(usage.totals().prompt_tokens, 0);
+        assert_eq!(usage.totals().completion_tokens, 0);
+        assert_eq!(usage.totals().cost_micros, Some(0));
+        assert_eq!(usage.exact_session_billed_tokens(), Some(1_000_000));
+        assert_eq!(usage.exact_session_cost_micros(), Some(expected_cost));
     }
 
     #[test]

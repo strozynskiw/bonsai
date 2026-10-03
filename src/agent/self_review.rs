@@ -448,7 +448,14 @@ impl Agent {
             &task,
             registry,
             cancellation_token.clone(),
-            model_override,
+            crate::tool::SelfReviewRunOptions {
+                model_override,
+                remaining_billed_tokens: self.budget.max_session_billed_tokens.and_then(|limit| {
+                    self.usage
+                        .exact_session_billed_tokens()
+                        .map(|used| limit.saturating_sub(used))
+                }),
+            },
         ));
         let (result, usage, mut usage_turns, delegated_read_evidence, child_status) = run.await;
         // Fold the reviewer's token usage into the parent's totals on every path

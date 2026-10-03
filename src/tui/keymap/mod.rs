@@ -96,6 +96,15 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     if matches!(
         app.modal,
         Some(ModalKind::Picker(
+            crate::tui::event::PickerModal::BudgetWarning { .. }
+        ))
+    ) {
+        return map_budget_warning_key(key);
+    }
+
+    if matches!(
+        app.modal,
+        Some(ModalKind::Picker(
             crate::tui::event::PickerModal::ReviewScopePicker { .. }
         ))
     ) {
@@ -517,7 +526,11 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         }
         KeyEvent {
             code: KeyCode::Esc, ..
-        } if matches!(app.task_state, crate::tui::event::TaskState::Running) => KeyIntent::Steer,
+        } if matches!(app.task_state, crate::tui::event::TaskState::Running)
+            && app.last_queued_input().is_some() =>
+        {
+            KeyIntent::Steer
+        }
         // Esc progressively clears: selection first, then the draft.
         KeyEvent {
             code: KeyCode::Esc, ..
@@ -776,7 +789,29 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         }
         KeyEvent {
             code: KeyCode::Up, ..
+        } if matches!(app.focus, Focus::Input) && app.composer.history_cursor.is_some() => {
+            KeyIntent::Action(AppAction::HistoryPrev)
+        }
+        KeyEvent {
+            code: KeyCode::Up, ..
+        } if matches!(app.focus, Focus::Input) && app.input().is_empty() => {
+            KeyIntent::Action(AppAction::HistoryPrev)
+        }
+        KeyEvent {
+            code: KeyCode::Up, ..
         } if matches!(app.focus, Focus::Input) => KeyIntent::Action(AppAction::CursorUp),
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        } if matches!(app.focus, Focus::Input) && app.composer.history_cursor.is_some() => {
+            KeyIntent::Action(AppAction::HistoryNext)
+        }
+        KeyEvent {
+            code: KeyCode::Down,
+            ..
+        } if matches!(app.focus, Focus::Input) && app.input().is_empty() => {
+            KeyIntent::Action(AppAction::HistoryNext)
+        }
         KeyEvent {
             code: KeyCode::Down,
             ..
@@ -1808,21 +1843,25 @@ mod tests {
                         id: "call-1".to_string(),
                         name: "bash".to_string(),
                         arguments: "{\"command\":\"echo hi\"}".to_string(),
+                        delegated_model: None,
                         status: ToolStatus::Failed,
                         result: Some("ok".to_string()),
                         diff: None,
                         started_at: std::time::Instant::now(),
                         finished_at: Some(std::time::Instant::now()),
+                        timing: Default::default(),
                     },
                     ToolActivity {
                         id: "call-2".to_string(),
                         name: "read".to_string(),
                         arguments: "{\"file_path\":\"a\"}".to_string(),
+                        delegated_model: None,
                         status: ToolStatus::Succeeded,
                         result: Some("ok".to_string()),
                         diff: None,
                         started_at: std::time::Instant::now(),
                         finished_at: Some(std::time::Instant::now()),
+                        timing: Default::default(),
                     },
                 ],
             }));
@@ -1863,9 +1902,10 @@ mod tests {
                     id: "call-1".to_string(),
                     name: "write".to_string(),
                     arguments: "{\"file_path\":\"a\"}".to_string(),
+                    delegated_model: None,
                     status: ToolStatus::Running,
                     result: None,
-                    diff: Some(FileDiff {
+                    diff: Some(Box::new(FileDiff {
                         path: "a".to_string(),
                         status: DiffStatus::Modified,
                         hunks: vec![],
@@ -1875,9 +1915,10 @@ mod tests {
                         added_lines: 0,
                         removed_lines: 0,
                         additional_files: Box::default(),
-                    }),
+                    })),
                     started_at: std::time::Instant::now(),
                     finished_at: None,
+                    timing: Default::default(),
                 }],
             }));
 
@@ -3096,8 +3137,24 @@ mod tests {
     }
 
     #[test]
-    fn esc_requests_immediate_steer_while_agent_runs() {
+    fn esc_clears_unsent_draft_while_agent_runs_without_queued_message() {
         let mut app = input_app_with_text("keep this draft");
+        app.task_state = crate::tui::event::TaskState::Running;
+
+        let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
+
+        assert!(matches!(intent, KeyIntent::Action(AppAction::ClearInput)));
+    }
+
+    #[test]
+    fn esc_requests_steer_while_agent_runs_with_queued_message() {
+        let mut app = input_app_with_text("queued correction");
+        app.reduce(AppAction::QueueNextInput {
+            id: 1,
+            text: "queued correction".to_string(),
+            content: crate::tui::app::ComposerContent::default(),
+            mode: crate::agent::AgentMode::Coding,
+        });
         app.task_state = crate::tui::event::TaskState::Running;
 
         let intent = map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &app);
