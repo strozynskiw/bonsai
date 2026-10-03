@@ -2282,7 +2282,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 7);
+    assert_eq!(migration_count, 8);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \
@@ -2444,15 +2444,20 @@ async fn task_run_migration_marks_historical_sessions_unknown() {
     let old_storage = Storage::open_paths_with_migrator(paths.clone(), &v1)
         .await
         .unwrap();
-    let session_id = old_storage
-        .start_session(
-            temp_dir.path(),
-            "codex",
-            "gpt-test",
-            ReasoningSelection::default(),
+    let project_id = old_storage.ensure_project(temp_dir.path()).await.unwrap();
+    // Seed the historical schema directly; today's session API requires the
+    // classification column introduced after this migration.
+    let session_id = SessionId::from_raw(
+        sqlx::query_scalar(
+            "INSERT INTO sessions (project_id, name, provider_id, model, reasoning_json, \
+             started_at_ms, updated_at_ms) VALUES (?, 'historical', 'codex', 'gpt-test', '{}', 1, 1) \
+             RETURNING id",
         )
+        .bind(project_id)
+        .fetch_one(&old_storage.pool)
         .await
-        .unwrap();
+        .unwrap(),
+    );
     old_storage
         .set_session_summary(session_id, "Ambiguous historical work")
         .await

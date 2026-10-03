@@ -232,6 +232,8 @@ impl Storage {
             .await
             .context("Failed to begin task-run transaction")?;
 
+        self.promote_task_session_in_tx(&mut tx, session_id).await?;
+
         sqlx::query(
             r#"
             UPDATE task_runs

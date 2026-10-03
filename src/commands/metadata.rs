@@ -369,7 +369,7 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
     CommandMetadata {
         name: "/sessions",
         description: "List saved sessions",
-        usage_hint: None,
+        usage_hint: Some("[all]"),
         surface: tui_only("Session persistence commands are a TUI feature."),
     },
     CommandMetadata {

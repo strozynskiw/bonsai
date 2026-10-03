@@ -1484,6 +1484,8 @@ fn session_summary(id: i64) -> crate::storage::SessionSummary {
         model: "MiniMax-M3".to_string(),
         reasoning: ReasoningSelection::default(),
         status: crate::storage::SessionStatus::Active,
+        kind: crate::storage::SessionKind::Task,
+        lifecycle_diagnostic: None,
         terminal_reason: None,
         latest_task: None,
         updated_at_ms: 1_000,

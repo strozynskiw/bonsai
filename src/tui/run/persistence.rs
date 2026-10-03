@@ -394,6 +394,7 @@ pub(in crate::tui::run) enum PersistenceCommand<'a> {
     ExportPlan(&'a str),
     Plans,
     Sessions,
+    DiagnosticSessions,
     Search(&'a str),
     Forget(&'a str),
     Resume(&'a str),
@@ -455,6 +456,7 @@ pub(in crate::tui::run) fn persistence_command(input: &str) -> Option<Persistenc
         "/new-plan" => Some(PersistenceCommand::NewPlan),
         "/export" => Some(PersistenceCommand::ExportPlan(arg)),
         "/plans" => Some(PersistenceCommand::Plans),
+        "/sessions" if arg == "all" => Some(PersistenceCommand::DiagnosticSessions),
         "/sessions" => Some(PersistenceCommand::Sessions),
         "/search" => Some(PersistenceCommand::Search(arg)),
         "/forget" => Some(PersistenceCommand::Forget(arg)),
@@ -514,6 +516,32 @@ pub(in crate::tui::run) async fn apply_persistence_command(
                     cursor: 0,
                 },
             )));
+        }
+        PersistenceCommand::DiagnosticSessions => {
+            let sessions = deps
+                .storage
+                .sessions_for_project(
+                    deps.project_root,
+                    100,
+                    crate::storage::SessionListScope::All,
+                )
+                .await?;
+            let mut lines = vec!["Session diagnostics (all classifications):".to_string()];
+            lines.extend(sessions.iter().map(|session| {
+                format!(
+                    "#{}  {}  {}  {}{}",
+                    session.id,
+                    session.kind.as_db_str(),
+                    session.status.label(),
+                    session.name,
+                    session
+                        .lifecycle_diagnostic
+                        .as_ref()
+                        .map(|detail| format!("\n  {detail}"))
+                        .unwrap_or_default(),
+                )
+            }));
+            push_command_message(app, CommandOutputKind::Status, &lines.join("\n"));
         }
         PersistenceCommand::Search(query) => {
             if query.trim().is_empty() {
@@ -1266,6 +1294,13 @@ pub(in crate::tui) async fn resume_session(
             return Ok(());
         }
     }
+    if let Err(error) = deps
+        .storage
+        .retire_clean_lifecycle_session(*state.current_session_id)
+        .await
+    {
+        tracing::warn!(%error, "Failed to retire outgoing lifecycle session");
+    }
     let PreparedResume {
         snapshot,
         conversation_cache_key,
@@ -1504,7 +1539,10 @@ pub(in crate::tui::run) async fn rotate_persisted_session(
         )
         .await?;
     storage
-        .start_session(project_root, &app.provider, &app.model, app.reasoning)
+        .retire_clean_lifecycle_session(current_session_id)
+        .await?;
+    storage
+        .start_lifecycle_session(project_root, &app.provider, &app.model, app.reasoning)
         .await
 }
 

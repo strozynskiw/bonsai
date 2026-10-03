@@ -238,6 +238,45 @@ impl<'a> SessionSnapshotWriter<'a> {
         previous: SessionSnapshotSignatures,
         mut checkpoint: impl FnMut(SnapshotGroup) -> Result<()>,
     ) -> Result<SnapshotWriteOutcome> {
+        let session_kind = self.storage.session_kind(self.session_id).await?;
+        let meaningful_activity = snapshot.transcript.iter().any(|item| {
+            matches!(
+                item,
+                TranscriptItem::UserMessage { .. }
+                    | TranscriptItem::ToolActivity(_)
+                    | TranscriptItem::ExecutionGroup(_)
+            )
+        }) || (!snapshot.plan.is_empty()
+            && session_kind != crate::storage::SessionKind::LegacyUnclassified)
+            || snapshot
+                .agent
+                .is_some_and(|agent| !agent.usage_turns().is_empty())
+            || snapshot
+                .fallback_usage
+                .is_some_and(|usage| !usage.turns.is_empty());
+        if !meaningful_activity && session_kind != crate::storage::SessionKind::Task {
+            let diagnostic = snapshot
+                .transcript
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    TranscriptItem::CommandOutput {
+                        kind: crate::tui::event::CommandOutputKind::Error,
+                        text,
+                    } => Some(text.as_str()),
+                    TranscriptItem::Error { error } => Some(error.detail.as_str()),
+                    _ => None,
+                });
+            if let Some(diagnostic) = diagnostic {
+                self.storage
+                    .record_lifecycle_diagnostic(self.session_id, diagnostic)
+                    .await?;
+            }
+            return Ok(SnapshotWriteOutcome {
+                signatures: previous,
+                changed: false,
+            });
+        }
         let transcript_signature = transcript_signature(snapshot.transcript);
         let plan_signature = plan_signature(snapshot.plan);
         let todo_signature = todo_signature(snapshot.todos);
@@ -292,6 +331,9 @@ impl<'a> SessionSnapshotWriter<'a> {
         let session_id = self.session_id;
         storage
             .with_session_snapshot_tx("session snapshot batch", async move |tx, now| {
+                if meaningful_activity {
+                    storage.promote_task_session_in_tx(tx, session_id).await?;
+                }
                 if transcript_changed || !snapshot.ui_peer_delivery_receipts.is_empty() {
                     if transcript_changed {
                         storage

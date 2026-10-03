@@ -25,7 +25,7 @@ completion popup; `Tab` completes names and arguments.
 | --- | --- | --- | --- |
 | `/new`, `/clear` | — | rotate to a fresh session (new cache key; episodes/plan cleared) | yes |
 | `/resume` | `[id]` | resume a saved session (bare = latest prior) | no |
-| `/sessions` | — | list saved sessions | no |
+| `/sessions` | `[all]` | list task sessions; `all` shows diagnostic identities | no |
 | `/forget` | `<id>` | delete a saved session | no |
 | `/search` | `<query>` | full-text search across saved messages | no |
 | `/retry` | `[shortcut]` | retry the latest user turn, optionally on a shortcut model | no |

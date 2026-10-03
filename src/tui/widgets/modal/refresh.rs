@@ -8,7 +8,7 @@ use super::*;
 /// `/refresh` — a live per-source status modal. Each row shows a colored
 /// status dot (yellow while pending, green on success, red on failure), the
 /// source name, model count, and added/removed deltas. The selected row's
-/// added/removed model ids are shown in the detail pane beside the list.
+/// added/removed model ids are shown beside the list, or below on narrow screens.
 pub(super) fn render_refresh(
     f: &mut Frame,
     area: Rect,
@@ -21,7 +21,7 @@ pub(super) fn render_refresh(
             .iter()
             .all(|s| !matches!(s.status, RefreshSourceStatus::Pending));
     let status_line = if all_done {
-        "Refresh complete. Esc or Enter to close."
+        "Refresh complete."
     } else {
         "Refreshing…"
     };
@@ -37,7 +37,7 @@ pub(super) fn render_refresh(
         ListDetailModal {
             title: "Refresh Model Catalogs",
             detail_title: "Model Changes",
-            split: ListDetailSplit::Horizontal,
+            split: ListDetailSplit::Refresh,
             detail_focused: false,
             footer_lines,
             modal_scroll: app.modal_scroll,
@@ -61,9 +61,7 @@ pub(super) fn render_refresh(
                 );
             }
             frame.render_widget(
-                Paragraph::new(table_lines)
-                    .style(theme::panel())
-                    .wrap(Wrap { trim: false }),
+                Paragraph::new(table_lines).style(theme::panel()),
                 table_area,
             );
             sources
@@ -86,7 +84,7 @@ fn refresh_columns() -> Vec<TableColumn<RefreshSourceState>> {
         },
         TableColumn {
             header: "Source",
-            width: TableWidth::Fit { cap: 20 },
+            width: TableWidth::Flex { min: 0 },
             render: CellRender::Value(|source| source.display_name.clone()),
             style: CellStyle::Text,
         },
@@ -109,7 +107,7 @@ fn refresh_columns() -> Vec<TableColumn<RefreshSourceState>> {
         },
         TableColumn {
             header: "Changes",
-            width: TableWidth::Flex { min: 0 },
+            width: TableWidth::Fit { cap: 12 },
             render: CellRender::Value(changes_label),
             style: CellStyle::Meta,
         },
@@ -213,7 +211,7 @@ pub(super) fn max_refresh_detail_scroll(
     let Some(source) = sources.get(cursor.min(sources.len().saturating_sub(1))) else {
         return 0;
     };
-    let (_, detail_area, _) = list_detail_regions(area, ListDetailSplit::Horizontal);
+    let (_, detail_area, _) = list_detail_regions(area, ListDetailSplit::Refresh);
     detail_max_scroll(
         detail_pane_inner(detail_area),
         &refresh_detail_lines(source),

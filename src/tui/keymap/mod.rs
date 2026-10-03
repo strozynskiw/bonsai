@@ -1430,6 +1430,8 @@ mod tests {
             model: "test-model".to_string(),
             reasoning: crate::provider::ReasoningSelection::default(),
             status: crate::storage::SessionStatus::Active,
+            kind: crate::storage::SessionKind::Task,
+            lifecycle_diagnostic: None,
             terminal_reason: None,
             latest_task: None,
             updated_at_ms: 1_000,

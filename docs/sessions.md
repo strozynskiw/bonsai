@@ -31,7 +31,12 @@ Secrets never enter the database — credentials are stored by
 
 - **Start** — a session row is created per project with a fresh
   conversation cache key (the prompt-cache route; see
-  [Models](models.md#prompt-cache-shaping)).
+  [Models](models.md#prompt-cache-shaping)). TUI startup reserves a
+  `lifecycle_only` identity for peers; authorization and model selection
+  classify it as `provider_probe`. The first meaningful user, provider, tool,
+  or plan activity atomically promotes the same identity to `task`.
+  Startup-only snapshots cannot receive task, todo, verification, review,
+  or episode evidence and do not enter task-quality metrics.
 - **Persistence cadence** — the TUI flushes changed snapshot groups every
   500 ms off the input thread; each group (transcript, context, usage, plan,
   …) has a content signature so unchanged groups are skipped, and all
@@ -51,12 +56,21 @@ Secrets never enter the database — credentials are stored by
   excluding rows with a fresh heartbeat (that's what makes concurrent
   sessions safe). Terminal reasons — including typed budget exhaustion — are
   recorded on the row, not reported as generic failures.
+  Retention removes only a newly classified, cleanly completed unused identity
+  without peer, authorization, recovery, or saved-plan evidence. Crashes and
+  ambiguous historical rows remain available for diagnosis; migration never
+  deletes them.
 
 ## Resume
 
 - `bonsai -c` resumes the latest session for the project; `bonsai -c <id>`
   a specific one. In the TUI, `/sessions` lists, `/resume [id]` resumes,
   `/forget <id>` deletes, `/search <query>` searches message history.
+  Normal session lists and latest-session resume include task sessions only.
+  `/sessions all` shows diagnostic classifications, including startup/configuration
+  identities and `legacy_unclassified` rows whose history cannot prove task work.
+  An explicit session id remains available for inspecting or resuming retained
+  diagnostic history.
 - A resumed session **pins** its stored provider, model, and reasoning
   (headless ignores `BONSAI_PROVIDER` on resume; `--model` can still
   override for that run), and restores its conversation cache key so the

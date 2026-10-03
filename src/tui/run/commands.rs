@@ -2544,6 +2544,12 @@ mod tests {
             idle_slash_command("/sessions"),
             Some(IdleSlashCommand::Persistence(PersistenceCommand::Sessions))
         );
+        assert_eq!(
+            idle_slash_command("/sessions all"),
+            Some(IdleSlashCommand::Persistence(
+                PersistenceCommand::DiagnosticSessions
+            ))
+        );
     }
 
     #[test]

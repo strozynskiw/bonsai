@@ -51,6 +51,7 @@ mod quality_evidence;
 mod read_evidence;
 mod recovery;
 mod self_review;
+mod session_kind;
 mod sessions;
 mod task_runs;
 #[cfg(test)]
@@ -78,6 +79,7 @@ pub use peers::{
 };
 pub use permissions::{PermissionScope, RuleKind, StoredPermissionRule};
 pub(crate) use recovery::{NewRecoveryPoint, RecoveryId, RecoveryPoint, RecoveryState};
+pub use session_kind::{SessionKind, SessionListScope};
 pub use task_runs::{TaskOutcome, TaskRun, TaskRunId, TaskTerminalReason, TaskTerminalReasonCode};
 pub use usage_stats::{
     DailyUsage, LocalToday, ModelUsage, QualityEvidenceIntegrity, UsageDashboard,
@@ -99,6 +101,8 @@ const SESSION_SUMMARY_PROJECTION: &str = r#"
               sessions.model,
               sessions.reasoning_json,
               sessions.status,
+              sessions.kind,
+              sessions.lifecycle_diagnostic,
               sessions.terminal_reason,
               sessions.updated_at_ms,
               sessions.prompt_token_count,
@@ -221,6 +225,10 @@ pub struct SessionSummary {
     pub model: String,
     pub reasoning: ReasoningSelection,
     pub status: SessionStatus,
+    /// Task activity classification, independent of process lifecycle.
+    pub kind: SessionKind,
+    /// Bounded, redacted startup/configuration failure detail for diagnostics.
+    pub lifecycle_diagnostic: Option<String>,
     pub terminal_reason: Option<crate::run_budget::RunBudgetExhaustion>,
     /// Latest durable user task, independent from `status` (process/session
     /// lifecycle). Terminal task rows are immutable across resume.

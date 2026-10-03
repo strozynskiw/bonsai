@@ -168,6 +168,7 @@ impl Storage {
                    status, result, blocker_count, major_count, minor_count, nit_count,
                    disposition
             FROM self_review_runs
+            WHERE session_id IN (SELECT id FROM sessions WHERE kind = 'task')
             ORDER BY session_id, seq
             "#,
         )

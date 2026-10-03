@@ -44,6 +44,42 @@ impl Storage {
         model: &str,
         reasoning: ReasoningSelection,
     ) -> Result<SessionId> {
+        self.create_session(
+            project_path,
+            provider_id,
+            model,
+            reasoning,
+            SessionKind::Task,
+        )
+        .await
+    }
+
+    /// Reserve startup/peer identity without claiming that task work began.
+    pub(crate) async fn start_lifecycle_session(
+        &self,
+        project_path: &Path,
+        provider_id: &str,
+        model: &str,
+        reasoning: ReasoningSelection,
+    ) -> Result<SessionId> {
+        self.create_session(
+            project_path,
+            provider_id,
+            model,
+            reasoning,
+            SessionKind::LifecycleOnly,
+        )
+        .await
+    }
+
+    async fn create_session(
+        &self,
+        project_path: &Path,
+        provider_id: &str,
+        model: &str,
+        reasoning: ReasoningSelection,
+        kind: SessionKind,
+    ) -> Result<SessionId> {
         let project_id = self.ensure_project(project_path).await?;
         let name = project_path
             .file_name()
@@ -58,9 +94,9 @@ impl Storage {
             r#"
             INSERT INTO sessions (
               project_id, name, provider_id, model, reasoning_json,
-              conversation_cache_key, status, started_at_ms, updated_at_ms
+              conversation_cache_key, status, started_at_ms, updated_at_ms, kind
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -73,6 +109,7 @@ impl Storage {
         .bind(SessionStatus::Active.as_db_str())
         .bind(now)
         .bind(now)
+        .bind(kind.as_db_str())
         .fetch_one(&self.pool)
         .await
         .context("Failed to create persisted session")?;
@@ -139,7 +176,7 @@ impl Storage {
                     THEN last_heartbeat_ms - active_run_started_at_ms
                   ELSE 0
                 END,
-                active_run_started_at_ms = ?, status = ?, terminal_reason = NULL,
+                active_run_started_at_ms = ?, status = ?, terminal_reason = NULL, kind = 'task',
                 updated_at_ms = ?, ended_at_ms = NULL
             WHERE id = ?
             RETURNING active_run_ms
@@ -676,7 +713,7 @@ impl Storage {
 
         let placeholders = vec!["?"; promoted_ids.len()].join(", ");
         let query = session_summary_query(
-            &format!("sessions.id IN ({placeholders})"),
+            &format!("sessions.kind = 'task' AND sessions.id IN ({placeholders})"),
             "ORDER BY sessions.updated_at_ms DESC\n            LIMIT ?",
         );
         let mut select = sqlx::query(sqlx::AssertSqlSafe(query));
@@ -716,9 +753,24 @@ impl Storage {
         project_path: &Path,
         limit: i64,
     ) -> Result<Vec<SessionSummary>> {
+        self.sessions_for_project(project_path, limit, SessionListScope::Tasks)
+            .await
+    }
+
+    /// List task sessions by default, or all identities for diagnostics.
+    pub async fn sessions_for_project(
+        &self,
+        project_path: &Path,
+        limit: i64,
+        scope: SessionListScope,
+    ) -> Result<Vec<SessionSummary>> {
         let project_path = canonical_project_path(project_path);
+        let where_clause = match scope {
+            SessionListScope::Tasks => "projects.path = ? AND sessions.kind = 'task'",
+            SessionListScope::All => "projects.path = ?",
+        };
         let query = session_summary_query(
-            "projects.path = ?",
+            where_clause,
             "ORDER BY sessions.updated_at_ms DESC\n            LIMIT ?",
         );
         let rows = sqlx::query(sqlx::AssertSqlSafe(query))
@@ -738,7 +790,7 @@ impl Storage {
     ) -> Result<Option<SessionSummary>> {
         let project_path = canonical_project_path(project_path);
         let query = session_summary_query(
-            "projects.path = ? AND sessions.id != ?",
+            "projects.path = ? AND sessions.kind = 'task' AND sessions.id != ?",
             "ORDER BY sessions.updated_at_ms DESC\n            LIMIT 1",
         );
         let row = sqlx::query(sqlx::AssertSqlSafe(query))
@@ -1122,6 +1174,8 @@ fn session_summary_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SessionSumma
             model: row.try_get("model")?,
             reasoning: reasoning_from_row(&row)?,
             status: SessionStatus::from_db_str(&row.try_get::<String, _>("status")?),
+            kind: SessionKind::from_db_str(&row.try_get::<String, _>("kind")?),
+            lifecycle_diagnostic: row.try_get("lifecycle_diagnostic")?,
             terminal_reason: row
                 .try_get::<Option<String>, _>("terminal_reason")?
                 .map(|value| crate::run_budget::RunBudgetExhaustion::from_json(&value))

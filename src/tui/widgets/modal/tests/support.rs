@@ -625,6 +625,8 @@ pub(super) fn session_summary(
         model: model.to_string(),
         reasoning: ReasoningSelection::default(),
         status: crate::storage::SessionStatus::from_db_str(status),
+        kind: crate::storage::SessionKind::Task,
+        lifecycle_diagnostic: None,
         terminal_reason: None,
         latest_task: None,
         updated_at_ms: current_time_ms(),

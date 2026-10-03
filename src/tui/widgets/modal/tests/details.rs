@@ -1494,15 +1494,18 @@ fn refresh_modal_places_source_list_left_and_changes_right() {
     // Both panes start at the top of the body — the detail is beside the list,
     // not below it.
     let (list_area, detail_area, footer_area) =
-        list_detail_regions(modal, ListDetailSplit::Horizontal);
+        list_detail_regions(modal, ListDetailSplit::Refresh);
     assert_eq!(
         detail_area.y, list_area.y,
         "horizontal split should start both panes on the same row"
     );
+    assert!(list_area.width > detail_area.width);
 
     // The source table renders inside the left pane.
     let header_row = row_text(&buffer, list_area.y);
     let source_col = header_row.find("Source").expect("source column header");
+    assert!(header_row.contains("Models"), "{header_row}");
+    assert!(header_row.contains("Changes"), "{header_row}");
     assert!(
         (list_area.x as usize..list_area.right() as usize).contains(&source_col),
         "source table should sit inside the left pane, column {source_col} vs {list_area:?}"
@@ -1566,4 +1569,62 @@ fn refresh_detail_scroll_uses_the_horizontal_detail_pane() {
         vertical_scroll > horizontal_scroll,
         "the same detail would overflow the short vertical pane (vertical scroll {vertical_scroll})"
     );
+}
+
+#[test]
+fn refresh_modal_stacks_compact_details_on_narrow_terminals() {
+    let sources = vec![crate::commands::RefreshSourceState {
+        display_name: "Xiaomi MiMo Coding Plan".to_string(),
+        status: crate::commands::RefreshSourceStatus::Ok,
+        model_count: Some(4),
+        added: Vec::new(),
+        removed: Vec::new(),
+    }];
+    let area = Rect::new(0, 0, 80, 24);
+    let kind = ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
+        sources,
+        cursor: 0,
+        generation: 1,
+    });
+    let modal = modal_area(area, &kind);
+    let (list_area, detail_area, footer_area) =
+        list_detail_regions(modal, ListDetailSplit::Refresh);
+    assert_eq!(list_area.width, detail_area.width);
+    assert_eq!(detail_area.y, list_area.bottom());
+    assert_eq!(detail_area.height, 6);
+    assert_eq!(footer_area.y, detail_area.bottom());
+
+    let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+    app.modal = Some(kind);
+    let buffer = render_full_modal(area, &app);
+    let header = row_text(&buffer, list_area.y);
+    for label in ["Source", "Status", "Models", "Changes"] {
+        assert!(header.contains(label), "{header}");
+    }
+    assert!(row_text(&buffer, list_area.y + 1).contains("Xiaomi MiMo Coding Plan"));
+    assert!(buffer_text(&buffer).contains("No model changes"));
+}
+
+#[test]
+fn refresh_detail_scroll_matches_responsive_render_geometry() {
+    let sources = vec![crate::commands::RefreshSourceState {
+        display_name: "Models.dev".to_string(),
+        status: crate::commands::RefreshSourceStatus::Ok,
+        model_count: Some(120),
+        added: (0..20)
+            .map(|i| format!("provider/a-long-model-name-{i}"))
+            .collect(),
+        removed: Vec::new(),
+    }];
+    for width in [50, 80, 110, 160] {
+        let area = Rect::new(0, 0, width, 24);
+        let (_, detail, _) = list_detail_regions(area, ListDetailSplit::Refresh);
+        assert_eq!(
+            max_refresh_detail_scroll(area, &sources, 0),
+            detail_max_scroll(
+                detail_pane_inner(detail),
+                &refresh_detail_lines(&sources[0])
+            )
+        );
+    }
 }
