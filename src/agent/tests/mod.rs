@@ -111,11 +111,13 @@ fn image_user_message() -> ChatCompletionRequestMessage {
                         vec![
                             async_openai::types::chat::ChatCompletionRequestUserMessageContentPart::Text(
                                 async_openai::types::chat::ChatCompletionRequestMessageContentPartText {
+                                    prompt_cache_breakpoint: None,
                                     text: "inspect this image".to_string(),
                                 },
                             ),
                             async_openai::types::chat::ChatCompletionRequestUserMessageContentPart::ImageUrl(
                                 async_openai::types::chat::ChatCompletionRequestMessageContentPartImage {
+                                    prompt_cache_breakpoint: None,
                                     image_url: async_openai::types::chat::ImageUrl {
                                         url: "data:image/png;base64,AAAA".to_string(),
                                         detail: None,

@@ -105,7 +105,10 @@ pub(crate) fn sanitize_image_parts_for_wire(
                     ChatCompletionRequestUserMessageContentPart::ImageUrl(image) => {
                         match image_part_replacement(&image.image_url.url, supports_vision) {
                             Some(text) => ChatCompletionRequestUserMessageContentPart::Text(
-                                ChatCompletionRequestMessageContentPartText { text },
+                                ChatCompletionRequestMessageContentPartText {
+                                    prompt_cache_breakpoint: None,
+                                    text,
+                                },
                             ),
                             None => part.clone(),
                         }
@@ -919,11 +922,13 @@ mod tests {
             content: ChatCompletionRequestUserMessageContent::Array(vec![
                 ChatCompletionRequestUserMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
+                        prompt_cache_breakpoint: None,
                         text: "look at this".to_string(),
                     },
                 ),
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
+                        prompt_cache_breakpoint: None,
                         image_url: ImageUrl {
                             url: "data:image/png;base64,AAAA".to_string(),
                             detail: None,
@@ -983,6 +988,7 @@ mod tests {
             content: ChatCompletionRequestUserMessageContent::Array(vec![
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
+                        prompt_cache_breakpoint: None,
                         image_url: ImageUrl {
                             url: "data:image/png;base64,AAAA".to_string(),
                             detail: None,
@@ -1042,11 +1048,13 @@ mod tests {
             content: ChatCompletionRequestUserMessageContent::Array(vec![
                 ChatCompletionRequestUserMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
+                        prompt_cache_breakpoint: None,
                         text: "the logo".to_string(),
                     },
                 ),
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
+                        prompt_cache_breakpoint: None,
                         image_url: ImageUrl {
                             url: url.to_string(),
                             detail: None,

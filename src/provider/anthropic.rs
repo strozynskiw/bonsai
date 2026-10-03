@@ -1624,6 +1624,7 @@ mod tests {
             content: ChatCompletionRequestUserMessageContent::Array(vec![
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
+                        prompt_cache_breakpoint: None,
                         image_url: ImageUrl {
                             url: "data:image/png;base64,AAAA".to_string(),
                             detail: None,
