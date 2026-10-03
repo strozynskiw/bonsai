@@ -8,6 +8,8 @@ pub(super) enum ListDetailSplit {
     Vertical,
     /// List on the left, detail on the right (skills).
     Horizontal,
+    /// Prioritize the source table, stacking compact details on narrow screens.
+    Refresh,
 }
 
 /// Configuration shared by all two-pane list/detail modals.
@@ -86,6 +88,24 @@ pub(super) fn list_detail_regions(area: Rect, split: ListDetailSplit) -> (Rect, 
                 .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
                 .split(body[0]);
             (columns[0], columns[1], body[1])
+        }
+        ListDetailSplit::Refresh => {
+            let body = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(2)])
+                .split(inner);
+            let panes = if inner.width >= 90 {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+                    .split(body[0])
+            } else {
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(3), Constraint::Length(6)])
+                    .split(body[0])
+            };
+            (panes[0], panes[1], body[1])
         }
     }
 }
