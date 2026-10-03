@@ -3,6 +3,51 @@
 # metadata backfill automatically. MiMo documents a top-level
 # `thinking.type = enabled|disabled` toggle and `reasoning_content` replay.
 
+# MiMo V2.6 (2026-09-22) is the current Pro/Flash pair: same 1M context and 128K
+# output as V2.5, with Pro on the Pro rates (0.435/0.87 per M) and Flash on the
+# cheap tier (0.14/0.28).
+[[targets]]
+connection = "mimo"
+model = "mimo/mimo-v2.6-pro"
+remote_model = "mimo-v2.6-pro"
+metadata_model = "xiaomi/mimo-v2.6-pro"
+recommended = true
+endpoint_path = "chat/completions"
+token_counter = "heuristic"
+reasoning_codec = "mimo-thinking"
+max_tokens = 16000
+context_window = 1048576
+output_limit = 131072
+# models.dev's xiaomi row omits MiMo's cache-write rate (writes are free);
+# keep the explicit 0 instead of falling back to the input rate.
+pinned_fields = ["pricing"]
+pricing = { input_micros_per_million = 435000, output_micros_per_million = 870000, cache_read_micros_per_million = 3600, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+# V2.6 Flash is the newest cheap tier of the family; V2.5 stays the default
+# picker selection until the V2.6 pair is live-verified on the metered API.
+[[targets]]
+connection = "mimo"
+model = "mimo/mimo-v2.6-flash"
+remote_model = "mimo-v2.6-flash"
+metadata_model = "xiaomi/mimo-v2.6-flash"
+roles = ["cheap"]
+endpoint_path = "chat/completions"
+token_counter = "heuristic"
+reasoning_codec = "mimo-thinking"
+max_tokens = 16000
+context_window = 1048576
+output_limit = 131072
+# models.dev's xiaomi row omits MiMo's cache-write rate (writes are free);
+# keep the explicit 0 instead of falling back to the input rate.
+pinned_fields = ["pricing"]
+pricing = { input_micros_per_million = 140000, output_micros_per_million = 280000, cache_read_micros_per_million = 2800, cache_write_micros_per_million = 0 }
+
+[[targets.reasoning_options]]
+type = "toggle"
+
 [[targets]]
 connection = "mimo"
 model = "mimo/mimo-v2.5-pro"
@@ -16,6 +61,9 @@ reasoning_codec = "mimo-thinking"
 max_tokens = 16000
 context_window = 1048576
 output_limit = 131072
+# models.dev's xiaomi row omits MiMo's cache-write rate (writes are free);
+# keep the explicit 0 instead of falling back to the input rate.
+pinned_fields = ["pricing"]
 pricing = { input_micros_per_million = 435000, output_micros_per_million = 870000, cache_read_micros_per_million = 3600, cache_write_micros_per_million = 0 }
 
 [[targets.reasoning_options]]
@@ -35,6 +83,9 @@ reasoning_codec = "mimo-thinking"
 max_tokens = 16000
 context_window = 1048576
 output_limit = 131072
+# models.dev's xiaomi row omits MiMo's cache-write rate (writes are free);
+# keep the explicit 0 instead of falling back to the input rate.
+pinned_fields = ["pricing"]
 pricing = { input_micros_per_million = 140000, output_micros_per_million = 280000, cache_read_micros_per_million = 2800, cache_write_micros_per_million = 0 }
 
 [[targets.reasoning_options]]

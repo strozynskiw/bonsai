@@ -53,6 +53,11 @@ type = "toggle"
 connection = "moonshotai"
 model = "moonshotai/kimi-k2.5"
 remote_model = "kimi-k2.5"
+# moonshotai dropped its kimi-k2.5 row (k2.6/k2.7-code/k3 remain), so this
+# entry keeps Moonshot's last published rates for sessions that still route
+# here. Unpinned, the drift check would pull in a third-party host's row for
+# the same wire name (openrouter, ollama-cloud, …) and overwrite them.
+pinned = true
 roles = ["cheap"]
 token_counter = "tiktoken"
 reasoning_codec = "kimi-thinking"

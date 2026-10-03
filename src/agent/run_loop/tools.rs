@@ -305,9 +305,12 @@ impl Agent {
         }
 
         // PostToolUse can append arbitrary hook context. This final boundary
-        // masks both that context and the original tool result before any sink,
-        // model context, or persisted snapshot can observe either.
-        result.redact_secrets();
+        // normalizes both that context and the original tool result before any
+        // sink, model context, or persisted snapshot can observe either: raw
+        // command output arrives with the escape sequences a terminal was meant
+        // to consume, and masking must happen after those are gone (see
+        // `ToolOutput::sanitize_for_context`).
+        result.sanitize_for_context();
         report_tool_completion(&sink, &tool_call, &result, status);
 
         (tool_call, result, status)

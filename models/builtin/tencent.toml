@@ -33,6 +33,28 @@ pricing = { input_micros_per_million = 132000, output_micros_per_million = 52800
 type = "effort"
 values = ["none", "low", "high"]
 
+# Hy4 (2026-08-28) is Hunyuan's 1M-context generation. TokenHub exposes no
+# prices, so models.dev's current international rates are pinned here; the
+# Preview id stays non-default until a live listing confirms serving. models.dev
+# lists no_think/effort=high only — Hy3's `low` is not offered.
+[[targets]]
+connection = "tencent"
+model = "tencent/hy4-preview"
+remote_model = "hy4-preview"
+metadata_model = "tencent-tokenhub/hy4-preview"
+display_name = "Hy4 Preview"
+recommended_effort = "high"
+token_counter = "heuristic"
+pinned_fields = ["display-name", "context-window", "output-limit", "pricing", "features", "reasoning"]
+context_window = 1024000
+output_limit = 64000
+features = ["tool-call", "reasoning", "structured-output", "temperature"]
+pricing = { input_micros_per_million = 834000, output_micros_per_million = 2501000, cache_read_micros_per_million = 42000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "high"]
+
 # Preview remains a distinct TokenHub model id. Tencent publishes the same
 # 256K/128K limits, but its current international price sheet has no standalone
 # Preview rate. Leave pricing unknown instead of inheriting models.dev's zero

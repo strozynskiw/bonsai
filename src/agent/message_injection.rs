@@ -529,7 +529,12 @@ impl Agent {
 }
 
 pub(super) fn untrusted_runtime_note(source: &str, body: &str) -> String {
-    let redacted = crate::redact::redact(body);
+    // Runtime notes quote raw command output — background task tails above all.
+    // Strip terminal controls *before* masking secrets: escape bytes can split a
+    // credential into fragments no redaction pattern matches, and stripping
+    // afterwards would re-join them into a live token the model then sees.
+    let stripped = crate::util::ansi::strip_terminal_controls(body);
+    let redacted = crate::redact::redact(stripped.as_ref());
     crate::tool::wrap_untrusted_content(source, redacted.as_ref())
 }
 
@@ -574,6 +579,34 @@ mod tests {
             "{framed}"
         );
         assert!(!framed.contains(&secret), "{framed}");
+        assert!(framed.contains("[REDACTED:GitHub token]"), "{framed}");
+    }
+
+    #[test]
+    fn runtime_note_strips_terminal_controls_from_quoted_command_output() {
+        // A background `bash` task tail quotes the command's own bytes; the
+        // model must not receive the escape sequences that terminal was meant
+        // to consume.
+        let framed = untrusted_runtime_note(
+            "background command completion",
+            "$ cargo test\n\u{1b}[32mok\u{1b}[0m \u{1b}(B\u{1b}[1m1 passed\u{1b}[m\n",
+        );
+
+        assert!(!framed.contains('\u{1b}'), "{framed}");
+        assert!(framed.contains("ok 1 passed"), "{framed}");
+    }
+
+    #[test]
+    fn runtime_note_masks_a_credential_split_by_escape_bytes() {
+        // Stripping after masking would hand the model the re-joined token.
+        let halves = "a1B2c3D4e5".repeat(2);
+        let token = format!("ghp_{halves}{halves}");
+        let framed = untrusted_runtime_note(
+            "background command completion",
+            &format!("key=ghp_{halves}\u{1b}[0m{halves} done"),
+        );
+
+        assert!(!framed.contains(&token), "{framed}");
         assert!(framed.contains("[REDACTED:GitHub token]"), "{framed}");
     }
 }

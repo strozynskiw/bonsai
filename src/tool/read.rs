@@ -733,8 +733,14 @@ impl ReadTool {
         })
     }
 
+    /// True only for image formats the wire targets accept (see
+    /// [`crate::provider::transform::SUPPORTED_IMAGE_MEDIA_TYPES`]).
+    /// `mime_for_path` maps `.svg` to `image/svg+xml`, but no provider accepts
+    /// that media type — SVG files fall through to the text reader so the
+    /// model gets their editable source instead of a guaranteed 400.
     fn is_image_path(&self, path: &std::path::Path) -> bool {
-        mime_for_path(path).starts_with("image/")
+        crate::provider::transform::SUPPORTED_IMAGE_MEDIA_TYPES
+            .contains(&mime_for_path(path).as_str())
     }
 }
 
@@ -860,7 +866,12 @@ async fn is_binary(path: &std::path::Path) -> Result<bool> {
 }
 
 fn mime_for_path(path: &std::path::Path) -> String {
-    match path.extension().and_then(|ext| ext.to_str()) {
+    // Lowercase the extension so `.PNG`/`.SVG` map like `.png`/`.svg`.
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
         Some("png") => "image/png".to_string(),
         Some("jpg") | Some("jpeg") => "image/jpeg".to_string(),
         Some("gif") => "image/gif".to_string(),
@@ -930,6 +941,15 @@ mod tests {
         assert_eq!(
             mime_for_path(PathBuf::from("image.png").as_path()),
             "image/png"
+        );
+        // Extensions are case-insensitive: `.PNG`/`.SVG` map like `.png`/`.svg`.
+        assert_eq!(
+            mime_for_path(PathBuf::from("image.PNG").as_path()),
+            "image/png"
+        );
+        assert_eq!(
+            mime_for_path(PathBuf::from("diagram.SVG").as_path()),
+            "image/svg+xml"
         );
         assert_eq!(
             mime_for_path(PathBuf::from("photo.jpg").as_path()),
@@ -1502,6 +1522,25 @@ mod tests {
             }
             _ => panic!("Expected Image output"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_read_svg_returns_text_not_image() {
+        // Regression (observed live, session #259): an SVG read as
+        // `image/svg+xml` base64 400s every provider ("The image data you
+        // provided does not represent a valid image") and wedges the session.
+        // SVG is editable source text — return it as such.
+        let fixture = TestFixture::new();
+        fixture.create_file(
+            "logo.svg",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        );
+
+        let tool = ReadTool::new(fixture.project_root.clone(), fixture.read_tracker.clone());
+        let result = tool.execute(json!({ "path": "logo.svg" })).await.unwrap();
+
+        let (text, _evidence) = read_output(result);
+        assert!(text.contains("<svg"), "{text}");
     }
 
     #[tokio::test]

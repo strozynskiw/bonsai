@@ -307,6 +307,42 @@ impl ToolOutput {
         }
     }
 
+    /// Strip ANSI/VT control sequences from the textual fields that carry raw
+    /// command output. Applied at the same run-loop boundary as
+    /// [`Self::redact_secrets`], so the model context, the transcript, `/ctx`,
+    /// and the persisted snapshot all see the same control-free form: those
+    /// bytes only add noise and destabilize text comparisons and cache prefixes.
+    ///
+    /// Byte/char counts in the `bash` command-summary footer are deliberately
+    /// left describing the command's raw output — they are evidence about what
+    /// the command emitted, not a measurement of this stripped text.
+    fn sanitize_terminal_controls(&mut self) {
+        if let Self::Command {
+            rendered,
+            stdout,
+            stderr,
+            ..
+        } = self
+        {
+            crate::util::ansi::strip_terminal_controls_in_place(rendered);
+            crate::util::ansi::strip_terminal_controls_in_place(stdout);
+            crate::util::ansi::strip_terminal_controls_in_place(stderr);
+        }
+    }
+
+    /// Final normalization before any sink observes this result: strip terminal
+    /// controls, then mask credentials.
+    ///
+    /// The order matters and is why this exists as one call. Escape bytes can
+    /// split a credential into fragments no redaction pattern matches
+    /// (`ghp_ac\u{1b}[0mdef`), so masking first would miss the token and
+    /// stripping afterwards would re-join it into a live secret the model then
+    /// sees.
+    pub(crate) fn sanitize_for_context(&mut self) {
+        self.sanitize_terminal_controls();
+        self.redact_secrets();
+    }
+
     #[must_use]
     pub(crate) fn usage_totals(&self) -> Option<UsageTotals> {
         match self {
@@ -2333,5 +2369,79 @@ mod registry_order_tests {
         let registry = ToolRegistry::new();
         let message = registry.unknown_tool_message("anything");
         assert!(message.contains("No tools are available"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod terminal_control_tests {
+    use super::ToolOutput;
+
+    fn command(rendered: &str, stdout: &str, stderr: &str) -> ToolOutput {
+        ToolOutput::Command {
+            rendered: rendered.to_string(),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+            truncation: None,
+        }
+    }
+
+    #[test]
+    fn command_output_loses_terminal_control_sequences() {
+        // Session 119: a failed `cargo fmt --all -- --check` leaked CSI color
+        // fragments (`^[[31m`, `^[(B^[[m`) into the model-facing excerpt.
+        let mut output = command(
+            "error: \u{1b}[31mstyle\u{1b}[0m\n\u{1b}(B\u{1b}[m",
+            "\u{1b}[32mok\u{1b}[0m",
+            "warn: \u{1b}[33mhint\u{1b}[0m",
+        );
+        output.sanitize_terminal_controls();
+
+        let ToolOutput::Command {
+            rendered,
+            stdout,
+            stderr,
+            ..
+        } = output
+        else {
+            panic!("constructed as Command");
+        };
+        assert_eq!(rendered, "error: style\n");
+        assert_eq!(stdout, "ok");
+        assert_eq!(stderr, "warn: hint");
+    }
+
+    #[test]
+    fn other_output_variants_keep_their_bytes() {
+        // A read must stay byte-exact for a source file that contains escape
+        // literals; only command output is normalized.
+        let literal = "const ESC: char = '\\u{1b}';";
+        let mut output = ToolOutput::Text(literal.to_string());
+        output.sanitize_terminal_controls();
+
+        let ToolOutput::Text(text) = output else {
+            panic!("constructed as Text");
+        };
+        assert_eq!(text, literal);
+    }
+
+    #[test]
+    fn context_normalization_masks_a_credential_split_by_escape_bytes() {
+        // Masking before stripping would leave the re-joined token visible.
+        let halves = "a1B2c3D4e5".repeat(2);
+        let token = format!("ghp_{halves}{halves}");
+        let mut output = command(
+            &format!("error: key=ghp_{halves}\u{1b}[0m{halves} leaked"),
+            "",
+            "",
+        );
+        output.sanitize_for_context();
+
+        let ToolOutput::Command { rendered, .. } = output else {
+            panic!("constructed as Command");
+        };
+        assert!(!rendered.contains(&token), "{rendered}");
+        assert!(rendered.contains("[REDACTED:GitHub token]"), "{rendered}");
     }
 }

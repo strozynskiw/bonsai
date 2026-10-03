@@ -17,7 +17,7 @@ pub(crate) mod test_utils;
 mod think_tags;
 mod token;
 mod tool_calls;
-mod transform;
+pub(crate) mod transform;
 mod usage;
 
 pub use auth::{AuthInput, AuthorizeOutcome};

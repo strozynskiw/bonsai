@@ -94,7 +94,7 @@ impl StartNewPlanTool {
             // surface cannot start a new plan, so it also stays. None of these
             // are errors: the coding turn simply continues.
             _ => Ok(ToolOutput::Text(
-                "Staying in the coding agent. Continue the work here, or produce a brief plan inline in chat — do not write an ad-hoc plan file.".to_string(),
+                "Staying in the coding agent. Continue the work here, or produce a brief plan inline in chat. Do not create an ad-hoc plan file by default; if the user explicitly asks to save or export a plan or existing output to a project file, write it to the requested path.".to_string(),
             )),
         }
     }
@@ -119,7 +119,9 @@ impl Tool for StartNewPlanTool {
          offering it is cheap. On confirmation any existing non-empty canvas is saved to the \
          plan library, then the conversation continues under the planning persona with a fresh \
          canvas; if the user declines, keep working in the coding agent. \
-         Never write an ad-hoc plan file (e.g. *.plan.md) — the canvas is the plan surface."
+         Do not create ad-hoc plan files (e.g. *.plan.md) by default — the canvas is the plan \
+         surface — but honor an explicit user request to save or export a plan or existing output \
+         to a project file."
     }
 
     fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
@@ -205,7 +207,12 @@ mod tests {
         });
         let out = tool.execute(serde_json::json!({})).await.unwrap();
         answerer.await.unwrap();
-        assert!(matches!(out, ToolOutput::Text(_)));
+        assert!(matches!(
+            out,
+            ToolOutput::Text(message)
+                if message.contains("if the user explicitly asks to save or export")
+                    && message.contains("write it to the requested path")
+        ));
     }
 
     #[tokio::test]

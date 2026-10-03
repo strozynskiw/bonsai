@@ -1006,6 +1006,36 @@ async fn fresh_plan_protection_saves_then_clears_an_unsaved_canvas() {
 }
 
 #[tokio::test]
+async fn fresh_plan_protection_saves_then_clears_untitled_review_findings() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
+    let mut review = crate::plan::PlanDoc::default();
+    review.edit().add_finding(review_finding(
+        "The payment transition contract drops duplicate callbacks",
+    ));
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(review));
+    let mut app = app();
+
+    protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+        .await
+        .unwrap();
+
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    let saved = storage
+        .saved_plans_for_project(temp_dir.path(), 10)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].title,
+        "The payment transition contract drops duplicate callbacks"
+    );
+    let snapshot = storage.load_saved_plan(saved[0].id).await.unwrap().unwrap();
+    assert_eq!(snapshot.plan.findings.len(), 1);
+}
+
+#[tokio::test]
 async fn fresh_plan_protection_refreshes_linked_plan_in_place() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
@@ -1039,22 +1069,29 @@ async fn fresh_plan_protection_refreshes_linked_plan_in_place() {
 }
 
 #[tokio::test]
-async fn fresh_plan_protection_keeps_an_invalid_canvas_intact() {
+async fn fresh_plan_protection_saves_then_clears_an_untitled_task_canvas() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
-    let mut invalid = crate::plan::PlanDoc::default();
-    invalid.edit().add_task("Untitled task");
-    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let mut plan = crate::plan::PlanDoc::default();
+    plan.edit().add_task("Untitled task");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(plan));
     let mut app = app();
 
-    let err = protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
+    protect_canvas_before_new_plan(&mut app, &storage, session_id, &plan_store)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(err.to_string().contains("untitled"));
-    assert_eq!(*plan_store.lock().await, invalid);
-    assert_eq!(app.plan, invalid);
-    assert!(app.active_saved_plan_session_id.is_none());
+    assert!(app.plan.is_empty());
+    assert!(plan_store.lock().await.is_empty());
+    let saved = storage
+        .saved_plans_for_project(temp_dir.path(), 10)
+        .await
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].title, "Untitled task");
+    let snapshot = storage.load_saved_plan(saved[0].id).await.unwrap().unwrap();
+    assert_eq!(snapshot.plan.tasks.len(), 1);
+    assert_eq!(snapshot.plan.tasks[0].text, "Untitled task");
 }
 
 #[tokio::test]
@@ -1179,19 +1216,15 @@ async fn security_review_save_failure_preserves_canvas_and_skips_spawn() {
     )
     .unwrap();
     let (storage, session_id) = storage_with_active_session(&fixture.project_root).await;
-    let saved = storage
-        .save_plan_to_library(session_id, None, &sample_plan("Existing archive"), None)
-        .await
-        .unwrap();
-    let mut invalid = crate::plan::PlanDoc::default();
-    invalid.edit().add_task("Untitled task");
-    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let missing_saved_plan_id = crate::storage::SavedPlanId::from_raw(i64::MAX);
+    let plan = sample_plan("Keep after save failure");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(plan.clone()));
     let agent = test_agent_in_project(Box::new(CompleteProvider), &fixture);
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
-    app.plan = invalid.clone();
-    app.active_saved_plan_session_id = Some(saved.id);
+    app.plan = plan.clone();
+    app.active_saved_plan_session_id = Some(missing_saved_plan_id);
 
     let started = security_review_changes(
         &mut app,
@@ -1208,12 +1241,15 @@ async fn security_review_save_failure_preserves_canvas_and_skips_spawn() {
         "reviewer must not spawn after save failure"
     );
     assert_eq!(app.task_state, TaskState::Idle);
-    assert_eq!(app.plan, invalid);
-    assert_eq!(*plan_store.lock().await, invalid);
-    assert_eq!(app.active_saved_plan_session_id, Some(saved.id));
+    assert_eq!(app.plan, plan);
+    assert_eq!(*plan_store.lock().await, plan);
+    assert_eq!(
+        app.active_saved_plan_session_id,
+        Some(missing_saved_plan_id)
+    );
     assert!(app.transcript.iter().any(|item| matches!(
         item,
-        TranscriptItem::Error { error } if error.detail.contains("untitled")
+        TranscriptItem::Error { error } if error.detail.contains("no longer exists")
     )));
 }
 
@@ -1221,13 +1257,14 @@ async fn security_review_save_failure_preserves_canvas_and_skips_spawn() {
 async fn start_new_plan_save_failure_keeps_coding_and_skips_continuation() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let (storage, session_id) = storage_with_active_session(temp_dir.path()).await;
-    let mut invalid = crate::plan::PlanDoc::default();
-    invalid.edit().add_task("Untitled task");
-    let plan_store: SharedPlanStore = Arc::new(Mutex::new(invalid.clone()));
+    let missing_saved_plan_id = crate::storage::SavedPlanId::from_raw(i64::MAX);
+    let plan = sample_plan("Keep after save failure");
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(plan.clone()));
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
     let agent = test_agent(Box::new(CompleteProvider));
     let mut app = app();
+    app.active_saved_plan_session_id = Some(missing_saved_plan_id);
     app.pending_start_new_plan = true;
     let mut repo_map = empty_repo_map_injector();
 
@@ -1249,8 +1286,12 @@ async fn start_new_plan_save_failure_keeps_coding_and_skips_continuation() {
     assert_eq!(app.task_state, TaskState::Idle);
     assert!(!tasks.is_busy());
     assert!(!app.pending_start_new_plan);
-    assert_eq!(app.plan, invalid);
-    assert_eq!(*plan_store.lock().await, invalid);
+    assert_eq!(app.plan, plan);
+    assert_eq!(*plan_store.lock().await, plan);
+    assert_eq!(
+        app.active_saved_plan_session_id,
+        Some(missing_saved_plan_id)
+    );
 }
 
 fn runtime_action_deps<'a>(
@@ -5880,7 +5921,7 @@ async fn pending_queued_run_does_not_resend_primary_message() {
 }
 
 #[tokio::test]
-async fn pending_steer_runs_before_and_separately_from_enter_queue() {
+async fn pending_steer_dispatches_all_queued_messages_in_one_run() {
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
@@ -5919,14 +5960,21 @@ async fn pending_steer_runs_before_and_separately_from_enter_queue() {
         .await
     );
 
+    // A steer takes the whole queue into the chat: the older Enter-queued
+    // message is dispatched immediately (its transcript row converts), and the
+    // steer itself is pre-seeded into the same run instead of staying pending
+    // for a later one.
+    assert!(
+        !app.queued_inputs
+            .iter()
+            .any(|queued| queued.text == "later work")
+    );
     assert!(matches!(
-        app.queued_inputs.as_slice(),
-        [QueuedInput {
-            id: 1,
-            text,
-            delivery: FollowUpDelivery::Queue,
-            ..
-        }] if text == "later work"
+        app.transcript.as_slice(),
+        [
+            TranscriptItem::UserMessage { text: first },
+            TranscriptItem::QueuedUserMessage { text: second, .. }
+        ] if first == "later work" && second == "urgent correction"
     ));
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -5940,7 +5988,10 @@ async fn pending_steer_runs_before_and_separately_from_enter_queue() {
     .expect("steer run should finish");
     assert_eq!(
         requests.lock().await.as_slice(),
-        &[vec!["urgent correction".to_string()]]
+        &[vec![
+            "later work".to_string(),
+            "urgent correction".to_string()
+        ]]
     );
 }
 
@@ -9598,4 +9649,135 @@ async fn halt_folds_completed_todos_into_plan_so_continue_resumes_in_place() {
         .await
         .expect("second fold should update the plan");
     assert_eq!(plan.next_phase_with_pending(None), Some(1));
+}
+
+/// Thread-local tracing capture so shutdown tests can assert on what the drain
+/// actually logs. `set_default` (not `init`) keeps it thread-scoped, which is
+/// what the test harness needs — tests in this binary run on separate threads.
+#[derive(Clone, Default)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        let bytes = self.0.lock().expect("captured log buffer lock").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured log buffer lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_logs_at_debug() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .without_time()
+        .with_target(false)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    (logs, guard)
+}
+
+#[tokio::test]
+async fn shutdown_drain_treats_aborted_spawns_as_expected_cancellation() {
+    let mut spawns = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        spawns.spawn(std::future::pending::<()>());
+    }
+    // Let every spawn reach its first await point so the abort below lands on
+    // *running* tasks, which is the shape a real shutdown drains.
+    tokio::task::yield_now().await;
+    spawns.abort_all();
+
+    let (logs, _guard) = capture_logs_at_debug();
+    drain_background_spawns(&mut spawns).await;
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("cancelled during shutdown"),
+        "expected debug-level cancellation traces, captured:\n{captured}"
+    );
+    assert!(
+        !captured.contains("ERROR"),
+        "normal shutdown must not report cancellations at error level:\n{captured}"
+    );
+    assert!(
+        !captured.contains("panicked"),
+        "cancelled tasks are not panics:\n{captured}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drain_reports_a_panicking_spawn_at_error_level() {
+    let mut spawns = tokio::task::JoinSet::new();
+    // Not aborted: a real panic must still be attributable after the change to
+    // silence expected cancellation.
+    spawns.spawn(async {
+        panic!("spawn drain test panic");
+    });
+
+    let (logs, _guard) = capture_logs_at_debug();
+    drain_background_spawns(&mut spawns).await;
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("ERROR") && captured.contains("failed during shutdown"),
+        "a panicking spawn must be surfaced at error level:\n{captured}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_drain_stays_bounded_when_a_spawn_ignores_cancellation() {
+    let mut spawns = tokio::task::JoinSet::new();
+    // `spawn_blocking` work cannot be cancelled by `abort`, so the drain can
+    // only end at its own deadline. The body parks on a channel the test
+    // releases afterwards, keeping runtime shutdown prompt on the green path
+    // and making a wrong "wait for the spawn" drain hang rather than pass.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    spawns.spawn_blocking(move || {
+        let _ = release_rx.recv();
+    });
+    spawns.abort_all();
+
+    let drain_task = tokio::spawn(async move {
+        drain_background_spawns(&mut spawns).await;
+    });
+    // Let the drain start and register its deadline timer before the clock
+    // jumps; the auto-advance alone does not fire it while a blocking task is
+    // in flight.
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(3)).await;
+    // The deadline now fired; give the woken drain task the polls it needs to
+    // observe the elapsed timeout and drop the set.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+
+    let drained = drain_task.is_finished();
+    drop(release_tx);
+    assert!(
+        drained,
+        "the drain must stop at its deadline instead of waiting for a spawn that ignores cancellation"
+    );
+    drain_task.abort();
 }

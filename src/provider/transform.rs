@@ -54,23 +54,40 @@ pub(crate) fn content_parts(content: Option<&Value>) -> Vec<ContentPart> {
     }
 }
 
+/// Image media types every wire target accepts (the intersection of the
+/// OpenAI, Anthropic, and Codex image-input formats). An image with any other
+/// media type — notably `image/svg+xml` — is rejected with a 400 by the
+/// provider and would wedge every later turn of the session.
+pub(crate) const SUPPORTED_IMAGE_MEDIA_TYPES: &[&str] =
+    &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
 /// Text substituted for each image content part when the wire target cannot
 /// see images. Deterministic so prompt-cache prefixes stay byte-stable.
 pub(crate) const IMAGE_OMITTED_PLACEHOLDER: &str =
     "[image omitted: this model does not support image input]";
 
-/// Replace image content parts in user messages with a text placeholder, for
-/// providers whose active model rejects image input. Wire-only: the persisted
-/// history keeps the image so switching back to a vision model restores it.
-/// Returns `Borrowed` when no message carries an image, keeping the common
-/// wire body byte-identical.
-pub(crate) fn strip_image_parts_for_wire(
+/// Downgrade image content parts in user messages to text before they reach
+/// the wire. Wire-only: the persisted history keeps the image so switching
+/// back to a capable model restores it. Two independent failure modes would
+/// otherwise 400 every later turn of the session and wedge it:
+/// - the active model rejects image input entirely — every image becomes
+///   [`IMAGE_OMITTED_PLACEHOLDER`];
+/// - the image's media type is outside [`SUPPORTED_IMAGE_MEDIA_TYPES`] (e.g.
+///   `image/svg+xml` from reading an SVG) — even vision models reject those.
+///
+/// Remote http(s) image URLs pass through: the provider fetches and validates
+/// those itself. Returns `Borrowed` when nothing needs downgrading, keeping
+/// the common wire body byte-identical.
+pub(crate) fn sanitize_image_parts_for_wire(
     messages: &[ChatCompletionRequestMessage],
+    supports_vision: bool,
 ) -> Cow<'_, [ChatCompletionRequestMessage]> {
-    if !messages.iter().any(user_message_has_image) {
+    if !messages.iter().any(user_message_has_image)
+        || (supports_vision && !messages.iter().any(user_message_has_unsupported_image))
+    {
         return Cow::Borrowed(messages);
     }
-    let stripped = messages
+    let sanitized = messages
         .iter()
         .map(|message| {
             let ChatCompletionRequestMessage::User(user) = message else {
@@ -85,12 +102,13 @@ pub(crate) fn strip_image_parts_for_wire(
             let parts = parts
                 .iter()
                 .map(|part| match part {
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => {
-                        ChatCompletionRequestUserMessageContentPart::Text(
-                            ChatCompletionRequestMessageContentPartText {
-                                text: IMAGE_OMITTED_PLACEHOLDER.to_string(),
-                            },
-                        )
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(image) => {
+                        match image_part_replacement(&image.image_url.url, supports_vision) {
+                            Some(text) => ChatCompletionRequestUserMessageContentPart::Text(
+                                ChatCompletionRequestMessageContentPartText { text },
+                            ),
+                            None => part.clone(),
+                        }
                     }
                     other => other.clone(),
                 })
@@ -101,7 +119,7 @@ pub(crate) fn strip_image_parts_for_wire(
             })
         })
         .collect();
-    Cow::Owned(stripped)
+    Cow::Owned(sanitized)
 }
 
 fn user_message_has_image(message: &ChatCompletionRequestMessage) -> bool {
@@ -121,6 +139,87 @@ fn is_image_part(part: &ChatCompletionRequestUserMessageContentPart) -> bool {
         part,
         ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
     )
+}
+
+fn user_message_has_unsupported_image(message: &ChatCompletionRequestMessage) -> bool {
+    matches!(
+        message,
+        ChatCompletionRequestMessage::User(user)
+            if matches!(
+                &user.content,
+                ChatCompletionRequestUserMessageContent::Array(parts)
+                    if parts.iter().any(|part| matches!(
+                        part,
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(image)
+                            if unsupported_media_type(&image.image_url.url).is_some()
+                    ))
+            )
+    )
+}
+
+/// True when every wire target accepts this image media type. Media types are
+/// case-insensitive (RFC 2045), so compare with `eq_ignore_ascii_case`.
+fn is_supported_media_type(media_type: &str) -> bool {
+    SUPPORTED_IMAGE_MEDIA_TYPES
+        .iter()
+        .any(|supported| supported.eq_ignore_ascii_case(media_type))
+}
+
+/// Placeholder text for an image whose media type is one no wire target
+/// accepts, or `None` when the media type is supported.
+///
+/// Producers call this at ingest time — image tool results and pasted
+/// attachments — so an unusable image never enters the conversation history
+/// and rides along with every later context request as a guaranteed 400.
+/// [`sanitize_image_parts_for_wire`] applies the same replacement to histories
+/// that already contain one.
+pub(crate) fn unsupported_media_type_placeholder(media_type: &str) -> Option<String> {
+    // Same parameter-stripping parse as the wire gate: `image/png; charset=utf-8`
+    // is an accepted `image/png` at both gates.
+    let media_type = bare_media_type(media_type);
+    (!is_supported_media_type(media_type)).then(|| unsupported_image_text(media_type))
+}
+
+/// The media type before any `;` parameters or `,` data, matching how the
+/// wire gate parses `data:` URLs.
+fn bare_media_type(media_type: &str) -> &str {
+    media_type.split([',', ';']).next().unwrap_or_default()
+}
+
+fn unsupported_image_text(media_type: &str) -> String {
+    let media_type = if media_type.is_empty() {
+        "unknown"
+    } else {
+        media_type
+    };
+    format!(
+        "[image omitted: unsupported image format `{media_type}`; supported formats: image/jpeg, image/png, image/gif, image/webp]"
+    )
+}
+
+/// The media type of a `data:` image URL when it is one every wire target
+/// rejects. Remote http(s) URLs return `None`: the provider fetches and
+/// validates those itself.
+fn unsupported_media_type(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("data:")?;
+    let media_type = bare_media_type(rest);
+    if is_supported_media_type(media_type) {
+        return None;
+    }
+    Some(if media_type.is_empty() {
+        "unknown"
+    } else {
+        media_type
+    })
+}
+
+/// The text that replaces an image part on the wire, when it must be replaced.
+fn image_part_replacement(url: &str, supports_vision: bool) -> Option<String> {
+    if !supports_vision {
+        return Some(IMAGE_OMITTED_PLACEHOLDER.to_string());
+    }
+    let media_type = unsupported_media_type(url)?;
+    Some(unsupported_image_text(media_type))
 }
 
 /// Provider-wire placement for Bonsai's immutable project-state snapshots.
@@ -837,23 +936,23 @@ mod tests {
     }
 
     #[test]
-    fn strip_image_parts_borrows_when_no_images() {
+    fn sanitize_image_parts_borrows_when_no_images() {
         let messages = vec![system_message("sys"), user_message("hello")];
         assert!(matches!(
-            strip_image_parts_for_wire(&messages),
+            sanitize_image_parts_for_wire(&messages, false),
             Cow::Borrowed(_)
         ));
     }
 
     #[test]
-    fn strip_image_parts_replaces_images_with_placeholder_and_keeps_text() {
+    fn sanitize_image_parts_replaces_images_with_placeholder_and_keeps_text() {
         let messages = vec![
             system_message("sys"),
             image_user_message(Some("bonsai_user")),
             user_message("plain"),
         ];
 
-        let stripped = strip_image_parts_for_wire(&messages);
+        let stripped = sanitize_image_parts_for_wire(&messages, false);
 
         let ChatCompletionRequestMessage::User(user) = &stripped[1] else {
             panic!("expected a user message");
@@ -877,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_image_parts_keeps_content_non_empty_for_image_only_messages() {
+    fn sanitize_image_parts_keeps_content_non_empty_for_image_only_messages() {
         use async_openai::types::chat::ChatCompletionRequestMessageContentPartImage;
         use async_openai::types::chat::ImageUrl;
         let image_only = ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
@@ -895,7 +994,7 @@ mod tests {
         });
 
         let messages = [image_only];
-        let stripped = strip_image_parts_for_wire(&messages);
+        let stripped = sanitize_image_parts_for_wire(&messages, false);
         let ChatCompletionRequestMessage::User(user) = &stripped[0] else {
             panic!("expected a user message");
         };
@@ -906,6 +1005,99 @@ mod tests {
         assert!(
             matches!(&parts[0], ChatCompletionRequestUserMessageContentPart::Text(t) if t.text == IMAGE_OMITTED_PLACEHOLDER)
         );
+    }
+
+    #[test]
+    fn unsupported_media_type_matches_case_insensitively() {
+        // RFC 2045 media types are case-insensitive: `data:image/JPEG` is a
+        // supported image and must pass through unchanged.
+        assert_eq!(unsupported_media_type("data:image/JPEG;base64,AAAA"), None);
+        assert_eq!(unsupported_media_type("data:IMAGE/PNG;base64,AAAA"), None);
+        assert_eq!(
+            unsupported_media_type("data:image/SVG+XML;base64,AAAA"),
+            Some("image/SVG+XML")
+        );
+    }
+
+    #[test]
+    fn ingest_gate_strips_media_type_parameters_like_the_wire_gate() {
+        assert_eq!(unsupported_media_type_placeholder("image/png"), None);
+        assert_eq!(
+            unsupported_media_type_placeholder("image/png; charset=utf-8"),
+            None
+        );
+        assert_eq!(
+            unsupported_media_type_placeholder("image/svg+xml"),
+            Some(
+                "[image omitted: unsupported image format `image/svg+xml`; supported formats: image/jpeg, image/png, image/gif, image/webp]"
+                    .to_string()
+            )
+        );
+    }
+
+    fn image_message_with_url(url: &str) -> ChatCompletionRequestMessage {
+        use async_openai::types::chat::ChatCompletionRequestMessageContentPartImage;
+        use async_openai::types::chat::ImageUrl;
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(vec![
+                ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: "the logo".to_string(),
+                    },
+                ),
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    ChatCompletionRequestMessageContentPartImage {
+                        image_url: ImageUrl {
+                            url: url.to_string(),
+                            detail: None,
+                        },
+                    },
+                ),
+            ]),
+            name: None,
+        })
+    }
+
+    #[test]
+    fn sanitize_image_parts_replaces_unsupported_media_type_even_for_vision_model() {
+        // Regression (observed live): `read` on an SVG emitted
+        // `data:image/svg+xml;base64,...`; no wire target accepts that media
+        // type (OpenAI: "The image data you provided does not represent a
+        // valid image"), so every later turn 400ed and the session wedged.
+        let messages = vec![
+            system_message("sys"),
+            image_message_with_url("data:image/svg+xml;base64,PHN2Zz4="),
+        ];
+
+        let sanitized = sanitize_image_parts_for_wire(&messages, true);
+
+        let ChatCompletionRequestMessage::User(user) = &sanitized[1] else {
+            panic!("expected a user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+            panic!("expected array content");
+        };
+        assert!(
+            matches!(&parts[1], ChatCompletionRequestUserMessageContentPart::Text(t)
+                if t.text.contains("unsupported image format")
+                    && t.text.contains("image/svg+xml")),
+            "svg must be downgraded to a text placeholder"
+        );
+    }
+
+    #[test]
+    fn sanitize_image_parts_borrows_for_vision_model_with_supported_images() {
+        // Supported data URIs and remote URLs (the provider validates those)
+        // stay untouched — byte-identical wire body for the common case.
+        let messages = vec![
+            system_message("sys"),
+            image_message_with_url("data:image/png;base64,AAAA"),
+            image_message_with_url("https://example.com/cat.webp"),
+        ];
+        assert!(matches!(
+            sanitize_image_parts_for_wire(&messages, true),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]

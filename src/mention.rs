@@ -9,7 +9,10 @@ use crate::tool::{ReadCoverage, ReadEvidence, ReadTracker, ReadWindow, digest_co
 pub(crate) const MENTION_FILE_CAP_BYTES: usize = 64 * 1024;
 const MENTION_TOTAL_CAP_BYTES: usize = 256 * 1024;
 pub(crate) const MENTION_DIRECTORY_ENTRY_CAP: usize = 200;
-const IMAGE_MENTION_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+// SVG is deliberately absent: it is XML source text, so an `.svg` mention is
+// inlined as text — mirroring `ReadTool::is_image_path`, since no provider
+// accepts `image/svg+xml` as image input.
+const IMAGE_MENTION_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedMention {
