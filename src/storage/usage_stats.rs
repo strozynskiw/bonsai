@@ -299,6 +299,7 @@ impl Storage {
              SUM(CASE WHEN lane_seq > 1 AND rewrite_kind = 'none' AND actual_cache_read_percent = 0 THEN 1 ELSE 0 END) AS cold_turns, \
              SUM(CASE WHEN lane_seq > 1 AND rewrite_kind = 'none' AND actual_cache_read_percent IS NOT NULL THEN 1 ELSE 0 END) AS warm_eligible_turns \
              FROM usage_turns \
+             WHERE session_id IN (SELECT id FROM sessions WHERE kind = 'task') \
              GROUP BY 1, 2, 3 \
              ORDER BY 1",
         )
@@ -343,6 +344,7 @@ impl Storage {
              MAX(ut.created_at_ms) AS last_used_ms \
              FROM usage_turns ut \
              JOIN sessions s ON s.id = ut.session_id \
+             WHERE s.kind = 'task' \
              GROUP BY 1, 2 \
              ORDER BY cost_micros DESC, input_tokens DESC",
         )
@@ -377,7 +379,7 @@ impl Storage {
              sessions.prompt_token_count + sessions.completion_token_count AS token_count, \
              sessions.started_at_ms \
              FROM sessions JOIN projects ON projects.id = sessions.project_id \
-             WHERE sessions.cost_micros > 0 \
+             WHERE sessions.kind = 'task' AND sessions.cost_micros > 0 \
              ORDER BY sessions.cost_micros DESC \
              LIMIT ?",
         )
@@ -407,14 +409,14 @@ impl Storage {
              CAST(COALESCE(AVG(COALESCE(ended_at_ms, updated_at_ms) - started_at_ms), 0) AS INTEGER) AS avg_duration_ms, \
              COALESCE(MAX(COALESCE(ended_at_ms, updated_at_ms) - started_at_ms), 0) AS longest_duration_ms \
              FROM sessions \
-             WHERE COALESCE(ended_at_ms, updated_at_ms) > started_at_ms",
+             WHERE kind = 'task' AND COALESCE(ended_at_ms, updated_at_ms) > started_at_ms",
         )
         .fetch_one(&self.pool)
         .await
         .context("Failed to load session duration stats")?;
         let longest = sqlx::query(
             "SELECT name FROM sessions \
-             WHERE COALESCE(ended_at_ms, updated_at_ms) > started_at_ms \
+             WHERE kind = 'task' AND COALESCE(ended_at_ms, updated_at_ms) > started_at_ms \
              ORDER BY COALESCE(ended_at_ms, updated_at_ms) - started_at_ms DESC \
              LIMIT 1",
         )
@@ -439,6 +441,7 @@ impl Storage {
              SUM(sessions.prompt_token_count + sessions.completion_token_count) AS tokens, \
              SUM(CASE WHEN sessions.cost_micros >= 0 THEN sessions.cost_micros ELSE 0 END) AS cost_micros \
              FROM sessions JOIN projects ON projects.id = sessions.project_id \
+             WHERE sessions.kind = 'task' \
              GROUP BY projects.id \
              ORDER BY tokens DESC \
              LIMIT ?",
@@ -461,7 +464,7 @@ impl Storage {
 
     async fn load_session_status_counts(&self) -> Result<Vec<(SessionStatus, i64)>> {
         let rows = sqlx::query(
-            "SELECT status, COUNT(*) AS count FROM sessions GROUP BY status ORDER BY count DESC",
+            "SELECT status, COUNT(*) AS count FROM sessions WHERE kind = 'task' GROUP BY status ORDER BY count DESC",
         )
         .fetch_all(&self.pool)
         .await
@@ -479,7 +482,8 @@ impl Storage {
     async fn load_task_outcome_counts(&self) -> Result<Vec<(TaskOutcome, i64)>> {
         let rows = sqlx::query(
             "SELECT outcome, COUNT(*) AS count FROM task_runs \
-             WHERE outcome IS NOT NULL GROUP BY outcome ORDER BY count DESC, outcome",
+             WHERE session_id IN (SELECT id FROM sessions WHERE kind = 'task') \
+             AND outcome IS NOT NULL GROUP BY outcome ORDER BY count DESC, outcome",
         )
         .fetch_all(&self.pool)
         .await
@@ -501,7 +505,8 @@ impl Storage {
              CAST(COALESCE(AVG(duration_ms), 0) AS INTEGER) AS avg_duration_ms, \
              COALESCE(MAX(duration_ms), 0) AS max_duration_ms \
              FROM tool_calls \
-             WHERE status != 'running' \
+             WHERE session_id IN (SELECT id FROM sessions WHERE kind = 'task') \
+             AND status != 'running' \
              GROUP BY name \
              ORDER BY calls DESC",
         )

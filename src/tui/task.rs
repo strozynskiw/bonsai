@@ -984,8 +984,17 @@ impl TaskController {
             active_mode,
         } = deps;
         let sender = self.sender.clone();
+        let session_runtime = self.session_runtime_budget.clone();
         let handle = tokio::spawn(async move {
             let result = async {
+                if matches!(
+                    input.split_whitespace().next(),
+                    Some("/authorize" | "/unauthorize" | "/model" | "/provider" | "/refresh")
+                ) && let Some(runtime) = session_runtime.as_ref()
+                    && let Some(session_id) = *runtime.active_session_id.lock().await
+                {
+                    runtime.storage.record_provider_probe(session_id).await?;
+                }
                 // Canonical lock order: session_store before agent. Every site
                 // that holds both locks acquires in this order so a concurrent
                 // command (e.g. an orphaned `/authorize` spawn) can't form an

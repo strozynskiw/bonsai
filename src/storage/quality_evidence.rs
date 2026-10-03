@@ -68,10 +68,12 @@ impl Storage {
             r#"
             SELECT DISTINCT current.session_id
             FROM verification_runs current
-            WHERE EXISTS (
+            WHERE current.session_id IN (SELECT id FROM sessions WHERE kind = 'task')
+              AND EXISTS (
                 SELECT 1
                 FROM verification_runs other
-                WHERE other.session_id != current.session_id
+                WHERE other.session_id IN (SELECT id FROM sessions WHERE kind = 'task')
+                  AND other.session_id != current.session_id
                   AND other.started_at_ms = current.started_at_ms
             )
             ORDER BY current.session_id

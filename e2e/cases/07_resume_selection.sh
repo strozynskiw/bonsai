@@ -8,7 +8,8 @@ WAIT=0.3
 e2e_begin "07_resume_selection: pinned model serves first resumed request"
 
 provider_ready="$E2E_HOME/provider-url"
-python3 "$E2E_LIB_DIR/mock_streaming_provider.py" "$provider_ready" &
+provider_requests="$E2E_HOME/provider-requests.jsonl"
+python3 "$E2E_LIB_DIR/mock_completion_provider.py" "$provider_ready" "$provider_requests" &
 E2E_HELPER_PID=$!
 for _ in {1..40}; do
   [ -s "$provider_ready" ] && break
@@ -29,6 +30,8 @@ tui_keys "mock-model"
 expect "mock model is filtered" "OpenAI Compatible · mock-model"
 tui_keys Enter
 expect_meta "target model selected" "Coding · mock-model"
+tui_keys "Seed a resumable conversation" Enter
+expect "target task completed" "deterministic request-1 complete"
 tui_keys "/quit" Enter
 for _ in {1..20}; do
   tui_alive || break
@@ -101,6 +104,22 @@ tui_keys "continue pinned session" Enter
 expect "resumed input is submitted" "continue pinned session"
 expect_meta "first request stays on target model" "Coding · mock-model"
 forbid_meta "global model does not replace target" "qwen3.7-max"
-forbid_meta "first request is actively running" "● Coding"
+expect "first resumed request completes" "deterministic request-2 complete"
+
+if python3 - "$provider_requests" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    requests = [json.loads(line) for line in stream if line.strip()]
+models = [request.get("model") for request in requests]
+if len(models) != 2 or not models[0] or models[1] != models[0]:
+    raise SystemExit(f"resumed request did not keep the pinned wire model: {models}")
+PY
+then
+  _pass "provider request uses the pinned model"
+else
+  _fail "provider request ignored the pinned model"
+fi
+tui_keys "/quit" Enter
 
 e2e_done

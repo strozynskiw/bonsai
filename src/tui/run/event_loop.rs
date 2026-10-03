@@ -1531,6 +1531,9 @@ async fn persist_provider_selection(
     let Some(selection) = selection else {
         return;
     };
+    if let Err(err) = storage.record_provider_probe(session_id).await {
+        tracing::warn!(session_id = %session_id, error = %err, "failed to classify provider probe");
+    }
     if let Err(err) = storage
         .set_session_run_selection(
             session_id,
@@ -2679,7 +2682,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     let mut current_session_id = {
         let guard = session_store.lock().await;
         storage
-            .start_session(
+            .start_lifecycle_session(
                 &session_project_root,
                 guard.current_kind_id(),
                 &guard.current_session().model,
@@ -4010,6 +4013,14 @@ async fn shutdown_tui(
             elapsed_ms = elapsed_ms(persistence_started_at),
             "TUI final persistence completed"
         );
+    }
+
+    if let Err(err) = storage
+        .retire_clean_lifecycle_session(current_session_id)
+        .await
+    {
+        tracing::warn!(session_id = %current_session_id, error = %err,
+            "failed to retire unused session identity");
     }
 
     let app_drop_started_at = Instant::now();
