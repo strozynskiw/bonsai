@@ -208,16 +208,18 @@ for index in {1..25}; do
   mkdir -p "$runs_root/retained-$index"
   touch "$runs_root/retained-$index/.completed"
 done
-BONSAI_VERIFIER_RUNS_ROOT="$runs_root" BONSAI_VERIFIER_BIN="$probe" \
-  "$VERIFIER" -- "$first_output" >/dev/null 2>&1 &
-first_pid=$!
-BONSAI_VERIFIER_RUNS_ROOT="$runs_root" BONSAI_VERIFIER_BIN="$probe" \
-  "$VERIFIER" -- "$second_output" >/dev/null 2>&1 &
-second_pid=$!
-wait "$first_pid"
-wait "$second_pid"
+prune_pids=()
+for index in {1..6}; do
+  BONSAI_VERIFIER_RUNS_ROOT="$runs_root" BONSAI_VERIFIER_BIN="$probe" \
+    "$VERIFIER" -- "$FIXTURE_ROOT/prune-output-$index" >/dev/null 2>&1 &
+  prune_pids+=("$!")
+done
+for prune_pid in "${prune_pids[@]}"; do
+  wait "$prune_pid"
+done
 [[ -d "$runs_root/000-unregistered" && -d "$runs_root/001-active" ]]
 [[ "$(find "$runs_root" -name .completed ! -path '*/001-active/*' | wc -l | tr -d ' ')" == 20 ]]
+[[ ! -d "${runs_root}.verifier-prune-lock" ]]
 
 # Reopening a completed retained run must survive pruning pressure for the
 # entire child lifetime, even though its old .completed marker remains present.

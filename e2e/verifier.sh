@@ -111,6 +111,10 @@ sha256_file() {
 
 prune_retained_runs() {
   local runs_root="$1" retained=0 run lock
+  # The retained count belongs to the whole root. Per-run locks alone let
+  # concurrent pruners skip each other's rows and both retain over the quota.
+  # Finalization releases this lock after the complete pruning pass.
+  acquire_root_lock "$runs_root" .verifier-prune-lock
   while IFS= read -r run; do
     [[ "$run" != *.verifier-retention-lock ]] || continue
     lock="${run}.verifier-retention-lock"
