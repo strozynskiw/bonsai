@@ -702,6 +702,106 @@ async fn task_outcome_is_independent_from_session_lifecycle_and_resume() {
 }
 
 #[tokio::test]
+async fn task_start_timestamp_is_captured_after_waiting_for_a_connection() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let mut connections = Vec::new();
+    for _ in 0..5 {
+        connections.push(fixture.storage.pool.acquire().await.unwrap());
+    }
+    let mut start = std::pin::pin!(
+        fixture
+            .storage
+            .start_task_run(session_id, None, "Queued task")
+    );
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(start.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let released_at = now_ms();
+    drop(connections);
+
+    let task = start.await.unwrap();
+    assert!(
+        task.started_at_ms >= released_at,
+        "task start must reflect the serialized write, not its queued request"
+    );
+}
+
+#[tokio::test]
+async fn task_supersession_preserves_chronology_after_clock_regression() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let first = fixture
+        .storage
+        .start_task_run(session_id, None, "First task")
+        .await
+        .unwrap();
+    let future_start = now_ms() + 60_000;
+    sqlx::query("UPDATE task_runs SET started_at_ms = ? WHERE id = ?")
+        .bind(future_start)
+        .bind(first.id.as_i64())
+        .execute(&fixture.storage.pool)
+        .await
+        .unwrap();
+
+    let replacement = fixture
+        .storage
+        .start_task_run(session_id, None, "Replacement task")
+        .await
+        .unwrap();
+    let first = fixture.storage.task_run(first.id).await.unwrap().unwrap();
+    assert_eq!(first.outcome, Some(TaskOutcome::Superseded));
+    assert_eq!(first.ended_at_ms, Some(future_start));
+    assert_eq!(replacement.started_at_ms, future_start);
+    assert_eq!(
+        fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        replacement.id
+    );
+}
+
+#[tokio::test]
+async fn task_finish_preserves_chronology_after_clock_regression() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let task = fixture
+        .storage
+        .start_task_run(session_id, None, "Finish task")
+        .await
+        .unwrap();
+    let future_start = now_ms() + 60_000;
+    sqlx::query("UPDATE task_runs SET started_at_ms = ? WHERE id = ?")
+        .bind(future_start)
+        .bind(task.id.as_i64())
+        .execute(&fixture.storage.pool)
+        .await
+        .unwrap();
+
+    let finished = fixture
+        .storage
+        .finish_task_run(task.id, TaskOutcome::Succeeded, None)
+        .await
+        .unwrap();
+    assert_eq!(finished.ended_at_ms, Some(future_start));
+    assert_eq!(
+        fixture
+            .storage
+            .finish_task_run(task.id, TaskOutcome::Succeeded, None)
+            .await
+            .unwrap(),
+        finished
+    );
+}
+
+#[tokio::test]
 async fn non_success_task_requires_typed_reason_and_goal_change_supersedes() {
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;

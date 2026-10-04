@@ -226,19 +226,24 @@ impl Storage {
             .map(i64::try_from)
             .transpose()
             .context("Task episode sequence exceeds SQLite range")?;
-        let now = now_ms();
         let mut tx = self
             .begin_write()
             .await
             .context("Failed to begin task-run transaction")?;
 
+        // Capture the transition after acquiring the writer lock so queued
+        // callers cannot supersede a newer task with an older timestamp.
+        let now = now_ms();
+
         self.promote_task_session_in_tx(&mut tx, session_id).await?;
 
-        sqlx::query(
+        let superseded_at: Option<i64> = sqlx::query_scalar(
             r#"
             UPDATE task_runs
-            SET outcome = ?, terminal_reason_code = ?, terminal_reason_detail = ?, ended_at_ms = ?
+            SET outcome = ?, terminal_reason_code = ?, terminal_reason_detail = ?,
+                ended_at_ms = MAX(?, started_at_ms)
             WHERE session_id = ? AND outcome IS NULL
+            RETURNING ended_at_ms
             "#,
         )
         .bind(TaskOutcome::Superseded.as_db_str())
@@ -246,9 +251,12 @@ impl Storage {
         .bind(TaskTerminalReasonCode::GoalSuperseded.fallback_detail())
         .bind(now)
         .bind(session_id.as_i64())
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .with_context(|| format!("Failed to supersede active task for session {session_id}"))?;
+
+        // Preserve task order even if the wall clock moved backwards.
+        let now = superseded_at.unwrap_or(now);
 
         let id: i64 = sqlx::query_scalar(
             r#"
@@ -299,7 +307,8 @@ impl Storage {
         sqlx::query(
             r#"
             UPDATE task_runs
-            SET outcome = ?, terminal_reason_code = ?, terminal_reason_detail = ?, ended_at_ms = ?
+            SET outcome = ?, terminal_reason_code = ?, terminal_reason_detail = ?,
+                ended_at_ms = MAX(?, started_at_ms)
             WHERE id = ? AND outcome IS NULL
             "#,
         )

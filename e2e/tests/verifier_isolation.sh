@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'printf "FAIL: verifier isolation at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERIFIER="$E2E_DIR/verifier.sh"
