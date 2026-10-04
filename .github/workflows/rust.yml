@@ -42,6 +42,8 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y tmux
     - name: Check verifier shell syntax
       run: bash -n e2e/verifier.sh e2e/lib.sh e2e/run.sh e2e/tests/verifier_isolation.sh
+    - name: Verify verifier isolation contract
+      run: bash e2e/tests/verifier_isolation.sh
     - name: Verify native keyring isolation
       run: cargo test --locked isolated_verifier
     - name: Verify isolated real TUI

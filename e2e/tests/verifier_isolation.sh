@@ -183,6 +183,28 @@ wait "$second_pid"
 [[ ! -d "${serial_evidence}.verifier-lock" ]]
 grep -qF 'exit_code=0' "$serial_evidence/manifest.txt"
 
+# A lock can disappear after mkdir reports contention. Simulate that exact
+# interleaving instead of depending on process scheduling to hit the window.
+race_bin="$FIXTURE_ROOT/race-bin"
+race_state="$FIXTURE_ROOT/race-state"
+race_marker="$FIXTURE_ROOT/race-observed"
+mkdir -p "$race_bin"
+cat > "$race_bin/mkdir" <<'MKDIR'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "${RACE_LOCK:-}" && ! -e "${RACE_MARKER:-}" ]]; then
+  touch "$RACE_MARKER"
+  exit 1
+fi
+MKDIR
+printf 'exec %q "$@"\n' "$(command -v mkdir)" >> "$race_bin/mkdir"
+chmod +x "$race_bin/mkdir"
+PATH="$race_bin:$PATH" RACE_LOCK="${race_state}.verifier-lock" RACE_MARKER="$race_marker" \
+  "$VERIFIER" --allow-reusable-roots --state-root "$race_state" \
+  --binary "$probe" -- "$FIXTURE_ROOT/race-output" >/dev/null 2>&1
+[[ -f "$race_marker" && -f "$FIXTURE_ROOT/race-output" ]]
+[[ ! -d "${race_state}.verifier-lock" ]]
+
 # Defaults require no opt-in and allocate fresh roots concurrently.
 runs_root="$FIXTURE_ROOT/concurrent-runs"
 first_output="$FIXTURE_ROOT/first-output"
@@ -211,12 +233,17 @@ done
 prune_pids=()
 for index in {1..6}; do
   BONSAI_VERIFIER_RUNS_ROOT="$runs_root" BONSAI_VERIFIER_BIN="$probe" \
-    "$VERIFIER" -- "$FIXTURE_ROOT/prune-output-$index" >/dev/null 2>&1 &
+    "$VERIFIER" -- "$FIXTURE_ROOT/prune-output-$index" >"$FIXTURE_ROOT/prune-$index.log" 2>&1 &
   prune_pids+=("$!")
 done
-for prune_pid in "${prune_pids[@]}"; do
-  wait "$prune_pid"
+prune_failed=false
+for index in {1..6}; do
+  if ! wait "${prune_pids[index-1]}"; then
+    cat "$FIXTURE_ROOT/prune-$index.log" >&2
+    prune_failed=true
+  fi
 done
+[[ "$prune_failed" == false ]]
 [[ -d "$runs_root/000-unregistered" && -d "$runs_root/001-active" ]]
 [[ "$(find "$runs_root" -name .completed ! -path '*/001-active/*' | wc -l | tr -d ' ')" == 20 ]]
 [[ ! -d "${runs_root}.verifier-prune-lock" ]]

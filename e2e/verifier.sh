@@ -75,7 +75,10 @@ require_unlinked_tree() {
 acquire_root_lock() {
   local root="$1" lock="${1}${2:-.verifier-lock}" attempts=0
   while ! mkdir "$lock" 2>/dev/null; do
-    [[ -d "$lock" && ! -L "$lock" ]] || die "cannot lock verifier root: $root"
+    # A competing owner can release between mkdir and this check. An absent
+    # lock is a retry, while a symlink or non-directory must still fail closed.
+    [[ ! -L "$lock" && ( ! -e "$lock" || -d "$lock" ) ]] \
+      || die "cannot lock verifier root: $root"
     attempts=$((attempts + 1))
     (( attempts < 300 )) || die "verifier root is busy: $root"
     sleep 0.1
