@@ -5,6 +5,7 @@ trap 'printf "FAIL: verifier isolation at line %s: %s\n" "$LINENO" "$BASH_COMMAN
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERIFIER="$E2E_DIR/verifier.sh"
 FIXTURE_ROOT="$(mktemp -d)"
+FIXTURE_ROOT="$(cd "$FIXTURE_ROOT" && pwd -P)"
 trap 'rm -rf "$FIXTURE_ROOT"' EXIT
 
 parent_home="$FIXTURE_ROOT/parent-bonsai"
@@ -202,7 +203,8 @@ chmod +x "$race_bin/mkdir"
 PATH="$race_bin:$PATH" RACE_LOCK="${race_state}.verifier-lock" RACE_MARKER="$race_marker" \
   "$VERIFIER" --allow-reusable-roots --state-root "$race_state" \
   --binary "$probe" -- "$FIXTURE_ROOT/race-output" >/dev/null 2>&1
-[[ -f "$race_marker" && -f "$FIXTURE_ROOT/race-output" ]]
+[[ -f "$race_marker" ]]
+[[ -f "$FIXTURE_ROOT/race-output" ]]
 [[ ! -d "${race_state}.verifier-lock" ]]
 
 # Defaults require no opt-in and allocate fresh roots concurrently.
