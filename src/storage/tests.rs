@@ -6297,11 +6297,12 @@ async fn support_log_preference_round_trips_and_defaults_off() {
 }
 
 #[tokio::test]
-async fn run_budget_is_unset_by_default_and_round_trips() {
+async fn run_budget_defaults_to_soft_alerts_and_round_trips() {
     let fixture = TestStorage::new().await;
     assert_eq!(
         fixture.storage.run_budget().await.unwrap(),
-        crate::run_budget::RunBudget::default()
+        crate::run_budget::RunBudget::soft_alert_defaults(),
+        "no saved budget must still warn before a session silently passes a threshold"
     );
 
     let budget = crate::run_budget::RunBudget {
@@ -6319,6 +6320,14 @@ async fn run_budget_is_unset_by_default_and_round_trips() {
     fixture.storage.set_run_budget(budget).await.unwrap();
 
     assert_eq!(fixture.storage.run_budget().await.unwrap(), budget);
+
+    // A saved budget is authoritative — including turning every alert off.
+    let alerts_off = crate::run_budget::RunBudget {
+        max_turns: Some(50),
+        ..crate::run_budget::RunBudget::default()
+    };
+    fixture.storage.set_run_budget(alerts_off).await.unwrap();
+    assert_eq!(fixture.storage.run_budget().await.unwrap(), alerts_off);
 }
 
 #[tokio::test]

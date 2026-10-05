@@ -197,21 +197,24 @@ pub(super) fn render_budget_warning(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),
+            Constraint::Min(6),
             Constraint::Length(2),
             Constraint::Length(1),
         ])
         .split(inner);
     let mut lines = vec![Line::from(
-        "A configured cumulative alert has been reached.",
+        "A configured cumulative alert has been reached. Current usage:",
     )];
-    for alert in usage
-        .alert_states()
-        .into_iter()
-        .filter(|alert| alert.is_reached())
-    {
+    // Reached axes first, then the upcoming ones, so the decision to continue
+    // is made with the next threshold visible — not just the crossed one.
+    let mut alerts = usage.alert_states();
+    alerts.sort_by_key(|alert| !alert.is_reached());
+    for alert in alerts {
         lines.push(Line::from(format_session_alert(alert)));
     }
+    lines.push(Line::from(
+        "Raise or disable thresholds in /settings under Session alerts.",
+    ));
     f.render_widget(
         Paragraph::new(lines)
             .style(theme::panel())

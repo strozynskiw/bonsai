@@ -106,8 +106,15 @@ Multiple bonsai processes can work in one project root concurrently:
 
 ## Budgets
 
-All budgets are **off by default**; enable presets in `/settings` or pass
-headless flags (flags override saved values for that run).
+Hard limits are **off by default**; enable presets in `/settings` or pass
+headless flags (flags override saved values for that run). Session **soft
+alerts** ship conservative defaults — $5 exact cost, 10M billed tokens, 250
+provider turns, 2h active time — that warn before submit once reached
+("Continue once", or raise/disable a threshold under `/settings` → Session
+alerts). The defaults apply until you save a budget of your own, and a saved
+budget always wins, including an explicit `off`. When any turn lacks pricing,
+the cost alert is disabled and reads `unknown` while the token, turn, and
+time alerts keep warning.
 
 **Per-run** (reset each run): `max turns`, `run time`, `generation` (per
 provider attempt), `output` (streamed chars per attempt), `tool time` (per

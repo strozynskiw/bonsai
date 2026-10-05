@@ -2599,7 +2599,9 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     crate::logging::set_support_log_enabled(support_log_enabled);
     let run_budget = storage.run_budget().await.unwrap_or_else(|error| {
         tracing::warn!(error = %error, "failed to restore run budget preference");
-        crate::run_budget::RunBudget::default()
+        // Unknown preference state: fall back to the soft-warning defaults so
+        // the session still cannot silently pass a warning threshold.
+        crate::run_budget::RunBudget::soft_alert_defaults()
     });
     let mut app = {
         let guard = session_store.lock().await;

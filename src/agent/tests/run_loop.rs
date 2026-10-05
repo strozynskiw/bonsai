@@ -3965,3 +3965,113 @@ async fn restore_usage_totals_preserves_unknown_cost_state() {
         Some(InputCacheUsage::new(7, 3, 100))
     );
 }
+
+#[tokio::test]
+async fn session_budget_counters_survive_provider_switch_and_mark_unknown_cost() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![])),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_run_budget(crate::run_budget::RunBudget {
+        alert_session_billed_tokens: Some(1_000),
+        alert_session_cost_micros: Some(1),
+        ..crate::run_budget::RunBudget::default()
+    });
+
+    // Priced work before the switch accumulates exact cost.
+    agent.usage.record(
+        Some(crate::provider::TokenUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: 100,
+            input_cache: None,
+        }),
+        Some(crate::provider::ModelPricing::new(3_000_000, 15_000_000)),
+        crate::agent::UsageTurnDiagnostics {
+            execution_lane: crate::agent::ExecutionLane::parent("session-1"),
+            ..Default::default()
+        },
+    );
+
+    agent.set_provider(
+        MockProvider::empty(),
+        200_000,
+        PromptEstimator::default(),
+        crate::agent::ActiveModelIdentity {
+            provider_id: "opencode".parse().unwrap(),
+            model: "qwen3-coder".to_string(),
+        },
+    );
+
+    // Unpriced work after the switch: tokens still count, cost goes unknown.
+    agent.usage.record(
+        Some(crate::provider::TokenUsage {
+            prompt_tokens: 500,
+            completion_tokens: 50,
+            input_cache: None,
+        }),
+        None,
+        crate::agent::UsageTurnDiagnostics {
+            execution_lane: crate::agent::ExecutionLane::parent("session-1"),
+            ..Default::default()
+        },
+    );
+
+    let usage = agent.session_budget_usage();
+    assert_eq!(
+        usage.exact_billed_tokens,
+        Some(1_650),
+        "token counters must span the provider switch"
+    );
+    assert_eq!(usage.turns, 2);
+    assert_eq!(
+        usage.exact_cost_micros, None,
+        "unpriced work must mark cost unknown, not zero"
+    );
+
+    // Unknown cost must never trip the cost threshold (1 micro-USD here),
+    // while the billed-token guardrail still fires.
+    let states = usage.alert_states();
+    let cost_state = states
+        .iter()
+        .find(|state| {
+            matches!(
+                state,
+                crate::run_budget::SessionBudgetAlertState::Cost { .. }
+            )
+        })
+        .expect("cost alert is configured");
+    assert!(
+        matches!(
+            cost_state,
+            crate::run_budget::SessionBudgetAlertState::Cost {
+                used_micros: None,
+                ..
+            }
+        ),
+        "cost usage must read unknown: {cost_state:?}"
+    );
+    assert!(
+        !cost_state.is_reached(),
+        "unknown cost must not reach the cost threshold"
+    );
+    let token_state = states
+        .iter()
+        .find(|state| {
+            matches!(
+                state,
+                crate::run_budget::SessionBudgetAlertState::BilledTokens { .. }
+            )
+        })
+        .expect("billed-token alert is configured");
+    assert!(
+        token_state.is_reached(),
+        "billed-token guardrail must still fire at 1,650/1,000"
+    );
+    assert!(usage.has_reached_alert());
+}

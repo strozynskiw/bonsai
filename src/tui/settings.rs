@@ -23,7 +23,8 @@ const BUDGET_RUN_TIME_VALUES: &[&str] = &["off", "5m", "15m", "30m", "60m"];
 const BUDGET_GENERATION_TIME_VALUES: &[&str] = &["off", "1m", "3m", "5m", "10m"];
 const BUDGET_OUTPUT_VALUES: &[&str] = &["off", "32k", "64k", "128k", "256k"];
 const BUDGET_TOOL_TIME_VALUES: &[&str] = &["off", "30s", "2m", "5m", "10m"];
-const BUDGET_SESSION_TOKEN_VALUES: &[&str] = &["off", "100k", "250k", "500k", "1000k"];
+const BUDGET_SESSION_TOKEN_VALUES: &[&str] =
+    &["off", "100k", "250k", "500k", "1000k", "5000k", "10000k"];
 const BUDGET_SESSION_TURN_VALUES: &[&str] = &["off", "100", "250", "500", "1000"];
 const BUDGET_SESSION_OUTPUT_VALUES: &[&str] = &["off", "256k", "512k", "1000k", "2000k"];
 const BUDGET_SESSION_TIME_VALUES: &[&str] = &["off", "30m", "60m", "120m", "240m"];
@@ -147,7 +148,7 @@ pub(crate) fn seed_settings_rows(
     });
     rows.push(SettingsRow::Choice {
         id: SettingId::BudgetSessionBilledTokens,
-        key: "session billed tokens",
+        key: "session tokens",
         values: BUDGET_SESSION_TOKEN_VALUES,
         current: token_index(app.run_budget.max_session_billed_tokens),
         note: Some("hard limit, all lanes, across resumes".to_string()),
@@ -214,7 +215,7 @@ pub(crate) fn seed_settings_rows(
         key: "exact cost",
         values: BUDGET_SESSION_COST_VALUES,
         current: session_cost_index(app.run_budget.alert_session_cost_micros),
-        note: Some("warn before submit; unknown cost stays disabled".to_string()),
+        note: Some("warn before submit; disabled if unpriced".to_string()),
     });
 
     rows.push(SettingsRow::Header("Sandbox"));
@@ -512,6 +513,23 @@ mod tests {
             SettingsRow::Choice { note: Some(note), .. }
                 if note == "effective: off · 8.2k context"
         ));
+    }
+
+    #[test]
+    fn soft_warning_defaults_map_to_visible_alert_presets() {
+        // A default that is not also a preset would render as "off" in
+        // /settings while silently active — keep the two lists in lockstep.
+        let mut app = app();
+        app.run_budget = crate::run_budget::RunBudget::soft_alert_defaults();
+        let rows = seed_settings_rows(&app, smol_profile(crate::smol::SmolPreference::Off));
+
+        assert_eq!(
+            choice_current(&rows, SettingId::AlertSessionBilledTokens),
+            Some(6)
+        );
+        assert_eq!(choice_current(&rows, SettingId::AlertSessionTurns), Some(2));
+        assert_eq!(choice_current(&rows, SettingId::AlertSessionTime), Some(3));
+        assert_eq!(choice_current(&rows, SettingId::AlertSessionCost), Some(2));
     }
 
     #[test]

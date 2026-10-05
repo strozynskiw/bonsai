@@ -213,9 +213,12 @@ variables are listed in [Providers](providers.md#built-in-connections).
 `/settings` covers the main runtime preferences without file editing: model,
 autonomy, self-review, context (smol), default credential store, appearance
 (serenity, theme), per-run budgets (max turns, run time, generation, output,
-tool time), session budgets (turns, output, time, cost), and sandbox
-(confinement, network). Every budget is off by default; choosing a preset
-opts in, and command-line limits still override saved values for that run.
+tool time), session budgets (turns, output, time, cost), session alerts
+(tokens, turns, time, cost), and sandbox (confinement, network). Hard budgets
+are off by default; session alerts ship conservative soft defaults you can
+raise or disable per row, and command-line limits still override saved values
+for that run.
+
 Preferences persist in the local database, not in `config.toml`.
 
 ## Where this lives in the code
