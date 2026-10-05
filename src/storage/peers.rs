@@ -133,6 +133,21 @@ impl PeerDeliveryReceipt {
     pub(crate) fn message_id(&self) -> i64 {
         self.message_id
     }
+
+    /// Seed a receipt for tests that need pending delivery state without
+    /// leasing a real message from the store.
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        message_id: i64,
+        consumer: PeerDeliveryConsumer,
+        lease_token: &str,
+    ) -> Self {
+        Self {
+            message_id,
+            consumer,
+            lease_token: lease_token.to_string(),
+        }
+    }
 }
 
 /// A peer message paired with the lease receipt required for acknowledgement.

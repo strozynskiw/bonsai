@@ -2861,7 +2861,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     };
     let mut pending_snapshot_flush: Option<tokio::task::JoinHandle<PersistenceFlushResult>> = None;
     // Cheap dirty check so an unchanged interval never captures, clones, spawns,
-    // or writes (#171). Recreated whenever the active session rotates.
+    // or writes (#171). The gate resets itself when the active session rotates.
     let mut snapshot_flush_gate = SnapshotFlushGate::new(current_session_id);
     if let Some(target) = resume {
         let mut persistence = PersistenceCommandState {

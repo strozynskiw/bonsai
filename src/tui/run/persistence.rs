@@ -235,8 +235,15 @@ pub(in crate::tui::run) struct PersistenceFlushResult {
 /// anything new to persist (#171).
 ///
 /// An unchanged interval then does O(1) work — no capture, no clone, no spawn,
-/// no SQLite write — while a bounded heartbeat still guarantees that
-/// agent-only changes (usage the transcript never mirrored) reach disk.
+/// no SQLite write. It is a conservative *filter* in front of the writer's own
+/// signature check, never a substitute: everything it cannot see is covered
+/// either by `agent_active` (a run holds the lock, so agent-owned state may be
+/// moving) or by the bounded heartbeat. Worst-case staleness for agent-only
+/// state that no transcript change mirrors is therefore
+/// [`SNAPSHOT_GATE_HEARTBEAT_INTERVALS`] intervals (5 s) while the session is
+/// idle, against one interval (500 ms) before this gate existed — mid-run state
+/// still flushes every interval through `agent_active`, and a crash loses at
+/// most the last bounded window.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::tui::run) struct SnapshotFlushGate {
     session_id: SessionId,
@@ -265,6 +272,11 @@ impl SnapshotFlushGate {
     /// Whether a periodic flush should run. `agent_active` is true whenever a
     /// run or command task holds or has just released the agent lock — the only
     /// window in which agent-owned snapshot state can change.
+    ///
+    /// Pending peer-delivery receipts are part of the fingerprint on purpose:
+    /// the writer acknowledges them on persist, and the duplicate-delivery path
+    /// inserts one *without* touching the transcript, so skipping here would
+    /// defer that acknowledgement and could re-deliver a message.
     pub(in crate::tui::run) fn needs_flush(
         &mut self,
         session_id: SessionId,
@@ -281,6 +293,7 @@ impl SnapshotFlushGate {
             || transcript_revision != self.transcript_revision
             || plan_revision != self.plan_revision
             || todo_signature != self.todo_signature
+            || !app.pending_peer_delivery_receipts.is_empty()
             || agent_active;
         if changed {
             self.record(transcript_revision, plan_revision, todo_signature);
@@ -2029,7 +2042,26 @@ mod tests {
             text: "after capture".to_string(),
         });
         assert_ne!(app.transcript.revision(), revision);
-        assert!(!Arc::ptr_eq(&first, &app.transcript.shared_items()));
+
+        // A *changed* interval rebuilds the vector once. The bound is loose
+        // (debug test build, and the rebuild only walks items this session
+        // already owns) so it pins out a regression that reintroduces heavy
+        // per-item work — payload copies or re-serialization — without flaking
+        // on a loaded host.
+        const REBUILD_BUDGET: std::time::Duration = std::time::Duration::from_millis(150);
+        let rebuild_started = Instant::now();
+        let rebuilt = app.transcript.shared_items();
+        let rebuild = rebuild_started.elapsed();
+        println!("changed-interval rebuild {rebuild:?}");
+        assert!(!Arc::ptr_eq(&first, &rebuilt));
+        assert!(
+            Arc::ptr_eq(&rebuilt, &app.transcript.shared_items()),
+            "the cache must be O(1) again on the interval after a change"
+        );
+        assert!(
+            rebuild <= REBUILD_BUDGET,
+            "a changed interval must stay bounded: {rebuild:?} > {REBUILD_BUDGET:?}"
+        );
 
         // The expensive half — message history, usage ledger, read evidence,
         // episodes — is captured by the spawned task, never on this frame.
@@ -2080,6 +2112,26 @@ mod tests {
             ..crate::plan::PlanDoc::default()
         };
         assert!(gate.needs_flush(session, &app, false));
+
+        // A pending peer-delivery receipt is not visible in the transcript, but
+        // the writer acknowledges it on persist: the duplicate-delivery path
+        // inserts one without touching the transcript, so the gate must never
+        // skip past it — it keeps requesting a flush until the write acks it.
+        app.pending_peer_delivery_receipts.insert(
+            77,
+            crate::storage::PeerDeliveryReceipt::for_tests(
+                77,
+                crate::storage::PeerDeliveryConsumer::Ui,
+                "lease-77",
+            ),
+        );
+        assert!(gate.needs_flush(session, &app, false));
+        assert!(
+            gate.needs_flush(session, &app, false),
+            "an unacknowledged delivery must not be skipped by the heartbeat"
+        );
+        app.pending_peer_delivery_receipts.clear();
+        assert!(!gate.needs_flush(session, &app, false));
 
         // A rotated session must not inherit the previous fingerprints.
         assert!(gate.needs_flush(SessionId::from_raw(2), &app, false));

@@ -522,8 +522,13 @@ impl TranscriptModel {
     }
 
     /// Shared, immutable snapshot of the items for the persistence handoff.
-    /// O(1) while the transcript is unchanged and no deep item clone either
-    /// way — the writer only ever sees refcounted handles (#171).
+    ///
+    /// O(1) while the transcript is unchanged — the cached `Arc` is handed over
+    /// by refcount, so a repeated unchanged interval copies nothing at all. A
+    /// changed revision rebuilds the vector once (an O(items) pass that still
+    /// shares nothing deep, and is what the pre-#171 capture did on *every*
+    /// interval on top of the agent state); the next unchanged interval is O(1)
+    /// again.
     pub(crate) fn shared_items(&self) -> Arc<Vec<TranscriptItem>> {
         let mut shared = self.shared.borrow_mut();
         if let Some((revision, items)) = shared.as_ref()
