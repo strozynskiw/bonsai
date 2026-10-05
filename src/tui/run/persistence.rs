@@ -197,15 +197,23 @@ pub(in crate::tui::run) async fn persist_changed_app_snapshots(
     }
 }
 
+/// The TUI-owned half of a session snapshot, captured on the input frame.
+///
+/// Deliberately cheap (#171): the transcript travels as a shared `Arc`, so this
+/// is a refcount bump while the transcript is unchanged and never a deep item
+/// clone. The agent half of the snapshot — message history, usage ledger, read
+/// evidence, episode archives — is captured later, inside the spawned flush
+/// task, because it is the bulk of the cost in a marathon session.
 #[derive(Debug)]
-struct OwnedSessionSnapshot {
-    transcript: Vec<TranscriptItem>,
+struct CapturedSnapshot {
+    transcript: Arc<Vec<TranscriptItem>>,
     plan: crate::plan::PlanDoc,
     todos: Vec<crate::todo::TodoItem>,
-    agent: Option<crate::session_persist::AgentStateSnapshot>,
+    /// Usage fallback, built on the input frame *only* while a run holds the
+    /// agent lock: the live context report is then the only available source
+    /// and the spawned task cannot read the locked agent.
     fallback_usage: Option<crate::session_persist::UsageStateSnapshot>,
     ui_peer_delivery_receipts: Vec<crate::storage::PeerDeliveryReceipt>,
-    agent_peer_delivery_receipts: Vec<crate::storage::PeerDeliveryReceipt>,
 }
 
 #[derive(Debug)]
@@ -216,6 +224,87 @@ pub(in crate::tui::run) struct PersistenceFlushResult {
     result: Option<Result<crate::session_persist::SnapshotWriteOutcome>>,
     ui_peer_delivery_receipts: Vec<crate::storage::PeerDeliveryReceipt>,
     agent_peer_delivery_receipts: Vec<crate::storage::PeerDeliveryReceipt>,
+    /// Completed off the input frame, reported separately so a regression is
+    /// attributable: agent-state capture is the expensive clone that must never
+    /// return to the frame, and `write` covers serialization plus SQLite.
+    agent_capture: std::time::Duration,
+    write: std::time::Duration,
+}
+
+/// Cheap input-frame fingerprints deciding whether a periodic flush has
+/// anything new to persist (#171).
+///
+/// An unchanged interval then does O(1) work — no capture, no clone, no spawn,
+/// no SQLite write — while a bounded heartbeat still guarantees that
+/// agent-only changes (usage the transcript never mirrored) reach disk.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::tui::run) struct SnapshotFlushGate {
+    session_id: SessionId,
+    transcript_revision: u64,
+    plan_revision: u64,
+    todo_signature: u64,
+    initialized: bool,
+    skipped: u32,
+}
+
+/// Consecutive unchanged intervals tolerated before the gate forces a flush.
+const SNAPSHOT_GATE_HEARTBEAT_INTERVALS: u32 = 10;
+
+impl SnapshotFlushGate {
+    pub(in crate::tui::run) fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            transcript_revision: 0,
+            plan_revision: 0,
+            todo_signature: 0,
+            initialized: false,
+            skipped: 0,
+        }
+    }
+
+    /// Whether a periodic flush should run. `agent_active` is true whenever a
+    /// run or command task holds or has just released the agent lock — the only
+    /// window in which agent-owned snapshot state can change.
+    pub(in crate::tui::run) fn needs_flush(
+        &mut self,
+        session_id: SessionId,
+        app: &AppState,
+        agent_active: bool,
+    ) -> bool {
+        if session_id != self.session_id {
+            self.reset(session_id);
+        }
+        let transcript_revision = app.transcript.revision();
+        let plan_revision = app.plan.revision;
+        let todo_signature = crate::session_persist::todo_signature(&app.todo);
+        let changed = !self.initialized
+            || transcript_revision != self.transcript_revision
+            || plan_revision != self.plan_revision
+            || todo_signature != self.todo_signature
+            || agent_active;
+        if changed {
+            self.record(transcript_revision, plan_revision, todo_signature);
+            return true;
+        }
+        self.skipped = self.skipped.saturating_add(1);
+        if self.skipped >= SNAPSHOT_GATE_HEARTBEAT_INTERVALS {
+            self.record(transcript_revision, plan_revision, todo_signature);
+            return true;
+        }
+        false
+    }
+
+    pub(in crate::tui::run) fn reset(&mut self, session_id: SessionId) {
+        *self = Self::new(session_id);
+    }
+
+    fn record(&mut self, transcript_revision: u64, plan_revision: u64, todo_signature: u64) {
+        self.initialized = true;
+        self.skipped = 0;
+        self.transcript_revision = transcript_revision;
+        self.plan_revision = plan_revision;
+        self.todo_signature = todo_signature;
+    }
 }
 
 #[cfg(test)]
@@ -232,19 +321,13 @@ pub(in crate::tui::run) fn failed_persistence_flush_for_tests(
         result: Some(Err(error)),
         ui_peer_delivery_receipts: Vec::new(),
         agent_peer_delivery_receipts: Vec::new(),
+        agent_capture: std::time::Duration::ZERO,
+        write: std::time::Duration::ZERO,
     }
 }
 
-fn capture_session_snapshot(app: &AppState, agent: &Arc<Mutex<Agent>>) -> OwnedSessionSnapshot {
-    let agent_snapshot = agent
-        .try_lock()
-        .ok()
-        .map(|agent| crate::session_persist::AgentStateSnapshot::capture(&agent));
-    let agent_peer_delivery_receipts = agent_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.peer_delivery_receipts().to_vec())
-        .unwrap_or_default();
-    let report_usage_snapshot = if agent_snapshot.is_none() {
+fn capture_app_snapshot(app: &AppState, agent_busy: bool) -> CapturedSnapshot {
+    let fallback_usage = if agent_busy {
         app.latest_context_report
             .as_ref()
             .and_then(usage_snapshot_from_context_report)
@@ -252,25 +335,44 @@ fn capture_session_snapshot(app: &AppState, agent: &Arc<Mutex<Agent>>) -> OwnedS
         None
     };
 
-    OwnedSessionSnapshot {
-        transcript: app.transcript.as_slice().to_vec(),
+    CapturedSnapshot {
+        transcript: app.transcript.shared_items(),
         plan: app.plan.clone(),
         todos: app.todo.clone(),
-        agent: agent_snapshot,
-        fallback_usage: report_usage_snapshot,
+        fallback_usage,
         ui_peer_delivery_receipts: app.pending_peer_delivery_receipts(),
-        agent_peer_delivery_receipts,
     }
 }
 
-async fn persist_owned_session_snapshot(
+async fn persist_captured_snapshot(
     storage: Storage,
     session_id: SessionId,
-    snapshot: OwnedSessionSnapshot,
+    capture: CapturedSnapshot,
+    agent: Arc<Mutex<Agent>>,
     signatures: PersistedSnapshotSignatures,
     generation: u64,
 ) -> PersistenceFlushResult {
     let generation_key = snapshot_generation_key(&storage, session_id);
+    // The agent half of the snapshot is captured HERE, on the flush task rather
+    // than the input frame (#171): it clones the full message history, usage
+    // ledger, read evidence, and episode archives — the dominant capture cost.
+    let capture_started = Instant::now();
+    let agent_snapshot = agent
+        .try_lock()
+        .ok()
+        .map(|agent| crate::session_persist::AgentStateSnapshot::capture(&agent));
+    let agent_capture = capture_started.elapsed();
+    let agent_peer_delivery_receipts = agent_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.peer_delivery_receipts().to_vec())
+        .unwrap_or_default();
+    // A captured agent is authoritative; the frame-built fallback applies only
+    // when the run still holds the lock (so this task could not read it).
+    let fallback_usage = agent_snapshot
+        .is_none()
+        .then_some(capture.fallback_usage.as_ref())
+        .flatten();
+
     let _write_guard = SNAPSHOT_WRITE_LOCK.lock().await;
     if !snapshot_generation_is_current(&storage, session_id, generation) {
         return PersistenceFlushResult {
@@ -278,28 +380,33 @@ async fn persist_owned_session_snapshot(
             generation_key,
             generation,
             result: None,
-            ui_peer_delivery_receipts: snapshot.ui_peer_delivery_receipts,
-            agent_peer_delivery_receipts: snapshot.agent_peer_delivery_receipts,
+            ui_peer_delivery_receipts: capture.ui_peer_delivery_receipts,
+            agent_peer_delivery_receipts,
+            agent_capture,
+            write: std::time::Duration::ZERO,
         };
     }
     let writer = crate::session_persist::SessionSnapshotWriter::new(&storage, session_id);
     let data = crate::session_persist::SessionSnapshotData {
-        transcript: snapshot.transcript.as_slice(),
-        plan: &snapshot.plan,
-        todos: &snapshot.todos,
-        agent: snapshot.agent.as_ref(),
-        fallback_usage: snapshot.fallback_usage.as_ref(),
-        ui_peer_delivery_receipts: &snapshot.ui_peer_delivery_receipts,
-        agent_peer_delivery_receipts: &snapshot.agent_peer_delivery_receipts,
+        transcript: capture.transcript.as_slice(),
+        plan: &capture.plan,
+        todos: &capture.todos,
+        agent: agent_snapshot.as_ref(),
+        fallback_usage,
+        ui_peer_delivery_receipts: &capture.ui_peer_delivery_receipts,
+        agent_peer_delivery_receipts: &agent_peer_delivery_receipts,
     };
+    let write_started = Instant::now();
     let result = writer.persist(data, signatures).await;
     PersistenceFlushResult {
         session_id,
         generation_key,
         generation,
         result: Some(result),
-        ui_peer_delivery_receipts: snapshot.ui_peer_delivery_receipts,
-        agent_peer_delivery_receipts: snapshot.agent_peer_delivery_receipts,
+        ui_peer_delivery_receipts: capture.ui_peer_delivery_receipts,
+        agent_peer_delivery_receipts,
+        agent_capture,
+        write: write_started.elapsed(),
     }
 }
 
@@ -315,6 +422,15 @@ pub(in crate::tui::run) fn apply_persistence_flush_result(
     {
         return;
     }
+    // Separate off-frame timings (#171): a regression in agent-state capture is
+    // distinguishable from one in serialization/SQLite.
+    tracing::debug!(
+        session_id = %flush.session_id,
+        agent_capture_ms = u64::try_from(flush.agent_capture.as_millis()).unwrap_or(u64::MAX),
+        write_ms = u64::try_from(flush.write.as_millis()).unwrap_or(u64::MAX),
+        superseded = flush.result.is_none(),
+        "periodic snapshot flush finished"
+    );
     match flush.result {
         None => {}
         Some(Ok(outcome)) => {
@@ -349,13 +465,19 @@ pub(in crate::tui::run) fn spawn_changed_snapshot_flush(
     signatures: PersistedSnapshotSignatures,
 ) -> tokio::task::JoinHandle<PersistenceFlushResult> {
     let generation = begin_snapshot_generation(storage, session_id);
-    let snapshot = capture_session_snapshot(app, agent);
+    // A run holds the agent lock for its whole duration, so a busy agent is
+    // exactly when the input frame has to build the usage fallback itself.
+    let agent_busy = agent.try_lock().is_err();
+    let capture = capture_app_snapshot(app, agent_busy);
+    let agent = agent.clone();
     let storage = storage.clone();
-    // IMPORTANT UI RESPONSIVENESS INVARIANT: SQLite snapshot writes must not be
-    // awaited inside the input frame. Sessions 94+ showed >500 ms flushes, long
-    // enough to starve keyboard polling and make Ctrl+C appear broken.
+    // IMPORTANT UI RESPONSIVENESS INVARIANT: neither the SQLite snapshot write
+    // nor the agent-state capture may run inside the input frame. Sessions 94+
+    // showed >500 ms flushes, and a marathon capture measured p50 ~62 ms / p99
+    // ~82 ms on the frame (session 119 scale, #171), long enough to starve
+    // keyboard polling and make Ctrl+C appear broken.
     tokio::spawn(async move {
-        persist_owned_session_snapshot(storage, session_id, snapshot, signatures, generation).await
+        persist_captured_snapshot(storage, session_id, capture, agent, signatures, generation).await
     })
 }
 
@@ -367,11 +489,13 @@ pub(in crate::tui::run) async fn persist_changed_snapshots(
     signatures: &mut PersistedSnapshotSignatures,
 ) {
     let generation = begin_snapshot_generation(storage, session_id);
-    let snapshot = capture_session_snapshot(app, &agent);
-    let flush = persist_owned_session_snapshot(
+    let agent_busy = agent.try_lock().is_err();
+    let capture = capture_app_snapshot(app, agent_busy);
+    let flush = persist_captured_snapshot(
         storage.clone(),
         session_id,
-        snapshot,
+        capture,
+        agent.clone(),
         *signatures,
         generation,
     )
@@ -1791,5 +1915,173 @@ mod tests {
             runs[0].status,
             crate::self_review::SelfReviewRunStatus::ParentInterrupted
         );
+    }
+
+    /// Stub provider for the capture frame-budget measurement; never invoked.
+    struct FrameStubProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for FrameStubProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[async_openai::types::chat::ChatCompletionRequestMessage],
+            _tools: &[async_openai::types::chat::ChatCompletionTool],
+            _cancellation_token: tokio_util::sync::CancellationToken,
+            _sink: crate::output::SharedSink,
+        ) -> crate::provider::ProviderResult<crate::provider::StreamedResponse> {
+            Err(crate::provider::ProviderFailure::configuration(
+                "capture frame-budget stub must not be invoked",
+            ))
+        }
+
+        async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Explicit interactive frame budget for the periodic snapshot capture
+    /// (#171). Capture runs on the input loop, so it must stay well inside a
+    /// 60 Hz frame to keep keystrokes and Ctrl+C responsive.
+    const CAPTURE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+    #[tokio::test]
+    async fn marathon_session_capture_stays_within_the_interactive_frame_budget() {
+        // Session 119 scale: 855 transcript blocks over ~1.8 MiB of execution
+        // group body text, plus a large live context window on the agent.
+        const BLOCKS: usize = 855;
+        const BODY_BYTES: usize = 1_800_000;
+        const CONTEXT_MESSAGES: usize = 220;
+
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let mut agent = Agent::new(
+            Box::new(FrameStubProvider),
+            Arc::new(crate::tool::ToolRegistry::new()),
+            Arc::new(crate::tool::ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        agent
+            .restore_context_messages_with_ids(
+                (0..CONTEXT_MESSAGES)
+                    .map(|index| {
+                        crate::provider::test_utils::user_message(&format!(
+                            "message {index}: {}",
+                            "context ".repeat(2_000)
+                        ))
+                    })
+                    .collect(),
+                (0..CONTEXT_MESSAGES)
+                    .map(|index| format!("msg-{index}"))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        let mut app = crate::tui::test_utils::app();
+        let body = "x".repeat(BODY_BYTES / BLOCKS);
+        for index in 0..BLOCKS {
+            let mut activity = ToolActivity::new(
+                format!("call-{index}"),
+                "bash".to_string(),
+                "{}".to_string(),
+                Instant::now(),
+            );
+            activity.status = ToolStatus::Succeeded;
+            activity.result = Some(body.clone());
+            app.transcript.push(TranscriptItem::ToolActivity(activity));
+        }
+
+        // What the input frame does on every flush interval.
+        let frame_capture = || {
+            let started = Instant::now();
+            let snapshot = capture_app_snapshot(&app, false);
+            let elapsed = started.elapsed();
+            std::hint::black_box(&snapshot);
+            elapsed
+        };
+        // Warm the one-time shared-snapshot build before sampling.
+        frame_capture();
+        let mut samples = (0..40).map(|_| frame_capture()).collect::<Vec<_>>();
+        samples.sort();
+        let percentile = |p: usize| samples[(samples.len() - 1) * p / 100];
+        let (p50, p95, p99) = (percentile(50), percentile(95), percentile(99));
+        println!("frame capture p50={p50:?} p95={p95:?} p99={p99:?}");
+
+        assert!(
+            p95 <= CAPTURE_FRAME_BUDGET,
+            "periodic snapshot capture must stay inside the interactive frame budget: \
+             p50={p50:?} p95={p95:?} p99={p99:?} budget={CAPTURE_FRAME_BUDGET:?}"
+        );
+
+        // Repeated unchanged intervals do O(1) work and no deep transcript
+        // clone: the same shared snapshot is handed over by refcount.
+        let first = app.transcript.shared_items();
+        let revision = app.transcript.revision();
+        for _ in 0..100 {
+            assert!(Arc::ptr_eq(&first, &app.transcript.shared_items()));
+        }
+        assert_eq!(app.transcript.revision(), revision);
+
+        // A mutation invalidates it, so the writer can never persist stale items.
+        app.transcript.push(TranscriptItem::UserMessage {
+            text: "after capture".to_string(),
+        });
+        assert_ne!(app.transcript.revision(), revision);
+        assert!(!Arc::ptr_eq(&first, &app.transcript.shared_items()));
+
+        // The expensive half — message history, usage ledger, read evidence,
+        // episodes — is captured by the spawned task, never on this frame.
+        // Measured only so a regression that pulls it back shows up.
+        let agent = Arc::new(Mutex::new(agent));
+        let started = Instant::now();
+        let snapshot = agent
+            .try_lock()
+            .ok()
+            .map(|agent| crate::session_persist::AgentStateSnapshot::capture(&agent));
+        let off_frame = started.elapsed();
+        std::hint::black_box(&snapshot);
+        println!("off-frame agent capture {off_frame:?}");
+    }
+
+    #[test]
+    fn snapshot_flush_gate_skips_unchanged_intervals_and_wakes_on_a_change() {
+        let session = SessionId::from_raw(1);
+        let mut app = crate::tui::test_utils::app();
+        let mut gate = SnapshotFlushGate::new(session);
+
+        // The first interval always flushes, then unchanged intervals are
+        // skipped — O(1), no capture and no spawn — until the bounded heartbeat.
+        assert!(gate.needs_flush(session, &app, false));
+        for _ in 0..SNAPSHOT_GATE_HEARTBEAT_INTERVALS - 1 {
+            assert!(!gate.needs_flush(session, &app, false));
+        }
+        assert!(
+            gate.needs_flush(session, &app, false),
+            "the heartbeat must still flush agent-only changes the transcript never mirrored"
+        );
+
+        // An active run always flushes, so mid-run state reaches disk.
+        assert!(gate.needs_flush(session, &app, true));
+        assert!(gate.needs_flush(session, &app, true));
+
+        // Any transcript mutation flushes on the next interval.
+        app.transcript.push(TranscriptItem::UserMessage {
+            text: "gate wake".to_string(),
+        });
+        assert!(gate.needs_flush(session, &app, false));
+        assert!(!gate.needs_flush(session, &app, false));
+
+        // A plan edit is a fingerprint change too.
+        app.plan = crate::plan::PlanDoc {
+            title: "gate plan".to_string(),
+            revision: 7,
+            ..crate::plan::PlanDoc::default()
+        };
+        assert!(gate.needs_flush(session, &app, false));
+
+        // A rotated session must not inherit the previous fingerprints.
+        assert!(gate.needs_flush(SessionId::from_raw(2), &app, false));
     }
 }

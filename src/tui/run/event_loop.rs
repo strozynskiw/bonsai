@@ -2860,6 +2860,9 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         episodes: 0,
     };
     let mut pending_snapshot_flush: Option<tokio::task::JoinHandle<PersistenceFlushResult>> = None;
+    // Cheap dirty check so an unchanged interval never captures, clones, spawns,
+    // or writes (#171). Recreated whenever the active session rotates.
+    let mut snapshot_flush_gate = SnapshotFlushGate::new(current_session_id);
     if let Some(target) = resume {
         let mut persistence = PersistenceCommandState {
             current_session_id: &mut current_session_id,
@@ -3257,15 +3260,20 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
 
         let now = Instant::now();
         if now >= next_persistence_flush && pending_snapshot_flush.is_none() {
-            let persist_started = Instant::now();
-            pending_snapshot_flush = Some(spawn_changed_snapshot_flush(
-                &storage,
-                current_session_id,
-                &app,
-                &agent,
-                persisted_signatures,
-            ));
-            frame_persist = persist_started.elapsed();
+            // `is_busy` covers a run holding the agent lock (agent state can
+            // change under it); the gate's bounded heartbeat covers anything
+            // that settles just after a run releases it.
+            if snapshot_flush_gate.needs_flush(current_session_id, &app, tasks.is_busy()) {
+                let persist_started = Instant::now();
+                pending_snapshot_flush = Some(spawn_changed_snapshot_flush(
+                    &storage,
+                    current_session_id,
+                    &app,
+                    &agent,
+                    persisted_signatures,
+                ));
+                frame_persist = persist_started.elapsed();
+            }
             next_persistence_flush = now + PERSISTENCE_FLUSH_INTERVAL;
         }
 

@@ -1,4 +1,5 @@
 use std::ops::{Index, IndexMut};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -473,17 +474,28 @@ pub struct TranscriptModel {
     /// Index-parallel to `items`; every mutator keeps the two in lockstep.
     meta: Vec<ItemStamp>,
     assistant_messages: usize,
+    /// Cheap content fingerprint bumped by every mutator. The periodic snapshot
+    /// flush compares it to skip an unchanged interval in O(1) (#171).
+    revision: u64,
+    /// Cached shared snapshot for the persistence handoff, keyed by the revision
+    /// it was built at. Rebuilt only when the content actually changed, so an
+    /// unchanged interval hands the writer a refcount bump, never a deep clone.
+    shared: std::cell::RefCell<Option<(u64, Arc<Vec<TranscriptItem>>)>>,
 }
 
 impl Clone for TranscriptModel {
     /// Deliberately not derived: a clone allocates fresh stamps. Stamps are
     /// cache identities, and two live models sharing ids would let a layout
-    /// cache keyed on one serve rendered lines for the other.
+    /// cache keyed on one serve rendered lines for the other. The shared
+    /// snapshot is rebuilt lazily rather than aliased, so a clone can never
+    /// hand a writer the original's cached items.
     fn clone(&self) -> Self {
         Self {
             items: self.items.clone(),
             meta: self.items.iter().map(|_| ItemStamp::fresh()).collect(),
             assistant_messages: self.assistant_messages,
+            revision: self.revision,
+            shared: std::cell::RefCell::new(None),
         }
     }
 }
@@ -502,6 +514,31 @@ impl TranscriptModel {
 
     pub fn as_slice(&self) -> &[TranscriptItem] {
         &self.items
+    }
+
+    /// Content fingerprint of the transcript; bumped by every mutator.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Shared, immutable snapshot of the items for the persistence handoff.
+    /// O(1) while the transcript is unchanged and no deep item clone either
+    /// way — the writer only ever sees refcounted handles (#171).
+    pub(crate) fn shared_items(&self) -> Arc<Vec<TranscriptItem>> {
+        let mut shared = self.shared.borrow_mut();
+        if let Some((revision, items)) = shared.as_ref()
+            && *revision == self.revision
+        {
+            return Arc::clone(items);
+        }
+        let items = Arc::new(self.items.clone());
+        *shared = Some((self.revision, Arc::clone(&items)));
+        items
+    }
+
+    /// Mark the content dirty for both the layout cache and the snapshot gate.
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn to_vec(&self) -> Vec<TranscriptItem> {
@@ -524,6 +561,7 @@ impl TranscriptModel {
         self.items.clear();
         self.meta.clear();
         self.assistant_messages = 0;
+        self.touch();
     }
 
     pub fn push(&mut self, item: TranscriptItem) {
@@ -532,6 +570,7 @@ impl TranscriptModel {
         }
         self.items.push(item);
         self.meta.push(ItemStamp::fresh());
+        self.touch();
     }
 
     pub fn extend<I>(&mut self, iter: I)
@@ -549,6 +588,7 @@ impl TranscriptModel {
         }
         self.items.insert(index, item);
         self.meta.insert(index, ItemStamp::fresh());
+        self.touch();
     }
 
     pub fn remove(&mut self, index: usize) -> TranscriptItem {
@@ -557,6 +597,7 @@ impl TranscriptModel {
         if Self::is_assistant_message(&item) {
             self.assistant_messages = self.assistant_messages.saturating_sub(1);
         }
+        self.touch();
         item
     }
 
@@ -577,6 +618,7 @@ impl TranscriptModel {
         self.meta
             .retain(|_| verdicts.next().expect("verdict mask covers meta"));
         self.assistant_messages = Self::count_assistant_messages(&self.items);
+        self.touch();
     }
 
     /// Downgrade the `AssistantMessage` at `index` to a `WorkLog` note in
@@ -625,6 +667,7 @@ impl TranscriptModel {
         for stamp in &mut self.meta {
             stamp.bump();
         }
+        self.touch();
         self.items.iter_mut()
     }
 
@@ -639,6 +682,7 @@ impl TranscriptModel {
         if let Some(stamp) = self.meta.get_mut(index) {
             stamp.bump();
         }
+        self.touch();
     }
 
     pub(crate) fn assistant_message_count(&self) -> usize {
@@ -770,6 +814,8 @@ impl From<Vec<TranscriptItem>> for TranscriptModel {
             items,
             meta,
             assistant_messages,
+            revision: 0,
+            shared: std::cell::RefCell::new(None),
         }
     }
 }
