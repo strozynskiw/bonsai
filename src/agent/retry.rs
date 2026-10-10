@@ -177,15 +177,24 @@ impl AttemptSink {
 
     fn admitted_stream_prefix<'a>(&self, channel: &AtomicUsize, text: &'a str) -> &'a str {
         let offered_chars = text.chars().count();
-        let previous = self
-            .streamed_chars
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                Some(
-                    used.saturating_add(offered_chars)
-                        .min(self.max_streamed_chars),
-                )
-            })
-            .unwrap_or_else(|used| used);
+        // `AtomicUsize::fetch_update` is deprecated on newer toolchains while the
+        // release build denies warnings; a compare-exchange loop is stable across
+        // every supported compiler. It returns the previous admission ceiling.
+        let mut previous = self.streamed_chars.load(Ordering::Acquire);
+        loop {
+            let next = previous
+                .saturating_add(offered_chars)
+                .min(self.max_streamed_chars);
+            match self.streamed_chars.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => previous = observed,
+            }
+        }
         let admitted_chars = offered_chars.min(self.max_streamed_chars.saturating_sub(previous));
         channel.fetch_add(admitted_chars, Ordering::Relaxed);
         if admitted_chars < offered_chars {

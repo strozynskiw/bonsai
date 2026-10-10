@@ -136,17 +136,25 @@ impl WorkspaceLeaseState {
     fn should_inject_refresh_failure(&self) -> bool {
         use std::sync::atomic::Ordering;
 
-        self.injected_refresh_failures
-            .fetch_update(
+        // A compare-exchange loop instead of `fetch_update`, which newer
+        // toolchains deprecate while the release build denies warnings.
+        let mut remaining = self.injected_refresh_failures.load(Ordering::Acquire);
+        loop {
+            let next = match remaining {
+                0 => return false,
+                usize::MAX => usize::MAX,
+                value => value - 1,
+            };
+            match self.injected_refresh_failures.compare_exchange_weak(
+                remaining,
+                next,
                 Ordering::AcqRel,
                 Ordering::Acquire,
-                |remaining| match remaining {
-                    0 => None,
-                    usize::MAX => Some(usize::MAX),
-                    value => Some(value - 1),
-                },
-            )
-            .is_ok()
+            ) {
+                Ok(_) => return true,
+                Err(observed) => remaining = observed,
+            }
+        }
     }
 }
 
