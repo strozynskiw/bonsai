@@ -61,6 +61,16 @@ class QualificationTests(unittest.TestCase):
             gate.record_test_count(result, log, ("artifact_malformed_stream_never_reports_completed",))
             self.assertEqual(result["status"], "passed")
 
+    def test_required_probe_sets_are_per_platform(self):
+        darwin = gate.required_tests("Darwin")["sandbox-probes"]
+        linux = gate.required_tests("Linux")["sandbox-probes"]
+        self.assertIn("escape_runs_what_confinement_blocks", darwin)
+        self.assertNotIn("escape_runs_what_confinement_blocks", linux)
+        for probe in gate.SANDBOX_PROBES:
+            self.assertIn(probe, darwin)
+            self.assertIn(probe, linux)
+        self.assertIn("artifact_confines_native_writes_and_network", gate.required_tests("Linux")["artifact-surface"])
+
     def test_archive_rejects_links_and_traversal(self):
         for name, kind in [
             ("../bonsai", tarfile.REGTYPE),

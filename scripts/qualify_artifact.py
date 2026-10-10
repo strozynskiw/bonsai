@@ -28,27 +28,32 @@ SKIP_MARKERS = (
     "skipping Bubblewrap integration test",
     "skipping native confinement probe",
 )
-# The native probe names are shared verbatim by the Linux `bubblewrap` and macOS
-# `seatbelt` modules in `src/sandbox/tests.rs`, so one target-independent set is
-# correct: only the module for the running target is compiled, and a target whose
-# backend cannot run them reports the names as missing (fail closed) rather than
-# passing on the other platform's evidence.
-REQUIRED_TESTS = {
-    "artifact-surface": (
-        "artifact_confines_native_writes_and_network",
-        "artifact_denies_noninteractive_mutation_and_project_escapes",
-        "artifact_frames_untrusted_tool_result_as_data",
-        "artifact_startup_upgrades_supported_store_and_preserves_failures",
-        "artifact_malformed_stream_never_reports_completed",
-        "artifact_tool_loop_exhaustion_is_bounded",
-        "invalid_surface_binary_override_never_falls_back",
-    ),
-    "sandbox-probes": (
-        "blocks_write_outside_project_root",
-        "denies_network_when_configured",
-        "escape_runs_what_confinement_blocks",
-    ),
-}
+# The native probes a target must actually execute. Both platforms share the
+# write/network proofs, but the approved-escape proof (`command_unconfined`)
+# exists only in the macOS `seatbelt` module: requiring it on Linux would fail a
+# healthy target, and omitting it on Darwin would accept unproven evidence.
+SANDBOX_PROBES = (
+    "blocks_write_outside_project_root",
+    "denies_network_when_configured",
+)
+SEATBELT_ONLY_PROBES = ("escape_runs_what_confinement_blocks",)
+
+
+def required_tests(system: str) -> dict[str, tuple[str, ...]]:
+    probes = SANDBOX_PROBES + (SEATBELT_ONLY_PROBES if system == "Darwin" else ())
+    return {
+        "artifact-surface": (
+            "artifact_confines_native_writes_and_network",
+            "artifact_denies_noninteractive_mutation_and_project_escapes",
+            "artifact_rejects_sandbox_escape_even_under_yolo",
+            "artifact_frames_untrusted_tool_result_as_data",
+            "artifact_startup_upgrades_supported_store_and_preserves_failures",
+            "artifact_malformed_stream_never_reports_completed",
+            "artifact_tool_loop_exhaustion_is_bounded",
+            "invalid_surface_binary_override_never_falls_back",
+        ),
+        "sandbox-probes": probes,
+    }
 
 
 def sha256(path: Path) -> str:
@@ -167,11 +172,12 @@ def qualify(args: argparse.Namespace) -> int:
                 ("release-eval", [str(binary), "eval", "--mode", "mock", "--suite", "eval/suites/release_gating.toml", "--baseline", "eval/baselines/release-v1.toml", "--fail-on-task-failure"], artifact_env),
                 ("continuity-eval", [str(binary), "eval", "--mode", "mock", "--suite", "eval/suites/intent_continuity.toml", "--fail-on-task-failure"], artifact_env),
             ]
+            required = required_tests(platform.system())
             for name, command, child_env in checks:
                 log = root / f"{name}.log"
                 result = run_check(command, child_env, args.timeout, log)
                 if name in {"artifact-surface", "inline", "sandbox-probes"}:
-                    record_test_count(result, log, REQUIRED_TESTS.get(name, ()))
+                    record_test_count(result, log, required.get(name, ()))
                 report["checks"][name] = result
             if sha256(binary) != report["binary_sha256"] or sha256(args.archive) != report["archive_sha256"]:
                 raise ValueError("artifact identity changed during qualification")
