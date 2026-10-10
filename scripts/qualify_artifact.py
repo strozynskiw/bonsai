@@ -22,6 +22,12 @@ TARGETS = {
     "aarch64-apple-darwin": ("Darwin", "arm64"),
 }
 REQUIRED = {"artifact-surface", "inline", "sandbox-probes", "release-eval", "continuity-eval"}
+# A probe that declined to run is not evidence, on any target: the native backend
+# was missing or ineffective, which the gate must report as failure.
+SKIP_MARKERS = (
+    "skipping Bubblewrap integration test",
+    "skipping native confinement probe",
+)
 # The native probe names are shared verbatim by the Linux `bubblewrap` and macOS
 # `seatbelt` modules in `src/sandbox/tests.rs`, so one target-independent set is
 # correct: only the module for the running target is compiled, and a target whose
@@ -103,7 +109,7 @@ def record_test_count(result: dict, log: Path, required_tests: tuple[str, ...] =
             match = re.search(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored", line)
             if match:
                 passed_tests += int(match[1])
-            skipped |= "skipping Bubblewrap integration test" in line
+            skipped |= any(marker in line for marker in SKIP_MARKERS)
             ok = re.match(r"test ([\w:]+) \.\.\.", line.strip())
             if ok and "ignored" not in line:
                 named.add(ok[1].rsplit("::", 1)[-1])

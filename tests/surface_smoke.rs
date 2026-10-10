@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -403,6 +404,9 @@ async fn artifact_denies_noninteractive_mutation_and_project_escapes() -> Result
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_rejects_sandbox_escape_even_under_yolo() -> Result<()> {
+    if !native_confinement_required()? {
+        return Ok(());
+    }
     let project = tempfile::tempdir()?;
     let (output, requests) = scenario(
         project.path(),
@@ -642,6 +646,82 @@ fn connection_within(listener: &std::net::TcpListener, timeout: Duration) -> boo
     false
 }
 
+/// Skip notice the qualification runner treats as a failed check, never a pass.
+const NATIVE_SKIP_NOTICE: &str =
+    "surface-qualification: skipping native confinement probe: no native sandbox backend";
+
+/// The artifact probes need a native backend that actually enforces. Ordinary
+/// `cargo test` runs skip when this host has none (developer fallback), but
+/// qualification sets `BONSAI_REQUIRE_NATIVE_SANDBOX=1`, which turns a missing
+/// backend into a failure instead of silence.
+fn native_confinement_required() -> Result<bool> {
+    if native_backend_available() {
+        return Ok(true);
+    }
+    if std::env::var("BONSAI_REQUIRE_NATIVE_SANDBOX").as_deref() == Ok("1") {
+        bail!("qualification requires an effective native sandbox backend");
+    }
+    eprintln!("{NATIVE_SKIP_NOTICE}");
+    Ok(false)
+}
+
+/// Availability must be *probed*, not inferred from a file: CI runners ship
+/// `bwrap` while restricting unprivileged user namespaces, so a present binary
+/// can still fail to confine anything. This mirrors `sandbox::linux`'s probe.
+fn native_backend_available() -> bool {
+    if cfg!(target_os = "macos") {
+        return Path::new("/usr/bin/sandbox-exec").is_file();
+    }
+    let Some(executable) = executable_in_path("bwrap") else {
+        return false;
+    };
+    let Ok(mut child) = std::process::Command::new(executable)
+        .args([
+            "--unshare-all",
+            "--share-net",
+            "--die-with-parent",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--chdir",
+            "/",
+            "--",
+            "/bin/sh",
+            "-c",
+            "true",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => return false,
+        }
+    }
+}
+
+fn executable_in_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 fn loopback_probe_command(address: std::net::SocketAddr) -> String {
     format!("curl -s --noproxy '*' --connect-timeout 1 --max-time 2 telnet://{address} </dev/null")
 }
@@ -651,6 +731,9 @@ fn loopback_probe_command(address: std::net::SocketAddr) -> String {
 /// release-only regression that stops wiring the sandbox into the artifact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_confines_native_writes_and_network() -> Result<()> {
+    if !native_confinement_required()? {
+        return Ok(());
+    }
     let project = tempfile::tempdir()?;
     let outside = OutsideDir::create()?;
     // Positive control: without confinement this exact directory is writable.

@@ -34,7 +34,11 @@ class QualificationTests(unittest.TestCase):
     def test_missing_or_skipped_native_results_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "private.log"
-            for text in ("test result: ok. 0 passed; 0 failed; 0 ignored", "skipping Bubblewrap integration test: bwrap unavailable\ntest result: ok. 1 passed; 0 failed; 0 ignored"):
+            for text in (
+                "test result: ok. 0 passed; 0 failed; 0 ignored",
+                "skipping Bubblewrap integration test: bwrap unavailable\ntest result: ok. 1 passed; 0 failed; 0 ignored",
+                "surface-qualification: skipping native confinement probe: no native sandbox backend (/usr/bin/bwrap)\ntest result: ok. 1 passed; 0 failed; 0 ignored",
+            ):
                 log.write_text(text)
                 result = {"status": "passed"}
                 gate.record_test_count(result, log)
