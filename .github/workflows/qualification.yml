@@ -37,7 +37,7 @@ jobs:
         run: cargo run --locked -- eval --suite eval/suites/language_acceptance.toml --qualification --mode mock --out target/qualification
       - name: Upload allowlisted mock snapshots only
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mock-qualification-not-live-evidence
           path: target/qualification/*/qualification.json
