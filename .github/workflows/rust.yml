@@ -50,7 +50,7 @@ jobs:
       run: ./e2e/run.sh cases/00_startup.sh cases/08_state_isolation.sh
     - name: Retain TUI replay evidence
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: tui-isolation-evidence
         path: target/tui-verification/e2e/
