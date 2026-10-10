@@ -1,0 +1,73 @@
+name: Qualify native candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  qualify:
+    name: Qualify ${{ matrix.target }}
+    runs-on: ${{ matrix.runs_on }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+      BONSAI_RELEASE_PUBLIC_KEY: ${{ vars.BONSAI_RELEASE_PUBLIC_KEY }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runs_on: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runs_on: macos-15
+            target: aarch64-apple-darwin
+            macos_deployment_target: "13.0"
+          - runs_on: macos-15-intel
+            target: x86_64-apple-darwin
+            macos_deployment_target: "13.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Test qualification failure controls
+        run: python3 scripts/test_qualify_artifact.py
+      - name: Install native sandbox prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap curl
+      - name: Add native target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build and pack candidate
+        run: |
+          cargo build --release --locked --target '${{ matrix.target }}'
+          mkdir -p dist
+          archive='dist/bonsai-candidate-${{ matrix.target }}.tar.gz'
+          tar -czf "$archive" -C 'target/${{ matrix.target }}/release' bonsai
+          shasum -a 256 "$archive" > "$archive.sha256"
+          shasum -a 256 'target/${{ matrix.target }}/release/bonsai' | cut -d ' ' -f 1 > "$archive.binary-sha256"
+      - name: Qualify packed native candidate
+        run: >-
+          python3 scripts/qualify_artifact.py
+          --target '${{ matrix.target }}'
+          --revision '${{ github.sha }}'
+          --archive 'dist/bonsai-candidate-${{ matrix.target }}.tar.gz'
+          --evidence 'qualification/${{ matrix.target }}'
+      - name: Retain qualification summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-${{ matrix.target }}
+          path: qualification/${{ matrix.target }}/qualification.json
+          if-no-files-found: error
+      - name: Retain qualified candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error

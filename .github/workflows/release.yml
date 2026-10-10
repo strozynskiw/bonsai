@@ -50,6 +50,8 @@ jobs:
         run: |
           rustc --edition 2024 -D warnings --test scripts/build-release-manifest.rs -o /tmp/build-release-manifest-tests
           /tmp/build-release-manifest-tests
+      - name: Test qualification failure controls
+        run: python3 scripts/test_qualify_artifact.py
       - name: Test RC soak evidence validator
         run: python3 scripts/test_check_rc_soak.py
       - name: Test Homebrew tap updater
@@ -103,6 +105,13 @@ jobs:
         run: |
           test -n "${BONSAI_RELEASE_PUBLIC_KEY}"
           test "$(printf '%s' "${BONSAI_RELEASE_PUBLIC_KEY}" | openssl base64 -d -A | wc -c | tr -d ' ')" = "32"
+      - name: Set up qualification Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install native sandbox prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap curl
       - name: Add target
         run: rustup target add ${{ matrix.target }}
       - name: Build release binary
@@ -148,6 +157,20 @@ jobs:
               done
             )
           fi
+      - name: Qualify packed native artifact
+        run: >-
+          python3 scripts/qualify_artifact.py
+          --target '${{ matrix.target }}'
+          --revision '${{ github.sha }}'
+          --archive 'dist/bonsai-${{ github.ref_name }}-${{ matrix.target }}.tar.gz'
+          --evidence 'qualification/${{ matrix.target }}'
+      - name: Upload qualification summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualification-${{ matrix.target }}
+          path: qualification/${{ matrix.target }}/qualification.json
+          if-no-files-found: error
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
         with:

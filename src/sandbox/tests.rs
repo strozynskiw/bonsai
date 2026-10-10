@@ -2,6 +2,39 @@ use std::path::Path;
 
 use super::*;
 
+async fn loopback_probe() -> (std::net::TcpListener, String) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    // TCP connect alone is sufficient; no external host or listener thread needed.
+    let script = format!(
+        "curl -s --noproxy '*' --connect-timeout 1 --max-time 2 telnet://{address} </dev/null"
+    );
+    let connected = tokio::net::TcpStream::connect(address).await.unwrap();
+    drop(connected);
+    // Verify the exact command can establish a connection without confinement.
+    listener.set_nonblocking(true).unwrap();
+    while listener.accept().is_ok() {}
+    let mut control = tokio::process::Command::new("/bin/sh")
+        .args(["-c", &script])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if listener.accept().is_ok() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "unsandboxed loopback positive control failed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let _ = control.kill().await;
+    control.wait().await.unwrap();
+    (listener, script)
+}
+
 #[test]
 fn disabled_sandbox_is_never_active() {
     let sb = CommandSandbox::disabled();
@@ -319,6 +352,11 @@ mod bubblewrap {
     #[tokio::test]
     async fn blocks_write_outside_project_root() {
         let Some(backend) = linux::detect_backend() else {
+            assert_ne!(
+                std::env::var("BONSAI_REQUIRE_NATIVE_SANDBOX").as_deref(),
+                Ok("1"),
+                "qualification requires effective Bubblewrap"
+            );
             eprintln!("skipping Bubblewrap integration test: bwrap unavailable");
             return;
         };
@@ -384,6 +422,11 @@ mod bubblewrap {
     #[tokio::test]
     async fn allows_configured_writable_root() {
         let Some(backend) = linux::detect_backend() else {
+            assert_ne!(
+                std::env::var("BONSAI_REQUIRE_NATIVE_SANDBOX").as_deref(),
+                Ok("1"),
+                "qualification requires effective Bubblewrap"
+            );
             eprintln!("skipping Bubblewrap integration test: bwrap unavailable");
             return;
         };
@@ -410,11 +453,15 @@ mod bubblewrap {
     }
 
     #[tokio::test]
-    #[ignore = "requires network egress; run manually"]
     async fn denies_network_when_configured() {
         let Some(backend) =
             linux::detect_backend().filter(|backend| backend.supports_network_deny())
         else {
+            assert_ne!(
+                std::env::var("BONSAI_REQUIRE_NATIVE_SANDBOX").as_deref(),
+                Ok("1"),
+                "qualification requires native network isolation"
+            );
             eprintln!("skipping Bubblewrap integration test: network isolation unavailable");
             return;
         };
@@ -425,7 +472,12 @@ mod bubblewrap {
             writable_roots: vec![root.clone()],
             deny_network: true,
         };
-        let status = run(backend, &policy, &root, "curl -m 2 -s https://example.com").await;
+        let (listener, script) = loopback_probe().await;
+        let status = run(backend, &policy, &root, &script).await;
+        assert!(
+            listener.accept().is_err(),
+            "sandbox connected to forbidden loopback listener"
+        );
         assert!(!status.success(), "network egress must be denied");
     }
 
@@ -736,7 +788,6 @@ mod seatbelt {
 
     /// Opt-in network proof — needs real network, so it is ignored by default.
     #[tokio::test]
-    #[ignore = "requires network egress; run manually"]
     async fn denies_network_when_configured() {
         let proj = tempfile::tempdir().unwrap();
         let root = proj.path().canonicalize().unwrap();
@@ -744,7 +795,12 @@ mod seatbelt {
             writable_roots: vec![root.clone()],
             deny_network: true,
         };
-        let status = run(&policy, &root, "curl -m 2 -s https://example.com").await;
+        let (listener, script) = loopback_probe().await;
+        let status = run(&policy, &root, &script).await;
+        assert!(
+            listener.accept().is_err(),
+            "sandbox connected to forbidden loopback listener"
+        );
         assert!(!status.success(), "network egress must be denied");
     }
 
