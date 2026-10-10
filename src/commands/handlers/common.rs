@@ -552,6 +552,7 @@ pub(crate) async fn handle_command_with_catalog(
             None => outcome.messages.push(status(format_agents_list(
                 &agent.custom_agents(),
                 &agent.builtin_subagent_settings(),
+                &|name| agent.declared_agent_tool_resolves(name),
             ))),
         },
         Some("/authorize") => {
@@ -1143,6 +1144,7 @@ fn toggle_builtin_skill_message(
 fn format_agents_list(
     custom: &AgentRegistry,
     settings: &crate::subagent::BuiltinSubagentSettingsRegistry,
+    resolves: &dyn Fn(&str) -> bool,
 ) -> String {
     let mut lines = vec!["Agents and subagents:".to_string()];
     for spec in crate::tool::builtin_agents() {
@@ -1191,7 +1193,7 @@ fn format_agents_list(
                 line.push_str(&format!("  [max turns: {max_turns}]"));
             }
         }
-        if let Some(invalid) = invalid_custom_agent_tools(def) {
+        if let Some(invalid) = invalid_custom_agent_tools(def, resolves) {
             line.push_str(&format!("  [unknown tools ignored: {invalid}]"));
         }
         lines.push(line);
@@ -1218,18 +1220,24 @@ fn append_model_summary(line: &mut String, model: Option<&str>, effort: Option<&
     }
 }
 
-/// Comma-joined declared tools that aren't grantable to a custom agent (an
-/// unknown name, or a recursion/session-internal tool like `agent`), or `None`
-/// when the agent's `tools:` are all valid. Mutating tools (`write`/`edit`/
-/// `bash`) are grantable now and prompt under the current policy, so they are not
-/// flagged.
-fn invalid_custom_agent_tools(def: &crate::resource::agent::AgentDef) -> Option<String> {
+/// Comma-joined declared tools that a run would not actually grant — an unknown
+/// name, a recursion/session-internal tool like `agent`, or an MCP name this
+/// session never discovered — or `None` when every declared name resolves.
+/// `resolves` is the same lookup a run uses ([`crate::tool::grantable_agent_tool`],
+/// via [`crate::agent::Agent::declared_agent_tool_resolves`]), so `/agents`
+/// neither reports a tool the agent can get nor stays silent about a typo.
+/// Mutating tools (`write`/`edit`/`bash`) are grantable now and prompt under the
+/// current policy, so they are not flagged.
+fn invalid_custom_agent_tools(
+    def: &crate::resource::agent::AgentDef,
+    resolves: &dyn Fn(&str) -> bool,
+) -> Option<String> {
     let invalid: Vec<&str> = def
         .tools
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .filter(|name| crate::tool::canonical_agent_tool(name).is_none())
+        .filter(|name| !resolves(name))
         .map(String::as_str)
         .collect();
     (!invalid.is_empty()).then(|| invalid.join(", "))

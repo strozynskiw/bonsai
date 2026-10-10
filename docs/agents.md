@@ -70,8 +70,11 @@ Mechanics:
   workspace effects return with the conclusion for attribution.
 - **No recursion** — a subagent cannot spawn subagents.
 - **Safe by default** — built-ins and custom definitions without `tools:`
-  are read-only. Mutating grants pass through the parent's permission gates
-  and serialize against conflicting work.
+  are read-only over *files*. Mutating grants pass through the parent's
+  permission gates and serialize against conflicting work. Discovered
+  [MCP](mcp.md) tools are the exception: they are available to every agent
+  (plan and SMOL included) and are gated per call on the extension approval
+  path, declared-capability risk tier included.
 - **`/subagents`** (alias `/subtasks`, or `Alt+S`) — live view of running
   and finished subagents: prompt, status, elapsed, live tool calls, final
   result; `m` sets a session-scoped model override for an agent name.
@@ -109,7 +112,7 @@ Do not modify anything.
 | `name` | yes | definition id; match the filename; built-in ids reserved |
 | `description` | yes | one line for `/agents` and the model's Subagents index |
 | `surface` | no | `[subagent]` (default), `[mode]`, or `[mode, subagent]` |
-| `tools` | no | grant scope; omit for the read-only default. Grantable: the read-only core plus `write`, `edit`, `apply_patch`, `bash`, `terminal`, `rename_symbol`, `skill`, `question`, `webfetch`. Unknown names are ignored and reported by `/agents`. |
+| `tools` | no | grant scope; omit for the read-only default. Grantable: the read-only core plus `write`, `edit`, `apply_patch`, `bash`, `terminal`, `rename_symbol`, `skill`, `question`, `webfetch`, and any discovered MCP tool by wire name (`mcp__github__create_issue`) or dotted id (`mcp.github.create_issue`). Unknown names are ignored and reported by `/agents`. |
 | `model` | no | model selector — a shortcut letter (follows the live binding) or a full `/model` selector. Applies on both surfaces: as a subagent and as a `Shift+Tab` persona. Omit to inherit the parent/session model. |
 | `effort` | no | reasoning-effort override for subagent invocations (persona runs follow the session's remembered reasoning) |
 | `fallback_model` / `fallback_effort` | no | backup used when the primary is unavailable or fails after normal retries (subagent invocations) |

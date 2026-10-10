@@ -248,6 +248,56 @@ fn custom_agent_can_be_granted_mutating_tools() {
 }
 
 #[test]
+fn custom_agent_can_be_granted_mcp_tools() {
+    // Every agent shares the parent's extension surface: a custom agent grants an
+    // MCP tool by its wire name (or dotted id) exactly like a built-in tool.
+    let custom = custom_registry(&[(
+        "issuer",
+        "---\nname: issuer\ndescription: d\ntools: [read, mcp.github.create_issue]\n---\nprompt",
+    )]);
+    let tool = agent_tool_with(
+        sub_registry_with(&["read", "grep", "mcp__github__create_issue"]),
+        custom,
+    );
+    let resolved = tool.resolve("issuer").unwrap();
+    assert!(resolved.registry.get("read").is_some());
+    assert!(
+        resolved.registry.get("mcp__github__create_issue").is_some(),
+        "declared MCP tool must be granted"
+    );
+    assert!(
+        resolved.registry.get("grep").is_none(),
+        "undeclared tools stay excluded"
+    );
+}
+
+#[test]
+fn mcp_granted_delegations_serialize() {
+    // An MCP tool's effects belong to the server, so an extension-namespace
+    // grant counts as mutation-bearing: the delegation serializes instead of
+    // fanning out beside other work. A genuinely read-only delegation still
+    // batches.
+    let custom = custom_registry(&[(
+        "issuer",
+        "---\nname: issuer\ndescription: d\ntools: [mcp__github__create_issue]\n---\nprompt",
+    )]);
+    let tool = agent_tool_with(
+        sub_registry_with(&["read", "mcp__github__create_issue"]),
+        custom,
+    );
+    assert_eq!(
+        tool.delegation_is_read_only(&serde_json::json!({ "agent": "issuer" })),
+        Some(false)
+    );
+
+    let read_only = agent_tool_with(sub_registry_with(&["read"]), custom_registry(&[]));
+    assert_eq!(
+        read_only.delegation_is_read_only(&serde_json::json!({ "agent": "explore" })),
+        Some(true)
+    );
+}
+
+#[test]
 fn custom_agent_unknown_tool_is_skipped_not_fatal() {
     // An unrecognized tool name is dropped (surfaced separately by `/agents`),
     // not a hard error that would sink the whole delegation.

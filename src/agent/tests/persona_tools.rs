@@ -123,6 +123,58 @@ async fn persona_can_be_granted_mutating_tools() {
 }
 
 #[tokio::test]
+async fn mcp_tools_reach_the_projected_read_only_and_review_registries() {
+    let fixture = TestFixture::new();
+    let temp = tempfile::TempDir::new().unwrap();
+    let custom = custom_agents(
+        temp.path(),
+        &[(
+            "chatter",
+            "---\nname: chatter\ndescription: chats\nview: chat\nsurface: [mode]\n---\nYou chat.",
+        )],
+    );
+
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        // The read-only default a persona without `tools:` projects from, and
+        // the review persona's source registry below.
+        registry_with(&["read", "mcp__github__create_issue"]),
+        registry_with(&["plan_add_task", "read", "mcp__github__create_issue"]),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .custom_agents(shared_registry(custom))
+    .build()
+    .unwrap();
+
+    // A projection narrows the built-in set but never drops the extension
+    // namespace: every agent keeps the parent's MCP surface.
+    agent.set_persona(ActivePersona::Custom("chatter".to_string()));
+    assert!(agent.tool_registry.get("read").is_some());
+    assert!(
+        agent
+            .tool_registry
+            .get("mcp__github__create_issue")
+            .is_some(),
+        "the read-only default must carry the discovered MCP tools"
+    );
+
+    agent.set_persona(ActivePersona::Builtin(super::AgentMode::Review));
+    assert!(agent.tool_registry.get("read").is_some());
+    assert!(
+        agent
+            .tool_registry
+            .get("mcp__github__create_issue")
+            .is_some(),
+        "review is an agent too and must not lose the extension surface"
+    );
+    assert!(
+        agent.tool_registry.get("plan_add_task").is_none(),
+        "review stays without the plan-canvas tools"
+    );
+}
+
+#[tokio::test]
 async fn direct_persona_selection_rejects_subagent_only_and_reserved_builtin_ids() {
     let fixture = TestFixture::new();
     let temp = tempfile::TempDir::new().unwrap();

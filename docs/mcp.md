@@ -69,6 +69,11 @@ enabled = false
 - Connection at startup is concurrent across enabled servers with a 10 s
   bound; tools register in sorted `(server, tool)` order so the prompt
   suffix stays byte-stable.
+- **Every agent has them.** The discovered tools register in every registry a
+  turn can run with — coding, plan, SMOL, delegated subagents (built-in and
+  custom), and custom personas that list them in `tools:`. A delegated agent
+  is therefore never blind to a tool the parent was told to use; each call
+  passes the same gate described below wherever it is invoked from.
 
 ## Trust and gating
 

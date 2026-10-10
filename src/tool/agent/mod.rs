@@ -11,7 +11,7 @@ mod tool;
 
 pub(crate) use catalog::{
     GRANTABLE_AGENT_TOOLS, agents_index_section_with_settings, builtin_agents,
-    builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
+    builtin_settings_model_chain, canonical_agent_tool, grantable_agent_tool, is_builtin_agent,
 };
 pub(crate) use runner::{
     SelfReviewRunOptions, SubagentProviderConfig, SubagentProviderFactory, SubagentRunner,

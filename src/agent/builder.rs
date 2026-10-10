@@ -43,7 +43,8 @@ const READ_ONLY_TOOL_NAMES: [&str; 13] = [
 
 /// Fallback SMOL subset projected from the coding registry when no assembled
 /// SMOL registry is injected. Keep the names and order in sync with the
-/// `ToolProfile::Smol` column of the tool descriptor table.
+/// `ToolProfile::Smol` column of the tool descriptor table; the projection adds
+/// the discovered MCP tools after them, like the assembled registry does.
 const SMOL_TOOL_NAMES: [&str; 7] = [
     "read",
     "write",
@@ -87,11 +88,21 @@ impl Agent {
 
     /// Project a named subset of `source` into a fresh registry (skipping names
     /// the source doesn't have). The shared mechanism behind the read-mostly
-    /// personas.
+    /// personas. Discovered MCP tools ride along in `source` order after the
+    /// named subset: every agent runs with the parent's extension surface (each
+    /// call re-enters the shared extension gate), and a projection must not
+    /// silently drop what the parent was told to use.
     fn registry_subset(source: &Arc<ToolRegistry>, names: &[&str]) -> Arc<ToolRegistry> {
         let mut registry = ToolRegistry::new();
         for name in names {
             if let Some(tool) = source.get(name) {
+                registry.register(tool);
+            }
+        }
+        for name in source.names() {
+            if crate::extension::is_mcp_wire_name(name)
+                && let Some(tool) = source.get(name)
+            {
                 registry.register(tool);
             }
         }

@@ -261,9 +261,12 @@ impl AgentEditTarget {
 }
 
 /// A tool the composer can grant, paired with whether it's currently selected.
+/// The name is owned: a declared tool outside the built-in catalog (an MCP tool
+/// named by wire or dotted id) gets a row of its own so the composer shows it and
+/// an edit-save round-trip never drops it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposerTool {
-    pub name: &'static str,
+    pub name: String,
     pub selected: bool,
 }
 
@@ -271,10 +274,54 @@ fn default_tools() -> Vec<ComposerTool> {
     crate::tool::GRANTABLE_AGENT_TOOLS
         .iter()
         .map(|name| ComposerTool {
-            name,
+            name: (*name).to_string(),
             selected: false,
         })
         .collect()
+}
+
+/// The catalog rows plus one selected row per declared MCP grant the catalog
+/// doesn't already cover (e.g. `mcp__github__create_issue`), so an edit-save
+/// round-trip keeps it. A name the catalog doesn't recognize and that isn't an
+/// MCP grant is left out — it doesn't resolve at run time and `/agents` reports
+/// it as unknown. Two spellings of the same MCP tool (wire and dotted) share
+/// one row, keeping the spelling the file already used.
+fn tools_with_declared(declared: &[String]) -> Vec<ComposerTool> {
+    let mut rows = default_tools();
+    for name in declared {
+        if let Some(canonical) = crate::tool::canonical_agent_tool(name) {
+            if let Some(row) = rows.iter_mut().find(|row| row.name == canonical) {
+                row.selected = true;
+            }
+            continue;
+        }
+        let name = name.trim();
+        if !crate::extension::is_mcp_tool_grant_name(name) {
+            continue;
+        }
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| same_declared_mcp_tool(&row.name, name))
+        {
+            row.selected = true;
+            continue;
+        }
+        rows.push(ComposerTool {
+            name: name.to_string(),
+            selected: true,
+        });
+    }
+    rows
+}
+
+/// Whether two declared names address the same MCP tool — the wire name
+/// (`mcp__server__tool`) and the dotted display id (`mcp.server.tool`) both
+/// resolve to one registry entry.
+fn same_declared_mcp_tool(a: &str, b: &str) -> bool {
+    fn wire(name: &str) -> String {
+        crate::extension::dotted_alias_to_wire(name).unwrap_or_else(|| name.to_string())
+    }
+    wire(a) == wire(b)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,12 +437,7 @@ impl AgentComposerState {
             .unwrap_or(0);
         let mut tool_rows = default_tools();
         if let Some(declared) = tools {
-            for row in &mut tool_rows {
-                row.selected = declared
-                    .iter()
-                    .filter_map(|name| crate::tool::canonical_agent_tool(name))
-                    .any(|canonical| canonical == row.name);
-            }
+            tool_rows = tools_with_declared(declared);
         }
         Self {
             step: AgentComposerStep::Details,
@@ -898,12 +940,12 @@ impl AgentComposerState {
     }
 
     /// The selected tools, or `None` when none are ticked (the read-only default).
-    pub(crate) fn selected_tools(&self) -> Option<Vec<&'static str>> {
-        let selected: Vec<&'static str> = self
+    pub(crate) fn selected_tools(&self) -> Option<Vec<&str>> {
+        let selected: Vec<&str> = self
             .tools
             .iter()
             .filter(|tool| tool.selected)
-            .map(|tool| tool.name)
+            .map(|tool| tool.name.as_str())
             .collect();
         (!selected.is_empty()).then_some(selected)
     }
@@ -1426,6 +1468,66 @@ mod tests {
         state.set_fallback_model(None);
         assert_eq!(state.selected_model(), None);
         assert_eq!(state.selected_fallback_model(), None);
+    }
+
+    #[test]
+    fn declared_mcp_tool_survives_an_edit_round_trip() {
+        use crate::resource::frontmatter::{AgentFrontmatter, parse_frontmatter};
+
+        let declared = vec![
+            "read".to_string(),
+            "mcp.github.create_issue".to_string(),
+            // The wire spelling of the same tool must not add a second row.
+            "mcp__github__create_issue".to_string(),
+            // A name that resolves to nothing is not carried over.
+            "bogus_tool".to_string(),
+        ];
+        let state = AgentComposerState::edit(
+            "Issuer".to_string(),
+            "d".to_string(),
+            true,
+            Some(&declared),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "prompt".to_string(),
+            PathBuf::from("/tmp/issuer.md"),
+        );
+
+        // A declared MCP grant outside the built-in catalog gets its own row, so
+        // an edit-save round-trip never silently drops it.
+        assert!(
+            state
+                .tools
+                .iter()
+                .any(|tool| tool.name == "mcp.github.create_issue" && tool.selected)
+        );
+        assert_eq!(
+            state
+                .tools
+                .iter()
+                .filter(|tool| tool.name.starts_with("mcp"))
+                .count(),
+            1,
+            "both spellings of one MCP tool share a single row"
+        );
+        assert!(
+            state.tools.iter().all(|tool| tool.name != "bogus_tool"),
+            "an unresolvable name is not turned into a grantable row"
+        );
+
+        let md = state.render_agent_md();
+        let parsed = parse_frontmatter::<AgentFrontmatter>(&md).expect("parses");
+        assert_eq!(
+            parsed.frontmatter.tools,
+            Some(vec![
+                "read".to_string(),
+                "mcp.github.create_issue".to_string()
+            ])
+        );
     }
 
     #[test]

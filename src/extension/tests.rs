@@ -44,6 +44,20 @@ fn dotted_alias_resolves_two_segment_mcp_ids_only() {
 }
 
 #[test]
+fn mcp_tool_grant_names_cover_the_wire_and_dotted_forms_only() {
+    assert!(is_mcp_wire_name("mcp__github__create_issue"));
+    assert!(!is_mcp_wire_name("mcp.github.create_issue"));
+    assert!(!is_mcp_wire_name("read"));
+
+    assert!(is_mcp_tool_grant_name("mcp__github__create_issue"));
+    assert!(is_mcp_tool_grant_name(" mcp.github.create_issue "));
+    // Nothing outside the reserved mcp namespace is grantable by name.
+    assert!(!is_mcp_tool_grant_name("read"));
+    assert!(!is_mcp_tool_grant_name("mcp.github"));
+    assert!(!is_mcp_tool_grant_name("hook.cargo-fmt"));
+}
+
+#[test]
 fn dotted_alias_dispatches_through_tool_registry_get() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(FakeTool::new("mcp__github__create_issue")));

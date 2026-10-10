@@ -223,6 +223,14 @@ impl Agent {
         &self.extensions
     }
 
+    /// Whether one declared `tools:` name would actually be granted to a custom
+    /// agent: a built-in catalog name, or an MCP tool this session discovered
+    /// (wire or dotted id). Deliberately the same lookup a run uses, so `/agents`
+    /// reports a typo instead of trusting the name's `mcp` shape.
+    pub(crate) fn declared_agent_tool_resolves(&self, name: &str) -> bool {
+        crate::tool::grantable_agent_tool(&self.registries.coding, name).is_some()
+    }
+
     /// The hooks engine, for `run_loop`/bash/file-mutation firing and
     /// `/hooks`.
     pub(crate) fn hooks(&self) -> &std::sync::Arc<crate::hooks::HookEngine> {

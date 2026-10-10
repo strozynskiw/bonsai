@@ -40,8 +40,12 @@ pub(crate) fn mcp_tool_id(server: &str, tool: &str) -> String {
 /// charset limits.
 const MAX_WIRE_NAME_LEN: usize = 64;
 
+/// Reserved wire-name prefix for one MCP server's tools. A truncated wire name
+/// keeps it (only the tail is clamped), so the namespace check is total.
+const MCP_WIRE_PREFIX: &str = "mcp__";
+
 pub(crate) fn mcp_wire_name(server: &str, tool: &str) -> String {
-    let name = format!("mcp__{server}__{tool}");
+    let name = format!("{MCP_WIRE_PREFIX}{server}__{tool}");
     if name.len() <= MAX_WIRE_NAME_LEN {
         return name;
     }
@@ -71,6 +75,22 @@ pub(crate) fn dotted_alias_to_wire(name: &str) -> Option<String> {
         return None;
     }
     Some(mcp_wire_name(server, tool))
+}
+
+/// Whether `name` is the provider wire name of an MCP tool
+/// (`mcp__<server>__<tool>`) — the key a registry stores it under, and the
+/// namespace every profile's extension seam is identified by.
+pub(crate) fn is_mcp_wire_name(name: &str) -> bool {
+    name.starts_with(MCP_WIRE_PREFIX)
+}
+
+/// Whether `name` is an MCP tool grant name: the wire name, or the dotted
+/// display id (`mcp.<server>.<tool>`) [`crate::tool::ToolRegistry::get`] aliases
+/// to that wire name. A custom agent's `tools:` may grant MCP tools by name,
+/// and nothing outside the reserved `mcp` namespace becomes grantable this way.
+pub(crate) fn is_mcp_tool_grant_name(name: &str) -> bool {
+    let name = name.trim();
+    is_mcp_wire_name(name) || dotted_alias_to_wire(name).is_some()
 }
 
 /// Register `tool` into `registry` under its wire name, unless that name is

@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn grantable_agent_tool_resolves_builtins_and_mcp_names_only() {
+    let registry = sub_registry_with(&["read", "set_session_title", "mcp__github__create_issue"]);
+
+    assert!(
+        grantable_agent_tool(&registry, "Read").is_some(),
+        "built-in aliases normalize before lookup"
+    );
+    assert!(grantable_agent_tool(&registry, "mcp__github__create_issue").is_some());
+    assert!(
+        grantable_agent_tool(&registry, " mcp.github.create_issue ").is_some(),
+        "the dotted display id resolves to the same tool"
+    );
+    // Session-internal and unknown names stay ungrantable.
+    assert!(grantable_agent_tool(&registry, "set_session_title").is_none());
+    assert!(grantable_agent_tool(&registry, "agent").is_none());
+    assert!(grantable_agent_tool(&registry, "bogus_tool").is_none());
+    assert!(grantable_agent_tool(&registry, "mcp.github.close_issue").is_none());
+}
+
+#[test]
 fn builtins_and_custom_agents_have_distinct_budgets() {
     assert_eq!(
         builtin_agent("explore").map(|spec| spec.budget.limits()),

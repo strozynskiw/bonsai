@@ -53,7 +53,8 @@ pub use agent::AgentTool;
 pub(crate) use agent::{
     GRANTABLE_AGENT_TOOLS, SelfReviewRunOptions, SubagentProviderConfig, SubagentProviderFactory,
     SubagentRunner, SubagentToolRegistryFactory, agents_index_section_with_settings,
-    builtin_agents, builtin_settings_model_chain, canonical_agent_tool, is_builtin_agent,
+    builtin_agents, builtin_settings_model_chain, canonical_agent_tool, grantable_agent_tool,
+    is_builtin_agent,
 };
 pub(crate) use apply_patch::{patch_target_paths_from_arguments, patched_paths_from_arguments};
 pub use bash::BashTool;

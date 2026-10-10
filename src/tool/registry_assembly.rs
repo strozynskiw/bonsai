@@ -531,6 +531,13 @@ pub(crate) fn build_tool_registries(
             ToolProfile::CustomSubagent,
             RegistrationStage::Standard,
         );
+        // Delegated agents get the same extension surface as the parent, so a
+        // subagent is never blind to a tool the parent was told to use. A built-in
+        // subagent's read-only set widens to the MCP namespace here; each call
+        // still passes the same `ExtensionGate` at `McpTool::execute`, so the
+        // approval boundary is identical wherever the tool is invoked from.
+        crate::mcp::register_mcp_tools(&mut subagent_registry, &mcp_tools, &extensions);
+        crate::mcp::register_mcp_tools(&mut full_sub_registry, &mcp_tools, &extensions);
         let registry_factory = subagent_tool_registry_factory(SubagentToolRunDeps {
             project_root: project_root.clone(),
             lsp_hub: lsp_hub.clone(),
@@ -710,8 +717,11 @@ pub(crate) fn build_tool_registries(
     );
     // MCP tools: appended after the built-in web tools, in the (server, tool) sorted
     // order `McpHub::connect_and_discover` already produced — the next
-    // byte-stable seam. Not in SMOL/planning in v1. A wire-name collision
-    // degrades that server visibly instead of shadowing the builtin.
+    // byte-stable seam, ahead of any `AfterExtensions` registration (episode
+    // recall) so that tail keeps its own stability. Every agent profile
+    // registers them (see the planning, SMOL and subagent registries above) so
+    // no agent is missing an extension surface the parent has. A wire-name
+    // collision degrades that server visibly instead of shadowing the builtin.
     crate::mcp::register_mcp_tools(&mut coding, &mcp_tools, &extensions);
     // Episode recall: appended after every
     // existing builtin/MCP registration so the disabled path preserves the
@@ -749,6 +759,7 @@ pub(crate) fn build_tool_registries(
     let mut smol = ToolRegistry::new();
     smol.set_authorization_ledger(authorization_ledger.clone());
     smol_instances.register_stage(&mut smol, ToolProfile::Smol, RegistrationStage::Standard);
+    crate::mcp::register_mcp_tools(&mut smol, &mcp_tools, &extensions);
 
     let mut planning_instances = ToolInstances::default();
     core.insert_into(
@@ -783,6 +794,7 @@ pub(crate) fn build_tool_registries(
         ToolProfile::Planning,
         RegistrationStage::Standard,
     );
+    crate::mcp::register_mcp_tools(&mut planning, &mcp_tools, &extensions);
     planning_instances.register_stage(
         &mut planning,
         ToolProfile::Planning,
@@ -1493,5 +1505,111 @@ mod tests {
             planning.get("agent").is_none(),
             "planning omits agent w/o factory"
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_reach_every_agent_profile() {
+        let (interaction, _rx) = crate::interaction::InteractionService::new();
+        let interaction = Arc::new(interaction);
+        let extensions = Arc::new(crate::extension::status::ExtensionRegistry::new());
+        // A real discovered tool set from the in-process fake server, registering
+        // through the same path `McpHub::connect_and_discover` uses.
+        let mcp_tools = crate::mcp::test_support::register_fake_server(
+            crate::config::DeclaredCapabilities::default(),
+            Vec::new(),
+            crate::mcp::test_support::gate_with(
+                PermissionManager::memory_only(),
+                interaction.clone(),
+            ),
+            extensions.clone(),
+        )
+        .await;
+        assert!(!mcp_tools.is_empty(), "the fake server advertises tools");
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let project_root = temp_dir.path().to_path_buf();
+        let storage = crate::storage::Storage::open_at(temp_dir.path().join("bonsai.db"))
+            .await
+            .unwrap();
+        let factory: crate::tool::SubagentProviderFactory = Arc::new(
+            |_agent: String, _chain: crate::subagent::SubagentModelChain| {
+                Box::pin(async {
+                    unreachable!("provider factory must not run during registration")
+                })
+            },
+        );
+        let (coding, planning, smol, runner) = build_tool_registries(ToolRegistryDeps {
+            project_root: project_root.clone(),
+            read_tracker: ReadTracker::new(),
+            path_evidence: crate::tool::PathEvidence::new(&project_root).unwrap(),
+            lsp_hub: Arc::new(crate::lsp::LspHub::new(project_root)),
+            project_info_runtime: Arc::new(crate::tool::ProjectInfoRuntime::default()),
+            permissions: PermissionManager::memory_only(),
+            domain_permissions: PermissionManager::memory_only_domains(),
+            interaction,
+            todo_store: Arc::new(Mutex::new(TodoStore::new())),
+            plan_store: Arc::new(Mutex::new(PlanDoc::default())),
+            background_tasks: Arc::new(BackgroundTaskRegistry::new()),
+            terminals: Arc::new(crate::terminal::TerminalRegistry::new()),
+            background_wakes: None,
+            background_wakes_parkable: false,
+            yolo_mode: crate::yolo::YoloMode::new(),
+            sandbox: crate::sandbox::CommandSandbox::disabled(),
+            workspace_locks: crate::tool::WorkspaceLockContext::disabled(
+                temp_dir.path().to_path_buf(),
+            ),
+            session_title: SessionTitleToolDeps {
+                storage,
+                active_session_id: Arc::new(Mutex::new(None)),
+            },
+            skills: crate::resource::skill::shared_registry(
+                crate::resource::skill::SkillRegistry::empty(),
+            ),
+            subagent_provider_factory: Some(factory),
+            subagent_background_wake: false,
+            peer_wake_when_done: false,
+            subagents: Arc::new(crate::subagent::SubagentRegistry::new()),
+            custom_agents: crate::resource::agent::shared_registry(
+                crate::resource::agent::AgentRegistry::empty(),
+            ),
+            builtin_subagent_settings: crate::subagent::SharedBuiltinSubagentSettings::default(),
+            peer_bus: None,
+            memory: None,
+            mcp_tools,
+            extensions,
+            hooks: Arc::new(crate::hooks::HookEngine::disabled()),
+            authorization_ledger: crate::tool::AuthorizationLedger::disabled(),
+            episode_store: None,
+        });
+        let runner = runner.expect("subagent factory must build a runner");
+
+        for (profile, registry) in [
+            ("coding", &coding),
+            ("planning", &planning),
+            ("SMOL", &smol),
+            ("builtin subagent", runner.read_only_registry()),
+            ("custom subagent", runner.full_registry()),
+        ] {
+            assert!(
+                registry.get("mcp__fake__echo").is_some(),
+                "{profile} must carry the discovered MCP tools"
+            );
+
+            // Extensions sit after the built-ins: the byte-stable prompt-cache
+            // seam. (An `AfterExtensions` addition such as episode recall would
+            // follow it; this session has none configured.)
+            let names: Vec<&str> = registry.names().collect();
+            let first_mcp = names
+                .iter()
+                .position(|name| name.starts_with("mcp__"))
+                .unwrap_or_else(|| panic!("{profile} registers the MCP tools"));
+            assert!(first_mcp > 0, "{profile}: built-ins precede extensions");
+            assert!(
+                names[first_mcp..]
+                    .iter()
+                    .all(|name| name.starts_with("mcp__")),
+                "{profile}: no builtin is registered after the extension seam: {names:?}"
+            );
+        }
     }
 }

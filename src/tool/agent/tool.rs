@@ -7,9 +7,8 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::catalog::{
-    SubagentRunLimits, builtin_agent, builtin_settings_model_chain, canonical_agent_tool,
-    custom_subagent_limits, frontmatter_model_chain, merged_agent_entries,
-    registry_grants_mutation,
+    SubagentRunLimits, builtin_agent, builtin_settings_model_chain, custom_subagent_limits,
+    frontmatter_model_chain, grantable_agent_tool, merged_agent_entries, registry_grants_mutation,
 };
 use super::runner::{SubagentRunSpec, SubagentRunner};
 use crate::agent::ExecutionLaneKind;
@@ -229,9 +228,7 @@ impl AgentTool {
         let full_registry = self.runner.full_registry();
         let mut registry = ToolRegistry::new();
         for name in tools {
-            if let Some(tool) =
-                canonical_agent_tool(name).and_then(|canonical| full_registry.get(canonical))
-            {
+            if let Some(tool) = grantable_agent_tool(full_registry, name) {
                 registry.register(tool);
             }
         }

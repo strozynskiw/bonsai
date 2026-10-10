@@ -1546,19 +1546,19 @@ impl Agent {
     /// safe read-only default; a declared list grants exactly those tools from the
     /// full coding registry — so write/edit/bash are grantable and prompt under
     /// the current approval policy at run time, exactly like the built-in coding
-    /// persona. Only [`canonical_agent_tool`]-recognized names resolve. The
-    /// parent-only `agent` delegation tool is retained automatically so every
-    /// user-facing agent can call subagents; delegated runs still omit it and
-    /// cannot recurse. Unknown or non-grantable names are skipped.
+    /// persona. A [`canonical_agent_tool`] name, or an MCP tool named by its
+    /// wire/dotted id, resolves through
+    /// [`crate::tool::grantable_agent_tool`]. The parent-only `agent` delegation
+    /// tool is retained automatically so every user-facing agent can call
+    /// subagents; delegated runs still omit it and cannot recurse. Unknown or
+    /// non-grantable names are skipped.
     fn scoped_persona_tools(&self, tools: Option<&[String]>) -> Arc<ToolRegistry> {
         let Some(tools) = tools else {
             return self.registries.read_only.clone();
         };
         let mut registry = ToolRegistry::new();
         for name in tools {
-            if let Some(tool) = crate::tool::canonical_agent_tool(name)
-                .and_then(|canonical| self.registries.coding.get(canonical))
-            {
+            if let Some(tool) = crate::tool::grantable_agent_tool(&self.registries.coding, name) {
                 registry.register(tool);
             }
         }

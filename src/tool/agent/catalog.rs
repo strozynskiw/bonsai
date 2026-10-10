@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::provider::ReasoningSelection;
@@ -7,7 +8,7 @@ use crate::subagent::{
     BuiltinSubagentId, BuiltinSubagentSettings, BuiltinSubagentSettingsRegistry,
     SubagentModelChain, SubagentModelOverride,
 };
-use crate::tool::ToolRegistry;
+use crate::tool::{Tool, ToolRegistry};
 
 pub(super) const EXPLORE_MAX_ITERATIONS: usize = 16;
 const REVIEW_MAX_ITERATIONS: usize = 40;
@@ -139,6 +140,22 @@ pub(crate) fn canonical_agent_tool(name: &str) -> Option<&'static str> {
     GRANTABLE_AGENT_TOOLS
         .contains(&canonical)
         .then_some(canonical)
+}
+
+/// Resolve one declared `tools:` name against a registry. A built-in name goes
+/// through [`canonical_agent_tool`]; everything else must be an MCP tool named
+/// by its wire name (`mcp__github__create_issue`) or dotted display id
+/// (`mcp.github.create_issue`). The `mcp` namespace check keeps
+/// recursion/session-internal tools (`agent`, `set_session_title`, plan tools)
+/// ungrantable, and an unknown name resolves to `None` rather than failing the
+/// whole delegation.
+pub(crate) fn grantable_agent_tool(registry: &ToolRegistry, name: &str) -> Option<Arc<dyn Tool>> {
+    if let Some(canonical) = canonical_agent_tool(name) {
+        return registry.get(canonical);
+    }
+    crate::extension::is_mcp_tool_grant_name(name)
+        .then(|| registry.get(name.trim()))
+        .flatten()
 }
 
 /// A built-in read-only subagent the model can delegate to.
@@ -314,11 +331,18 @@ fn render_agents_index_section(entries: &[(String, String)], hidden_custom: usiz
 }
 
 /// Whether a subagent's scoped registry grants any tool that can change the
-/// workspace or shell state. A delegation to such an agent must serialize;
-/// a read-only one (nothing here) can fan out in parallel.
+/// workspace, shell, or remote state. A delegation to such an agent must
+/// serialize; a read-only one (nothing here) can fan out in parallel.
 pub(super) fn registry_grants_mutation(registry: &ToolRegistry) -> bool {
     const MUTATING: [&str; 5] = ["write", "edit", "apply_patch", "bash", "rename_symbol"];
-    MUTATING.iter().any(|name| registry.get(name).is_some())
+    if MUTATING.iter().any(|name| registry.get(name).is_some()) {
+        return true;
+    }
+    // An MCP tool's effects belong to the server; the declared capabilities are
+    // the user's best guess, not an enforced contract. Default to serialized
+    // for any extension-namespace grant, like every other unknown external tool,
+    // until a narrower per-capability policy is proven.
+    registry.names().any(crate::extension::is_mcp_wire_name)
 }
 
 /// The model/effort a custom agent declares in frontmatter. `model:` is a
