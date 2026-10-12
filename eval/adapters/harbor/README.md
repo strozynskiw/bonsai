@@ -22,6 +22,19 @@ explicit values for:
 - `timeout_seconds`
 - `network` (`deny` or `allow`)
 
+Qualification additionally requires `b3sum` in the image and explicit
+`BONSAI_REVISION` / `BONSAI_TRIAL_ID=<task>-run-<N>` passed to the adapter's
+trusted environment settings. Run each frozen task/repetition once; do not reuse
+one result for multiple repetitions. The adapter records actual payload
+provider/model, execution profile, binary digest and trial identity in metadata.
+The common importer rejects missing/mismatched provenance for real evidence.
+
+Build each selected task image on the approved remote runner with the Linux amd64
+Bonsai executable copied to `/usr/local/bin/bonsai` and `b3sum` preinstalled.
+Record the resulting image digest and retain the Dockerfile privately. Neither
+adapter installs packages in benchmark workspaces. Never embed credentials in
+images; pass only the approved environment-key provider credential at runtime.
+
 Harbor owns environment setup, the verifier, reward calculation, timeout
 cleanup, and result persistence. Bonsai runs with `--isolation off` because the
 prepared Harbor environment is already the disposable workspace boundary; its

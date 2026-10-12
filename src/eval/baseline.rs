@@ -9,6 +9,11 @@ use super::{EvalReport, TaskReport};
 
 const BASELINE_SCHEMA_VERSION: u32 = 1;
 
+/// Shared score floor for internal and external regression gates.
+pub(crate) fn minimum_score(reference: f64, allowed_drop: f64) -> f64 {
+    (reference - allowed_drop).max(0.0)
+}
+
 /// Validate matrix membership independently of aggregate scores.
 /// Missing, duplicate, or failed cells cannot be averaged away.
 pub(crate) fn validate_qualification_cells(report: &EvalReport) -> Result<()> {
@@ -289,7 +294,7 @@ impl LoadedEvalBaseline {
         let actual = EvalBaselineMetrics::from_report(report);
         let policy = profile.policy();
         let minimum_score_percent =
-            (reference.score_percent - policy.allowed_score_drop_percent).max(0.0);
+            minimum_score(reference.score_percent, policy.allowed_score_drop_percent);
         let mut violations = Vec::new();
         if actual.score_percent < minimum_score_percent {
             violations.push(format!(

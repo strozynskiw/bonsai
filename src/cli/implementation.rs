@@ -627,6 +627,46 @@ fn parse_eval_adapter_args(args: &[String]) -> anyhow::Result<crate::eval::Adapt
         anyhow::bail!(USAGE);
     };
     match action {
+        "import-scorecard" => {
+            let mut input = None;
+            let mut output = None;
+            let mut force = false;
+            let mut json = false;
+            parse_adapter_flags(
+                &args[1..],
+                &mut input,
+                &mut output,
+                &mut force,
+                &mut json,
+                "--result",
+                "Usage: bonsai eval adapter import-scorecard --result <path> --out <path>",
+            )?;
+            anyhow::ensure!(!force && !json, "Unsupported import-scorecard flag");
+            Ok(crate::eval::AdapterCliCommand::ImportScorecard {
+                input: input.ok_or_else(|| anyhow::anyhow!("Missing --result"))?,
+                output: output.ok_or_else(|| anyhow::anyhow!("Missing --out"))?,
+            })
+        }
+        "compare" => {
+            let mut candidate = None;
+            let mut baseline = None;
+            let mut force = false;
+            let mut json = false;
+            parse_adapter_flags(
+                &args[1..],
+                &mut candidate,
+                &mut baseline,
+                &mut force,
+                &mut json,
+                "--candidate",
+                "Usage: bonsai eval adapter compare --candidate <scorecard> --out <baseline>",
+            )?;
+            anyhow::ensure!(!force && !json, "compare does not accept --force or --json");
+            Ok(crate::eval::AdapterCliCommand::Compare {
+                candidate: candidate.ok_or_else(|| anyhow::anyhow!("Missing --candidate"))?,
+                baseline: baseline.ok_or_else(|| anyhow::anyhow!("Missing --out baseline"))?,
+            })
+        }
         "run" => {
             let mut request_path = None;
             let mut out_dir = None;

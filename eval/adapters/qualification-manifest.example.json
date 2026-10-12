@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "fixture",
+  "runner": {
+    "platform": "linux-amd64",
+    "required_disk_gib": 100,
+    "max_spend_usd": 0,
+    "credential_env": "ANTHROPIC_API_KEY",
+    "output_directory": "/srv/bonsai-qualification/private"
+  },
+  "profile": {
+    "provider": "anthropic",
+    "model": "REPLACE_WITH_APPROVED_MODEL",
+    "reasoning_effort": "high",
+    "autonomy": "auto-accept",
+    "network": "deny",
+    "budgets": {
+      "max_turns": 80,
+      "max_generation_seconds": 900,
+      "max_output_chars": 400000,
+      "max_tool_seconds": 300,
+      "timeout_seconds": 3600,
+      "max_patch_bytes": 1000000
+    }
+  },
+  "candidate": {
+    "revision": "REPLACE_WITH_FULL_GIT_REVISION",
+    "binary_blake3": "REPLACE_WITH_BINARY_DIGEST"
+  },
+  "suites": [
+    {
+      "kind": "swe_bench_verified",
+      "dataset": "swe-bench_verified",
+      "dataset_version": "REPLACE_WITH_IMMUTABLE_HF_REVISION",
+      "harness_commit": "f7bbbb2ccdf479001d6467c9e34af59e44a840f9",
+      "contract_commit": "b679692b8b7e274a6c89fd0842f25b02da4b9256",
+      "task_ids": ["django__django-11099"],
+      "repetitions": 1
+    },
+    {
+      "kind": "terminal_bench2",
+      "dataset": "terminal-bench-2",
+      "dataset_version": "2fd12b88aafdd04a52c298e3940bcb189f9766d6",
+      "harness_commit": "2d3f78d55a703df2f76c005d7df44a5ce2d8adf5",
+      "contract_commit": "2fd12b88aafdd04a52c298e3940bcb189f9766d6",
+      "task_ids": ["REPLACE_WITH_PRESELECTED_TASK"],
+      "repetitions": 1
+    }
+  ]
+}

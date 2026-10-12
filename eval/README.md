@@ -397,6 +397,93 @@ canary execution remain opt-in work for a disk-capable remote runner. Benchmark
 instructions and repositories enter Bonsai as untrusted user/workspace data,
 not system instructions or permission grants.
 
+## External qualification handoff (#14)
+
+Copy `eval/adapters/qualification-manifest.example.json` and freeze task IDs,
+repetitions, immutable dataset revision, candidate revision/digest, execution
+profile and budgets **before** running. The example is a fixture, not an approved
+qualification selection; `django__django-11099` remains only a smoke example.
+
+Only an explicitly approved remote Linux amd64 runner with Docker may download
+or spend tokens. `eval/adapters/runner-requirements.txt` pins upstream source,
+but is **not** a transitive lockfile: the operator must create and review a
+hash-locked wheelhouse before use. Record installed VCS revisions from pip's
+`direct_url.json`, Docker version, architecture, free disk against the manifest,
+and presence (never contents) of the credential environment variable. Fresh
+`BONSAI_HOME` cannot reuse OAuth/keyring credentials. Standard CI stays offline.
+
+On that runner use the prepared Python environment, not `uv run` auto-install:
+
+```sh
+.venv/bin/python eval/adapters/phase_e/run_canary.py provision --out "$PRIVATE" --manifest "$MANIFEST" --approve-live
+.venv/bin/python eval/adapters/phase_e/run_canary.py run --out "$PRIVATE" --manifest "$MANIFEST" --approve-live
+.venv/bin/python eval/adapters/phase_e/run_canary.py grade --out "$PRIVATE" --manifest "$MANIFEST" --approve-live
+.venv/bin/python eval/adapters/phase_e/run_canary.py import-report --out "$PRIVATE" --manifest "$MANIFEST"
+```
+
+Preflight reads profile/task selection from the manifest, verifies installed VCS
+pins and the executable with `b3sum`, checks Docker, architecture, credentials and
+disk. Install `b3sum` on the runner. Grading uses the pinned dataset snapshot.
+Import checks task completeness and sidecar profile; never treat CLI flags as
+proof of actual execution. Restart only with matching evidence; do not silently
+rerun paid trials or mix candidate revisions. Run Harbor separately with the
+pinned adapter and a preinstalled Bonsai binary; Harbor owns verifier and cleanup.
+
+The versioned external scorecard in `src/eval/adapters/scorecard.rs` keeps each
+suite's expected trial IDs, individual pass/fail/error outcomes and binary
+Terminal-Bench rewards. Missing trials and infrastructure errors cannot qualify.
+Ordinary verifier failures are complete benchmark outcomes. Public export uses
+strict typed fields and rejects credential patterns and unknown private fields:
+
+```sh
+bonsai eval adapter import-scorecard --result private-import-bundle.json --out public-scorecard.json
+# Human review must explicitly set reviewed=true after inspecting provenance.
+bonsai eval adapter compare --candidate public-scorecard.json --out approved-baseline.json
+```
+
+The comparison is an offline RC gate: both suites, reviewed real evidence,
+matching manifest/profile/pins/trials, and no score drop are mandatory. Missing
+baseline returns nonzero. Candidate revision and binary version may differ;
+execution policy/budgets may not. `manifest_digest` must identify the frozen
+selection/profile, excluding candidate identity so RC revisions can be compared.
+Baseline creation is a separate human-reviewed promotion, never automatic.
+
+The import bundle contains `scorecard`, optional upstream-v2 `swe_report`, and
+`harbor_trials` records (`id`, `task_id`, `repetition`, pinned `result` envelope).
+Harbor IDs must be `<task_id>-run-<repetition>`; SWE IDs use official instance IDs.
+Import resets `reviewed=false`, preserves binary rewards and checks missing trials.
+
+**Preparation remains incomplete:** deterministic transitive runner locking,
+fully verified Harbor run provenance, complete Harbor invocation and offline
+end-to-end promotion tests still require implementation. Do not use manually assembled
+scorecards as sufficient release evidence. Administrative closure of #14 does
+not qualify a release or attest completion of the remaining work.
+
+<!-- Remaining work after administrative closure of #14, at the user's request:
+1. Freeze and review transitive dependency versions/hashes and a remote-runner
+   wheelhouse; verify deterministic offline deployment.
+2. Supply and verify the exact pinned Harbor invocation, candidate image setup,
+   credential/profile propagation, and task/repetition provenance.
+3. Complete the operator handoff and verify manifest -> both harness reports ->
+   common import -> scorecard -> regression comparison end to end offline.
+4. Only after explicit operator approval: run both remote canaries, review and
+   publish redacted evidence, explicitly promote a real baseline, and verify
+   the RC gate against frozen results. No live qualification or baseline exists
+   merely because the issue is closed.
+-->
+
+Keep workspaces, DBs, transcripts, patches and raw grader reports private. Publish
+only reviewed allowlisted evidence plus a limitations note under
+`eval/evidence/0.5.0/`; automated redaction does not replace human review. Label
+sample size, errors and canary limitations, never claim full benchmark results.
+
+Offline Python checks need no external dependencies and must not install them:
+
+```sh
+python3 -m venv /tmp/bonsai-eval-offline
+/tmp/bonsai-eval-offline/bin/python -m unittest eval.adapters.phase_e.test_import
+```
+
 ## Efficiency Gates
 
 `task_todo.toml` is the end-to-end implementation benchmark recovered from the

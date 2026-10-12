@@ -1,8 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "datasets>=3.0",
-#     "swebench>=3.0",
+#     "swebench @ git+https://github.com/SWE-bench/SWE-bench.git@f7bbbb2ccdf479001d6467c9e34af59e44a840f9",
 # ]
 # ///
 """Phase E — external qualification driver for the SWE-bench Verified adapter.
@@ -38,6 +37,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
+import importlib.metadata
 import os
 import shutil
 import stat
@@ -173,11 +174,11 @@ def clone_at_commit(repo: str, base_commit: str, dest: Path) -> None:
     run_checked(["git", "checkout", "-q", base_commit], cwd=dest)
 
 
-def load_instances(instance_ids: list[str]) -> list[Instance]:
+def load_instances(instance_ids: list[str], revision: str | None = None) -> list[Instance]:
     from datasets import load_dataset  # deferred: heavy import, network on first use
 
     eprint(f"Loading {DATASET_NAME}[{DATASET_SPLIT}] ...")
-    ds = load_dataset(DATASET_NAME, split=DATASET_SPLIT)
+    ds = load_dataset(DATASET_NAME, split=DATASET_SPLIT, revision=revision)
     wanted = set(instance_ids)
     found: dict[str, Instance] = {}
     for row in ds:
@@ -203,7 +204,7 @@ def stage_provision(args: argparse.Namespace) -> None:
     workspaces = out / "workspaces"
     out.mkdir(parents=True, exist_ok=True)
     instance_ids = read_instance_ids(args)
-    instances = load_instances(instance_ids)
+    instances = load_instances(instance_ids, args.dataset_revision)
 
     batch = []
     for inst in instances:
@@ -274,6 +275,10 @@ def stage_grade(args: argparse.Namespace) -> None:
     if not preds.exists():
         raise SystemExit(f"Missing {preds}; run `run` first.")
     instance_ids = read_instance_ids(args)
+    from datasets import load_dataset
+    snapshot = load_dataset(DATASET_NAME, split=DATASET_SPLIT, revision=args.dataset_revision)
+    snapshot_path = out / "pinned-dataset.json"
+    snapshot.to_json(str(snapshot_path), orient="records", lines=False)
     # The harness runs in `out` (it writes its report + logs there), so the
     # predictions path must be absolute, not relative to the repo cwd.
     cmd = [
@@ -281,7 +286,7 @@ def stage_grade(args: argparse.Namespace) -> None:
         "-m",
         "swebench.harness.run_evaluation",
         "--dataset_name",
-        DATASET_NAME,
+        str(snapshot_path.resolve()),
         "--split",
         DATASET_SPLIT,
         "--predictions_path",
@@ -303,17 +308,44 @@ def stage_import(args: argparse.Namespace) -> None:
     out = Path(args.out)
     report_path = Path(args.report) if args.report else find_report(out, args.run_id)
     report = json.loads(report_path.read_text())
-    total = report.get("total_instances") or len(report.get("submitted_ids", []) or [])
-    resolved = len(report.get("resolved_ids", []) or [])
+    if not args.manifest:
+        raise SystemExit("import-report requires --manifest with the frozen task selection")
+    manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    suites = [s for s in manifest["suites"] if s["kind"] == "swe_bench_verified"]
+    if len(suites) != 1 or suites[0]["repetitions"] != 1:
+        raise SystemExit("SWE import requires exactly one suite and one repetition per report")
+    suite = suites[0]
+    verified = json.loads((out / "verified-runner.json").read_text(encoding="utf-8"))
+    if verified["binary_blake3"] != manifest["candidate"]["binary_blake3"] or verified["revision"] != manifest["candidate"]["revision"]:
+        raise SystemExit("Verified candidate identity differs from manifest")
+    if verified["dataset_revision"] != suite["dataset_version"]:
+        raise SystemExit("Verified dataset identity differs from manifest")
+    if suite["harness_commit"] != SWE_BENCH_HARNESS_COMMIT or suite["contract_commit"] != SWE_BENCH_PREDICTION_SCHEMA_COMMIT:
+        raise SystemExit("Manifest upstream pins differ from supported pins")
+    sidecars = [json.loads(p.read_text(encoding="utf-8")) for p in (out / "adapter").glob("*/bonsai-sidecar.json")]
+    sidecar_ids = [s["task_id"] for s in sidecars]
+    if len(sidecar_ids) != len(set(sidecar_ids)) or set(sidecar_ids) != set(suite["task_ids"]):
+        raise SystemExit("Missing, duplicate or foreign sidecars")
+    for sidecar in sidecars:
+        actual = sidecar["bonsai"]
+        if any(actual.get(key) != value for key, value in manifest["profile"].items()):
+            raise SystemExit("Sidecar execution profile differs from manifest")
+        if actual["declared_revision"] != manifest["candidate"]["revision"]:
+            raise SystemExit("Sidecar candidate revision differs from manifest")
+        if sidecar["benchmark"]["harness_commit"] != suite["harness_commit"]:
+            raise SystemExit("Sidecar harness differs from manifest")
+    counts = validate_grading(report, suite["task_ids"])
+    total = counts["total"]
+    resolved = counts["pass"]
     score = (resolved / total * 100.0) if total else 0.0
     scorecard = {
         "suite": "swe_bench_verified_canary",
         "dataset": DATASET_HF,
-        "dataset_version": DATASET_SPLIT,
+        "dataset_version": suite["dataset_version"],
         "harness_commit": SWE_BENCH_HARNESS_COMMIT,
-        "provider": args.provider,
-        "model": args.model,
-        "effort": args.effort,
+        "profile": manifest["profile"],
+        "counts": counts,
+        "complete": counts["error"] == 0 and counts["missing"] == 0,
         "total_instances": total,
         "resolved_instances": resolved,
         "score_percent": round(score, 2),
@@ -324,20 +356,33 @@ def stage_import(args: argparse.Namespace) -> None:
     scorecard_path = out / "scorecard.json"
     scorecard_path.write_text(json.dumps(scorecard, indent=2))
     eprint(f"Scorecard -> {scorecard_path}")
+    manifest_digest = subprocess.run(["b3sum", args.manifest], capture_output=True,
+                                     text=True, check=True).stdout.split()[0]
+    profile = dict(sidecars[0]["bonsai"])
+    suites_out = []
+    for selected in manifest["suites"]:
+        ids = selected["task_ids"]
+        expected = ids if selected["kind"] == "swe_bench_verified" else [
+            f"{task}-run-{rep}" for task in ids for rep in range(1, selected["repetitions"] + 1)]
+        pin = {key: selected[key] for key in ("kind", "dataset", "dataset_version", "harness_commit", "contract_commit")}
+        suites_out.append({"pin": pin, "expected_trials": expected, "trials": []})
+    harbor_trials = []
+    if args.harbor_trials:
+        harbor_trials = json.loads(Path(args.harbor_trials).read_text(encoding="utf-8"))
+    bundle = {
+        "scorecard": {"schema_version": 1, "fixture": manifest["evidence_kind"] != "real",
+                      "reviewed": False, "manifest_digest": manifest_digest,
+                      "binary_digest": verified["binary_blake3"], "profile": profile,
+                      "suites": suites_out},
+        "swe_report": report,
+        "swe_provenance": {**verified, "sidecars": sidecars},
+        "harbor_trials": harbor_trials,
+    }
+    (out / "import-bundle.json").write_text(json.dumps(bundle, indent=2), encoding="utf-8")
 
-    profile = "\n".join(
-        [
-            "[[profiles]]",
-            'suite = "swe_bench_verified_canary"',
-            f'provider = "{args.provider}"',
-            f'model = "{args.model}"',
-            f'effort = "{args.effort}"',
-            f"score_percent = {round(score, 1)}",
-            "allowed_score_drop_percent = 0.0",
-        ]
-    )
-    print("\n# --- suggested eval/baselines profile (review before committing) ---")
-    print(profile)
+    # Import is diagnostic, never an automatic baseline promotion.
+    if not scorecard["complete"]:
+        raise SystemExit("Incomplete grading: baseline promotion is forbidden")
 
 
 def stage_selftest(args: argparse.Namespace) -> None:
@@ -411,7 +456,130 @@ def stage_selftest(args: argparse.Namespace) -> None:
 
 # --- Helpers ------------------------------------------------------------------
 
+def validate_grading(report: dict, expected_ids: list[str]) -> dict[str, int]:
+    """Validate pinned upstream schema v2; completed overlaps errors legitimately."""
+    expected = set(expected_ids)
+    if not expected or len(expected) != len(expected_ids):
+        raise ValueError("Manifest task IDs must be nonempty and unique")
+    if report.get("schema_version") != 2:
+        raise ValueError("Expected upstream grading schema_version 2")
+    fields = ("submitted", "completed", "resolved", "unresolved", "error",
+              "incomplete", "empty_patch")
+    groups = {}
+    for name in fields:
+        values = report.get(f"{name}_ids")
+        if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+            raise ValueError(f"Missing or invalid {name}_ids")
+        group = set(values)
+        if len(group) != len(values) or not group <= expected:
+            raise ValueError(f"Duplicate or foreign IDs in {name}_ids")
+        count = report.get(f"{name}_instances")
+        if count is not None and (type(count) is not int or count != len(group)):
+            raise ValueError(f"Contradictory {name}_instances")
+        groups[name] = group
+    if report.get("total_instances") != len(expected):
+        raise ValueError("Grader dataset selection differs from manifest")
+    submitted = groups["submitted"]
+    if groups["incomplete"] != expected - submitted:
+        raise ValueError("Contradictory incomplete_ids")
+    classified = [groups[n] for n in ("resolved", "unresolved", "error", "empty_patch")]
+    for index, group in enumerate(classified):
+        if not group <= submitted or any(group & other for other in classified[index + 1:]):
+            raise ValueError("Contradictory outcome classifications")
+    if not (groups["resolved"] | groups["unresolved"]) <= groups["completed"]:
+        raise ValueError("Resolved/unresolved results require completed grading")
+    if not groups["completed"] <= (groups["resolved"] | groups["unresolved"] | groups["error"]):
+        raise ValueError("Completed IDs lack a grading classification")
+    accounted = set().union(*classified, groups["incomplete"])
+    return {"total": len(expected), "pass": len(groups["resolved"]),
+            "fail": len(groups["unresolved"] | groups["empty_patch"]),
+            "error": len(groups["error"]),
+            "missing": len(groups["incomplete"] | (expected - accounted))}
+
+
+def preflight(args: argparse.Namespace) -> None:
+    """Fail before downloads/spend; inspect installed source, not declared pins."""
+    if not args.manifest or not args.approve_live:
+        raise SystemExit("Live stages require --manifest and --approve-live")
+    manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    if manifest["evidence_kind"] != "real":
+        raise SystemExit("Example/fixture manifest is not approved for live execution")
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        raise SystemExit("Qualification requires Linux amd64")
+    docker = subprocess.run(["docker", "info"], capture_output=True, check=False)
+    if docker.returncode:
+        raise SystemExit("Docker daemon is unavailable")
+    runner = manifest["runner"]
+    if not os.environ.get(runner["credential_env"]):
+        raise SystemExit("Required provider credential environment variable is absent")
+    if runner["max_spend_usd"] <= 0:
+        raise SystemExit("An explicit positive spend ceiling is required")
+    out = Path(args.out)
+    if out.resolve() != Path(runner["output_directory"]).resolve():
+        raise SystemExit("Output directory differs from manifest")
+    ancestor = out.resolve()
+    while not ancestor.exists():
+        ancestor = ancestor.parent
+    if shutil.disk_usage(ancestor).free < runner["required_disk_gib"] * 1024 ** 3:
+        raise SystemExit("Insufficient disk space for declared requirement")
+    for package, pin in (("swebench", SWE_BENCH_HARNESS_COMMIT),
+                         ("harbor", "2d3f78d55a703df2f76c005d7df44a5ce2d8adf5")):
+        direct = importlib.metadata.distribution(package).read_text("direct_url.json")
+        if not direct or json.loads(direct).get("vcs_info", {}).get("commit_id") != pin:
+            raise SystemExit(f"Installed {package} source revision differs from pin")
+    profile = manifest["profile"]
+    args.provider = profile["provider"]
+    args.model = profile["model"]
+    args.effort = profile["reasoning_effort"]
+    args.autonomy = profile["autonomy"]
+    args.network = profile["network"]
+    args.revision = manifest["candidate"]["revision"]
+    suite = next(s for s in manifest["suites"] if s["kind"] == "swe_bench_verified")
+    args.dataset_revision = suite["dataset_version"]
+    if len(args.dataset_revision) != 40:
+        raise SystemExit("Dataset must use an immutable 40-character revision")
+    for key, value in profile["budgets"].items():
+        if DEFAULT_BUDGETS.get(key) != value:
+            raise SystemExit("This runner currently requires the explicit default canary budgets")
+    digest = subprocess.run(["b3sum", str(Path(args.binary).resolve())],
+                            capture_output=True, text=True, check=True).stdout.split()[0]
+    if digest != manifest["candidate"]["binary_blake3"]:
+        raise SystemExit("Candidate binary digest differs from manifest")
+    if args.stage in ("run", "all") and (out / "requests.json").exists():
+        requests = json.loads((out / "requests.json").read_text(encoding="utf-8"))
+        for request in requests:
+            if Path(request["runner"]["bonsai_binary"]).resolve() != Path(args.binary).resolve():
+                raise SystemExit("Stored request references a different binary")
+            if request["runner"]["bonsai_revision"] != args.revision:
+                raise SystemExit("Stored request references a different candidate")
+    identity = {"binary_blake3": digest, "revision": args.revision,
+                "dataset_revision": args.dataset_revision,
+                "harness_commit": SWE_BENCH_HARNESS_COMMIT}
+    evidence_path = out / "verified-runner.json"
+    if evidence_path.exists():
+        if json.loads(evidence_path.read_text(encoding="utf-8")) != identity:
+            raise SystemExit("Existing runner evidence conflicts; use a fresh output directory")
+    elif args.stage not in ("provision", "all"):
+        raise SystemExit("Missing original runner evidence; provision a fresh run")
+    else:
+        out.mkdir(parents=True, exist_ok=True)
+        with evidence_path.open("x", encoding="utf-8") as evidence:
+            json.dump(identity, evidence)
+    eprint("Preflight passed; credentials were not printed. Spend ceiling is operator-enforced.")
+
+
 def read_instance_ids(args: argparse.Namespace) -> list[str]:
+    if args.manifest:
+        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+        suites = [s for s in manifest["suites"] if s["kind"] == "swe_bench_verified"]
+        if len(suites) != 1 or not suites[0]["task_ids"]:
+            raise SystemExit("Manifest requires one nonempty SWE task selection")
+        ids = suites[0]["task_ids"]
+        if len(ids) != len(set(ids)):
+            raise SystemExit("Duplicate manifest tasks")
+        if args.instance_id and args.instance_id != ids:
+            raise SystemExit("CLI selection differs from manifest")
+        return ids
     if args.instance_id:
         return list(args.instance_id)
     path = Path(args.instances)
@@ -435,7 +603,9 @@ def find_report(out: Path, run_id: str) -> Path:
             f"No grader report matching *.{run_id}.json under {out}; grading may "
             "have failed."
         )
-    return matches[-1]
+    if len(matches) != 1:
+        raise SystemExit("Ambiguous grader reports; select --report explicitly")
+    return matches[0]
 
 
 def add_common(p: argparse.ArgumentParser, *, needs_model: bool = True) -> None:
@@ -456,6 +626,10 @@ def add_common(p: argparse.ArgumentParser, *, needs_model: bool = True) -> None:
                    help="Re-provision workspaces even if present.")
     p.add_argument("--max-workers", type=int, default=1)
     p.add_argument("--report", help="Explicit grader report path for import.")
+    p.add_argument("--manifest", help="Frozen qualification manifest (required for import).")
+    p.add_argument("--harbor-trials", help="Private JSON array of pinned Harbor trial envelopes for common import.")
+    p.add_argument("--dataset-revision", help="Immutable Hugging Face dataset revision.")
+    p.add_argument("--approve-live", action="store_true", help="Explicit approval for downloads and provider spend.")
     if needs_model:
         # Config default is codex (OAuth), which the adapter's isolated
         # BONSAI_HOME strips — so the canary default is an env-key provider.
@@ -487,6 +661,8 @@ def main() -> None:
         sp.set_defaults(fn=fn)
 
     args = parser.parse_args()
+    if args.stage not in ("selftest", "import-report"):
+        preflight(args)
     if args.stage == "all":
         stage_provision(args)
         stage_run(args)

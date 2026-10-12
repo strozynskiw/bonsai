@@ -4,6 +4,7 @@ mod contract;
 mod harbor;
 mod launcher;
 mod report;
+mod scorecard;
 mod swe_bench;
 
 use std::collections::HashSet;
@@ -26,6 +27,14 @@ const DEFAULT_ADAPTER_OUT_DIR: &str = "target/eval/adapters";
 pub(crate) enum AdapterCliCommand {
     Run(AdapterRunConfig),
     ImportHarbor(AdapterImportConfig),
+    Compare {
+        candidate: PathBuf,
+        baseline: PathBuf,
+    },
+    ImportScorecard {
+        input: PathBuf,
+        output: PathBuf,
+    },
 }
 
 /// Run one or more versioned benchmark requests.
@@ -88,6 +97,32 @@ pub(crate) async fn execute_adapter(command: AdapterCliCommand) -> Result<Adapte
     match command {
         AdapterCliCommand::Run(config) => run_adapter(config).await,
         AdapterCliCommand::ImportHarbor(config) => import_harbor(config),
+        AdapterCliCommand::ImportScorecard { input, output } => {
+            scorecard::import_scorecard(&input, &output)?;
+            Ok(AdapterRunOutcome {
+                total: 0,
+                completed: 0,
+                failed: 0,
+                reused: 0,
+                output_dir: output.display().to_string(),
+                tasks: Vec::new(),
+            })
+        }
+        AdapterCliCommand::Compare {
+            candidate,
+            baseline,
+        } => {
+            scorecard::compare_external(&candidate, &baseline)?;
+            println!("External qualification passed for both benchmarks");
+            Ok(AdapterRunOutcome {
+                total: 2,
+                completed: 2,
+                failed: 0,
+                reused: 0,
+                output_dir: String::new(),
+                tasks: Vec::new(),
+            })
+        }
     }
 }
 

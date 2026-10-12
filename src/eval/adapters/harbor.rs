@@ -112,8 +112,15 @@ pub(crate) fn import_harbor_result(body: &str) -> Result<HarborImportedResult> {
             terminal_reason: Some("Harbor result did not contain verifier rewards".to_string()),
         });
     }
-    let score = rewards.values().sum::<f64>() / rewards.len() as f64;
-    let terminal_state = if score > 0.0 {
+    anyhow::ensure!(rewards.len() == 1, "Terminal-Bench expects one reward");
+    let score = *rewards
+        .get("reward")
+        .ok_or_else(|| anyhow::anyhow!("Missing Terminal-Bench reward"))?;
+    anyhow::ensure!(
+        score == 0.0 || score == 1.0,
+        "Terminal-Bench verifier reward must be binary"
+    );
+    let terminal_state = if score == 1.0 {
         AdapterTerminalState::Completed
     } else {
         AdapterTerminalState::VerifierFailed

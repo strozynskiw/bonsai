@@ -137,6 +137,7 @@ class Bonsai(BaseInstalledAgent):
             **self._resolved_env_vars,
             "BONSAI_PROVIDER": provider,
             "BONSAI_DOTENV": "off",
+            "BONSAI_HOME": f"/tmp/bonsai-home-{uuid.uuid4().hex}",
             instruction_env: instruction,
         }
         command = (
@@ -156,6 +157,27 @@ class Bonsai(BaseInstalledAgent):
         payload = self._parse_payload(result.stdout or "")
         if payload is not None:
             self._populate_context(context, payload)
+            digest_result = await environment.exec(command=f'b3sum "$(command -v {binary})"')
+            if digest_result.return_code != 0:
+                raise RuntimeError("Qualification requires preinstalled b3sum")
+            profile = {
+                "declared_revision": self._get_env("BONSAI_REVISION"),
+                "binary_version": None,
+                "provider": payload.get("provider"),
+                "model": payload.get("model"),
+                "reasoning_effort": self._resolved_flags["reasoning_effort"],
+                "autonomy": self._resolved_flags["autonomy"],
+                "network": self._resolved_env_vars["BONSAI_SANDBOX_NETWORK"],
+                "budgets": {key: self._resolved_flags[key] for key in (
+                    "max_turns", "max_generation_seconds", "max_output_chars",
+                    "max_tool_seconds", "timeout_seconds")},
+            }
+            profile["budgets"]["max_patch_bytes"] = 1_000_000
+            context.metadata.update({
+                "bonsai_profile": profile,
+                "bonsai_binary_digest": digest_result.stdout.split()[0],
+                "bonsai_trial_id": self._get_env("BONSAI_TRIAL_ID"),
+            })
         else:
             context.metadata = {"bonsai_terminal_state": "agent_failure"}
         if result.return_code != 0:

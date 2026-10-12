@@ -120,7 +120,7 @@ pub(crate) struct BenchmarkPin {
 }
 
 impl BenchmarkPin {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         require_text("benchmark.dataset", &self.dataset)?;
         require_text("benchmark.dataset_version", &self.dataset_version)?;
         match self.kind {
