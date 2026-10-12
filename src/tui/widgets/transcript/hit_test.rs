@@ -21,7 +21,7 @@ fn locate(app: &AppState, area: Rect, row: u16) -> Option<(usize, &TranscriptIte
     let viewport_height = transcript_viewport_height(area);
     let total_rows = app.transcript_layout.total_rows(app, content_width);
     let (scroll, _) = resolved_scroll(app, total_rows, viewport_height);
-    let target = scroll as usize + row.saturating_sub(area.y + 1) as usize;
+    let target = scroll + row.saturating_sub(area.y + 1) as usize;
     let (index, row_in_item) = app
         .transcript_layout
         .locate_row(app, content_width, target)?;

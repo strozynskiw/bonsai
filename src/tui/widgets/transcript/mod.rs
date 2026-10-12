@@ -93,11 +93,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         let text = empty_state(app);
         let text_rows = wrapped_rows_for_lines(&text, content_width);
         let (scroll, max_scroll) = resolved_scroll(app, text_rows, viewport_height);
+        debug_assert!(text_rows <= u16::MAX as usize);
         let paragraph = Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .block(block)
             .style(style)
-            .scroll((scroll, 0));
+            .scroll((scroll.min(u16::MAX as usize) as u16, 0));
         f.render_widget(paragraph, area);
         (scroll, max_scroll)
     } else {
@@ -114,8 +115,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             vertical: 1,
             horizontal: 1,
         });
-        let mut state = ScrollbarState::new(max_scroll as usize + 1)
-            .position(scroll as usize)
+        let mut state = ScrollbarState::new(max_scroll + 1)
+            .position(scroll)
             .viewport_content_length(viewport_height);
         let scrollbar = theme::scrollbar(ScrollbarOrientation::VerticalRight);
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
@@ -199,7 +200,7 @@ pub fn render_jump_to_bottom(f: &mut Frame, area: Rect, app: &AppState) {
     );
 }
 
-pub(crate) fn max_transcript_scroll(app: &AppState, area: Rect) -> u16 {
+pub(crate) fn max_transcript_scroll(app: &AppState, area: Rect) -> usize {
     let content_width = area.width.saturating_sub(4).max(20) as usize;
     let viewport = transcript_viewport_height(area);
     let total = match app.transcript_layout.total_rows(app, content_width) {

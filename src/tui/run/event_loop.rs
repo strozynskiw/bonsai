@@ -539,10 +539,10 @@ fn selection_auto_scroll_surface(action: &AppAction) -> Option<SelectionAutoScro
     }
 }
 
-fn selection_surface_scroll(app: &AppState, surface: SelectionAutoScrollSurface) -> u16 {
+fn selection_surface_scroll(app: &AppState, surface: SelectionAutoScrollSurface) -> usize {
     match surface {
         SelectionAutoScrollSurface::Transcript => app.current_scroll(),
-        SelectionAutoScrollSurface::Plan => app.plan_scroll,
+        SelectionAutoScrollSurface::Plan => usize::from(app.plan_scroll),
     }
 }
 

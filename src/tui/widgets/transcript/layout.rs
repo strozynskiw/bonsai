@@ -119,8 +119,8 @@ impl ItemLayout {
 /// The per-frame answer `render` needs, resolved under a single cache pass.
 pub(super) struct ViewWindow {
     pub(super) total_rows: usize,
-    pub(super) scroll: u16,
-    pub(super) max_scroll: u16,
+    pub(super) scroll: usize,
+    pub(super) max_scroll: usize,
     pub(super) lines: Vec<Line<'static>>,
 }
 
@@ -163,7 +163,7 @@ impl TranscriptLayoutCache {
                 total_rows,
                 scroll,
                 max_scroll,
-                lines: state.window(scroll as usize, viewport),
+                lines: state.window(scroll, viewport),
             }
         })
     }
@@ -261,8 +261,12 @@ impl LayoutState {
 
 /// Today's autoscroll/clamp rule, shared by paint and hit-testing so a click
 /// while streaming resolves against exactly the rows on screen.
-pub(super) fn resolved_scroll(app: &AppState, total_rows: usize, viewport: usize) -> (u16, u16) {
-    let max_scroll = total_rows.saturating_sub(viewport).min(u16::MAX as usize) as u16;
+pub(super) fn resolved_scroll(
+    app: &AppState,
+    total_rows: usize,
+    viewport: usize,
+) -> (usize, usize) {
+    let max_scroll = total_rows.saturating_sub(viewport);
     let scroll = if app.transcript_autoscroll_enabled() {
         max_scroll
     } else {

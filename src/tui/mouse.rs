@@ -426,6 +426,8 @@ fn scrollbar_action(
         return Some(AppAction::SetCurrentScroll(scroll));
     }
 
+    // The plan and todo panes keep their `u16` scroll domains; each offset is
+    // bounded by that pane's own maximum, so this narrowing always succeeds.
     if let Some(plan_area) = regions.plan
         && let Some(scroll) = vertical_scroll_from_point(
             column,
@@ -434,8 +436,9 @@ fn scrollbar_action(
                 vertical: 1,
                 horizontal: 1,
             }),
-            plan::max_plan_scroll(app, plan_area),
+            usize::from(plan::max_plan_scroll(app, plan_area)),
         )
+        .and_then(|scroll| u16::try_from(scroll).ok())
     {
         return Some(AppAction::SetPlanScroll(scroll));
     }
@@ -448,12 +451,18 @@ fn scrollbar_action(
             vertical: 1,
             horizontal: 1,
         }),
-        sidebar::max_todo_scroll(app, sidebar_area),
+        usize::from(sidebar::max_todo_scroll(app, sidebar_area)),
     )
+    .and_then(|scroll| u16::try_from(scroll).ok())
     .map(AppAction::SetSidebarScroll)
 }
 
-fn vertical_scroll_from_point(column: u16, row: u16, area: Rect, max_scroll: u16) -> Option<u16> {
+fn vertical_scroll_from_point(
+    column: u16,
+    row: u16,
+    area: Rect,
+    max_scroll: usize,
+) -> Option<usize> {
     if max_scroll == 0 || area.is_empty() || column != area.right().saturating_sub(1) {
         return None;
     }
@@ -471,7 +480,7 @@ fn vertical_scroll_from_point(column: u16, row: u16, area: Rect, max_scroll: u16
     let rel = row
         .saturating_sub(area.y + 1)
         .min(track_len.saturating_sub(1));
-    Some(((rel as u32 * max_scroll as u32) / track_len.saturating_sub(1).max(1) as u32) as u16)
+    Some((rel as usize * max_scroll) / track_len.saturating_sub(1).max(1) as usize)
 }
 
 #[cfg(test)]

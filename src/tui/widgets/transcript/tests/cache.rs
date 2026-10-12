@@ -335,9 +335,9 @@ fn window_slices_match_the_full_transcript() {
 
     app.transcript_autoscroll = false;
     for scroll in 0..=total.saturating_sub(viewport) {
-        app.transcript_scroll = scroll as u16;
+        app.transcript_scroll = scroll;
         let window = app.transcript_layout.view_window(&app, width, viewport);
-        assert_eq!(window.scroll as usize, scroll);
+        assert_eq!(window.scroll, scroll);
         assert_eq!(
             window.lines,
             full[scroll..(scroll + viewport).min(total)],
@@ -434,4 +434,30 @@ fn perf_probe_cold_vs_warm() {
         "800 items · cold fill {cold:?} · warm frame {warm:?} · streaming frame {stream:?} \
          (old cost ≈ 3 × cold per frame)"
     );
+}
+
+/// A session renders far past 65,535 rows, so the scroll domain must stay
+/// `usize`: a `u16` cap pins `max_scroll` and strands the transcript's tail.
+#[test]
+fn scroll_domain_is_not_capped_at_u16_rows() {
+    use super::super::layout::resolved_scroll;
+
+    let mut app = test_app();
+    let viewport = 40;
+    let total = 70_000;
+    let bottom = total - viewport;
+
+    app.transcript_autoscroll = false;
+    app.transcript_scroll = bottom;
+    let (scroll, max_scroll) = resolved_scroll(&app, total, viewport);
+    assert_eq!(max_scroll, bottom);
+    assert_eq!(scroll, bottom, "the newest rows must stay reachable");
+
+    // Autoscroll follows to the true bottom.
+    app.transcript_autoscroll = true;
+    let (scroll, max_scroll) = resolved_scroll(&app, total, viewport);
+    assert_eq!(max_scroll, bottom);
+    assert_eq!(scroll, bottom);
+    app.clamp_current_scroll(bottom);
+    assert_eq!(app.current_scroll(), bottom);
 }

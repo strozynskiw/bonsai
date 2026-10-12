@@ -1179,7 +1179,7 @@ pub enum AppAction {
     /// Toggle the TUI-only calm transcript presentation.
     SetSerenityMode(bool),
     ScrollCurrent(i16),
-    SetCurrentScroll(u16),
+    SetCurrentScroll(usize),
     ScrollTop,
     ScrollBottom,
     ScrollSidebar(i16),

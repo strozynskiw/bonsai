@@ -26,7 +26,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         }
         AppAction::ScrollCurrent(delta) => {
             app.transcript_autoscroll = false;
-            app.transcript_scroll = clamped_scroll(app.transcript_scroll, delta);
+            app.transcript_scroll = clamped_scroll_usize(app.transcript_scroll, delta);
         }
         AppAction::SetCurrentScroll(scroll) => {
             app.transcript_scroll = scroll;
@@ -86,6 +86,12 @@ pub(crate) fn clamped_scroll(current: u16, delta: i16) -> u16 {
     } else {
         current.saturating_add(delta as u16)
     }
+}
+
+/// `usize` counterpart of [`clamped_scroll`]: the transcript's row count is
+/// bounded only by session length.
+pub(crate) fn clamped_scroll_usize(current: usize, delta: i16) -> usize {
+    current.saturating_add_signed(isize::from(delta))
 }
 
 #[cfg(test)]

@@ -372,7 +372,7 @@ pub struct AppState {
     pub(crate) session_toast: Option<SessionToast>,
     pub(crate) next_execution_group_id: u64,
     pub(crate) active_execution_group_id: Option<u64>,
-    pub(crate) transcript_scroll: u16,
+    pub(crate) transcript_scroll: usize,
     pub(crate) sidebar_scroll: u16,
     pub(crate) plan_scroll: u16,
     pub(crate) modal_scroll: u16,
@@ -845,11 +845,11 @@ impl AppState {
         self.reduce(AppAction::ScrollBottom);
     }
 
-    pub fn current_scroll(&self) -> u16 {
+    pub fn current_scroll(&self) -> usize {
         self.transcript_scroll
     }
 
-    pub fn clamp_current_scroll(&mut self, max_scroll: u16) {
+    pub fn clamp_current_scroll(&mut self, max_scroll: usize) {
         if self.transcript_autoscroll {
             self.transcript_scroll = max_scroll;
             self.transcript_seen_messages = self.assistant_message_count();
@@ -3360,7 +3360,7 @@ mod tests {
         // lands the user at the bottom of the (narrower) Plan chat column.
         app.reduce(AppAction::SetView(View::Plan));
         assert!(app.transcript_autoscroll);
-        let max_plan = 80u16;
+        let max_plan = 80usize;
         app.clamp_current_scroll(max_plan);
         assert_eq!(app.transcript_scroll, max_plan);
 
@@ -3369,7 +3369,7 @@ mod tests {
         app.transcript_scroll = 5;
         app.reduce(AppAction::ToggleView);
         assert!(app.transcript_autoscroll);
-        let max_agent = 30u16;
+        let max_agent = 30usize;
         app.clamp_current_scroll(max_agent);
         assert_eq!(app.transcript_scroll, max_agent);
     }

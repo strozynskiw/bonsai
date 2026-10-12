@@ -107,7 +107,7 @@ fn resolve_context_scroll(app: &mut AppState, area: Rect) {
     app.modal_scroll = app.modal_scroll.min(metrics.max_scroll);
 }
 
-fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll: u16) {
+fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll: usize) {
     if !app.scroll_transcript_focus_into_view {
         return;
     }
@@ -125,7 +125,7 @@ fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll:
     if viewport == 0 {
         return;
     }
-    let current = app.transcript_scroll as usize;
+    let current = app.transcript_scroll;
     let next = if start < current {
         start
     } else if end > current.saturating_add(viewport) {
@@ -133,7 +133,7 @@ fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll:
     } else {
         current
     };
-    app.transcript_scroll = next.min(max_scroll as usize) as u16;
+    app.transcript_scroll = next.min(max_scroll);
 }
 
 fn resolve_question_scroll(app: &mut AppState, area: Rect) {

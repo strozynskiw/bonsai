@@ -48,7 +48,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.transcript_autoscroll = false;
                 app.scroll_transcript_focus_into_view = false;
                 if scroll_delta != 0 {
-                    app.transcript_scroll = crate::tui::app::reducer::scroll::clamped_scroll(
+                    app.transcript_scroll = crate::tui::app::reducer::scroll::clamped_scroll_usize(
                         app.transcript_scroll,
                         scroll_delta,
                     );
