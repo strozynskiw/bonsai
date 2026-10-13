@@ -61,6 +61,7 @@ struct TurnPolicies {
     serial_delegation: SerialDelegationGuard,
     implementation_stall: ImplementationStallGuard,
     empty_response_nudges: usize,
+    truncated_response_nudges: usize,
 }
 
 impl TurnPolicies {
@@ -83,6 +84,7 @@ impl TurnPolicies {
         self.serial_delegation = SerialDelegationGuard::default();
         self.reset_implementation_stall_for_external_progress("user steering received");
         self.empty_response_nudges = 0;
+        self.truncated_response_nudges = 0;
     }
 
     fn observe_tool_execution(&mut self, execution: &ToolExecutionOutcome) {
@@ -263,10 +265,11 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         self.agent.caches.last_perf_report = None;
         let deferred_sink = DeferredAssistantSink::new(self.sink.clone());
         let model_sink: SharedSink = deferred_sink.clone();
-        let response = match self
+        let (response, response_id) = match self
             .agent
             .call_model(
-                &self.tool_schema,
+                &self.tool_registry,
+                &mut self.tool_schema,
                 &model_sink,
                 self.cancellation_token.clone(),
             )
@@ -277,7 +280,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     String::new(),
                 )));
             }
-            ModelCallOutcome::Response(response) => response,
+            ModelCallOutcome::Response(response, id) => (response, id),
         };
 
         // Providers use `Completed(Stop)` for an ordinary terminal response;
@@ -289,7 +292,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             if !response.content.is_empty() {
                 deferred_sink.flush();
                 self.agent
-                    .push_message(assistant_text_message(&response.content));
+                    .push_message(incomplete_assistant_text_message(&response.content));
                 self.agent.emit_context_updated(&self.sink);
             }
             return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
@@ -297,19 +300,67 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )));
         }
 
+        if matches!(
+            response.finish_reason(),
+            Some(crate::provider::FinishReason::Length)
+        ) {
+            self.agent.log_response(&response, false);
+            deferred_sink.discard();
+            // A length terminal cannot establish completion or authorize a
+            // partially generated tool batch. Keep only the partial answer as
+            // context; the next generation must reissue any intended calls.
+            if !response.content.trim().is_empty() {
+                self.agent
+                    .push_message(incomplete_assistant_text_message(&response.content));
+            }
+            if self.state.policies.truncated_response_nudges >= EMPTY_RESPONSE_NUDGE_LIMIT {
+                self.agent.emit_context_updated(&self.sink);
+                bail!(
+                    "Model repeatedly truncated its response at the output limit; try a lower reasoning effort or a shorter response."
+                );
+            }
+            self.state.policies.truncated_response_nudges += 1;
+            self.agent.push_harness_note(
+                "Your previous generation was truncated at its output limit and did not complete the task. \
+                 No tool calls from that generation were executed. Continue the current task, \
+                 reissue any intended tool calls in full, and provide a complete concise self-contained final answer. \
+                 The partial answer was retained as context but was not delivered to the user.",
+            );
+            self.sink
+                .status("Model response was truncated; continuing the current task.");
+            self.agent.emit_context_updated(&self.sink);
+            return Ok(TurnOutcome::Continue);
+        }
+        self.state.policies.truncated_response_nudges = 0;
+
+        if let crate::provider::StreamTerminal::Incomplete(reason) = &response.terminal {
+            self.agent.log_response(&response, false);
+            deferred_sink.discard();
+            if !response.content.trim().is_empty() {
+                self.agent
+                    .push_message(incomplete_assistant_text_message(&response.content));
+            }
+            self.agent.emit_context_updated(&self.sink);
+            bail!(
+                "Provider returned an incomplete response ({}); no tool calls were executed and the task was not completed.",
+                reason.as_db_str(),
+            );
+        }
+
         if response.tool_calls.is_empty() {
             return self
-                .finish_or_continue_without_tools(response, &deferred_sink)
+                .finish_or_continue_without_tools(response, response_id, &deferred_sink)
                 .await;
         }
 
         deferred_sink.flush();
-        self.execute_tool_turn(response).await
+        self.execute_tool_turn(response, response_id).await
     }
 
     async fn finish_or_continue_without_tools(
         &mut self,
         response: StreamedResponse,
+        response_id: crate::provider::ResponseId,
         deferred_sink: &DeferredAssistantSink,
     ) -> Result<TurnOutcome> {
         self.agent.log_response(&response, false);
@@ -352,8 +403,10 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     "pending background work completed",
                 );
             deferred_sink.flush();
-            self.agent
-                .push_message(assistant_text_message(&response.content));
+            self.agent.push_model_response_message(
+                assistant_text_message(&response.content),
+                response_id,
+            );
             self.agent.emit_context_updated(&self.sink);
             return Ok(TurnOutcome::Continue);
         }
@@ -431,8 +484,10 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             }
             CompletionGuardVerdict::Reject(failure) => {
                 deferred_sink.flush();
-                self.agent
-                    .push_message(assistant_text_message(&response.content));
+                self.agent.push_model_response_message(
+                    assistant_text_message(&response.content),
+                    response_id,
+                );
                 self.agent.emit_context_updated(&self.sink);
                 tracing::warn!(
                     target: "bonsai::guard",
@@ -451,14 +506,18 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 
         deferred_sink.flush();
         self.agent
-            .push_message(assistant_text_message(&response.content));
+            .push_model_response_message(assistant_text_message(&response.content), response_id);
         self.agent.emit_context_updated(&self.sink);
         Ok(TurnOutcome::Finished(AgentRunResult::Completed(
             response.content,
         )))
     }
 
-    async fn execute_tool_turn(&mut self, response: StreamedResponse) -> Result<TurnOutcome> {
+    async fn execute_tool_turn(
+        &mut self,
+        response: StreamedResponse,
+        response_id: crate::provider::ResponseId,
+    ) -> Result<TurnOutcome> {
         let policies = &mut self.state.policies;
         let session_title_action = policies.session_title.action_for(&response.tool_calls);
         let session_title_rejection =
@@ -574,7 +633,8 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             .auto_background_verification_calls(&response.tool_calls);
         let finalization = self.agent.finalization_rejections(&response.tool_calls);
 
-        self.agent.push_message(build_assistant_message(&response)?);
+        self.agent
+            .push_model_response_message(build_assistant_message(&response)?, response_id);
         self.agent.emit_context_updated(&self.sink);
         self.agent.log_response(&response, false);
 

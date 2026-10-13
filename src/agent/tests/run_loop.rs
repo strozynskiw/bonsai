@@ -18,6 +18,11 @@ struct EffortRetryProvider {
     responses: Arc<Mutex<Vec<crate::provider::ProviderResult<StreamedResponse>>>>,
     requests: Arc<Mutex<Vec<Vec<ChatCompletionRequestMessage>>>>,
     options: Arc<Mutex<Vec<crate::provider::ProviderRequestOptions>>>,
+    pinned_reasoning: Option<crate::provider::ReasoningSelection>,
+    response_delays: Option<(std::time::Duration, std::time::Duration)>,
+    count_endpoint: Option<String>,
+    retry_preparation_error: Option<&'static str>,
+    diagnostics: std::sync::Mutex<Option<crate::provider::ProviderRequestDiagnostics>>,
 }
 
 struct PartialRetryProvider {
@@ -62,14 +67,75 @@ impl EffortRetryProvider {
             responses: Arc::new(Mutex::new(responses)),
             requests: Arc::new(Mutex::new(Vec::new())),
             options: Arc::new(Mutex::new(Vec::new())),
+            pinned_reasoning: None,
+            count_endpoint: None,
+            retry_preparation_error: None,
+            diagnostics: std::sync::Mutex::new(None),
+            response_delays: None,
         }
     }
 }
 
 #[async_trait::async_trait]
 impl Provider for EffortRetryProvider {
+    fn prepare_request_for_estimation(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<crate::provider::PreparedProviderRequest> {
+        context.validate_assistant_count(
+            messages
+                .iter()
+                .filter(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+                .count(),
+        )?;
+        let reasoning = self.reasoning_for_request(messages, options, context)?;
+        if reasoning == crate::provider::ReasoningSelection::Medium
+            && let Some(error) = self.retry_preparation_error
+        {
+            return Err(ProviderFailure::configuration(error));
+        }
+        let mut body = serde_json::json!({"messages":messages,"tools":tools});
+        if self.count_endpoint.is_some() {
+            body["model"] = serde_json::json!("claude-sonnet-4-5");
+            body["output_config"] = serde_json::json!({"effort":reasoning.to_string()});
+        }
+        Ok(crate::provider::PreparedProviderRequest {
+            protocol: self
+                .count_endpoint
+                .as_ref()
+                .map(|_| crate::provider::Protocol::AnthropicMessages),
+            body,
+            reasoning,
+            native_budget: Vec::new(),
+            count_endpoint: self.count_endpoint.clone(),
+            count_auth_header: None,
+        })
+    }
+
+    fn take_last_request_diagnostics(&self) -> Option<crate::provider::ProviderRequestDiagnostics> {
+        self.diagnostics.lock().unwrap().take()
+    }
+
     fn reasoning(&self) -> crate::provider::ReasoningSelection {
-        crate::provider::ReasoningSelection::High
+        if self.pinned_reasoning.is_some() {
+            crate::provider::ReasoningSelection::Off
+        } else {
+            crate::provider::ReasoningSelection::High
+        }
+    }
+
+    fn reasoning_for_request(
+        &self,
+        _messages: &[ChatCompletionRequestMessage],
+        options: crate::provider::ProviderRequestOptions,
+        _context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<crate::provider::ReasoningSelection> {
+        Ok(self
+            .pinned_reasoning
+            .unwrap_or_else(|| options.reasoning.unwrap_or_else(|| self.reasoning())))
     }
 
     async fn chat_stream(
@@ -92,14 +158,47 @@ impl Provider for EffortRetryProvider {
     async fn chat_stream_with_options(
         &self,
         messages: &[ChatCompletionRequestMessage],
-        _tools: &[ChatCompletionTool],
+        tools: &[ChatCompletionTool],
         options: crate::provider::ProviderRequestOptions,
         _cancellation_token: CancellationToken,
-        _sink: SharedSink,
+        sink: SharedSink,
     ) -> crate::provider::ProviderResult<StreamedResponse> {
         self.requests.lock().await.push(messages.to_vec());
         self.options.lock().await.push(options);
-        self.responses.lock().await.remove(0)
+        let prepared =
+            self.prepare_request_for_estimation(messages, tools, options, &Default::default())?;
+        *self.diagnostics.lock().unwrap() = Some(crate::provider::ProviderRequestDiagnostics {
+            serialized_body: serde_json::to_vec(&prepared.body).unwrap(),
+            preview: crate::provider::ProviderRequestPreview::with_wire_sections(
+                "POST",
+                "mock generation",
+                prepared.body,
+                Vec::new(),
+            ),
+            cache_mechanism: None,
+            cache_route_key: None,
+        });
+        let response = self.responses.lock().await.remove(0);
+        if let Some((high, medium)) = self.response_delays {
+            tokio::time::sleep(
+                if options.reasoning == Some(crate::provider::ReasoningSelection::Medium) {
+                    medium
+                } else {
+                    high
+                },
+            )
+            .await;
+        }
+        if let Ok(response) = &response {
+            if response.reasoning_chars > 0 {
+                sink.reasoning_delta(&"r".repeat(response.reasoning_chars));
+            }
+            if !response.content.is_empty() {
+                sink.assistant_delta(&response.content);
+                sink.assistant_done();
+            }
+        }
+        response
     }
 
     async fn list_models(&self) -> anyhow::Result<Vec<String>> {
@@ -722,6 +821,363 @@ async fn retry_requires_a_human_turn() {
 }
 
 #[tokio::test]
+async fn lower_effort_retry_recounts_settings_and_attributes_each_actual_request() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    for (effort, tokens) in [("high", 100), ("medium", 200)] {
+        Mock::given(method("POST"))
+            .and(path("/count"))
+            .and(body_partial_json(
+                serde_json::json!({"output_config":{"effort":effort}}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"input_tokens":tokens})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let fixture = TestFixture::new();
+    let mut provider = EffortRetryProvider::new(vec![
+        Ok(StreamedResponse {
+            terminal: crate::provider::StreamTerminal::Incomplete(
+                crate::provider::FinishReason::Length,
+            ),
+            reasoning_chars: 5,
+            ..Default::default()
+        }),
+        finished_response("answer"),
+    ]);
+    provider.count_endpoint = Some(format!("{}/count", server.uri()));
+    provider.response_delays = Some((
+        std::time::Duration::from_millis(15),
+        std::time::Duration::from_millis(180),
+    ));
+    let requests = provider.requests.clone();
+    let session =
+        crate::provider::test_utils::provider_session("test", &server.uri(), "claude-sonnet-4-5");
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_prompt_estimator(PromptEstimator::from_metadata(
+        &crate::provider::anthropic::ANTHROPIC_METADATA,
+        &session,
+    ));
+    assert_eq!(
+        agent
+            .run(
+                "explain this",
+                CancellationToken::new(),
+                Arc::new(CaptureSink::default())
+            )
+            .await
+            .unwrap(),
+        AgentRunResult::Completed("answer".into())
+    );
+    assert_eq!(requests.lock().await.len(), 2);
+    let turns = agent.usage_turns();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].estimated_prompt_tokens, Some(100));
+    assert_eq!(turns[1].estimated_prompt_tokens, Some(200));
+    assert!(
+        turns[1].ttft_ms.unwrap() >= 150,
+        "retry TTFT must come from its own delayed stream"
+    );
+    assert!(turns[1].latency_ms.unwrap() >= turns[1].ttft_ms.unwrap());
+    assert!(turns[0].request_body_hash.is_some());
+    assert_ne!(turns[0].request_body_hash, turns[1].request_body_hash);
+    assert_eq!(
+        turns[0].effective_reasoning,
+        Some(crate::provider::ReasoningSelection::High)
+    );
+    assert_eq!(
+        turns[1].effective_reasoning,
+        Some(crate::provider::ReasoningSelection::Medium)
+    );
+    let perf = agent.caches.last_perf_report.as_ref().unwrap();
+    assert_eq!(perf.prompt.prompt_tokens, 200);
+    assert_eq!(perf.preflight.token_count_calls, 2);
+    assert_eq!(perf.provider.attempts.len(), 2);
+    assert!(
+        perf.provider.total_duration.as_millis() as u64
+            >= turns[0]
+                .latency_ms
+                .unwrap()
+                .saturating_add(turns[1].latency_ms.unwrap())
+    );
+    assert_eq!(agent.timing.snapshot().open_interval_count, 0);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn lower_effort_retry_oversized_count_stops_before_another_invocation() {
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    for (effort, tokens) in [("high", 100), ("medium", 2_000_000)] {
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({"output_config":{"effort":effort}}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"input_tokens":tokens})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let fixture = TestFixture::new();
+    let mut provider = EffortRetryProvider::new(vec![Ok(StreamedResponse {
+        terminal: crate::provider::StreamTerminal::Incomplete(
+            crate::provider::FinishReason::Length,
+        ),
+        ..Default::default()
+    })]);
+    provider.count_endpoint = Some(format!("{}/count", server.uri()));
+    let requests = provider.requests.clone();
+    let session =
+        crate::provider::test_utils::provider_session("test", &server.uri(), "claude-sonnet-4-5");
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_prompt_estimator(PromptEstimator::from_metadata(
+        &crate::provider::anthropic::ANTHROPIC_METADATA,
+        &session,
+    ));
+    let error = agent
+        .run(
+            "explain this",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("prompt estimate 2000000"));
+    assert_eq!(requests.lock().await.len(), 1);
+    assert_eq!(agent.usage_turns().len(), 1);
+    assert_eq!(agent.usage_turns()[0].estimated_prompt_tokens, Some(100));
+    assert_eq!(
+        agent
+            .caches
+            .last_perf_report
+            .as_ref()
+            .unwrap()
+            .prompt
+            .prompt_tokens,
+        100
+    );
+    assert_eq!(agent.timing.snapshot().open_interval_count, 0);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn lower_effort_retry_preparation_failure_keeps_the_original_usage_and_diagnostics() {
+    let fixture = TestFixture::new();
+    let mut provider = EffortRetryProvider::new(vec![Ok(StreamedResponse {
+        terminal: crate::provider::StreamTerminal::Incomplete(
+            crate::provider::FinishReason::Length,
+        ),
+        ..Default::default()
+    })]);
+    provider.retry_preparation_error = Some("lower request cannot be prepared");
+    let requests = provider.requests.clone();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let error = agent
+        .run(
+            "explain this",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("lower request cannot be prepared"));
+    assert_eq!(requests.lock().await.len(), 1);
+    let turns = agent.usage_turns();
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].request_body_hash.is_some());
+    assert_eq!(
+        turns[0].request_body_hash,
+        agent
+            .caches
+            .last_perf_report
+            .as_ref()
+            .unwrap()
+            .prompt
+            .request_body_hash
+    );
+    assert_eq!(
+        turns[0].effective_reasoning,
+        Some(crate::provider::ReasoningSelection::High)
+    );
+    assert_eq!(agent.timing.snapshot().open_interval_count, 0);
+}
+
+#[tokio::test]
+async fn lower_effort_retry_preparation_failover_preserves_next_turn_drops() {
+    let fixture = TestFixture::new();
+    let mut provider = EffortRetryProvider::new(vec![Ok(StreamedResponse {
+        terminal: crate::provider::StreamTerminal::Incomplete(
+            crate::provider::FinishReason::Length,
+        ),
+        ..Default::default()
+    })]);
+    provider.retry_preparation_error = Some("lower request cannot be prepared");
+    let backup = MockProvider::new(vec![finished_response("backup answer")]);
+    let backup_requests = backup.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent
+        .restore_text_history(&[
+            ("user".into(), "hidden history marker".into()),
+            ("assistant".into(), "old answer".into()),
+        ])
+        .await
+        .unwrap();
+    let hidden_id = agent.message_ids[1].clone();
+    assert!(
+        agent.apply_context_control_action(&hidden_id, ContextControlAction::ToggleDropNextTurn)
+    );
+    agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+        Box::new(backup),
+        120_000,
+        PromptEstimator::heuristic(),
+        "backup".into(),
+    ));
+    assert_eq!(
+        agent
+            .run(
+                "explain this",
+                CancellationToken::new(),
+                Arc::new(CaptureSink::default())
+            )
+            .await
+            .unwrap(),
+        AgentRunResult::Completed("backup answer".into())
+    );
+    let requests = backup_requests.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .iter()
+            .all(|message| !message_content(message).contains("hidden history marker"))
+    );
+    assert_eq!(
+        agent.usage_turns().len(),
+        2,
+        "primary and backup only; preparation is not a generation"
+    );
+    assert_eq!(agent.timing.snapshot().open_interval_count, 0);
+}
+
+#[tokio::test]
+async fn lower_effort_retry_count_cancellation_creates_no_phantom_invocation() {
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    for (effort, delay) in [("high", 0), ("medium", 60)] {
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({"output_config":{"effort":effort}}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(delay))
+                    .set_body_json(serde_json::json!({"input_tokens":100})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let fixture = TestFixture::new();
+    let mut provider = EffortRetryProvider::new(vec![Ok(StreamedResponse {
+        terminal: crate::provider::StreamTerminal::Incomplete(
+            crate::provider::FinishReason::Length,
+        ),
+        ..Default::default()
+    })]);
+    provider.count_endpoint = Some(format!("{}/count", server.uri()));
+    let requests = provider.requests.clone();
+    let session =
+        crate::provider::test_utils::provider_session("test", &server.uri(), "claude-sonnet-4-5");
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_prompt_estimator(PromptEstimator::from_metadata(
+        &crate::provider::anthropic::ANTHROPIC_METADATA,
+        &session,
+    ));
+    let cancellation = CancellationToken::new();
+    let run = agent.run(
+        "explain this",
+        cancellation.clone(),
+        Arc::new(CaptureSink::default()),
+    );
+    let cancel = async {
+        loop {
+            if server.received_requests().await.unwrap().iter().any(|request| serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["output_config"]["effort"] == "medium") { break; }
+            tokio::task::yield_now().await;
+        }
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(run, cancel)
+    })
+    .await
+    .expect("retry count must cancel");
+    assert!(matches!(result.unwrap(), AgentRunResult::Interrupted(_)));
+    assert_eq!(requests.lock().await.len(), 1);
+    assert_eq!(agent.usage_turns().len(), 1);
+    assert_eq!(
+        agent
+            .caches
+            .last_perf_report
+            .as_ref()
+            .unwrap()
+            .prompt
+            .prompt_tokens,
+        100
+    );
+    assert_eq!(agent.timing.snapshot().open_interval_count, 0);
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn length_truncated_reasoning_retries_same_request_at_lower_effort() {
     let fixture = TestFixture::new();
     let provider = EffortRetryProvider::new(vec![
@@ -784,6 +1240,28 @@ async fn length_truncated_reasoning_retries_same_request_at_lower_effort() {
     );
     let turns = agent.usage_turns();
     assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].provider_attempts.len(), 1);
+    assert_eq!(turns[1].provider_attempts.len(), 1);
+    assert_eq!(
+        turns
+            .iter()
+            .flat_map(|turn| &turn.provider_attempts)
+            .map(|attempt| attempt.reasoning_chars)
+            .sum::<usize>(),
+        96_800
+    );
+    assert_eq!(agent.usage.session_output_chars(), 96_811);
+    assert_eq!(
+        agent
+            .caches
+            .last_perf_report
+            .as_ref()
+            .unwrap()
+            .provider
+            .attempts
+            .len(),
+        2
+    );
     assert_eq!(
         turns[0].finish_reason,
         Some(crate::provider::FinishReason::Length)
@@ -802,6 +1280,378 @@ async fn length_truncated_reasoning_retries_same_request_at_lower_effort() {
             .iter()
             .any(|status| status.contains("medium effort"))
     );
+}
+
+#[tokio::test]
+async fn pinned_native_effort_continues_without_ineffective_retry_or_misreported_usage() {
+    for fragment in ["", "partial answer"] {
+        let fixture = TestFixture::new();
+        let mut provider = EffortRetryProvider::new(vec![
+            Ok(StreamedResponse {
+                content: fragment.into(),
+                terminal: crate::provider::StreamTerminal::Incomplete(
+                    crate::provider::FinishReason::Length,
+                ),
+                usage: Some(crate::provider::TokenUsage {
+                    prompt_tokens: 100,
+                    completion_tokens: 50,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            Ok(StreamedResponse {
+                content: "complete".into(),
+                usage: Some(crate::provider::TokenUsage {
+                    prompt_tokens: 150,
+                    completion_tokens: 20,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        ]);
+        provider.pinned_reasoning = Some(crate::provider::ReasoningSelection::High);
+        let requests = provider.requests.clone();
+        let options = provider.options.clone();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            empty_registry(),
+            empty_registry(),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        let sink = Arc::new(CaptureSink::default());
+        let result = agent
+            .run("explain the result", CancellationToken::new(), sink.clone())
+            .await
+            .unwrap();
+        assert_eq!(result, AgentRunResult::Completed("complete".into()));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_ne!(
+            requests[0], requests[1],
+            "the second call must carry the bounded continuation, not repeat an unchanged tool turn at fictitious lower effort"
+        );
+        if !fragment.is_empty() {
+            assert!(requests[1].iter().any(|message| matches!(message, ChatCompletionRequestMessage::Assistant(assistant) if assistant.name.as_deref() == Some(crate::context::INCOMPLETE_ASSISTANT_MESSAGE_NAME))));
+        }
+        assert!(
+        options
+            .lock()
+            .await
+            .iter()
+            .all(|options| options.reasoning == Some(crate::provider::ReasoningSelection::High))
+    );
+        assert_eq!(agent.usage_turns().len(), 2);
+        assert!(agent.usage_turns().iter().all(
+            |turn| turn.effective_reasoning == Some(crate::provider::ReasoningSelection::High)
+        ));
+        assert!(
+            !sink
+                .statuses()
+                .iter()
+                .any(|status| status.contains("medium effort"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn lower_effort_retry_failure_records_the_failed_invocation() {
+    let fixture = TestFixture::new();
+    let provider = EffortRetryProvider::new(vec![
+        Ok(StreamedResponse {
+            terminal: crate::provider::StreamTerminal::Incomplete(
+                crate::provider::FinishReason::Length,
+            ),
+            reasoning_chars: 5,
+            ..StreamedResponse::default()
+        }),
+        Err(ProviderFailure::configuration(
+            "lower effort request failed",
+        )),
+    ]);
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let error = agent
+        .run(
+            "Explain this",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("lower effort request failed"),
+        "{error}"
+    );
+    let turns = agent.usage_turns();
+    assert_eq!(
+        turns.len(),
+        2,
+        "each provider invocation needs a usage row even when it fails"
+    );
+    assert_eq!(
+        turns[1].effective_reasoning,
+        Some(crate::provider::ReasoningSelection::Medium)
+    );
+    assert_eq!(turns[1].provider_attempts.len(), 1);
+    assert_eq!(turns[0].provider_attempts.len(), 1);
+    assert_eq!(
+        agent
+            .caches
+            .last_perf_report
+            .as_ref()
+            .unwrap()
+            .provider
+            .attempts
+            .len(),
+        2
+    );
+    assert_eq!(agent.timing.snapshot().open_interval_count, 0);
+}
+
+#[tokio::test]
+async fn lower_effort_retry_denied_by_session_budget_does_not_create_a_usage_row() {
+    let fixture = TestFixture::new();
+    let provider = EffortRetryProvider::new(vec![Ok(StreamedResponse {
+        terminal: crate::provider::StreamTerminal::Incomplete(
+            crate::provider::FinishReason::Length,
+        ),
+        reasoning_chars: 5,
+        ..StreamedResponse::default()
+    })]);
+    let requests = provider.requests.clone();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.budget.max_session_turns = Some(1);
+    let error = agent
+        .run(
+            "Explain this",
+            CancellationToken::new(),
+            Arc::new(CaptureSink::default()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<crate::run_budget::RunBudgetExhaustion>()
+            .is_some()
+    );
+    assert_eq!(requests.lock().await.len(), 1);
+    assert_eq!(agent.usage_turns().len(), 1);
+    assert_eq!(agent.usage.session_output_chars(), 5);
+    assert_eq!(agent.timing.snapshot().open_interval_count, 0);
+}
+
+#[tokio::test]
+async fn length_truncated_answer_continues_before_completion() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            content: "partial answer".to_string(),
+            terminal: crate::provider::StreamTerminal::Incomplete(
+                crate::provider::FinishReason::Length,
+            ),
+            ..StreamedResponse::default()
+        }),
+        finished_response("complete answer"),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let result = agent
+        .run(
+            "Explain the behavior",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("complete answer".to_string())
+    );
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(user_messages_in(&requests[1]), ["Explain the behavior"]);
+    assert!(
+        requests[1]
+            .iter()
+            .any(|message| message_content(message).contains("partial answer"))
+    );
+}
+
+#[tokio::test]
+async fn length_truncated_tool_call_is_not_executed() {
+    let fixture = TestFixture::new();
+    let tool = MockTool::new("write", "written");
+    let executions = tool.calls.clone();
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![crate::provider::ToolCall {
+                id: "truncated".to_string(),
+                name: "write".to_string(),
+                arguments: r#"{"title":"incomplete action"}"#.to_string(),
+            }],
+            terminal: crate::provider::StreamTerminal::Incomplete(
+                crate::provider::FinishReason::Length,
+            ),
+            ..StreamedResponse::default()
+        }),
+        finished_response("complete answer"),
+    ]);
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(tool));
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let result = agent
+        .run(
+            "Explain the behavior",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("complete answer".to_string())
+    );
+    assert!(executions.lock().await.is_empty());
+    assert!(
+        !requests.lock().await[1]
+            .iter()
+            .any(|message| matches!(message, ChatCompletionRequestMessage::Tool(_)))
+    );
+}
+
+#[tokio::test]
+async fn non_length_incomplete_responses_never_execute_tools_or_complete_the_task() {
+    for reason in [
+        crate::provider::FinishReason::ContentFilter,
+        crate::provider::FinishReason::Other("provider_partial".into()),
+    ] {
+        let fixture = TestFixture::new();
+        let tool = MockTool::new("write", "written");
+        let executions = tool.calls.clone();
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(tool));
+        let provider = MockProvider::new(vec![Ok(StreamedResponse {
+            content: "partial candidate".into(),
+            tool_calls: vec![crate::provider::ToolCall {
+                id: "partial".into(),
+                name: "write".into(),
+                arguments: "{}".into(),
+            }],
+            terminal: crate::provider::StreamTerminal::Incomplete(reason.clone()),
+            ..Default::default()
+        })]);
+        let requests = provider.requests();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            Arc::new(registry),
+            empty_registry(),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        let error = agent
+            .run(
+                "Explain the behavior",
+                CancellationToken::new(),
+                Arc::new(StdoutSink),
+            )
+            .await
+            .expect_err("an incomplete batch cannot complete the task");
+        assert!(error.to_string().contains(reason.as_db_str()));
+        assert!(executions.lock().await.is_empty());
+        assert_eq!(
+            requests.lock().await.len(),
+            1,
+            "incomplete filtering is not retried to bypass the provider"
+        );
+        assert!(
+            !agent
+                .context_messages()
+                .iter()
+                .any(|message| matches!(message, ChatCompletionRequestMessage::Tool(_)))
+        );
+        assert!(agent.native_replay_snapshot().live_bindings.is_empty());
+        assert_eq!(agent.usage_turns().len(), 1);
+        assert_eq!(
+            agent.usage_turns()[0].provider_attempts[0].outcome,
+            crate::agent::ProviderAttemptOutcome::Incomplete
+        );
+    }
+}
+
+#[tokio::test]
+async fn repeated_length_truncation_fails_with_a_bounded_recovery() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(
+        (0..3)
+            .map(|_| {
+                Ok(StreamedResponse {
+                    content: "partial answer".to_string(),
+                    terminal: crate::provider::StreamTerminal::Incomplete(
+                        crate::provider::FinishReason::Length,
+                    ),
+                    ..StreamedResponse::default()
+                })
+            })
+            .collect(),
+    );
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let error = agent
+        .run(
+            "Explain the behavior",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("truncated"), "{error}");
+    assert!(requests.lock().await.len() <= 3);
 }
 
 /// The nudge budget is bounded: a model that keeps returning blank turns must

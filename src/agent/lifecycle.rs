@@ -49,6 +49,7 @@ impl Agent {
         self.read_evidence.delegated_overlap_advised.clear();
         self.context_controls.clear();
         self.summary_sources.clear();
+        self.native_source_response_bindings.clear();
         self.summary_source_stable_ids.clear();
         self.pending_context_rewrite = PendingContextRewrite::default();
         self.completion = CompletionGuardState::default();
@@ -91,6 +92,8 @@ impl Agent {
         self.self_review.reset_for_new_session();
         self.self_review_runs.clear();
         self.usage = SessionUsage::default();
+        self.tool_call_identities.clear();
+        self.native_replay.clear();
         // Loaded skill bodies are gone with the conversation; start fresh.
         self.loaded_skills.clear();
     }
@@ -105,6 +108,12 @@ impl Agent {
     /// outgoing session flush performed by the TUI.
     pub(crate) async fn clear_for_session_rotation(&mut self) {
         let snapshot = SessionRotationSnapshot {
+            context: self.context_message_snapshot(),
+            context_controls: self.context_controls.clone(),
+            context_sources: self.summary_sources.clone(),
+            context_source_stable_ids: self.summary_source_stable_ids.clone(),
+            native_replay: self.native_replay_snapshot(),
+            tool_call_identities: self.tool_call_identity_snapshot(),
             compaction_events: std::mem::take(&mut self.compaction_events),
             verification_runs: std::mem::take(&mut self.verification.verification_runs),
             self_review_runs: std::mem::take(&mut self.self_review_runs),
@@ -117,6 +126,37 @@ impl Agent {
         &mut self,
     ) -> Option<SessionRotationSnapshot> {
         self.pending_session_rotation_snapshot.take()
+    }
+
+    pub(crate) fn tool_call_identity_snapshot(&self) -> Vec<crate::provider::ToolCallIdentity> {
+        self.tool_call_identities.snapshot()
+    }
+
+    pub(crate) fn native_replay_snapshot(&self) -> NativeReplaySnapshot {
+        NativeReplaySnapshot {
+            records: self.native_replay.snapshot(),
+            live_bindings: self.native_response_bindings.clone(),
+            source_bindings: self.native_source_response_bindings.clone(),
+        }
+    }
+
+    pub(crate) fn restore_native_replay(&mut self, snapshot: &NativeReplaySnapshot) -> Result<()> {
+        snapshot.validate(&self.messages, &self.message_ids, &self.summary_sources)?;
+        self.native_replay.restore(&snapshot.records)?;
+        self.native_response_bindings = snapshot.live_bindings.clone();
+        self.native_source_response_bindings = snapshot.source_bindings.clone();
+        self.provider
+            .set_native_replay_store(self.native_replay.clone());
+        Ok(())
+    }
+
+    pub(crate) fn restore_tool_call_identities(
+        &mut self,
+        records: &[crate::provider::ToolCallIdentity],
+    ) {
+        self.tool_call_identities.restore(records);
+        self.provider
+            .set_tool_call_identity_store(self.tool_call_identities.clone());
     }
 
     #[cfg(test)]
@@ -509,6 +549,8 @@ impl Agent {
         identity: ActiveModelIdentity,
     ) {
         provider.set_conversation_cache_key(&self.conversation_cache_key);
+        provider.set_tool_call_identity_store(self.tool_call_identities.clone());
+        provider.set_native_replay_store(self.native_replay.clone());
         self.provider = provider;
         // IMPORTANT CACHE STRATEGY BOUNDARY: switching providers may switch
         // how volatile state is represented. Normalize immediately so Codex's
@@ -526,7 +568,7 @@ impl Agent {
         self.cached_models.clear();
     }
 
-    /// Install a one-shot backup used only by delegated subagents.
+    /// Install a backup used by delegated subagents after a model request fails.
     pub(crate) fn set_provider_fallback(&mut self, fallback: crate::tool::SubagentProviderConfig) {
         self.provider_fallback = Some(fallback);
     }
@@ -553,6 +595,15 @@ impl Agent {
                 identity,
             ),
             None => {
+                fallback
+                    .provider
+                    .set_conversation_cache_key(&self.conversation_cache_key);
+                fallback
+                    .provider
+                    .set_tool_call_identity_store(self.tool_call_identities.clone());
+                fallback
+                    .provider
+                    .set_native_replay_store(self.native_replay.clone());
                 self.provider = fallback.provider;
                 self.normalize_project_state_cache_strategy(
                     ProjectStateNormalization::ProviderSwitch,

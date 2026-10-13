@@ -35,6 +35,14 @@ impl Agent {
         let source_ids = std::mem::take(&mut self.summary_source_stable_ids);
         self.summary_source_stable_ids =
             reindex_by_message_id(source_ids, old_to_new, &self.message_ids);
+        let response_ids = std::mem::take(&mut self.native_source_response_bindings)
+            .into_iter()
+            .collect();
+        self.native_source_response_bindings =
+            reindex_by_message_id(response_ids, old_to_new, &self.message_ids)
+                .into_iter()
+                .collect();
+        self.prune_native_response_bindings();
     }
 
     pub(in crate::agent) fn prune_context_controls_to_current_messages(&mut self) {

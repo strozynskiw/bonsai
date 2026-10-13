@@ -169,6 +169,14 @@ impl Agent {
         });
 
         let conversation_cache_key = crate::provider::new_conversation_cache_key();
+        let tool_call_identities = crate::provider::ToolCallIdentityStore::default();
+        let native_replay = crate::provider::NativeReplayStore::default();
+        builder
+            .provider
+            .set_native_replay_store(native_replay.clone());
+        builder
+            .provider
+            .set_tool_call_identity_store(tool_call_identities.clone());
         builder
             .provider
             .set_conversation_cache_key(&conversation_cache_key);
@@ -178,6 +186,10 @@ impl Agent {
         );
         let mut agent = Self {
             provider: builder.provider,
+            tool_call_identities,
+            native_replay,
+            native_response_bindings: Default::default(),
+            native_source_response_bindings: Default::default(),
             provider_fallback: None,
             provider_fallback_model_observer: None,
             conversation_cache_key,
@@ -255,6 +267,7 @@ impl Agent {
             tool_schema_cache: StdMutex::new(HashMap::new()),
             caches: PerfCaches {
                 last_prompt_estimate: None,
+                last_prompt_estimate_fingerprint: None,
                 last_sent_prompt_estimate: None,
                 last_perf_report: None,
                 previous_request_body: None,

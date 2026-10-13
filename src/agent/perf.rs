@@ -30,6 +30,12 @@ pub(crate) struct ProviderPerf {
     pub(crate) generation_budget: GenerationBudget,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct InvocationTiming {
+    pub(super) total_duration: Duration,
+    pub(super) first_output_duration: Option<Duration>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PromptPerf {
     pub(crate) prompt_tokens: usize,
@@ -134,6 +140,10 @@ impl PerfSink {
 }
 
 impl OutputSink for PerfSink {
+    fn wants_context_updates(&self) -> bool {
+        self.inner.wants_context_updates()
+    }
+
     fn assistant_delta(&self, text: &str) {
         self.mark_first_output(text);
         self.inner.assistant_delta(text);
@@ -221,18 +231,64 @@ impl OutputSink for PerfSink {
 impl Agent {
     pub(super) async fn estimate_prompt_for_preflight(
         &self,
-        messages: &[ChatCompletionRequestMessage],
+        request: &mut PreparedModelRequest,
         tools: &[ChatCompletionTool],
         tool_schema_tokens: usize,
         capture: &mut PreflightPerfCapture,
-    ) -> PromptEstimate {
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<PromptEstimate> {
         let started_at = Instant::now();
-        let estimate = self
-            .prompt_estimator
-            .estimate_prompt_with_tool_schema_tokens(messages, tools, tool_schema_tokens)
+        let requested_options = self
+            .verification_reasoning_for_request()
+            .map(crate::provider::ProviderRequestOptions::with_reasoning)
+            .unwrap_or_default();
+        let result = self
+            .estimate_prompt_for_request_options(
+                request,
+                tools,
+                tool_schema_tokens,
+                requested_options,
+                cancellation,
+            )
             .await;
         capture.record_token_count(started_at.elapsed());
-        estimate
+        result
+    }
+
+    pub(super) async fn estimate_prompt_for_request_options(
+        &self,
+        request: &mut PreparedModelRequest,
+        tools: &[ChatCompletionTool],
+        tool_schema_tokens: usize,
+        requested_options: crate::provider::ProviderRequestOptions,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<PromptEstimate> {
+        let prepared = self.provider.prepare_request_for_estimation(
+            &request.messages,
+            tools,
+            requested_options,
+            &request.context,
+        )?;
+        request.estimate_fingerprint = Some(prepared.estimate_fingerprint()?);
+        request.options = if prepared.reasoning
+            == requested_options
+                .reasoning
+                .unwrap_or_else(|| self.provider.reasoning())
+        {
+            requested_options
+        } else {
+            crate::provider::ProviderRequestOptions::with_reasoning(prepared.reasoning)
+        };
+        let estimate = self
+            .prompt_estimator
+            .estimate_prepared_prompt(
+                &prepared,
+                tool_schema_tokens,
+                self.budget.context_budget_tokens,
+                cancellation,
+            )
+            .await;
+        estimate?.ok_or_else(|| super::compaction::CompactionCancelled.into())
     }
 
     pub(super) fn build_perf_report(

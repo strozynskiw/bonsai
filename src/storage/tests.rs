@@ -570,6 +570,7 @@ async fn read_evidence_snapshot_roundtrips_without_file_content_duplication() {
             std::slice::from_ref(&record),
             &inspections,
             &[],
+            (&[], &crate::agent::NativeReplaySnapshot::default()),
         )
         .await
         .unwrap();
@@ -1876,7 +1877,14 @@ async fn context_snapshot_roundtrips_raw_messages() {
     };
 
     storage
-        .replace_agent_context_snapshot(session_id, &context_snapshot, &[], &[], &[])
+        .replace_agent_context_snapshot(
+            session_id,
+            &context_snapshot,
+            &[],
+            &[],
+            &[],
+            (&[], &crate::agent::NativeReplaySnapshot::default()),
+        )
         .await
         .unwrap();
 
@@ -2390,6 +2398,173 @@ async fn usage_turn_sync_appends_and_only_updates_mutable_attribution() {
 }
 
 #[tokio::test]
+async fn concurrent_resume_reads_keep_context_and_native_provenance_in_one_snapshot() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let storage = &fixture.storage;
+    let barrier = tokio::sync::Barrier::new(2);
+    let write = async {
+        barrier.wait().await;
+        for generation in 0..40 {
+            let response_id = crate::provider::ResponseId::new();
+            let row_id = format!("assistant-{generation}");
+            let context = ContextMessageSnapshot {
+                messages: vec![crate::provider::test_utils::assistant_message(
+                    "same answer",
+                )],
+                ids: vec![row_id.clone()],
+            };
+            let source_key = format!("source-{generation}");
+            let sources = HashMap::from([(source_key.clone(), context.messages.clone())]);
+            let aliases = HashMap::from([(source_key.clone(), vec![row_id.clone()])]);
+            let native = crate::agent::NativeReplaySnapshot {
+                records: vec![crate::provider::NativeReplayRecord {
+                    response_id: response_id.clone(),
+                    provider_scope: "native-scope".into(),
+                    payload: crate::provider::NativeReplayPayload::OpenAiChat(
+                        crate::provider::ChatNativeReplay {
+                            reasoning_content: Some(format!("trace-{generation}")),
+                            ..Default::default()
+                        },
+                    ),
+                }],
+                live_bindings: std::collections::BTreeMap::from([(row_id, response_id.clone())]),
+                source_bindings: std::collections::BTreeMap::from([(
+                    source_key,
+                    vec![Some(response_id)],
+                )]),
+            };
+            storage
+                .with_session_snapshot_tx("concurrent native snapshot", async |tx, now| {
+                    storage
+                        .replace_context_snapshot_in_tx(tx, session_id, &context, now)
+                        .await?;
+                    storage
+                        .replace_context_control_snapshot_in_tx(
+                            tx,
+                            session_id,
+                            &HashMap::new(),
+                            &sources,
+                            &aliases,
+                            now,
+                        )
+                        .await?;
+                    storage
+                        .replace_native_replay_in_tx(tx, session_id, &native)
+                        .await
+                })
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+        }
+    };
+    let read = async {
+        barrier.wait().await;
+        let mut observed = 0;
+        for _ in 0..120 {
+            let snapshot = storage
+                .load_session_snapshot(session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if snapshot.native_replay.live_bindings.is_empty() {
+                continue;
+            }
+            observed += 1;
+            snapshot
+                .native_replay
+                .validate(
+                    &snapshot.context_messages,
+                    &snapshot.context_message_ids,
+                    &snapshot.context_sources,
+                )
+                .unwrap();
+            let row_id = snapshot.native_replay.live_bindings.keys().next().unwrap();
+            let generation = row_id.strip_prefix("assistant-").unwrap();
+            let source_key = format!("source-{generation}");
+            assert!(snapshot.context_sources.contains_key(&source_key));
+            assert_eq!(
+                snapshot.context_source_stable_ids[&source_key].as_slice(),
+                std::slice::from_ref(row_id)
+            );
+            assert!(
+                snapshot
+                    .native_replay
+                    .source_bindings
+                    .contains_key(&source_key)
+            );
+        }
+        assert!(observed > 0);
+    };
+    tokio::join!(write, read);
+}
+
+#[tokio::test]
+async fn legacy_native_replay_is_empty_and_corrupt_sidecars_keep_failure_detail() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let legacy = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        legacy.native_replay,
+        crate::agent::NativeReplaySnapshot::default()
+    );
+
+    let id = crate::provider::ResponseId::new();
+    let record = crate::provider::NativeReplayRecord {
+        response_id: id.clone(),
+        provider_scope: "native-scope".into(),
+        payload: crate::provider::NativeReplayPayload::OpenAiChat(
+            crate::provider::ChatNativeReplay {
+                reasoning_content: Some("opaque trace".into()),
+                ..Default::default()
+            },
+        ),
+    };
+    let mut malformed_id = serde_json::to_value(crate::agent::NativeReplaySnapshot {
+        records: vec![record.clone()],
+        ..Default::default()
+    })
+    .unwrap();
+    malformed_id["records"][0]["response_id"] = serde_json::json!("msg-0");
+    let invalid_binding = crate::agent::NativeReplaySnapshot {
+        live_bindings: std::collections::BTreeMap::from([("missing-row".into(), id)]),
+        ..Default::default()
+    };
+    let duplicates = crate::agent::NativeReplaySnapshot {
+        records: vec![record.clone(), record],
+        ..Default::default()
+    };
+    for (raw, expected) in [
+        ("{".to_string(), "EOF"),
+        (serde_json::to_string(&malformed_id).unwrap(), "UUID"),
+        (
+            serde_json::to_string(&invalid_binding).unwrap(),
+            "missing assistant row missing-row",
+        ),
+        (
+            serde_json::to_string(&duplicates).unwrap(),
+            "duplicate native response identity",
+        ),
+    ] {
+        sqlx::query("INSERT INTO native_response_replay (session_id, raw_json) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET raw_json = excluded.raw_json")
+            .bind(session_id.as_i64()).bind(raw).execute(&fixture.storage.pool).await.unwrap();
+        let error = fixture
+            .storage
+            .load_session_snapshot(session_id)
+            .await
+            .unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("native response replay"), "{detail}");
+        assert!(detail.contains(expected), "{detail}");
+    }
+}
+
+#[tokio::test]
 async fn fresh_database_uses_one_current_schema_baseline() {
     let fixture = TestStorage::new().await;
     let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
@@ -2399,7 +2574,15 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 12);
+    assert_eq!(migration_count, 14);
+
+    let identity_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tool_call_identities'",
+    )
+    .fetch_one(&fixture.storage.pool)
+    .await
+    .unwrap();
+    assert_eq!(identity_table, 1);
 
     let builtin_subagent_settings_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master \
@@ -5264,7 +5447,14 @@ async fn agent_peer_ack_rolls_back_with_failed_context_snapshot() {
         .unwrap();
     assert_eq!(replay[0].id, first[0].id);
     storage
-        .replace_agent_context_snapshot(recipient, &context, &[], &[], &[replay[0].receipt.clone()])
+        .replace_agent_context_snapshot(
+            recipient,
+            &context,
+            &[],
+            &[],
+            &[replay[0].receipt.clone()],
+            (&[], &crate::agent::NativeReplaySnapshot::default()),
+        )
         .await
         .unwrap();
     assert!(

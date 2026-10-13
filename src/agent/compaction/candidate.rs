@@ -94,31 +94,64 @@ impl Agent {
             self.reindexed_sources_for_candidate(&old_to_new, &messages, &message_ids);
         let mut summary_source_stable_ids =
             self.reindexed_source_stable_ids_for_candidate(&old_to_new, &messages, &message_ids);
+        let mut native_source_response_bindings = std::collections::BTreeMap::new();
+        let valid_ids = valid_context_control_ids(&messages, &message_ids);
+        for (id, bindings) in &self.native_source_response_bindings {
+            let canonical = canonical_context_control_id(id);
+            let target = if let Some(old_index) = self.message_index_for_control_id(&canonical) {
+                old_to_new
+                    .get(&old_index)
+                    .map(|&index| id_at_or_synthetic(&message_ids, index))
+            } else {
+                valid_ids.contains(&canonical).then_some(canonical)
+            };
+            if let Some(target) = target {
+                native_source_response_bindings.insert(target, bindings.clone());
+            }
+        }
 
         if let Some(summary_index) = summary_index {
             let summary_id = id_at_or_synthetic(&message_ids, summary_index);
             let originals = draft.omitted_originals().cloned().collect::<Vec<_>>();
             if !originals.is_empty() {
                 summary_sources.insert(summary_id.clone(), originals);
+                native_source_response_bindings.insert(
+                    summary_id.clone(),
+                    draft
+                        .omitted
+                        .iter()
+                        .flat_map(|item| item.response_ids.iter().cloned())
+                        .collect(),
+                );
                 summary_source_stable_ids
                     .insert(summary_id, draft.omitted_stable_ids().cloned().collect());
             }
         }
         for stub in &draft.tool_outputs_to_stub {
             if !summary_sources.contains_key(&stub.tool_id) {
-                let (messages, stable_ids) =
+                let (messages, stable_ids, response_ids) =
                     self.original_source_snapshot_for_message(stub.old_index, &stub.original);
                 summary_sources.insert(stub.tool_id.clone(), messages);
                 summary_source_stable_ids.insert(stub.tool_id.clone(), stable_ids);
+                native_source_response_bindings.insert(stub.tool_id.clone(), response_ids);
             }
         }
 
+        for (id, bindings) in &native_source_response_bindings {
+            anyhow::ensure!(
+                summary_sources
+                    .get(id)
+                    .is_some_and(|source| source.len() == bindings.len()),
+                "native response provenance does not align with compaction source {id}"
+            );
+        }
         Ok(CompactionCandidate {
             messages,
             message_ids,
             controls,
             summary_sources,
             summary_source_stable_ids,
+            native_source_response_bindings,
             messages_omitted: draft.messages_omitted,
             tool_outputs_stubbed: draft.tool_outputs_to_stub.len(),
             summary_source_available: summary_index.is_some()
@@ -209,16 +242,31 @@ impl Agent {
         message_ids: &[String],
         controls: &HashMap<String, ContextControlState>,
         tool_schema: &ToolSchemaPayload,
-    ) -> usize {
+        cancellation: &CancellationToken,
+    ) -> Result<usize> {
         let projection = self.context_projection_for_controls(messages, message_ids, controls);
-        self.prompt_estimator
-            .estimate_prompt_with_tool_schema_tokens(
-                projection.control_messages(),
-                tool_schema.tools(),
+        let request = projection.into_prepared_model_request();
+        let options = self
+            .verification_reasoning_for_request()
+            .map(crate::provider::ProviderRequestOptions::with_reasoning)
+            .unwrap_or_default();
+        let prepared = self.provider.prepare_request_for_estimation(
+            &request.messages,
+            tool_schema.tools(),
+            options,
+            &request.context,
+        )?;
+        Ok(self
+            .prompt_estimator
+            .estimate_prepared_prompt(
+                &prepared,
                 tool_schema.model_tool_schema_tokens(),
+                self.budget.context_budget_tokens,
+                cancellation,
             )
-            .await
-            .input_tokens
+            .await?
+            .ok_or(CompactionCancelled)?
+            .input_tokens)
     }
 
     pub(in crate::agent) fn payload_message_token_estimate(

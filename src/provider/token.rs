@@ -1,11 +1,16 @@
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionTool};
+use async_openai::types::chat::ChatCompletionRequestMessage;
+#[cfg(test)]
+use async_openai::types::chat::ChatCompletionTool;
+use futures::StreamExt;
 use serde::de;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokenizers::Tokenizer;
+use tokio_util::sync::CancellationToken;
 
 use crate::model_catalog::ResolvedModel;
 use crate::provider::anthropic;
@@ -96,6 +101,9 @@ pub struct PromptEstimate {
     pub source: TokenCounterKind,
     pub confidence: EstimateConfidence,
     pub tool_schema_tokens: usize,
+    /// Conservative opaque allowance; provider counting replaces this total.
+    pub native_opaque_reserve_tokens: usize,
+    pub native_cost_unknown: bool,
 }
 
 impl PromptEstimate {
@@ -109,6 +117,8 @@ impl PromptEstimate {
             source,
             confidence: EstimateConfidence::Low,
             tool_schema_tokens,
+            native_opaque_reserve_tokens: 0,
+            native_cost_unknown: false,
         }
     }
 }
@@ -413,6 +423,121 @@ pub(crate) struct PromptEstimatorCacheKey {
 }
 
 impl PromptEstimator {
+    /// Count the exact prepared provider shape. Local opaque allowances use
+    /// reported output or the original cap; absent evidence reserves a window.
+    ///
+    /// # Errors
+    /// Returns serialization failures; cancellation returns `None`.
+    pub(crate) async fn estimate_prepared_prompt(
+        &self,
+        prepared: &crate::provider::PreparedProviderRequest,
+        tool_schema_tokens: usize,
+        context_window_tokens: usize,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<PromptEstimate>> {
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
+        let remote = async {
+            match (self.kind, prepared.protocol) {
+                (
+                    TokenCounterKind::AnthropicCountTokens,
+                    Some(crate::provider::Protocol::AnthropicMessages),
+                ) => {
+                    if let Some(client) = &self.anthropic {
+                        return client.count_prepared(prepared).await.map(Some);
+                    }
+                }
+                (TokenCounterKind::ZaiTokenizer, Some(crate::provider::Protocol::OpenAiChat)) => {
+                    if let Some(client) = &self.zai {
+                        return client.count_prepared(prepared).await.map(Some);
+                    }
+                }
+                _ => {}
+            }
+            Ok(None)
+        };
+        let counted = tokio::select! {
+            biased;
+            _=cancellation.cancelled()=>return Ok(None),
+            result=tokio::time::timeout(Duration::from_secs(30),remote)=>result,
+        };
+        match counted {
+            Ok(Ok(Some(tokens))) => {
+                return Ok(Some(PromptEstimate {
+                    input_tokens: tokens,
+                    source: self.kind,
+                    confidence: EstimateConfidence::High,
+                    tool_schema_tokens,
+                    native_opaque_reserve_tokens: 0,
+                    native_cost_unknown: false,
+                }));
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(error=%format!("{error:#}"),"prepared token count failed; using conservative local estimate")
+            }
+            Err(_) => {
+                tracing::debug!("prepared token count timed out; using conservative local estimate")
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
+        Ok(Some(self.estimate_prepared_for_report(
+            prepared,
+            tool_schema_tokens,
+            context_window_tokens,
+        )?))
+    }
+
+    pub(crate) fn estimate_prepared_for_report(
+        &self,
+        prepared: &crate::provider::PreparedProviderRequest,
+        tool_schema_tokens: usize,
+        context_window_tokens: usize,
+    ) -> Result<PromptEstimate> {
+        let text = serde_json::to_string(&prepared.local_count_body())
+            .context("Failed to serialize prepared prompt for counting")?;
+        let (base, source, mut confidence) =
+            match count_text_with_local_tokenizer(self.kind, &self.model, &text) {
+                Ok(tokens) => (
+                    tokens,
+                    self.kind,
+                    local_tokenizer_confidence(self.kind, &self.model),
+                ),
+                Err(_) => (
+                    heuristic_text_tokens(&text),
+                    TokenCounterKind::Heuristic,
+                    EstimateConfidence::Low,
+                ),
+            };
+        let mut reserve = 0usize;
+        let mut unknown = false;
+        for native in &prepared.native_budget {
+            if native.opaque {
+                confidence = EstimateConfidence::Low;
+                let allowance = native.opaque_allowance_tokens.map(|tokens| {
+                    usize::try_from(tokens)
+                        .unwrap_or(context_window_tokens)
+                        .min(context_window_tokens)
+                });
+                unknown |= allowance.is_none();
+                reserve = reserve.saturating_add(allowance.unwrap_or(context_window_tokens));
+            }
+        }
+        if prepared.has_images() {
+            confidence = EstimateConfidence::Low;
+        }
+        Ok(PromptEstimate {
+            input_tokens: base.saturating_add(reserve),
+            source,
+            confidence,
+            tool_schema_tokens,
+            native_opaque_reserve_tokens: reserve,
+            native_cost_unknown: unknown,
+        })
+    }
     pub fn from_metadata(metadata: &ProviderMetadata, session: &ProviderSession) -> Self {
         let model = session.model.clone();
         let kind = metadata
@@ -520,6 +645,7 @@ impl PromptEstimator {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn estimate_prompt_with_tool_schema_tokens(
         &self,
         messages: &[ChatCompletionRequestMessage],
@@ -558,6 +684,8 @@ impl PromptEstimator {
                             source: TokenCounterKind::AnthropicCountTokens,
                             confidence: EstimateConfidence::High,
                             tool_schema_tokens,
+                            native_opaque_reserve_tokens: 0,
+                            native_cost_unknown: false,
                         },
                         Err(err) => {
                             tracing::debug!(
@@ -587,6 +715,8 @@ impl PromptEstimator {
                             source: TokenCounterKind::ZaiTokenizer,
                             confidence: EstimateConfidence::High,
                             tool_schema_tokens,
+                            native_opaque_reserve_tokens: 0,
+                            native_cost_unknown: false,
                         },
                         Err(err) => {
                             tracing::debug!(
@@ -635,6 +765,8 @@ impl PromptEstimator {
                 source,
                 confidence,
                 tool_schema_tokens,
+                native_opaque_reserve_tokens: 0,
+                native_cost_unknown: false,
             },
         )
     }
@@ -659,6 +791,26 @@ struct ZaiTokenizerClient {
 }
 
 impl ZaiTokenizerClient {
+    async fn count_prepared(
+        &self,
+        prepared: &crate::provider::PreparedProviderRequest,
+    ) -> Result<usize> {
+        let mut body = json!({"model":prepared.body.get("model").unwrap_or(&Value::String(self.model.clone())),"messages":prepared.body.get("messages").context("prepared Z.AI request has no messages")?});
+        if let Some(tools) = prepared.body.get("tools") {
+            body["tools"] = tools.clone();
+        }
+        let request = self
+            .http
+            .post(prepared.count_endpoint.as_deref().unwrap_or(&self.endpoint))
+            .bearer_auth(&self.api_key)
+            .json(&body);
+        let payload = bounded_count_response(request).await?;
+        payload
+            .pointer("/usage/prompt_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .context("Z.AI tokenizer response missing usage.prompt_tokens")
+    }
     fn new(session: &ProviderSession, metadata: &ProviderMetadata, model: &str) -> Self {
         let base_url = if session.base_url.trim().is_empty() {
             metadata.default_base_url.as_ref()
@@ -673,6 +825,7 @@ impl ZaiTokenizerClient {
         }
     }
 
+    #[cfg(test)]
     async fn count_tokens(
         &self,
         messages: &[ChatCompletionRequestMessage],
@@ -714,10 +867,31 @@ struct AnthropicCountTokensClient {
     http: reqwest::Client,
     endpoint: String,
     api_key: String,
+    #[cfg(test)]
     model: String,
 }
 
 impl AnthropicCountTokensClient {
+    async fn count_prepared(
+        &self,
+        prepared: &crate::provider::PreparedProviderRequest,
+    ) -> Result<usize> {
+        let request = self
+            .http
+            .post(prepared.count_endpoint.as_deref().unwrap_or(&self.endpoint))
+            .header(
+                prepared.count_auth_header.as_deref().unwrap_or("x-api-key"),
+                &self.api_key,
+            )
+            .header("anthropic-version", anthropic::ANTHROPIC_API_VERSION)
+            .json(&prepared.anthropic_count_body());
+        let payload = bounded_count_response(request).await?;
+        payload
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .context("count_tokens response missing input_tokens")
+    }
     fn new(session: &ProviderSession, metadata: &ProviderMetadata) -> Self {
         Self::build(
             session,
@@ -751,7 +925,7 @@ impl AnthropicCountTokensClient {
         session: &ProviderSession,
         metadata: &ProviderMetadata,
         endpoint_path: &str,
-        model: String,
+        _model: String,
     ) -> Self {
         let base_url = if session.base_url.trim().is_empty() {
             metadata.default_base_url.to_string()
@@ -767,10 +941,12 @@ impl AnthropicCountTokensClient {
             http: crate::provider::http_client(),
             endpoint,
             api_key: session.api_key.clone(),
-            model,
+            #[cfg(test)]
+            model: _model,
         }
     }
 
+    #[cfg(test)]
     async fn count_tokens(
         &self,
         messages: &[ChatCompletionRequestMessage],
@@ -810,6 +986,28 @@ impl AnthropicCountTokensClient {
     }
 }
 
+async fn bounded_count_response(request: reqwest::RequestBuilder) -> Result<Value> {
+    const MAX_COUNT_BYTES: usize = 16 * 1024;
+    let response = request
+        .send()
+        .await
+        .context("Failed to call prepared token counter")?;
+    if !response.status().is_success() {
+        anyhow::bail!("token counter returned HTTP {}", response.status());
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("Failed to read token counter response")?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_COUNT_BYTES {
+            anyhow::bail!("token counter response exceeds {MAX_COUNT_BYTES} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).context("Failed to parse token counter response")
+}
+
+#[cfg(test)]
 fn estimate_with_local_tokenizer(
     kind: TokenCounterKind,
     model: &str,
@@ -824,6 +1022,8 @@ fn estimate_with_local_tokenizer(
         source: kind,
         confidence: local_tokenizer_confidence(kind, model),
         tool_schema_tokens,
+        native_opaque_reserve_tokens: 0,
+        native_cost_unknown: false,
     })
 }
 
@@ -998,6 +1198,7 @@ fn estimate_tool_schema_tokens(tools: &[ChatCompletionTool]) -> usize {
     }
 }
 
+#[cfg(test)]
 fn heuristic_estimate_with_tool_schema_tokens(
     messages: &[ChatCompletionRequestMessage],
     tool_schema_tokens: usize,
@@ -1014,6 +1215,7 @@ fn heuristic_estimate_with_tool_schema_tokens(
     )
 }
 
+#[cfg(test)]
 fn serialized_prompt(
     messages: &[ChatCompletionRequestMessage],
     tools: &[ChatCompletionTool],
@@ -1138,6 +1340,174 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::provider::test_utils::provider_session;
+
+    fn signed_prepared_request(
+        endpoint: Option<String>,
+        ciphertext: &str,
+    ) -> crate::provider::PreparedProviderRequest {
+        crate::provider::PreparedProviderRequest {
+            protocol: Some(crate::provider::Protocol::AnthropicMessages),
+            body: json!({
+                "model":"claude-sonnet-4-5","max_tokens":8192,"stream":true,
+                "system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}],
+                "messages":[{"role":"assistant","content":[
+                    {"type":"thinking","thinking":"visible reasoning","signature":ciphertext},
+                    {"type":"redacted_thinking","data":ciphertext},
+                    {"type":"tool_use","id":"call","name":"read","input":{"signature":"user argument stays"}}
+                ]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":"ok"}]}],
+                "thinking":{"type":"enabled","budget_tokens":1024},
+                "output_config":{"effort":"high"},
+                "tools":[{"name":"read","input_schema":{"type":"object"}}],
+                "tool_choice":{"type":"auto"}
+            }),
+            reasoning: crate::provider::ReasoningSelection::Default,
+            native_budget: vec![crate::provider::NativeBudgetAttribution {
+                assistant_slot: 0,
+                reasoning_text: "visible reasoning".into(),
+                opaque: true,
+                opaque_allowance_tokens: Some(600),
+            }],
+            count_endpoint: endpoint,
+            count_auth_header: Some("x-native-key".into()),
+        }
+    }
+
+    #[test]
+    fn prepared_native_budget_is_independent_of_ciphertext_length_and_preserves_unknown() {
+        let estimator = PromptEstimator::for_tests("gpt-4o", TokenCounterKind::Tiktoken, None);
+        let short = signed_prepared_request(None, "x");
+        let long = signed_prepared_request(None, &"ciphertext".repeat(10_000));
+        let short_estimate = estimator
+            .estimate_prepared_for_report(&short, 10, 4096)
+            .unwrap();
+        let long_estimate = estimator
+            .estimate_prepared_for_report(&long, 10, 4096)
+            .unwrap();
+        assert_eq!(short_estimate, long_estimate);
+        assert_eq!(short_estimate.native_opaque_reserve_tokens, 600);
+        assert_eq!(short_estimate.confidence, EstimateConfidence::Low);
+        assert!(!short_estimate.native_cost_unknown);
+        assert_eq!(
+            short.local_count_body()["messages"][0]["content"][2]["input"]["signature"],
+            "user argument stays"
+        );
+        for (allowance, reserve, unknown) in [(Some(0), 0, false), (None, 4096, true)] {
+            let mut prepared = signed_prepared_request(None, "x");
+            prepared.native_budget[0].opaque_allowance_tokens = allowance;
+            let estimate = estimator
+                .estimate_prepared_for_report(&prepared, 10, 4096)
+                .unwrap();
+            assert_eq!(estimate.native_opaque_reserve_tokens, reserve);
+            assert_eq!(estimate.native_cost_unknown, unknown);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_count_uses_actual_endpoint_header_and_signed_shape_without_double_reserve() {
+        let server = MockServer::start().await;
+        let prepared = signed_prepared_request(
+            Some(format!("{}/custom/count_tokens", server.uri())),
+            "exact signed bytes==",
+        );
+        Mock::given(method("POST"))
+            .and(path("/custom/count_tokens"))
+            .and(header("x-native-key", "key"))
+            .and(wiremock::matchers::body_json(
+                prepared.anthropic_count_body(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens":42})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let session = provider_session("key", &server.uri(), "claude-sonnet-4-5");
+        let estimator = PromptEstimator::from_metadata(
+            &crate::provider::anthropic::ANTHROPIC_METADATA,
+            &session,
+        );
+        let estimate = estimator
+            .estimate_prepared_prompt(&prepared, 10, 4096, &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(estimate.input_tokens, 42);
+        assert_eq!(estimate.confidence, EstimateConfidence::High);
+        assert_eq!(estimate.native_opaque_reserve_tokens, 0);
+        assert!(!estimate.native_cost_unknown);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn prepared_count_failure_keeps_conservative_native_allowance() {
+        for response in [
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(200).set_body_string("invalid json"),
+            ResponseTemplate::new(200).set_body_string("x".repeat(20_000)),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages/count_tokens"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let session = provider_session("key", &server.uri(), "claude-sonnet-4-5");
+            let estimator = PromptEstimator::from_metadata(
+                &crate::provider::anthropic::ANTHROPIC_METADATA,
+                &session,
+            );
+            let prepared = signed_prepared_request(None, "signed");
+            let local = estimator
+                .estimate_prepared_for_report(&prepared, 10, 4096)
+                .unwrap();
+            let estimate = estimator
+                .estimate_prepared_prompt(&prepared, 10, 4096, &CancellationToken::new())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(estimate, local);
+            assert_eq!(estimate.native_opaque_reserve_tokens, 600);
+            assert_eq!(estimate.confidence, EstimateConfidence::Low);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_count_cancellation_abandons_a_stalled_remote_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(60))
+                    .set_body_json(json!({"input_tokens":42})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let session = provider_session("key", &server.uri(), "claude-sonnet-4-5");
+        let estimator = PromptEstimator::from_metadata(
+            &crate::provider::anthropic::ANTHROPIC_METADATA,
+            &session,
+        );
+        let prepared = signed_prepared_request(None, "signed");
+        let cancellation = CancellationToken::new();
+        let count = estimator.estimate_prepared_prompt(&prepared, 10, 4096, &cancellation);
+        let cancel = async {
+            loop {
+                if !server.received_requests().await.unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            cancellation.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(count, cancel)
+        })
+        .await
+        .expect("count must observe cancellation");
+        assert!(result.unwrap().is_none());
+        server.verify().await;
+    }
 
     #[test]
     fn model_pricing_computes_micro_usd_from_actual_usage() {

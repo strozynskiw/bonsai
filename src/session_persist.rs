@@ -61,6 +61,8 @@ impl SessionSnapshotSignatures {
 #[derive(Debug, Clone)]
 pub(crate) struct AgentStateSnapshot {
     context: ContextMessageSnapshot,
+    tool_call_identities: Vec<crate::provider::ToolCallIdentity>,
+    native_replay: crate::agent::NativeReplaySnapshot,
     read_evidence: Vec<ReadEvidenceRecord>,
     inspection_events: Vec<InspectionEventRecord>,
     usage: UsageTotals,
@@ -81,6 +83,8 @@ impl AgentStateSnapshot {
     pub(crate) fn capture(agent: &Agent) -> Self {
         Self {
             context: agent.context_message_snapshot(),
+            tool_call_identities: agent.tool_call_identity_snapshot(),
+            native_replay: agent.native_replay_snapshot(),
             read_evidence: agent.read_evidence_snapshot(),
             inspection_events: agent.inspection_event_snapshot(),
             usage: agent.usage_totals(),
@@ -98,6 +102,14 @@ impl AgentStateSnapshot {
 
     pub(crate) fn context(&self) -> &ContextMessageSnapshot {
         &self.context
+    }
+
+    pub(crate) fn tool_call_identities(&self) -> &[crate::provider::ToolCallIdentity] {
+        &self.tool_call_identities
+    }
+
+    pub(crate) fn native_replay(&self) -> &crate::agent::NativeReplaySnapshot {
+        &self.native_replay
     }
 
     pub(crate) fn read_evidence(&self) -> &[ReadEvidenceRecord] {
@@ -155,6 +167,8 @@ pub(crate) fn agent_state_signatures(snapshot: &AgentStateSnapshot) -> AgentStat
             &snapshot.context,
             &snapshot.read_evidence,
             &snapshot.inspection_events,
+            &snapshot.tool_call_identities,
+            &snapshot.native_replay,
         ),
         context_controls: context_control_signature(
             &snapshot.controls,
@@ -376,6 +390,16 @@ impl<'a> SessionSnapshotWriter<'a> {
                             .replace_context_snapshot_in_tx(tx, session_id, agent.context(), now)
                             .await?;
                         storage
+                            .replace_tool_call_identities_in_tx(
+                                tx,
+                                session_id,
+                                agent.tool_call_identities(),
+                            )
+                            .await?;
+                        storage
+                            .replace_native_replay_in_tx(tx, session_id, agent.native_replay())
+                            .await?;
+                        storage
                             .replace_read_evidence_snapshot_in_tx(
                                 tx,
                                 session_id,
@@ -518,6 +542,7 @@ pub(crate) async fn persist_agent_state(
                 &snapshot.read_evidence,
                 &snapshot.inspection_events,
                 &snapshot.peer_delivery_receipts,
+                (&snapshot.tool_call_identities, &snapshot.native_replay),
             )
             .await
         {
@@ -651,6 +676,14 @@ pub(crate) async fn restore_agent_state(agent: &mut Agent, snapshot: &SessionSna
         snapshot.context_sources.clone(),
         snapshot.context_source_stable_ids.clone(),
     );
+    agent.restore_tool_call_identities(&snapshot.tool_call_identities);
+    // Runtime snapshots are validated before a durable resume switch. Retain
+    // parse/validation detail if an internally constructed snapshot is invalid;
+    // absent native data remains absent rather than guessing by visible text.
+    if let Err(error) = agent.restore_native_replay(&snapshot.native_replay) {
+        tracing::error!(session_id = %snapshot.summary.id, error = %format!("{error:#}"),
+            "failed to restore native response replay");
+    }
     agent
         .restore_read_evidence(snapshot.read_evidence.clone())
         .await;
@@ -823,6 +856,8 @@ fn context_signature(
     snapshot: &ContextMessageSnapshot,
     read_evidence: &[ReadEvidenceRecord],
     inspection_events: &[InspectionEventRecord],
+    tool_call_identities: &[crate::provider::ToolCallIdentity],
+    native_replay: &crate::agent::NativeReplaySnapshot,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     snapshot.messages.len().hash(&mut hasher);
@@ -834,6 +869,10 @@ fn context_signature(
     }
     read_evidence.hash(&mut hasher);
     inspection_events.hash(&mut hasher);
+    tool_call_identities.hash(&mut hasher);
+    if let Ok(raw) = serde_json::to_string(native_replay) {
+        raw.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -966,6 +1005,8 @@ mod tests {
                 messages: Vec::new(),
                 ids: Vec::new(),
             },
+            tool_call_identities: Vec::new(),
+            native_replay: Default::default(),
             read_evidence: Vec::new(),
             inspection_events: Vec::new(),
             usage: UsageTotals::default(),
@@ -996,7 +1037,37 @@ mod tests {
             content: "atomic todo".to_string(),
             status: crate::todo::TodoStatus::Pending,
         }];
-        let agent = agent_snapshot();
+        let mut agent = agent_snapshot();
+        let identities = crate::provider::ToolCallIdentityStore::default();
+        let mut calls = [crate::provider::ToolCall {
+            id: "wire-id".to_string(),
+            name: "read".to_string(),
+            arguments: "{}".to_string(),
+        }];
+        identities.assign_calls("provider-scope", &mut calls);
+        agent.tool_call_identities = identities.snapshot();
+        let response_id = crate::provider::ResponseId::new();
+        agent.context.messages = vec![crate::provider::test_utils::assistant_message(
+            "same answer",
+        )];
+        agent.context.ids = vec!["live-response".into()];
+        agent.native_replay = crate::agent::NativeReplaySnapshot {
+            records: vec![crate::provider::NativeReplayRecord {
+                response_id: response_id.clone(),
+                provider_scope: "native-scope".into(),
+                payload: crate::provider::NativeReplayPayload::OpenAiChat(
+                    crate::provider::ChatNativeReplay {
+                        reasoning_content: Some("private native trace".into()),
+                        ..Default::default()
+                    },
+                ),
+            }],
+            live_bindings: std::collections::BTreeMap::from([(
+                "live-response".into(),
+                response_id,
+            )]),
+            ..Default::default()
+        };
         let writer = SessionSnapshotWriter::new(&fixture.storage, session_id);
 
         for failed_group in [
@@ -1042,6 +1113,19 @@ mod tests {
             assert!(stored.transcript.is_empty(), "failed at {failed_group:?}");
             assert!(stored.plan.is_empty(), "failed at {failed_group:?}");
             assert!(stored.todos.is_empty(), "failed at {failed_group:?}");
+            assert!(
+                stored.tool_call_identities.is_empty(),
+                "failed at {failed_group:?}"
+            );
+            assert_eq!(
+                stored.native_replay,
+                crate::agent::NativeReplaySnapshot::default(),
+                "native replay must roll back at {failed_group:?}"
+            );
+            assert!(
+                stored.context_messages.is_empty(),
+                "context must roll back at {failed_group:?}"
+            );
         }
 
         let snapshot = SessionSnapshotData {
@@ -1071,6 +1155,9 @@ mod tests {
         ));
         assert_eq!(stored.plan.title, "atomic plan");
         assert_eq!(stored.todos, todos);
+        assert_eq!(stored.tool_call_identities, agent.tool_call_identities);
+        assert_eq!(stored.native_replay, agent.native_replay);
+        assert_eq!(stored.context_messages, agent.context.messages);
     }
 
     #[tokio::test]

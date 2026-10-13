@@ -1,0 +1,50 @@
+id = "response_literals"
+seed = 273
+
+[budgets]
+max_logical_turns = 2
+max_provider_attempts = 3
+max_duration_ms = 120000
+max_prompt_tokens = 30000
+max_completion_tokens = 4000
+max_missing_usage_turns = 0
+
+[[tasks]]
+id = "leading_literal_tag"
+fixture = "fixtures/broad_review"
+prompt = "This is a text rendering example. Reply with exactly <think>LITERAL_SENTINEL</think> as literal sample XML, with no code fence or explanation. Do not inspect or edit files or run tools."
+
+[tasks.mock]
+final_response = "<think>LITERAL_SENTINEL</think>"
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["<think>LITERAL_SENTINEL</think>"]
+
+[[tasks.graders]]
+type = "changed-files"
+exact = []
+
+[[tasks.graders]]
+type = "tool-effects"
+forbidden_attempts = ["inspection", "workspace-mutation", "command-execution", "interaction", "delegation", "external-access", "local-state", "unknown"]
+
+[[tasks]]
+id = "fenced_literal_tag"
+fixture = "fixtures/broad_review"
+prompt = "This is a text rendering example. Reply with one fenced xml code block containing exactly <think>EXAMPLE_SENTINEL</think> as sample data. Add no explanation. Do not inspect or edit files or run tools."
+
+[tasks.mock]
+final_response = "```xml\n<think>EXAMPLE_SENTINEL</think>\n```"
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["```xml\n<think>EXAMPLE_SENTINEL</think>\n```"]
+
+[[tasks.graders]]
+type = "changed-files"
+exact = []
+
+[[tasks.graders]]
+type = "tool-effects"
+forbidden_attempts = ["inspection", "workspace-mutation", "command-execution", "interaction", "delegation", "external-access", "local-state", "unknown"]

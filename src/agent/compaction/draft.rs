@@ -148,11 +148,12 @@ impl Agent {
         // reference to gather their restore sources, so don't clone them.
         for (index, message) in self.messages.iter().enumerate() {
             if index != 0 && omitted_indices.contains(&index) {
-                let (originals, stable_ids) =
+                let (originals, stable_ids, response_ids) =
                     self.original_source_snapshot_for_message(index, message);
                 omitted.push(CompactionOmittedMessage {
                     originals,
                     stable_ids,
+                    response_ids,
                 });
             } else {
                 kept.push(CompactionKeptMessage {
@@ -243,14 +244,23 @@ impl Agent {
         &self,
         index: usize,
         message: &ChatCompletionRequestMessage,
-    ) -> (Vec<ChatCompletionRequestMessage>, Vec<String>) {
+    ) -> (
+        Vec<ChatCompletionRequestMessage>,
+        Vec<String>,
+        Vec<Option<crate::provider::ResponseId>>,
+    ) {
         let message_id = self.message_id_or_synthetic(index);
         if let Some(source) = self.summary_sources.get(&message_id) {
             let mut stable_ids = vec![message_id.clone()];
             if let Some(nested_ids) = self.summary_source_stable_ids.get(&message_id) {
                 stable_ids.extend(nested_ids.iter().cloned());
             }
-            return (source.clone(), stable_ids);
+            let response_ids = self
+                .native_source_response_bindings
+                .get(&message_id)
+                .cloned()
+                .unwrap_or_else(|| vec![None; source.len()]);
+            return (source.clone(), stable_ids, response_ids);
         }
         if let Some(call_id) = tool_message_call_id(message)
             && let tool_id = ContextNodeId::tool(&call_id).into_string()
@@ -260,9 +270,15 @@ impl Agent {
             if let Some(nested_ids) = self.summary_source_stable_ids.get(&tool_id) {
                 stable_ids.extend(nested_ids.iter().cloned());
             }
-            return (source.clone(), stable_ids);
+            let response_ids = self
+                .native_source_response_bindings
+                .get(&tool_id)
+                .cloned()
+                .unwrap_or_else(|| vec![None; source.len()]);
+            return (source.clone(), stable_ids, response_ids);
         }
-        (vec![message.clone()], vec![message_id])
+        let response_id = self.native_response_bindings.get(&message_id).cloned();
+        (vec![message.clone()], vec![message_id], vec![response_id])
     }
 
     pub(super) fn compaction_stub_for_message(
@@ -412,15 +428,9 @@ impl Agent {
     }
 
     pub(in crate::agent) fn read_reuse_target_indices(&self) -> HashSet<usize> {
-        let mut target_call_ids = self
-            .tool_context_details
-            .values()
-            .filter_map(read_reuse_target_call_id)
-            .map(str::to_string)
-            .collect::<HashSet<_>>();
-        for message in &self.messages {
-            let content = message_content_string(message);
-            target_call_ids.extend(reused_read_source_call_ids(&content));
+        let mut target_call_ids = HashSet::new();
+        for (index, message) in self.messages.iter().enumerate() {
+            target_call_ids.extend(self.live_reuse_source_call_ids(index, message));
         }
         if target_call_ids.is_empty() {
             return HashSet::new();
@@ -454,23 +464,47 @@ impl Agent {
             .iter()
             .enumerate()
             .filter(|(index, _)| *index < span_start || *index > span_end)
-            .any(|(_index, message)| {
-                let mut sources = reused_read_source_call_ids(&message_content_string(message));
-                if let Some(pointer_call_id) = tool_message_call_id(message)
-                    && let Some(source) = self
-                        .tool_context_details
-                        .get(&pointer_call_id)
-                        .and_then(|detail| detail.reuse_target_call_id.as_ref())
-                {
-                    sources.push(source.clone());
-                }
-                sources.contains(&target_call_id)
+            .any(|(index, message)| {
+                self.live_reuse_source_call_ids(index, message)
+                    .contains(&target_call_id)
             })
+    }
+
+    fn live_reuse_source_call_ids(
+        &self,
+        index: usize,
+        message: &ChatCompletionRequestMessage,
+    ) -> Vec<String> {
+        if self.message_has_control(index, message, |state| {
+            state.stubbed || state.drop_next_turn
+        }) {
+            return Vec::new();
+        }
+        self.reuse_source_call_ids(message)
+    }
+
+    pub(in crate::agent) fn reuse_source_call_ids(
+        &self,
+        message: &ChatCompletionRequestMessage,
+    ) -> Vec<String> {
+        let mut sources = reused_read_source_call_ids(&message_content_string(message));
+        if let Some(pointer_call_id) = tool_message_call_id(message)
+            && let Some(source) = self
+                .tool_context_details
+                .get(&pointer_call_id)
+                .and_then(read_reuse_target_call_id)
+        {
+            sources.push(source.to_string());
+        }
+        sources
     }
 }
 
 fn reused_read_source_call_ids(content: &str) -> Vec<String> {
-    if !content.starts_with(REUSED_READ_MARKER) && !content.starts_with(PARTIAL_READ_REUSE_MARKER) {
+    if !content.starts_with(REUSED_READ_MARKER)
+        && !content.starts_with(PARTIAL_READ_REUSE_MARKER)
+        && !content.starts_with("[reused previous recall]")
+    {
         return Vec::new();
     }
     content

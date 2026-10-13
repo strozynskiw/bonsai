@@ -242,7 +242,13 @@ fn wait_for_tui_frame(output: &Mutex<Vec<u8>>, timeout: Duration) -> Result<()> 
         drop(rendered);
         std::thread::sleep(Duration::from_millis(25));
     }
-    bail!("TUI did not render within {timeout:?}")
+    let captured = output
+        .lock()
+        .map_err(|_| anyhow::anyhow!("PTY output lock was poisoned"))?;
+    bail!(
+        "TUI did not render within {timeout:?}; captured output: {:?}",
+        String::from_utf8_lossy(&captured)
+    )
 }
 
 fn tool_response(name: &str, arguments: Value) -> String {

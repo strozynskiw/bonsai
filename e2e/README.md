@@ -90,6 +90,9 @@ e2e/
     08_state_isolation.sh   # real child leaves parent state byte-identical
     09_continuation_resume.sh # retries recover the substantive task identity
     10_action_continuation.sh # terse approvals keep the complete Coding tools
+    13_truncated_response.sh # length-truncated answers recover before completion
+    14_repeated_tool_ids.sh # repeated wire IDs retain distinct finished tool cards
+    15_literal_think_tags.sh # literal examples survive rendering and follow-up history
   mock_streaming_provider.py # deterministic loopback SSE provider
 ```
 

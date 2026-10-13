@@ -350,6 +350,26 @@ impl Agent {
         cancellation_token: CancellationToken,
         sink: SharedSink,
     ) -> std::result::Result<RetriedStream, ProviderRetryError> {
+        self.chat_stream_with_retry_context(
+            messages,
+            tools,
+            options,
+            &crate::provider::ProviderRequestContext::default(),
+            cancellation_token,
+            sink,
+        )
+        .await
+    }
+
+    pub(super) async fn chat_stream_with_retry_context(
+        &mut self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[async_openai::types::chat::ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+        cancellation_token: CancellationToken,
+        sink: SharedSink,
+    ) -> std::result::Result<RetriedStream, ProviderRetryError> {
         let mut attempt = 0;
         let mut attempts = Vec::new();
         if let Some(exhaustion) = self.session_budget_exhaustion() {
@@ -376,10 +396,15 @@ impl Agent {
             let attempt_sink = AttemptSink::new(sink.clone(), budget, attempt_cancellation.clone());
             let provider_sink: SharedSink = attempt_sink.clone();
             let started_at = std::time::Instant::now();
-            let provider_call = self.provider.chat_stream_with_options(
+            self.provider
+                .set_tool_call_identity_store(self.tool_call_identities.clone());
+            self.provider
+                .set_native_replay_store(self.native_replay.clone());
+            let provider_call = self.provider.chat_stream_with_context(
                 messages,
                 tools,
                 options,
+                context,
                 attempt_cancellation.clone(),
                 provider_sink,
             );
@@ -488,13 +513,10 @@ impl Agent {
                         }
                     }
                     let Some((delay, retry_label)) = retry else {
-                        if !cancellation_token.is_cancelled()
-                            && let Some(model) = self.activate_provider_fallback()
-                        {
-                            sink.status(&format!("[provider failover] switching to {model}"));
-                            attempt = 0;
-                            continue;
-                        }
+                        // A different provider needs a fresh request projection,
+                        // estimator, and context admission. The model-call
+                        // boundary owns failover after metering this provider's
+                        // failed attempts; transport retries reuse this request.
                         if let Some(limit) = err.limit_kind() {
                             let exhaustion = match limit {
                                 crate::provider::ProviderLimitKind::RateLimit => {
@@ -723,6 +745,50 @@ mod tests {
 
     struct CancellationProvider {
         attempts: Arc<AtomicUsize>,
+    }
+
+    struct RecordingBackupProvider {
+        requests: Arc<Mutex<Vec<Vec<ChatCompletionRequestMessage>>>>,
+        cache_key: Arc<Mutex<String>>,
+        content: String,
+    }
+
+    struct CancelOnFailoverSink {
+        cancellation: CancellationToken,
+    }
+
+    impl crate::output::OutputSink for CancelOnFailoverSink {
+        fn status(&self, text: &str) {
+            if text.starts_with("[provider failover]") {
+                self.cancellation.cancel();
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RecordingBackupProvider {
+        fn set_conversation_cache_key(&mut self, key: &str) {
+            *self.cache_key.lock().unwrap() = key.to_string();
+        }
+
+        async fn chat_stream(
+            &self,
+            messages: &[ChatCompletionRequestMessage],
+            _tools: &[async_openai::types::chat::ChatCompletionTool],
+            _cancellation_token: CancellationToken,
+            sink: SharedSink,
+        ) -> crate::provider::ProviderResult<StreamedResponse> {
+            self.requests.lock().unwrap().push(messages.to_vec());
+            sink.assistant_delta(&self.content);
+            Ok(StreamedResponse {
+                content: self.content.clone(),
+                ..StreamedResponse::default()
+            })
+        }
+
+        async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
     }
 
     #[async_trait::async_trait]
@@ -1186,7 +1252,7 @@ mod tests {
 
         for _ in 0..2 {
             agent
-                .chat_stream_with_retry(&[], &[], CancellationToken::new(), sink.clone())
+                .run("hello", CancellationToken::new(), sink.clone())
                 .await
                 .expect("backup succeeds");
         }
@@ -1282,12 +1348,14 @@ mod tests {
         let sink = Arc::new(CapturingSink::default());
 
         let response = agent
-            .chat_stream_with_retry(&[], &[], CancellationToken::new(), sink.clone())
+            .run("hello", CancellationToken::new(), sink.clone())
             .await
-            .expect("final fallback succeeds")
-            .response;
+            .expect("final fallback succeeds");
 
-        assert_eq!(response.content, "final-success");
+        assert_eq!(
+            response,
+            AgentRunResult::Completed("final-success".to_string())
+        );
         assert_eq!(
             primary_attempts.load(Ordering::Relaxed),
             MAX_PROVIDER_RETRIES + 1
@@ -1343,7 +1411,7 @@ mod tests {
         let sink = Arc::new(CapturingSink::default());
 
         agent
-            .chat_stream_with_retry(&[], &[], CancellationToken::new(), sink.clone())
+            .run("hello", CancellationToken::new(), sink.clone())
             .await
             .expect("backup succeeds after retries");
 
@@ -1491,7 +1559,7 @@ mod tests {
 
         agent
             .run(
-                "test",
+                "hello",
                 CancellationToken::new(),
                 Arc::new(CapturingSink::default()),
             )
@@ -1501,6 +1569,224 @@ mod tests {
         let turn = agent.usage_turns().last().expect("usage turn");
         assert_eq!(turn.provider_id.as_deref(), Some("backup-provider"));
         assert_eq!(turn.model.as_deref(), Some("backup-model"));
+        let turns = agent.usage_turns();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].provider_id.as_deref(), Some("primary-provider"));
+        assert_eq!(turns[0].model.as_deref(), Some("primary-model"));
+        assert_eq!(turns[0].provider_attempts.len(), 1);
+        assert_eq!(
+            turns[0].provider_attempts[0].outcome,
+            ProviderAttemptOutcome::Failed
+        );
+        assert_eq!(turns[1].provider_attempts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fallback_rejects_a_high_confidence_prompt_that_cannot_fit() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = Agent::builder(
+            Box::new(ConfigurationFailureProvider {
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .context_budget_tokens(120_000)
+        .build()
+        .unwrap();
+        agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+            Box::new(RecordingBackupProvider {
+                requests: requests.clone(),
+                cache_key: Arc::new(Mutex::new(String::new())),
+                content: "must not run".to_string(),
+            }),
+            1,
+            PromptEstimator::for_tests("gpt-5.5", TokenCounterKind::Tiktoken, None),
+            "tiny-backup".to_string(),
+        ));
+
+        let error = agent
+            .run(
+                "hello",
+                CancellationToken::new(),
+                Arc::new(CapturingSink::default()),
+            )
+            .await
+            .expect_err("the fallback must pass its own admission check");
+
+        assert!(format!("{error:#}").contains("exceeds context window 1"));
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(agent.usage_turns().len(), 1, "no phantom backup invocation");
+    }
+
+    #[tokio::test]
+    async fn cancellation_at_failover_does_not_admit_a_backup_request() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let primary_attempts = Arc::new(AtomicUsize::new(0));
+        let backup_attempts = Arc::new(AtomicUsize::new(0));
+        let mut agent = Agent::new(
+            Box::new(ConfigurationFailureProvider {
+                attempts: primary_attempts.clone(),
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        agent.set_provider_fallback(fallback_config(
+            Box::new(CountingSuccessProvider {
+                attempts: backup_attempts.clone(),
+                content: "must not run",
+            }),
+            "backup-provider",
+            "backup-model",
+        ));
+        let cancellation = CancellationToken::new();
+
+        let result = agent
+            .run(
+                "hello",
+                cancellation.clone(),
+                Arc::new(CancelOnFailoverSink { cancellation }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, AgentRunResult::Interrupted(String::new()));
+        assert_eq!(primary_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(backup_attempts.load(Ordering::Relaxed), 0);
+        assert_eq!(agent.usage_turns().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fallback_compacts_with_its_estimator_before_sending_any_request() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let cache_key = Arc::new(Mutex::new(String::new()));
+        let estimator = PromptEstimator::for_tests("gpt-5.5", TokenCounterKind::Tiktoken, None);
+        let mut agent = Agent::builder(
+            Box::new(ConfigurationFailureProvider {
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .context_budget_tokens(120_000)
+        .build()
+        .unwrap();
+        agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+            Box::new(RecordingBackupProvider {
+                requests: requests.clone(),
+                cache_key: cache_key.clone(),
+                content: "backup".to_string(),
+            }),
+            32_000,
+            estimator.clone(),
+            "small-backup".to_string(),
+        ));
+        let history = (0..30)
+            .map(|index| {
+                (
+                    "user".to_string(),
+                    format!("message {index} {}", "old evidence ".repeat(1_000)),
+                )
+            })
+            .collect::<Vec<_>>();
+        agent.restore_text_history(&history).await.unwrap();
+
+        let result = agent
+            .run_current_context(CancellationToken::new(), Arc::new(CapturingSink::default()))
+            .await
+            .expect("the smaller backup can use compacted history");
+
+        assert_eq!(result, AgentRunResult::Completed("backup".to_string()));
+        assert_eq!(
+            cache_key.lock().unwrap().as_str(),
+            agent.conversation_cache_key
+        );
+        let requests = requests.lock().unwrap().clone();
+        assert!(!requests.is_empty());
+        for request in &requests {
+            let estimate = estimator.estimate_prompt(request, &[]).await;
+            assert_eq!(estimate.confidence, EstimateConfidence::High);
+            assert!(estimate.input_tokens + agent.output_reserve_tokens() <= 32_000);
+        }
+        assert!(requests.last().unwrap().iter().any(|message| {
+            describe_message_full(message)
+                .1
+                .contains("# Compacted Context Summary")
+        }));
+        assert!(!agent.compaction_events.is_empty());
+        assert_eq!(
+            agent
+                .caches
+                .last_sent_prompt_estimate
+                .as_ref()
+                .unwrap()
+                .source,
+            TokenCounterKind::Tiktoken
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_uses_its_own_generation_limit() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = Agent::builder(
+            Box::new(ConfigurationFailureProvider {
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .context_budget_tokens(120_000)
+        .build()
+        .unwrap();
+        agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+            Box::new(RecordingBackupProvider {
+                requests: requests.clone(),
+                cache_key: Arc::new(Mutex::new(String::new())),
+                content: "x".repeat(75_000),
+            }),
+            32_000,
+            PromptEstimator::heuristic(),
+            "small-backup".to_string(),
+        ));
+        let sink = Arc::new(CapturingSink::default());
+
+        let error = agent
+            .run("hello", CancellationToken::new(), sink.clone())
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.downcast_ref::<crate::run_budget::RunBudgetExhaustion>(),
+            Some(&crate::run_budget::RunBudgetExhaustion::ProviderOutput {
+                limit_chars: 64_000
+            })
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "the bounded lower-effort retry also uses the backup limit"
+        );
+        assert!(
+            sink.assistant.lock().unwrap().is_empty(),
+            "aborted output was withdrawn"
+        );
+        assert_eq!(
+            agent.usage_turns().last().unwrap().provider_attempts[0].assistant_chars,
+            64_000
+        );
     }
 
     #[tokio::test]

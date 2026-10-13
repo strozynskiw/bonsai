@@ -241,6 +241,15 @@ pub(super) fn assistant_text_message(text: &str) -> ChatCompletionRequestMessage
     })
 }
 
+/// Preserve an unfinished fragment without treating it as a completed turn.
+pub(crate) fn incomplete_assistant_text_message(text: &str) -> ChatCompletionRequestMessage {
+    let mut message = assistant_text_message(text);
+    if let ChatCompletionRequestMessage::Assistant(assistant) = &mut message {
+        assistant.name = Some(crate::context::INCOMPLETE_ASSISTANT_MESSAGE_NAME.to_string());
+    }
+    message
+}
+
 #[cfg(test)]
 mod provenance_tests {
     use super::*;

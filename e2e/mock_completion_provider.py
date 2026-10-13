@@ -22,11 +22,13 @@ class CompletionServer(ThreadingHTTPServer):
         self.server_name = "127.0.0.1"
         self.server_port = self.server_address[1]
 
-    def __init__(self, address, request_log):
+    def __init__(self, address, request_log, truncate_first=False, literal_think=False):
         super().__init__(address, CompletionHandler)
         self.request_log = request_log
         self.request_count = 0
         self.request_lock = threading.Lock()
+        self.truncate_first = truncate_first
+        self.literal_think = literal_think
 
     def record_request(self, payload):
         with self.request_lock:
@@ -63,21 +65,39 @@ class CompletionHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
+        truncated = self.server.truncate_first and request_id == 1
+        answer = (
+            "INCOMPLETE_ANSWER_SENTINEL"
+            if truncated
+            else "No change was needed; "
+            f"deterministic request-{request_id} complete."
+        )
         chunks = [
             {
                 "choices": [
                     {
                         "delta": {
-                            "content": (
-                                "No change was needed; "
-                                f"deterministic request-{request_id} complete."
-                            )
+                            "content": answer
                         }
                     }
                 ]
             },
-            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            {"choices": [{"delta": {}, "finish_reason": "length" if truncated else "stop"}]},
         ]
+        if self.server.literal_think:
+            if request_id == 1:
+                deltas = [
+                    {"reasoning_content": "native reasoning", "content": "<thi"},
+                    {"content": "nk>NATIVE_LITERAL</think>\n\nUse `<think>EXAMPLE_LITERAL</think>`."},
+                ]
+            else:
+                deltas = [
+                    {"content": "<thi"},
+                    {"content": "nk>LEGACY_REASONING_SENTINEL</think>"
+                     f"Legacy request-{request_id} complete: `<think>SECOND_LITERAL</think>`."},
+                ]
+            chunks = [{"choices": [{"delta": delta}]} for delta in deltas]
+            chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
         try:
             for chunk in chunks:
                 self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
@@ -88,14 +108,22 @@ class CompletionHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4) or (
+        len(sys.argv) == 4 and sys.argv[3] not in ("--truncate-first", "--literal-think")
+    ):
         raise SystemExit(
-            "usage: mock_completion_provider.py <ready-file> <request-log>"
+            "usage: mock_completion_provider.py <ready-file> <request-log> "
+            "[--truncate-first|--literal-think]"
         )
     ready_file = Path(sys.argv[1])
     request_log = Path(sys.argv[2])
     request_log.write_text("", encoding="utf-8")
-    with CompletionServer(("127.0.0.1", 0), request_log) as server:
+    mode = sys.argv[3] if len(sys.argv) == 4 else None
+    with CompletionServer(
+        ("127.0.0.1", 0), request_log,
+        truncate_first=mode == "--truncate-first",
+        literal_think=mode == "--literal-think",
+    ) as server:
         ready_file.write_text(
             f"http://127.0.0.1:{server.server_port}/v1", encoding="utf-8"
         )

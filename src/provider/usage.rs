@@ -71,9 +71,20 @@ pub(crate) struct AnthropicUsageAccumulator {
     output: Option<u32>,
     cache_read: Option<u64>,
     cache_creation: Option<u64>,
+    completed_output: Option<u64>,
 }
 
 impl AnthropicUsageAccumulator {
+    pub(crate) fn completed_output_tokens(&self) -> Option<u64> {
+        self.completed_output
+    }
+
+    pub(crate) fn apply_final_event_usage(&mut self, usage: &Value) {
+        self.apply_event_usage(usage);
+        if let Some(tokens) = usage.get("output_tokens").and_then(Value::as_u64) {
+            self.completed_output = Some(tokens);
+        }
+    }
     pub(crate) fn set_input_tokens(&mut self, value: u64) {
         self.input = Some(token_count_u32(Some(value)));
     }
@@ -234,6 +245,17 @@ mod tests {
         }));
 
         assert_eq!(usage.input_cache, None);
+    }
+
+    #[test]
+    fn native_budget_anthropic_initial_usage_is_not_a_completed_output_measurement() {
+        let mut usage = AnthropicUsageAccumulator::default();
+        usage.apply_event_usage(&serde_json::json!({"input_tokens":20,"output_tokens":1}));
+        assert_eq!(usage.completed_output_tokens(), None);
+        usage.apply_final_event_usage(&serde_json::json!({"input_tokens":20}));
+        assert_eq!(usage.completed_output_tokens(), None);
+        usage.apply_final_event_usage(&serde_json::json!({"output_tokens":0}));
+        assert_eq!(usage.completed_output_tokens(), Some(0));
     }
 
     #[test]

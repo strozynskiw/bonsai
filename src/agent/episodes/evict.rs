@@ -211,15 +211,17 @@ impl Agent {
         let mut archives = Vec::with_capacity(evictions.len());
         let mut restore_sources = Vec::with_capacity(evictions.len());
         let mut restore_source_stable_ids = Vec::with_capacity(evictions.len());
+        let mut restore_response_ids = Vec::with_capacity(evictions.len());
         for eviction in &evictions {
             let mut archive = Vec::new();
             let mut sources = Vec::new();
             let mut source_stable_ids = Vec::new();
+            let mut response_ids = Vec::new();
             let span_rows = self.messages[eviction.start..=eviction.end]
                 .iter()
                 .zip(&message_ids[eviction.start..=eviction.end]);
             for (offset, (message, stable_id)) in span_rows.enumerate() {
-                let (originals, stable_ids) =
+                let (originals, stable_ids, original_response_ids) =
                     self.original_source_snapshot_for_message(eviction.start + offset, message);
                 // The archive keeps REAL bytes: a GC-stubbed row archives its
                 // single original. A row whose sources fan out (nested prior
@@ -235,10 +237,12 @@ impl Agent {
                 });
                 sources.extend(originals);
                 source_stable_ids.extend(stable_ids);
+                response_ids.extend(original_response_ids);
             }
             archives.push(archive);
             restore_sources.push(sources);
             restore_source_stable_ids.push(source_stable_ids);
+            restore_response_ids.push(response_ids);
         }
 
         // Allocate marker ids and atomically transition every ledger row before
@@ -322,6 +326,10 @@ impl Agent {
                 self.summary_source_stable_ids.insert(
                     marker_ids[index].clone(),
                     std::mem::take(&mut restore_source_stable_ids[index]),
+                );
+                self.native_source_response_bindings.insert(
+                    marker_ids[index].clone(),
+                    std::mem::take(&mut restore_response_ids[index]),
                 );
             }
         }

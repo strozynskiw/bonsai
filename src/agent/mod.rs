@@ -86,7 +86,11 @@ pub use crate::review::ReviewScope;
 #[derive(Default)]
 pub(in crate::agent) struct SilentSink;
 
-impl OutputSink for SilentSink {}
+impl OutputSink for SilentSink {
+    fn wants_context_updates(&self) -> bool {
+        false
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanContextMode {
@@ -384,6 +388,7 @@ pub(crate) struct Advisories {
 #[derive(Debug, Clone)]
 pub(crate) struct PerfCaches {
     pub(crate) last_prompt_estimate: Option<PromptEstimate>,
+    pub(crate) last_prompt_estimate_fingerprint: Option<blake3::Hash>,
     pub(crate) last_sent_prompt_estimate: Option<PromptEstimate>,
     pub(crate) last_perf_report: Option<PerfReport>,
     pub(crate) previous_request_body: Option<Vec<u8>>,
@@ -418,6 +423,12 @@ pub(crate) struct BackgroundVerificationCapture {
 /// the outgoing rows must remain available for one final persistence flush.
 #[derive(Debug)]
 pub(crate) struct SessionRotationSnapshot {
+    pub(crate) context: ContextMessageSnapshot,
+    pub(crate) context_controls: HashMap<String, ContextControlState>,
+    pub(crate) context_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
+    pub(crate) context_source_stable_ids: HashMap<String, Vec<String>>,
+    pub(crate) native_replay: NativeReplaySnapshot,
+    pub(crate) tool_call_identities: Vec<crate::provider::ToolCallIdentity>,
     pub(crate) compaction_events: Vec<CompactionEvent>,
     pub(crate) verification_runs: Vec<crate::verification::VerificationRunRecord>,
     pub(crate) self_review_runs: Vec<SelfReviewRunRecord>,
@@ -438,8 +449,13 @@ type ProviderFallbackModelObserver = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct Agent {
     provider: Box<dyn Provider>,
+    tool_call_identities: crate::provider::ToolCallIdentityStore,
+    native_replay: crate::provider::NativeReplayStore,
+    native_response_bindings: std::collections::BTreeMap<String, crate::provider::ResponseId>,
+    native_source_response_bindings:
+        std::collections::BTreeMap<String, Vec<Option<crate::provider::ResponseId>>>,
     /// One-shot delegated-run backup. Present only for subagents with a
-    /// persisted fallback assignment and consumed on the first provider failure
+    /// persisted fallback assignment and consumed at the model-request boundary
     /// after the primary exhausts its normal retries.
     provider_fallback: Option<crate::tool::SubagentProviderConfig>,
     /// Delegated-run hook that keeps external run metadata aligned when a
@@ -786,6 +802,15 @@ impl Agent {
         );
     }
 
+    fn apply_last_usage_invocation_timing(&mut self, timing: perf::InvocationTiming) {
+        if let Some(turn) = self.usage.usage_turns.last_mut() {
+            turn.latency_ms = Some(crate::util::time::duration_to_ms(timing.total_duration));
+            turn.ttft_ms = timing
+                .first_output_duration
+                .map(crate::util::time::duration_to_ms);
+        }
+    }
+
     fn record_usage_details(
         &mut self,
         usage: Option<TokenUsage>,
@@ -968,7 +993,9 @@ impl Agent {
     }
 
     fn emit_context_updated(&self, sink: &SharedSink) {
-        sink.context_updated(self.context_report());
+        if sink.wants_context_updates() {
+            sink.context_updated(self.context_report());
+        }
     }
 
     fn tool_schema_cache(
@@ -1246,6 +1273,37 @@ impl Agent {
         id
     }
 
+    /// Bind an accepted, unchanged assistant response to its immutable origin.
+    fn push_model_response_message(
+        &mut self,
+        message: ChatCompletionRequestMessage,
+        response_id: crate::provider::ResponseId,
+    ) -> String {
+        debug_assert!(matches!(
+            message,
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
+        let id = self.push_message(message);
+        self.native_response_bindings
+            .insert(id.clone(), response_id);
+        id
+    }
+
+    fn prune_native_response_bindings(&mut self) {
+        let valid = self
+            .message_ids
+            .iter()
+            .zip(&self.messages)
+            .filter_map(|(id, message)| {
+                matches!(message, ChatCompletionRequestMessage::Assistant(_)).then_some(id.as_str())
+            })
+            .collect::<HashSet<_>>();
+        self.native_response_bindings
+            .retain(|id, _| valid.contains(id.as_str()));
+        self.native_source_response_bindings
+            .retain(|id, _| self.summary_sources.contains_key(id));
+    }
+
     fn refresh_execution_policy_snapshot(&mut self) -> bool {
         let snapshot = policy_snapshot::ExecutionPolicySnapshot::from_runtime(
             &self.yolo_mode,
@@ -1278,6 +1336,7 @@ impl Agent {
     }
 
     fn reset_context_messages(&mut self, system: ChatCompletionRequestMessage) {
+        self.native_response_bindings.clear();
         self.messages = vec![system];
         self.message_ids = vec![format_context_message_id(0)];
         self.next_message_id = 1;
@@ -1345,6 +1404,7 @@ impl Agent {
         mut messages: Vec<ChatCompletionRequestMessage>,
         ids: Vec<String>,
     ) {
+        self.native_response_bindings.clear();
         for message in &mut messages {
             normalize_chat_message_tool_call_arguments(message);
         }
@@ -1943,7 +2003,11 @@ mod read_persistence;
 mod retry;
 mod run_loop;
 mod run_loop_executor;
+#[cfg(test)]
+pub(crate) use messages::incomplete_assistant_text_message as test_incomplete_assistant_message;
 pub(crate) use run_loop_executor::capture_verification_workspace_identity;
+#[cfg(test)]
+pub(crate) use run_loop_executor::image_user_message as test_tool_image_message;
 mod self_review;
 mod text;
 mod timing;
@@ -1968,8 +2032,8 @@ use run_loop_executor::*;
 use self_review::SelfReviewState;
 use text::*;
 use transcript::*;
-pub(crate) use types::ContextMessageSnapshot;
 pub(crate) use types::MessageProvenance;
+use types::PreparedModelRequest;
 pub use types::{
     ActiveModelIdentity, AgentRunResult, CompactionMode, CompactionReport, CompactionRequest,
     CompactionSummaryPolicy, CompactionSummarySource, ContextRewriteKind, ExecutionLane,
@@ -1977,6 +2041,7 @@ pub use types::{
     ProviderAttemptOutcome, ProviderAttemptReport, QueuedUserMessage, QueuedUserMessageCommand,
     UsageTotals, UsageTurn, UsageTurnStatus, UserInput, WaitReason,
 };
+pub(crate) use types::{ContextMessageSnapshot, NativeReplaySnapshot};
 use types::{context_message_seq, format_context_message_id};
 use usage_ledger::*;
 

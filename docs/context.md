@@ -26,13 +26,35 @@ volatile state appended to history, keeping the entire prefix append-only.
 [Memory](memory.md) is deliberately *not* in the system prompt — recalled
 entries arrive as per-turn background data notes.
 
+Tool cards, results, and persisted inspection evidence use UUID call identities.
+A separate session snapshot preserves each call's original provider correlator,
+independently of discarded context or archived episodes. Transports restore the
+original provider ID on assistant calls and their results. OpenAI-compatible,
+Anthropic, and opted-in Codex native payloads have immutable response UUIDs and a
+session-owned store. Live rows and omitted originals retain those UUIDs when
+context-control IDs change, so repeated answer text never selects another trace.
+Opaque signatures and reasoning payloads remain unchanged. Unsigned compatible
+requests still deduplicate repeated
+wire IDs when the backend requires request-wide uniqueness.
+
 ## Token accounting
 
 A per-model estimator drives context-pressure decisions (billing truth stays
 with provider-reported usage): local tiktoken or Qwen tokenizers, the
-Anthropic `count_tokens` API, or a `chars/4` heuristic — each tagged with a
-confidence. Over-budget bails only trust high-confidence estimates; image
-payloads are redacted before counting. See
+Anthropic `count_tokens` or Z.AI tokenizer API, or a `chars/4` heuristic — each
+tagged with a confidence. Counting and sending share the same prepared request,
+including selected native history and resolved thinking settings. This applies
+to preflight, compaction candidates, and hidden summaries. Remote counts have
+a 30-second deadline, bounded response bodies, and cancellation support.
+
+Local counts include native plaintext reasoning, with image and opaque payload
+bytes redacted at their protocol fields. Opaque reasoning gets a conservative
+allowance from the original measured completion or submitted output ceiling,
+once per selected response. Missing evidence reserves a full context window;
+ciphertext length is never treated as a hidden-token measurement. These
+allowances have low confidence but still prevent an oversized request. A
+successful remote count replaces the allowance. Ordinary over-budget rejection
+uses high-confidence estimates. See
 [Models](models.md#token-counting-and-cost).
 
 Thresholds use the input window left after reserving response headroom. Outside
@@ -137,6 +159,16 @@ usage. Keys in the ledger view: `p` pin (never GC), `d` drop, `s` stub,
 `r` restore, Enter/arrows expand. The header's context chip (fill bar +
 percent) is the always-visible summary; click it to open `/ctx`.
 
+Native reasoning and local opaque allowances have separate ledger entries on
+their source assistant row. A framing/tokenizer delta explains differences
+between local row allocations and the prepared request total. A previous count
+is reused only when the actual request and native budget evidence match.
+
+Dropping a tool row removes its complete call/result exchange for the next
+request, including reuse pointers that depend on those bytes. The stored
+transcript remains intact. Use `s` to shorten just one tool output while keeping
+the exchange in context.
+
 ## Where this lives in the code
 
 | Concern | Location |
@@ -146,5 +178,6 @@ percent) is the always-visible summary; click it to open `/ctx`.
 | Episodes | `src/episode.rs`, `src/agent/episodes/` |
 | Project context block | `src/context.rs` |
 | Estimators | `src/provider/token.rs` |
+| Prepared request and native cost evidence | `src/provider/prepared.rs`, `src/provider/native_replay.rs` |
 | Smol profile | `src/smol.rs`, `src/agent/controls/smol.rs` |
 | `/ctx` report & modal | `src/context_view/`, `src/tui/widgets/modal/context.rs` |

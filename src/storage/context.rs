@@ -1,6 +1,71 @@
 use super::*;
 
 impl Storage {
+    pub(crate) async fn replace_native_replay_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        session_id: SessionId,
+        snapshot: &crate::agent::NativeReplaySnapshot,
+    ) -> Result<()> {
+        let raw = serde_json::to_string(snapshot)
+            .context("Failed to serialize native response replay")?;
+        sqlx::query("INSERT INTO native_response_replay (session_id, raw_json) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET raw_json = excluded.raw_json")
+            .bind(session_id.as_i64()).bind(raw).execute(&mut **tx).await
+            .with_context(|| format!("Failed to persist native response replay for session {session_id}"))?;
+        Ok(())
+    }
+
+    pub(super) async fn load_native_replay(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        session_id: SessionId,
+    ) -> Result<crate::agent::NativeReplaySnapshot> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT raw_json FROM native_response_replay WHERE session_id = ?")
+                .bind(session_id.as_i64())
+                .fetch_optional(&mut **tx)
+                .await?;
+        raw.map(|raw| {
+            serde_json::from_str(&raw).with_context(|| {
+                format!("Failed to parse native response replay for session {session_id}")
+            })
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+    }
+
+    pub(crate) async fn replace_tool_call_identities_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        session_id: SessionId,
+        identities: &[crate::provider::ToolCallIdentity],
+    ) -> Result<()> {
+        let raw = serde_json::to_string(identities)
+            .context("Failed to serialize tool call identities")?;
+        sqlx::query("INSERT INTO tool_call_identities (session_id, raw_json) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET raw_json = excluded.raw_json")
+            .bind(session_id.as_i64()).bind(raw).execute(&mut **tx).await
+            .with_context(|| format!("Failed to persist tool call identities for session {session_id}"))?;
+        Ok(())
+    }
+
+    pub(super) async fn load_tool_call_identities(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<crate::provider::ToolCallIdentity>> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT raw_json FROM tool_call_identities WHERE session_id = ?")
+                .bind(session_id.as_i64())
+                .fetch_optional(&self.pool)
+                .await?;
+        raw.map(|raw| {
+            serde_json::from_str(&raw).with_context(|| {
+                format!("Failed to parse tool call identities for session {session_id}")
+            })
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+    }
+
     #[cfg(test)]
     pub(crate) async fn replace_agent_context_snapshot(
         &self,
@@ -9,9 +74,17 @@ impl Storage {
         read_evidence: &[ReadEvidenceRecord],
         inspection_events: &[InspectionEventRecord],
         peer_delivery_receipts: &[PeerDeliveryReceipt],
+        identities: (
+            &[crate::provider::ToolCallIdentity],
+            &crate::agent::NativeReplaySnapshot,
+        ),
     ) -> Result<()> {
         self.with_session_snapshot_tx("agent context snapshot", async move |tx, now| {
             self.replace_context_snapshot_in_tx(tx, session_id, context, now)
+                .await?;
+            self.replace_tool_call_identities_in_tx(tx, session_id, identities.0)
+                .await?;
+            self.replace_native_replay_in_tx(tx, session_id, identities.1)
                 .await?;
             self.replace_read_evidence_snapshot_in_tx(tx, session_id, read_evidence, now)
                 .await?;
@@ -197,6 +270,7 @@ impl Storage {
     }
     pub(super) async fn load_context_messages(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         session_id: SessionId,
     ) -> Result<ContextMessageSnapshot> {
         let rows =
@@ -204,7 +278,7 @@ impl Storage {
                 "SELECT seq, stable_id, raw_json FROM context_messages WHERE session_id = ? ORDER BY seq",
             )
                 .bind(session_id.as_i64())
-                .fetch_all(&self.pool)
+                .fetch_all(&mut **tx)
                 .await
                 .with_context(|| {
                     format!("Failed to load context messages for session {session_id}")
@@ -231,13 +305,14 @@ impl Storage {
 
     pub(super) async fn load_context_controls(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         session_id: SessionId,
     ) -> Result<HashMap<String, ContextControlState>> {
         let rows = sqlx::query(
             "SELECT node_id, state_json FROM context_controls WHERE session_id = ? ORDER BY node_id",
         )
         .bind(session_id.as_i64())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut **tx)
         .await
         .with_context(|| format!("Failed to load context controls for session {session_id}"))?;
 
@@ -726,13 +801,14 @@ impl Storage {
 
     pub(super) async fn load_context_sources(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         session_id: SessionId,
     ) -> Result<HashMap<String, Vec<ChatCompletionRequestMessage>>> {
         let rows = sqlx::query(
             "SELECT node_id, messages_json FROM context_sources WHERE session_id = ? ORDER BY node_id",
         )
         .bind(session_id.as_i64())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut **tx)
         .await
         .with_context(|| format!("Failed to load context sources for session {session_id}"))?;
 
@@ -749,6 +825,7 @@ impl Storage {
 
     pub(super) async fn load_context_source_stable_ids(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         session_id: SessionId,
     ) -> Result<HashMap<String, Vec<String>>> {
         let rows = sqlx::query(
@@ -756,7 +833,7 @@ impl Storage {
              WHERE session_id = ? AND stable_ids_json IS NOT NULL ORDER BY node_id",
         )
         .bind(session_id.as_i64())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut **tx)
         .await
         .with_context(|| {
             format!("Failed to load context source stable ids for session {session_id}")

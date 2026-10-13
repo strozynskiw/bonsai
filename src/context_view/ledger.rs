@@ -24,7 +24,7 @@ impl ToolLedgerCalls {
         row_metadata: ContextTokenMetadata,
         estimator: &PromptEstimator,
         source: ContextSourceRef,
-    ) {
+    ) -> usize {
         let index = self.ensure_call(
             &call.call_id,
             &call.name,
@@ -41,6 +41,7 @@ impl ToolLedgerCalls {
         ledger_call.arguments = Some(input_text);
         ledger_call.input_tokens = input_tokens;
         ledger_call.input_source = Some(source);
+        input_tokens
     }
 
     pub(crate) fn record_output(

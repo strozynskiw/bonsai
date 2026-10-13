@@ -1,7 +1,7 @@
 //! SMOL-persona outgoing-context capping: summarizes older messages into a
 //! single trusted-context note and truncates recent tool output, so the
 //! compact SMOL prompt/context profile also shrinks what actually goes out
-//! on the wire. Entry point is [`Agent::smol_outgoing_messages`], called from
+//! on the wire. Entry point is [`Agent::smol_outgoing_messages_with_sources`], called from
 //! `outgoing::outgoing_messages_for` when the SMOL persona is active.
 //!
 //! Local backends (llama.cpp, Ollama, vLLM) re-use the previous request's
@@ -27,10 +27,10 @@ const SMOL_PRIOR_TOOL_OUTPUT_CHARS: usize = 1_500;
 const SMOL_SUMMARY_SNIPPET_CHARS: usize = 700;
 
 impl Agent {
-    pub(super) fn smol_outgoing_messages(
+    pub(super) fn smol_outgoing_messages_with_sources(
         &self,
         messages: Vec<ChatCompletionRequestMessage>,
-    ) -> Vec<ChatCompletionRequestMessage> {
+    ) -> (Vec<ChatCompletionRequestMessage>, Vec<Option<usize>>) {
         let body_start = usize::from(matches!(
             messages.first(),
             Some(ChatCompletionRequestMessage::System(_))
@@ -42,10 +42,12 @@ impl Agent {
             .unwrap_or(0);
 
         let mut outgoing = Vec::new();
+        let mut source_indices = Vec::new();
         if body_start == 1
             && let Some(system) = messages.first()
         {
             outgoing.push(system.clone());
+            source_indices.push(Some(0));
         }
 
         let prior = &messages[body_start..recent_start];
@@ -53,6 +55,7 @@ impl Agent {
             outgoing.push(trusted_context_message(
                 &self.smol_prior_context_summary(prior),
             ));
+            source_indices.push(None);
         }
 
         outgoing.extend(
@@ -68,7 +71,8 @@ impl Agent {
                     smol_cap_message(message.clone(), max_chars)
                 }),
         );
-        outgoing
+        source_indices.extend((recent_start..messages.len()).map(Some));
+        (outgoing, source_indices)
     }
 
     fn smol_prior_context_summary(&self, messages: &[ChatCompletionRequestMessage]) -> String {

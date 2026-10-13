@@ -8,11 +8,15 @@
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 E2E_ASSERT_TRIES=120
-e2e_begin "12_inspection_batching: advisory, declarations, and diagnostics"
+e2e_begin "${E2E_BATCHING_CASE_NAME:-12_inspection_batching: advisory, declarations, and diagnostics}"
 
 provider_ready="$E2E_HOME/provider-url"
 provider_requests="$E2E_HOME/provider-requests.jsonl"
-python3 "$E2E_LIB_DIR/mock_batching_provider.py" "$provider_ready" "$provider_requests" &
+if [ "${E2E_REPEAT_CALL_IDS:-0}" == 1 ]; then
+  python3 "$E2E_LIB_DIR/mock_batching_provider.py" "$provider_ready" "$provider_requests" --repeat-call-ids &
+else
+  python3 "$E2E_LIB_DIR/mock_batching_provider.py" "$provider_ready" "$provider_requests" &
+fi
 E2E_HELPER_PID=$!
 for _ in {1..40}; do
   [ -s "$provider_ready" ] && break
@@ -102,6 +106,7 @@ request_assert "no advisory before the streak" 3 \
   '"Inspection batching advisory:" not in json.dumps(payload)'
 
 quit_and_wait
+cp -p "$provider_requests" "$E2E_EVIDENCE/provider-requests.jsonl"
 
 # Persistence evidence: one diagnostics row per inspection turn.
 database_assert "diagnostics persist for every inspection turn" \
@@ -119,5 +124,20 @@ database_assert "batched turn reports a width-two plan and execution" \
   "SELECT json_extract(inspection_batch_json, '\$.planned_widths') || \
           json_extract(inspection_batch_json, '\$.actual_widths') FROM usage_turns \
    WHERE json_extract(inspection_batch_json, '\$.classification') = 'batched'" "[2][2]"
+
+if [ "${E2E_REPEAT_CALL_IDS:-0}" == 1 ]; then
+  database_assert "all tool cards survive repeated provider IDs" \
+    "SELECT COUNT(*) FROM tool_calls" 5
+  database_assert "tool cards have distinct canonical identities" \
+    "SELECT COUNT(DISTINCT call_id) FROM tool_calls" 5
+  database_assert "every tool card finished successfully" \
+    "SELECT COUNT(*) FROM tool_calls WHERE status = 'succeeded'" 5
+  database_assert "original provider IDs are durably retained" \
+    "SELECT COUNT(*) FROM tool_call_identities, json_each(raw_json) WHERE json_extract(value, '\$.wire_id') = 'same-wire-id'" 5
+  request_assert "follow-up wire IDs are unique and paired" 5 \
+    '(lambda calls, results: len(calls) == 5 and len(set(calls)) == 5 and calls == results)([call["id"] for message in payload["messages"] for call in message.get("tool_calls", [])], [message["tool_call_id"] for message in payload["messages"] if message.get("role") == "tool"])'
+  request_assert "read reuse points to the model-visible source ID" 3 \
+    'any(message.get("role") == "tool" and "[reused previous read]" in str(message.get("content")) and "across tool(s) same-wire-id." in str(message.get("content")) and "\nsource_calls: same-wire-id" in str(message.get("content")) for message in payload["messages"])'
+fi
 
 e2e_done

@@ -76,7 +76,8 @@ One run = one `TurnCoordinator` driving up to `max_iterations` turns
 2. **Model call** — `chat_stream_with_retry`: up to 3 retries with
    `retry-after`-aware backoff, per-attempt generation-time and
    streamed-char meters, visible retraction of a failed attempt's output,
-   and provider-fallback activation on permanent errors
+   then `call_model` records failed usage and activates a provider fallback at
+   the request boundary, rerunning preflight with the backup's limits
    ([Providers](providers.md#errors-retries-and-failover)).
 3. **Tool execution** — calls are classified
    (`ReadPath`/`WritePath`/`GlobalWrite`/`ParallelBash`/`Independent`),

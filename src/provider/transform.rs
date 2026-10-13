@@ -7,7 +7,6 @@
 //! normalized values to its protocol shape.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use async_openai::types::chat::{
@@ -764,17 +763,6 @@ pub(crate) fn tool_call_parts(tool_call: &Value) -> (&str, &str, &str) {
         .and_then(Value::as_str)
         .unwrap_or("{}");
     (id, name, arguments)
-}
-
-/// The reasoning/thinking items captured for an assistant turn, keyed by the
-/// turn's first tool-call id. Both transports replay these ahead of the turn's
-/// output; `None` when there is no map, no tool calls, or no match for the id.
-pub(crate) fn replay_items_for<'a>(
-    items_by_call_id: Option<&'a HashMap<String, Vec<Value>>>,
-    tool_calls: Option<&[Value]>,
-) -> Option<&'a [Value]> {
-    let first_id = tool_calls?.first()?.get("id").and_then(Value::as_str)?;
-    items_by_call_id?.get(first_id).map(Vec::as_slice)
 }
 
 pub(crate) fn tool_function(tool: &ChatCompletionTool) -> Result<ToolFunction> {

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -12,14 +11,12 @@ use crate::provider::ToolCall;
 /// keyed by the first call id — so letting `""` escape makes every parallel
 /// call collide on the first empty-id card in the transcript: the first tool
 /// swallows all results and every later tool spins as "running" forever.
-/// Synthesize a process-unique id instead; the provider never sent one, so the
+/// Synthesize an ID that stays unique across process restarts; the provider never sent one, so the
 /// only contract is self-consistency between the assistant echo and the tool
 /// result, which both read this value from the stored `ToolCall`. Deliberate
 /// mixed-model seam — do not "simplify" back to passing the wire id through.
 fn synthesize_missing_call_id() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-    format!("bonsai-call-{seq}")
+    format!("bonsai-call-{}", uuid::Uuid::now_v7().simple())
 }
 
 fn ensure_call_id(id: String) -> String {
@@ -80,27 +77,12 @@ impl ChatToolCallAccumulator {
     }
 
     pub(crate) fn into_tool_calls_with_extra_content(self) -> Vec<ChatToolCall> {
-        // Kimi K2 mints deterministic `name:index` ids and can hand two
-        // parallel calls in one message the same id (observed live:
-        // `project_info:1` twice). Duplicates break the same downstream id
-        // joins as empty ids above, and Moonshot 400s any replayed history
-        // containing them ("tool call id ... is duplicated"), wedging the
-        // session. Keep the first occurrence, suffix later ones.
-        let mut seen = std::collections::HashSet::new();
+        // Preserve raw correlators here, including duplicate IDs. Providers
+        // assign separate canonical identities before storing replay metadata.
         self.calls
             .into_iter()
             .map(|(_, (id, name, arguments, extra_content))| {
-                let mut id = ensure_call_id(id);
-                if !seen.insert(id.clone()) {
-                    let mut suffix = 2usize;
-                    id = loop {
-                        let candidate = format!("{id}-dup{suffix}");
-                        if seen.insert(candidate.clone()) {
-                            break candidate;
-                        }
-                        suffix += 1;
-                    };
-                }
+                let id = ensure_call_id(id);
                 ChatToolCall {
                     call: ToolCall {
                         id,
@@ -114,11 +96,19 @@ impl ChatToolCallAccumulator {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn responses_tool_call_from_done_event(
     event: &Value,
     argument_deltas: &HashMap<String, String>,
 ) -> Option<ToolCall> {
     let item = event.get("item")?;
+    responses_tool_call_from_item(item, argument_deltas)
+}
+
+pub(crate) fn responses_tool_call_from_item(
+    item: &Value,
+    argument_deltas: &HashMap<String, String>,
+) -> Option<ToolCall> {
     if item.get("type").and_then(Value::as_str) != Some("function_call") {
         return None;
     }
@@ -247,10 +237,10 @@ mod tests {
     }
 
     #[test]
-    fn accumulator_uniquifies_duplicate_wire_ids_within_one_message() {
+    fn accumulator_preserves_duplicate_wire_ids_for_provider_projection() {
         // Kimi K2 mints `name:index` ids and can hand two parallel calls in
-        // one message the same id; the first keeps the wire id (its result
-        // joins normally), later ones get a deterministic suffix.
+        // one message the same id. Canonical identities are assigned later,
+        // without losing each call's original provider correlator.
         let mut accumulator = ChatToolCallAccumulator::default();
         for index in [0_u64, 1, 2] {
             accumulator.push_delta(&serde_json::json!({
@@ -265,14 +255,7 @@ mod tests {
             .into_iter()
             .map(|call| call.id)
             .collect();
-        assert_eq!(
-            ids,
-            [
-                "project_info:1",
-                "project_info:1-dup2",
-                "project_info:1-dup3"
-            ]
-        );
+        assert_eq!(ids, ["project_info:1", "project_info:1", "project_info:1"]);
     }
 
     #[test]

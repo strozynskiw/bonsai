@@ -1,5 +1,227 @@
 use super::*;
-use crate::agent::CompactionSummaryPolicy;
+use crate::agent::{CompactionSummaryPolicy, ExecutionLaneKind, ProviderAttemptOutcome};
+
+async fn tool_exchange_control_agent(interleaved: bool) -> Agent {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let mut assistant = assistant_tool_call_message("a", "read", r#"{"path":"a.rs"}"#);
+    if let ChatCompletionRequestMessage::Assistant(message) = &mut assistant {
+        let ChatCompletionRequestMessage::Assistant(other) =
+            assistant_tool_call_message("b", "read", r#"{"path":"b.rs"}"#)
+        else {
+            unreachable!()
+        };
+        message
+            .tool_calls
+            .as_mut()
+            .unwrap()
+            .extend(other.tool_calls.unwrap());
+    }
+    let mut messages = vec![
+        system_message(AgentMode::Coding, ""),
+        assistant,
+        tool_result_message("a", "result A"),
+    ];
+    if interleaved {
+        messages.push(test_user_message("legacy attachment"));
+    }
+    messages.extend([
+        tool_result_message("b", "result B"),
+        test_user_message("keep this user turn"),
+    ]);
+    agent.restore_context_messages(messages).await.unwrap();
+    agent
+}
+
+#[tokio::test]
+async fn dropping_any_tool_exchange_row_preserves_pairs_and_toggles_the_whole_exchange() {
+    for interleaved in [false, true] {
+        for target in ["tool-a", "tool-b", "msg-1", "msg-2"] {
+            let mut agent = tool_exchange_control_agent(interleaved).await;
+            let stored = agent.context_messages().to_vec();
+            assert!(
+                agent
+                    .apply_context_control_action(target, ContextControlAction::ToggleDropNextTurn)
+            );
+            let wire = agent.outgoing_messages_for(&agent.messages);
+            assert!(!wire.iter().any(|message| matches!(
+                message,
+                ChatCompletionRequestMessage::Assistant(_) | ChatCompletionRequestMessage::Tool(_)
+            )));
+            assert!(
+                wire.iter()
+                    .any(|message| message_content(message) == "keep this user turn")
+            );
+            if interleaved {
+                assert!(
+                    wire.iter()
+                        .any(|message| message_content(message) == "legacy attachment")
+                );
+            }
+            for (index, message) in agent.messages.iter().enumerate().filter(|(_, message)| {
+                matches!(
+                    message,
+                    ChatCompletionRequestMessage::Assistant(_)
+                        | ChatCompletionRequestMessage::Tool(_)
+                )
+            }) {
+                assert!(agent.message_has_control(index, message, |state| state.drop_next_turn));
+            }
+            assert_eq!(agent.context_messages(), stored);
+            assert!(
+                agent
+                    .apply_context_control_action(target, ContextControlAction::ToggleDropNextTurn)
+            );
+            assert!(agent.context_controls().is_empty());
+            assert_eq!(
+                agent
+                    .outgoing_messages_for(&agent.messages)
+                    .iter()
+                    .filter(|message| matches!(message, ChatCompletionRequestMessage::Tool(_)))
+                    .count(),
+                2
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_single_row_drop_controls_restore_as_a_complete_exchange() {
+    for target in ["tool-a", "tool-b", "msg-1", "msg-2"] {
+        let mut agent = tool_exchange_control_agent(true).await;
+        agent.restore_context_controls(
+            std::collections::HashMap::from([(
+                target.to_string(),
+                crate::context_view::ContextControlState {
+                    drop_next_turn: true,
+                    ..Default::default()
+                },
+            )]),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let projection = agent.context_projection_for_controls(
+            &agent.messages,
+            &agent.message_ids,
+            &agent.context_controls,
+        );
+        let inclusions = projection.message_inclusions();
+        for index in [1, 2, 4] {
+            assert_eq!(inclusions.get(&index), Some(&ContextInclusion::NotSent));
+            assert!(
+                agent.message_has_control(index, &agent.messages[index], |state| state
+                    .drop_next_turn)
+            );
+        }
+        assert!(!projection.wire_messages().iter().any(|message| matches!(
+            message,
+            ChatCompletionRequestMessage::Assistant(_) | ChatCompletionRequestMessage::Tool(_)
+        )));
+        agent.clear_drop_next_turn_controls();
+        assert_eq!(
+            agent
+                .outgoing_messages_for(&agent.messages)
+                .iter()
+                .filter(|message| matches!(message, ChatCompletionRequestMessage::Tool(_)))
+                .count(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn dropping_a_reuse_source_also_drops_and_restores_dependent_exchanges() {
+    for restore in [false, true] {
+        let mut agent = tool_exchange_control_agent(false).await;
+        for (id, source) in [("c", "a"), ("d", "c")] {
+            agent.push_message(assistant_tool_call_message(
+                id,
+                "recall",
+                r#"{"episode":1}"#,
+            ));
+            agent.push_message(tool_result_message(
+                id,
+                &format!("[reused previous recall]\nsource_calls: {source}"),
+            ));
+        }
+        if restore {
+            agent.restore_context_controls(
+                std::collections::HashMap::from([(
+                    "tool-a".to_string(),
+                    crate::context_view::ContextControlState {
+                        drop_next_turn: true,
+                        ..Default::default()
+                    },
+                )]),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            );
+        } else {
+            assert!(
+                agent.apply_context_control_action(
+                    "tool-a",
+                    ContextControlAction::ToggleDropNextTurn
+                )
+            );
+        }
+        assert!(
+            !agent
+                .outgoing_messages_for(&agent.messages)
+                .iter()
+                .any(|message| matches!(
+                    message,
+                    ChatCompletionRequestMessage::Assistant(_)
+                        | ChatCompletionRequestMessage::Tool(_)
+                ))
+        );
+        assert!(agent.read_reuse_target_indices().is_empty());
+        assert!(
+            agent.apply_context_control_action("tool-a", ContextControlAction::ToggleDropNextTurn)
+        );
+        assert!(agent.context_controls().is_empty());
+        assert_eq!(
+            agent
+                .outgoing_messages_for(&agent.messages)
+                .iter()
+                .filter(|message| matches!(message, ChatCompletionRequestMessage::Tool(_)))
+                .count(),
+            4
+        );
+    }
+}
+
+#[tokio::test]
+async fn restoring_a_pointer_restores_its_sources_without_reviving_unrelated_pointers() {
+    let mut agent = tool_exchange_control_agent(false).await;
+    for (id, source) in [("c", "a"), ("d", "c"), ("e", "a")] {
+        agent.push_message(assistant_tool_call_message(
+            id,
+            "recall",
+            r#"{"episode":1}"#,
+        ));
+        agent.push_message(tool_result_message(
+            id,
+            &format!("[reused previous recall]\nsource_calls: {source}"),
+        ));
+    }
+    assert!(agent.apply_context_control_action("tool-a", ContextControlAction::ToggleDropNextTurn));
+    assert!(agent.apply_context_control_action("tool-c", ContextControlAction::ToggleDropNextTurn));
+    let ids = agent
+        .outgoing_messages_for(&agent.messages)
+        .iter()
+        .filter_map(crate::context_view::tool_message_call_id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["a", "b", "c", "d"]);
+    assert!(agent.context_controls()["tool-e"].drop_next_turn);
+}
 
 fn stable_message_id_containing(agent: &Agent, needle: &str) -> String {
     let snapshot = agent.context_message_snapshot();
@@ -548,6 +770,14 @@ async fn automatic_compaction_uses_deterministic_fallback_on_summary_error() {
         TokenCounterKind::Heuristic,
         None,
     ));
+    let backup = MockProvider::new(vec![]);
+    let backup_requests = backup.requests();
+    agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+        Box::new(backup),
+        32_000,
+        PromptEstimator::heuristic(),
+        "backup".to_string(),
+    ));
     let history = (0..30)
         .map(|index| {
             (
@@ -564,6 +794,23 @@ async fn automatic_compaction_uses_deterministic_fallback_on_summary_error() {
         .unwrap();
 
     assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+    assert!(
+        backup_requests.lock().await.is_empty(),
+        "hidden summary failure must use deterministic recovery under the original provider"
+    );
+    let summary_turn = agent
+        .usage_turns()
+        .iter()
+        .find(|turn| turn.lane_kind == ExecutionLaneKind::Compaction)
+        .expect("failed hidden summary must retain its invocation diagnostics");
+    assert_eq!(summary_turn.provider_attempts.len(), 1);
+    assert_eq!(
+        summary_turn.provider_attempts[0].outcome,
+        ProviderAttemptOutcome::Failed
+    );
+    assert_eq!(summary_turn.prompt_tokens, None);
+    assert_eq!(summary_turn.completion_tokens, None);
+    assert_eq!(summary_turn.rewrite_kind, ContextRewriteKind::Compaction);
     let requests = requests.lock().await;
     assert_eq!(requests.len(), 2);
     let summary = requests[1]
@@ -760,6 +1007,150 @@ async fn provider_only_manual_compaction_returns_summary_error() {
         .expect_err("provider-only compaction should return provider errors");
 
     assert!(format!("{err:#}").contains("summary unavailable"));
+    let turn = agent
+        .usage_turns()
+        .last()
+        .expect("hidden failed invocation");
+    assert_eq!(turn.lane_kind, ExecutionLaneKind::Compaction);
+    assert_eq!(turn.provider_attempts.len(), 1);
+    assert_eq!(
+        turn.provider_attempts[0].outcome,
+        ProviderAttemptOutcome::Failed
+    );
+    assert_eq!(agent.context_report().session_prompt_tokens, 0);
+}
+
+#[tokio::test]
+async fn oversized_compaction_summary_creates_no_invocation_or_usage_row() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![]);
+    let requests = provider.requests();
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .context_budget_tokens(2_000)
+    .build()
+    .unwrap();
+    agent.set_prompt_estimator(PromptEstimator::for_tests(
+        "gpt-4o",
+        TokenCounterKind::Tiktoken,
+        None,
+    ));
+    for index in 0..30 {
+        agent.push_user_message_raw(&format!("old {index}: {}", "context ".repeat(300)));
+    }
+    let before = agent.context_messages().to_vec();
+    let error = agent
+        .compact_context(
+            CompactionRequest::manual(false, CancellationToken::new())
+                .with_target_tokens(1)
+                .with_summary_policy(CompactionSummaryPolicy::ProviderOnly),
+        )
+        .await
+        .expect_err("the hidden summary must be admitted before invocation");
+    assert!(format!("{error:#}").contains("context summary prompt estimate"));
+    assert!(requests.lock().await.is_empty());
+    assert!(agent.usage_turns().is_empty());
+    assert_eq!(agent.context_messages(), before);
+}
+
+#[tokio::test]
+async fn native_budget_summary_count_cancellation_never_invokes_the_model() {
+    use crate::provider::ProviderFactory;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .and(body_string_contains("You summarize prior chat history"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(60))
+                .set_body_json(serde_json::json!({"input_tokens":1000})),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"input_tokens":1000})),
+        )
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let session =
+        crate::provider::test_utils::provider_session("test", &server.uri(), "claude-sonnet-4-5");
+    let target = crate::provider::fallback_run_target(
+        &crate::provider::anthropic::ANTHROPIC_METADATA,
+        &session,
+    );
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        crate::provider::anthropic::AnthropicFactory.build_target(&session, &target),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .context_budget_tokens(1_000_000)
+    .build()
+    .unwrap();
+    agent.set_prompt_estimator(PromptEstimator::from_metadata(
+        &crate::provider::anthropic::ANTHROPIC_METADATA,
+        &session,
+    ));
+    for index in 0..30 {
+        agent.push_user_message_raw(&format!("old {index}: {}", "context ".repeat(30)));
+    }
+    let before = agent.context_messages().to_vec();
+    let cancellation = CancellationToken::new();
+    let compact = agent.compact_context(
+        CompactionRequest::manual(false, cancellation.clone())
+            .with_target_tokens(1)
+            .with_summary_policy(CompactionSummaryPolicy::ProviderOnly),
+    );
+    let cancel = async {
+        loop {
+            if server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    String::from_utf8_lossy(&request.body)
+                        .contains("You summarize prior chat history")
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(compact, cancel)
+    })
+    .await
+    .expect("summary count must observe cancellation");
+    assert!(super::super::compaction::is_compaction_cancelled(
+        &result.unwrap_err()
+    ));
+    assert!(agent.usage_turns().is_empty());
+    assert_eq!(agent.context_messages(), before);
+    server.verify().await;
 }
 
 #[tokio::test]
@@ -1096,6 +1487,117 @@ async fn context_drop_next_turn_clears_after_provider_error() {
             .iter()
             .any(|message| message_content(message) == "drop me"),
         "drop-for-next-turn must not mutate stored transcript context"
+    );
+    assert!(agent.context_controls().is_empty());
+}
+
+#[tokio::test]
+async fn context_drop_next_turn_survives_failover_until_the_logical_request_finishes() {
+    let fixture = TestFixture::new();
+    let primary = MockProvider::new(vec![Err(ProviderFailure::configuration("unavailable"))]);
+    let primary_requests = primary.requests();
+    let backup = MockProvider::new(vec![Ok(StreamedResponse {
+        content: "done".to_string(),
+        ..StreamedResponse::default()
+    })]);
+    let backup_requests = backup.requests();
+    let mut agent = Agent::new(
+        Box::new(primary),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+        Box::new(backup),
+        32_000,
+        PromptEstimator::heuristic(),
+        "backup".to_string(),
+    ));
+    agent
+        .restore_context_messages(vec![
+            system_message(AgentMode::Coding, ""),
+            test_user_message("drop me"),
+            test_user_message("keep me"),
+        ])
+        .await
+        .unwrap();
+    assert!(agent.apply_context_control_action("msg-1", ContextControlAction::ToggleDropNextTurn));
+
+    let result = agent
+        .run_current_context(CancellationToken::new(), Arc::new(StdoutSink))
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Completed("done".to_string()));
+    assert_eq!(
+        user_messages_in(&primary_requests.lock().await[0]),
+        vec!["keep me".to_string()]
+    );
+    assert_eq!(
+        user_messages_in(&backup_requests.lock().await[0]),
+        vec!["keep me".to_string()]
+    );
+    assert!(agent.context_controls().is_empty());
+    assert!(
+        agent
+            .context_messages()
+            .iter()
+            .any(|message| message_content(message) == "drop me")
+    );
+}
+
+#[tokio::test]
+async fn interrupted_backup_compaction_clears_consumed_next_turn_drops() {
+    let fixture = TestFixture::new();
+    let primary = MockProvider::new(vec![Err(ProviderFailure::configuration("unavailable"))]);
+    let backup = MockProvider::new(vec![Ok(StreamedResponse::interrupted())]);
+    let backup_requests = backup.requests();
+    let mut agent = Agent::builder(
+        Box::new(primary),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .context_budget_tokens(120_000)
+    .build()
+    .unwrap();
+    agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+        Box::new(backup),
+        32_000,
+        PromptEstimator::heuristic(),
+        "backup".to_string(),
+    ));
+    let history = (0..30)
+        .map(|index| {
+            (
+                "user".to_string(),
+                format!("message {index} {}", "x".repeat(6_000)),
+            )
+        })
+        .collect::<Vec<_>>();
+    agent.restore_text_history(&history).await.unwrap();
+    assert!(agent.apply_context_control_action("msg-1", ContextControlAction::ToggleDropNextTurn));
+
+    let result = agent
+        .run_current_context(CancellationToken::new(), Arc::new(StdoutSink))
+        .await
+        .unwrap();
+
+    assert_eq!(result, AgentRunResult::Interrupted(String::new()));
+    let requests = backup_requests.lock().await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the canceled hidden summary was invoked"
+    );
+    assert!(
+        requests[0]
+            .iter()
+            .any(|message| message_content(message).contains("Omitted prior context"))
     );
     assert!(agent.context_controls().is_empty());
 }
@@ -2784,6 +3286,7 @@ async fn rolling_summary_updates_a_prior_summary_instead_of_resummarizing() {
     let omitted = |text: &str| CompactionOmittedMessage {
         originals: vec![test_user_message(text)],
         stable_ids: Vec::new(),
+        response_ids: vec![None],
     };
     let draft = CompactionDraft::with_omitted_for_test;
     let joined = |messages: Vec<ChatCompletionRequestMessage>| {

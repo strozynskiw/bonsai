@@ -262,14 +262,129 @@ fn post_warmup_cache_percent(turns: &[UsageTurnReport], warmup_turns: usize) -> 
         read_tokens = read_tokens.saturating_add(turn.cache_read_input_tokens.unwrap_or(0));
         measured_tokens = measured_tokens.saturating_add(measured);
     }
-    read_tokens
-        .saturating_mul(1000)
-        .checked_div(measured_tokens)
+    read_tokens.saturating_mul(100).checked_div(measured_tokens)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn usage_turn_fixture() -> UsageTurnReport {
+        use crate::agent::Agent;
+        use crate::output::StdoutSink;
+        use crate::tool::{ToolRegistry, test_utils::TestFixture};
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let fixture = TestFixture::new();
+        let script = serde_json::from_value(serde_json::json!({"final_response":"Done."})).unwrap();
+        let provider = crate::eval::mock::MockEvalProvider::new(script, 0);
+        let mut agent = Agent::new(
+            Box::new(provider),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        agent
+            .run(
+                "Explain this",
+                CancellationToken::new(),
+                Arc::new(StdoutSink),
+            )
+            .await
+            .unwrap();
+        agent.context_report().usage_turns.remove(0)
+    }
+
+    #[tokio::test]
+    async fn cache_floor_uses_whole_percent_after_independent_lane_warmups() {
+        let template = usage_turn_fixture().await;
+        let rows = [
+            (ExecutionLaneKind::Parent, "a", 100, 100),
+            (ExecutionLaneKind::Subagent, "a", 100, 100),
+            (ExecutionLaneKind::Subagent, "b", 100, 100),
+            (ExecutionLaneKind::Parent, "a", 30, 100),
+            (ExecutionLaneKind::Subagent, "a", 0, 200),
+        ];
+        let turns = rows
+            .into_iter()
+            .map(|(kind, id, read, measured)| {
+                let mut turn = template.clone();
+                turn.lane_kind = kind;
+                turn.lane_id = id.to_string();
+                turn.cache_read_input_tokens = Some(read);
+                turn.cache_measured_input_tokens = Some(measured);
+                turn
+            })
+            .collect::<Vec<_>>();
+        let metrics =
+            EvalMetricsReport::from_run(&turns, 5, 5, std::time::Duration::ZERO, 0, Vec::new(), 1);
+        assert_eq!(metrics.post_warmup_cache_percent, Some(10));
+        let report = EvalBudgetReport::evaluate(
+            EvalBudgets {
+                min_post_warmup_cache_percent: Some(65),
+                ..EvalBudgets::default()
+            },
+            metrics,
+            UsageReport {
+                prompt_tokens: 600,
+                completion_tokens: 0,
+                total_tokens: 600,
+                cost_micros: None,
+            },
+        );
+        assert!(!report.passed());
+        assert_eq!(
+            report.violations,
+            ["post-warmup cache was 10%, below minimum 65%"]
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_floor_accepts_a_sufficient_hit_rate_and_rejects_missing_measurement() {
+        let mut turn = usage_turn_fixture().await;
+        turn.cache_read_input_tokens = Some(75);
+        turn.cache_measured_input_tokens = Some(100);
+        let metrics = EvalMetricsReport::from_run(
+            &[turn.clone()],
+            1,
+            1,
+            std::time::Duration::ZERO,
+            0,
+            Vec::new(),
+            0,
+        );
+        assert_eq!(metrics.post_warmup_cache_percent, Some(75));
+        let declared = EvalBudgets {
+            min_post_warmup_cache_percent: Some(65),
+            ..EvalBudgets::default()
+        };
+        let usage = UsageReport {
+            prompt_tokens: 100,
+            completion_tokens: 0,
+            total_tokens: 100,
+            cost_micros: None,
+        };
+        assert!(EvalBudgetReport::evaluate(declared, metrics, usage).passed());
+        for measured in [None, Some(0)] {
+            turn.cache_measured_input_tokens = measured;
+            let metrics = EvalMetricsReport::from_run(
+                &[turn.clone()],
+                1,
+                1,
+                std::time::Duration::ZERO,
+                0,
+                Vec::new(),
+                0,
+            );
+            assert_eq!(metrics.post_warmup_cache_percent, None);
+            assert!(!EvalBudgetReport::evaluate(declared, metrics, usage).passed());
+        }
+        assert_eq!(post_warmup_cache_percent(&[turn], 1), None);
+    }
 
     #[test]
     fn task_budgets_overlay_suite_defaults() {

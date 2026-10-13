@@ -10,6 +10,38 @@ impl Agent {
         cancellation_token: CancellationToken,
     ) -> Result<String> {
         let messages = self.compaction_summary_prompt(draft).await?;
+        // Summary generation must fit the active provider too. If summarizing
+        // the omitted bytes would overflow its window, the caller uses the
+        // deterministic summary without sending an inadmissible hidden request.
+        let options = crate::provider::ProviderRequestOptions::default();
+        let context = crate::provider::ProviderRequestContext::default();
+        let prepared =
+            self.provider
+                .prepare_request_for_estimation(&messages, &[], options, &context)?;
+        let effective_reasoning = prepared.reasoning;
+        let estimate = self
+            .prompt_estimator
+            .estimate_prepared_prompt(
+                &prepared,
+                0,
+                self.budget.context_budget_tokens,
+                &cancellation_token,
+            )
+            .await?
+            .ok_or(CompactionCancelled)?;
+        if matches!(estimate.confidence, EstimateConfidence::High)
+            && estimate
+                .input_tokens
+                .saturating_add(self.output_reserve_tokens())
+                > self.budget.context_budget_tokens
+        {
+            bail!(
+                "context summary prompt estimate {} + reserve {} exceeds context window {}",
+                estimate.input_tokens,
+                self.output_reserve_tokens(),
+                self.budget.context_budget_tokens
+            );
+        }
         let retried = self
             .chat_stream_with_retry(
                 &messages,
@@ -17,14 +49,26 @@ impl Agent {
                 cancellation_token.clone(),
                 Arc::new(SilentSink),
             )
-            .await?;
-        let response = retried.response;
-        let interrupted = cancellation_token.is_cancelled() || response.is_interrupted();
+            .await;
+        let (response, attempts, failure) = match retried {
+            Ok(retried) => (retried.response, retried.attempts, None),
+            Err(failure) => {
+                let (error, attempts) = failure.into_parts();
+                // No provider invocation means no hidden work to account for.
+                if attempts.is_empty() {
+                    return Err(error);
+                }
+                (StreamedResponse::default(), attempts, Some(error))
+            }
+        };
+        let interrupted = cancellation_token.is_cancelled()
+            || response.is_interrupted()
+            || failure.as_ref().is_some_and(is_compaction_cancelled);
         let diagnostics = UsageTurnDiagnostics {
             interrupted,
             finish_reason: response.finish_reason().cloned(),
             reasoning_chars: response.reasoning_chars,
-            provider_attempts: retried.attempts,
+            provider_attempts: attempts,
             execution_lane: ExecutionLane::compaction(self.execution_lane.id.clone()),
             provider_id: self
                 .active_model_identity
@@ -34,7 +78,7 @@ impl Agent {
                 .active_model_identity
                 .as_ref()
                 .map(|identity| identity.model.clone()),
-            effective_reasoning: self.provider.reasoning(),
+            effective_reasoning,
             context_window_tokens: Some(self.budget.context_budget_tokens),
             rewrite: PendingContextRewrite {
                 kind: ContextRewriteKind::Compaction,
@@ -50,6 +94,9 @@ impl Agent {
         );
         if interrupted {
             return Err(CompactionCancelled.into());
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         let summary = response.content.trim();
         if summary.is_empty() {

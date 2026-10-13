@@ -284,8 +284,10 @@ async fn resume_restores_typed_reuse_target_without_parsing_pointer_text() {
         )
         .await
         .unwrap();
-    agent.restore_read_evidence(vec![evidence_record]).await;
-    agent.restore_inspection_events(vec![inspection_record]);
+    agent
+        .restore_read_evidence(vec![evidence_record.clone()])
+        .await;
+    agent.restore_inspection_events(vec![inspection_record.clone()]);
 
     let restored = agent.tool_context_details.get("call-read-2").unwrap();
     assert_eq!(
@@ -297,4 +299,40 @@ async fn resume_restores_typed_reuse_target_without_parsing_pointer_text() {
         agent.read_evidence.inspection_events["call-read-2"].outcome,
         InspectionOutcome::Reused
     );
+
+    // Exercise the production resume order: controls load before typed reuse
+    // metadata, so the second normalization must hide the dependent exchange.
+    let storage = crate::storage::test_utils::TestStorage::new().await;
+    let session_id = storage.start_session().await;
+    let mut snapshot = storage
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let context = agent.context_message_snapshot();
+    snapshot.context_messages = context.messages;
+    snapshot.context_message_ids = context.ids;
+    snapshot.read_evidence = vec![evidence_record];
+    snapshot.inspection_events = vec![inspection_record];
+    snapshot.context_controls.insert(
+        crate::context_view::ContextNodeId::tool("call-read-1").into_string(),
+        crate::context_view::ContextControlState {
+            drop_next_turn: true,
+            ..crate::context_view::ContextControlState::default()
+        },
+    );
+    crate::session_persist::restore_agent_state(&mut agent, &snapshot).await;
+
+    for id in ["msg-1", "msg-2", "msg-3", "msg-4", "tool-call-read-2"] {
+        assert!(
+            agent
+                .context_controls
+                .get(id)
+                .is_some_and(|state| state.drop_next_turn),
+            "{id}: {:?}",
+            agent.context_controls
+        );
+    }
+    assert_eq!(agent.messages.len(), 5, "stored originals remain intact");
 }

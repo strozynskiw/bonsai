@@ -696,6 +696,15 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
         .unwrap();
     let agent = test_agent(Box::new(CompleteProvider));
     let episode_store = crate::episode::SharedEpisodeStore::default();
+    let identities = crate::provider::ToolCallIdentityStore::default();
+    let mut calls = [crate::provider::ToolCall {
+        id: "old-wire-id".into(),
+        name: "read".into(),
+        arguments: "{}".into(),
+    }];
+    identities.assign_calls("old-provider", &mut calls);
+    let old_identities = identities.snapshot();
+    let mut old_native_replay = crate::agent::NativeReplaySnapshot::default();
     let compaction_event = crate::agent::CompactionEvent {
         seq: 1,
         occurred_at_ms: 1_700_000_000_050,
@@ -723,6 +732,36 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
         )]);
         agent.restore_self_review_runs(vec![sample_self_review_run(1_700_000_000_100, 4)]);
         agent.restore_compaction_events(vec![compaction_event.clone()]);
+        agent.restore_tool_call_identities(&old_identities);
+        let context = agent.context_message_snapshot();
+        let (id, _) = context
+            .ids
+            .iter()
+            .zip(&context.messages)
+            .find(|(_, message)| {
+                matches!(
+                    message,
+                    async_openai::types::chat::ChatCompletionRequestMessage::Assistant(_)
+                )
+            })
+            .unwrap();
+        let response_id = crate::provider::ResponseId::new();
+        old_native_replay
+            .records
+            .push(crate::provider::NativeReplayRecord {
+                response_id: response_id.clone(),
+                provider_scope: "native-scope".into(),
+                payload: crate::provider::NativeReplayPayload::OpenAiChat(
+                    crate::provider::ChatNativeReplay {
+                        reasoning_content: Some("rotation trace".into()),
+                        ..Default::default()
+                    },
+                ),
+            });
+        old_native_replay
+            .live_bindings
+            .insert(id.clone(), response_id);
+        agent.restore_native_replay(&old_native_replay).unwrap();
         agent.clear_for_session_rotation().await;
     }
     let command = CommandOutcomeEvent::Applied {
@@ -772,10 +811,19 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
     assert_eq!(outgoing_snapshot.verification_runs.len(), 1);
     assert_eq!(outgoing_snapshot.self_review_runs.len(), 1);
     assert_eq!(outgoing_snapshot.compaction_events, [compaction_event]);
+    assert_eq!(outgoing_snapshot.tool_call_identities, old_identities);
+    assert_eq!(outgoing_snapshot.native_replay, old_native_replay);
+    assert_eq!(
+        agent.lock().await.native_replay_snapshot(),
+        crate::agent::NativeReplaySnapshot::default()
+    );
+    assert!(agent.lock().await.tool_call_identity_snapshot().is_empty());
     let resumed_agent = test_agent(Box::new(CompleteProvider));
     {
         let mut resumed = resumed_agent.lock().await;
         crate::session_persist::restore_agent_state(&mut resumed, &outgoing_snapshot).await;
+        assert_eq!(resumed.tool_call_identity_snapshot(), old_identities);
+        assert_eq!(resumed.native_replay_snapshot(), old_native_replay);
         assert_eq!(
             resumed.compaction_events(),
             outgoing_snapshot.compaction_events

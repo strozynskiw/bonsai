@@ -30,6 +30,7 @@ impl Agent {
         futures::future::join_all(refreshes).await;
     }
 
+    #[cfg(test)]
     pub(in crate::agent) fn outgoing_messages_for(
         &self,
         messages: &[ChatCompletionRequestMessage],

@@ -109,6 +109,7 @@ pub(crate) enum MessageProvenance {
     Peer,
     Background,
     Terminal,
+    ToolImage,
     UntrustedData,
 }
 
@@ -121,6 +122,7 @@ impl MessageProvenance {
             Self::Peer => Some("bonsai_peer"),
             Self::Background => Some("bonsai_background"),
             Self::Terminal => Some("bonsai_terminal"),
+            Self::ToolImage => Some("bonsai_tool_image"),
             Self::UntrustedData => Some("bonsai_untrusted"),
         }
     }
@@ -165,6 +167,84 @@ pub struct ProviderAttemptReport {
 pub(crate) struct ContextMessageSnapshot {
     pub(crate) messages: Vec<ChatCompletionRequestMessage>,
     pub(crate) ids: Vec<String>,
+}
+
+/// Messages and their provenance are prepared together so request filtering
+/// cannot leave a sidecar aligned with a different copy of the history.
+#[derive(Debug, Clone)]
+pub(in crate::agent) struct PreparedModelRequest {
+    pub(in crate::agent) messages: Vec<ChatCompletionRequestMessage>,
+    pub(in crate::agent) context: crate::provider::ProviderRequestContext,
+    pub(in crate::agent) options: crate::provider::ProviderRequestOptions,
+    pub(in crate::agent) estimate_fingerprint: Option<blake3::Hash>,
+}
+
+impl std::ops::Deref for PreparedModelRequest {
+    type Target = [ChatCompletionRequestMessage];
+
+    fn deref(&self) -> &Self::Target {
+        &self.messages
+    }
+}
+
+/// Durable native responses and provenance for live and omitted originals.
+/// Source vectors align with original messages, independently of UI aliases.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct NativeReplaySnapshot {
+    pub(crate) records: Vec<crate::provider::NativeReplayRecord>,
+    pub(crate) live_bindings: std::collections::BTreeMap<String, crate::provider::ResponseId>,
+    pub(crate) source_bindings:
+        std::collections::BTreeMap<String, Vec<Option<crate::provider::ResponseId>>>,
+}
+
+impl NativeReplaySnapshot {
+    /// Verify a stored sidecar before committing a resumed conversation.
+    ///
+    /// # Errors
+    /// Rejects duplicate response records, missing assistant/source rows, or
+    /// source vectors which do not align with their original messages.
+    pub(crate) fn validate(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        ids: &[String],
+        sources: &std::collections::HashMap<String, Vec<ChatCompletionRequestMessage>>,
+    ) -> anyhow::Result<()> {
+        let mut identities = std::collections::HashSet::new();
+        for record in &self.records {
+            anyhow::ensure!(
+                identities.insert((&record.response_id, record.provider_scope.as_str())),
+                "duplicate native response identity in session snapshot"
+            );
+        }
+        for key in self.live_bindings.keys() {
+            anyhow::ensure!(
+                ids.iter().zip(messages).any(|(id, message)| {
+                    id == key && matches!(message, ChatCompletionRequestMessage::Assistant(_))
+                }),
+                "native response binding references missing assistant row {key}"
+            );
+        }
+        for (key, bindings) in &self.source_bindings {
+            let originals = sources.get(key).ok_or_else(|| {
+                anyhow::anyhow!("native response provenance references missing source {key}")
+            })?;
+            anyhow::ensure!(
+                bindings.len() == originals.len(),
+                "native response source {key} has {} entries for {} original rows",
+                bindings.len(),
+                originals.len()
+            );
+            anyhow::ensure!(
+                bindings.iter().zip(originals).all(|(binding, message)| {
+                    binding.is_none()
+                        || matches!(message, ChatCompletionRequestMessage::Assistant(_))
+                }),
+                "native response source {key} binds a non-assistant row"
+            );
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn format_context_message_id(seq: u64) -> String {

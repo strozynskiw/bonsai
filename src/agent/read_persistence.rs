@@ -281,6 +281,9 @@ impl Agent {
                 .inspection_events
                 .insert(record.call_id, record.admission);
         }
+        // Read/git reuse dependencies are reconstructed after the persisted
+        // controls. Propagate legacy source drops once their targets are known.
+        self.normalize_dropped_tool_exchanges();
     }
 
     fn persisted_evidence_target_index(&self, record: &ReadEvidenceRecord) -> Option<usize> {

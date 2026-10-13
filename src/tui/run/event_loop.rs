@@ -2110,12 +2110,7 @@ async fn rotate_persisted_session_on_clear(
     };
     if let Some(snapshot) = outgoing_session_snapshot
         && let Err(err) = storage
-            .persist_session_rotation_snapshot(
-                *current_session_id,
-                &snapshot.compaction_events,
-                &snapshot.verification_runs,
-                &snapshot.self_review_runs,
-            )
+            .persist_session_rotation_snapshot(*current_session_id, &snapshot)
             .await
     {
         tracing::warn!(

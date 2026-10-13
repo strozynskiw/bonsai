@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -418,15 +418,11 @@ pub struct AnthropicCompatibleProvider {
     /// Connection/model-specific placement of mutable project state relative
     /// to the rolling history breakpoint.
     prompt_cache_policy: crate::model_catalog::PromptCachePolicy,
-    /// Native thinking blocks captured per assistant turn, keyed by that turn's
-    /// first tool-call id, and replayed ahead of the rebuilt assistant content
-    /// on later requests. The Anthropic protocol expects thinking to be echoed
-    /// back through a tool loop; dropping it (the old behaviour) made models
-    /// stop thinking after the first tool round (observed on MiniMax:
-    /// — thinking only at turn starts, none for the rest of the run). Rebuilt
-    /// empty per provider instance; resumed history simply omits thinking.
-    thinking_by_call_id: Mutex<HashMap<String, Vec<Value>>>,
+    native_replay: crate::provider::NativeReplayStore,
+    native_replay_scope: String,
     last_request_diagnostics: Mutex<Option<ProviderRequestDiagnostics>>,
+    tool_call_identities: crate::provider::ToolCallIdentityStore,
+    tool_call_scope: String,
 }
 
 /// Transport behavior toggles resolved from provider metadata. A named struct
@@ -454,37 +450,53 @@ impl AnthropicCompatibleProvider {
         } = flags;
         let base_url = target.base_url.trim().trim_end_matches('/').to_string();
         let model = target.remote_model_id.to_string();
+        let provider_id = provider_id.into();
+        let endpoint_path = target
+            .endpoint_path
+            .as_deref()
+            .unwrap_or("v1/messages")
+            .to_string();
+        let tool_call_scope = crate::provider::tool_call_scope(
+            "anthropic-messages",
+            &provider_id,
+            &base_url,
+            &endpoint_path,
+        );
+        // Only these codecs have an Anthropic wire representation.
+        let reasoning_codec = match target.reasoning_codec {
+            ReasoningCodec::AnthropicAdaptive | ReasoningCodec::AnthropicThinkingWithEffort => {
+                target.reasoning_codec
+            }
+            _ => ReasoningCodec::AnthropicThinking,
+        };
+        let native_replay_scope = crate::provider::tool_call_scope(
+            "anthropic-messages-native",
+            &tool_call_scope,
+            &model,
+            &format!("{reasoning_codec:?}"),
+        );
         Self {
-            provider_id: provider_id.into(),
+            provider_id,
             http: crate::provider::http_client(),
             model,
             base_url,
             api_key: session.api_key.clone(),
             api_key_header: api_key_header.into(),
-            endpoint_path: target
-                .endpoint_path
-                .as_deref()
-                .unwrap_or("v1/messages")
-                .to_string(),
+            endpoint_path,
             max_tokens: target.output_limit.unwrap_or(DEFAULT_MAX_TOKENS),
             output_limit: target.output_limit,
             reasoning: target.reasoning,
             reasoning_escalation: target.reasoning_escalation,
-            // Non-Anthropic codecs make no sense on this transport. Preserve
-            // both current Anthropic shapes plus the Opus 4.5 hybrid; otherwise
-            // fall back to the historical budget-tokens shape.
-            reasoning_codec: match target.reasoning_codec {
-                ReasoningCodec::AnthropicAdaptive | ReasoningCodec::AnthropicThinkingWithEffort => {
-                    target.reasoning_codec
-                }
-                _ => ReasoningCodec::AnthropicThinking,
-            },
+            reasoning_codec,
             require_api_key,
             supports_prompt_cache,
             supports_vision,
             prompt_cache_policy: target.prompt_cache_policy,
-            thinking_by_call_id: Mutex::new(HashMap::new()),
+            native_replay: crate::provider::NativeReplayStore::default(),
+            native_replay_scope,
             last_request_diagnostics: Mutex::new(None),
+            tool_call_identities: crate::provider::ToolCallIdentityStore::default(),
+            tool_call_scope,
         }
     }
 
@@ -560,9 +572,9 @@ impl AnthropicCompatibleProvider {
     /// Whether to split inline `<think>…</think>` reasoning out of the text
     /// channel. Real Anthropic (`claude-*`) streams reasoning on a dedicated
     /// `thinking_delta` channel and may legitimately print a literal `<think>`
-    /// inside a code block, so it is excluded. Every other Anthropic-compatible
-    /// endpoint (MiniMax, local models, …) instead emits reasoning inline, so it
-    /// would otherwise leak into the visible answer.
+    /// inside a code block, so it is excluded. Compatible endpoints can emit a
+    /// leading inline block; observing a native thinking block disables that
+    /// fallback before any answer text is parsed.
     fn splits_inline_think_tags(&self) -> bool {
         self.provider_id != ANTHROPIC_METADATA.id.as_ref()
     }
@@ -576,15 +588,27 @@ impl AnthropicCompatibleProvider {
         self.request_body_with_reasoning(messages, tools, self.reasoning)
     }
 
+    #[cfg(test)]
     fn request_body_with_reasoning(
         &self,
         messages: &[ChatCompletionRequestMessage],
         tools: &[ChatCompletionTool],
         reasoning: ReasoningSelection,
     ) -> Result<Value> {
-        // Hold the thinking map only for the synchronous rebuild; never across
-        // an await.
-        let thinking = self.thinking_by_call_id.lock().expect("thinking map lock");
+        self.request_body_with_context(messages, tools, reasoning, &Default::default())
+    }
+
+    fn request_body_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        reasoning: ReasoningSelection,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> Result<Value> {
+        let pinned_settings = self.tool_turn_settings(messages, context)?;
+        let reasoning = pinned_settings
+            .as_ref()
+            .map_or(reasoning, |settings| settings.reasoning);
         // IMPORTANT CACHE COMPATIBILITY: native Anthropic and MiniMax Coding
         // Plan retain their verified system-tail layout. OpenCode opts into a
         // rolling-history layout in catalog config because its read-coverage
@@ -605,9 +629,12 @@ impl AnthropicCompatibleProvider {
         // later turn.
         let wire_messages =
             transform::sanitize_image_parts_for_wire(wire_messages.as_ref(), self.supports_vision);
-        let (system, mut anthropic_messages) =
-            transform_messages_with_thinking(wire_messages.as_ref(), Some(&thinking))?;
-        drop(thinking);
+        let (system, mut anthropic_messages) = transform_messages_with_replay(
+            wire_messages.as_ref(),
+            &self.native_replay,
+            &self.native_replay_scope,
+            context,
+        )?;
         let mut tools = transform_tools(tools)?;
         // Prompt-cache breakpoints (Anthropic allows 4): the tools prefix, the
         // byte-stable system prefix, and the whole prior-history prefix. The
@@ -621,7 +648,35 @@ impl AnthropicCompatibleProvider {
                 mark_last_message_cacheable(&mut anthropic_messages);
             }
         }
-        let (thinking, max_tokens) = self.thinking_payload_and_max_tokens_for(reasoning);
+        let (mut thinking, mut max_tokens) = self.thinking_payload_and_max_tokens_for(reasoning);
+        let mut output_config = matches!(
+            self.reasoning_codec,
+            ReasoningCodec::AnthropicAdaptive | ReasoningCodec::AnthropicThinkingWithEffort
+        )
+        .then(|| anthropic_adaptive_effort(reasoning))
+        .flatten()
+        .map(|effort| json!({"effort": effort}));
+        if let Some(settings) = pinned_settings {
+            thinking = settings.thinking;
+            output_config = settings.output_config;
+            if let Some(budget) = thinking
+                .as_ref()
+                .and_then(|value| value.get("budget_tokens"))
+                .and_then(Value::as_u64)
+            {
+                let desired_max = u32::try_from(budget.saturating_add(1))
+                    .context("Anthropic tool-turn thinking budget exceeds output limits")?;
+                max_tokens = max_tokens.max(desired_max);
+                if let Some(limit) = self.output_limit {
+                    max_tokens = max_tokens.min(limit);
+                }
+                if budget >= u64::from(max_tokens) {
+                    anyhow::bail!(
+                        "Anthropic output limit cannot preserve the current tool-turn thinking budget of {budget} tokens"
+                    );
+                }
+            }
+        }
         let mut body = json!({
             "model": self.model,
             "system": system_field(&system, self.supports_prompt_cache),
@@ -633,14 +688,58 @@ impl AnthropicCompatibleProvider {
         if let Some(thinking) = thinking {
             body["thinking"] = thinking;
         }
-        if matches!(
-            self.reasoning_codec,
-            ReasoningCodec::AnthropicAdaptive | ReasoningCodec::AnthropicThinkingWithEffort
-        ) && let Some(effort) = anthropic_adaptive_effort(reasoning)
-        {
-            body["output_config"] = json!({"effort": effort});
+        if let Some(output_config) = output_config {
+            body["output_config"] = output_config;
         }
+        let identity_ids = self
+            .tool_call_identities
+            .project_request(&self.tool_call_scope, &mut body);
+        self.tool_call_identities
+            .project_reuse_references(&mut body, &identity_ids);
         Ok(body)
+    }
+
+    fn tool_turn_settings(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<Option<crate::provider::AnthropicReplaySettings>> {
+        context.validate_assistant_count(
+            messages
+                .iter()
+                .filter(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+                .count(),
+        )?;
+        let mut ids = context
+            .assistant_response_ids
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .rev();
+        for message in messages.iter().rev() {
+            match message {
+                // Named user rows are injected context, not a new human turn.
+                ChatCompletionRequestMessage::User(user) if user.name.is_none() => return Ok(None),
+                ChatCompletionRequestMessage::Assistant(assistant) => {
+                    let id = ids.next().and_then(Option::as_ref);
+                    if id.is_none()
+                        && assistant.name.as_deref()
+                            == Some(crate::context::INCOMPLETE_ASSISTANT_MESSAGE_NAME)
+                    {
+                        continue;
+                    }
+                    if assistant.tool_calls.as_ref().is_none_or(Vec::is_empty) {
+                        return Ok(None);
+                    }
+                    return Ok(id.and_then(|id| {
+                        self.native_replay
+                            .anthropic_settings_for(&self.native_replay_scope, id)
+                    }));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     fn request_preview_from_body(&self, body: Value) -> ProviderRequestPreview {
@@ -790,6 +889,43 @@ fn is_project_state_block(block: &Value) -> bool {
 
 #[async_trait]
 impl Provider for AnthropicCompatibleProvider {
+    fn prepare_request_for_estimation(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<crate::provider::PreparedProviderRequest> {
+        let reasoning = self.reasoning_for_request(messages, options, context)?;
+        let body = self
+            .request_body_with_context(messages, tools, reasoning, context)
+            .map_err(|error| {
+                crate::provider::ProviderFailure::configuration(format!("{error:#}"))
+            })?;
+        Ok(crate::provider::PreparedProviderRequest {
+            protocol: Some(Protocol::AnthropicMessages),
+            body,
+            reasoning,
+            native_budget: self.native_replay.selected_budgets(
+                &self.native_replay_scope,
+                context,
+                Protocol::AnthropicMessages,
+            ),
+            count_endpoint: Some(format!(
+                "{}/count_tokens",
+                self.messages_endpoint().trim_end_matches('/')
+            )),
+            count_auth_header: Some(self.api_key_header.clone()),
+        })
+    }
+    fn set_native_replay_store(&mut self, store: crate::provider::NativeReplayStore) {
+        self.native_replay = store;
+    }
+
+    fn set_tool_call_identity_store(&mut self, store: crate::provider::ToolCallIdentityStore) {
+        self.tool_call_identities = store;
+    }
+
     fn project_state_cache_strategy(&self) -> crate::provider::ProjectStateCacheStrategy {
         if self.prompt_cache_policy.uses_append_only_project_state() {
             // IMPORTANT OPENCODE CACHE CONTRACT: this must agree with the
@@ -820,8 +956,32 @@ impl Provider for AnthropicCompatibleProvider {
         Ok(self.request_preview_from_body(body))
     }
 
+    #[cfg(test)]
+    fn preview_request_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        context: &crate::provider::ProviderRequestContext,
+    ) -> Result<ProviderRequestPreview> {
+        let body = self.request_body_with_context(messages, tools, self.reasoning, context)?;
+        Ok(self.request_preview_from_body(body))
+    }
+
     fn take_last_request_diagnostics(&self) -> Option<ProviderRequestDiagnostics> {
         ProviderRequestDiagnostics::take(&self.last_request_diagnostics)
+    }
+
+    fn reasoning_for_request(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<ReasoningSelection> {
+        Ok(self
+            .tool_turn_settings(messages, context)?
+            .map_or(options.reasoning.unwrap_or(self.reasoning), |settings| {
+                settings.reasoning
+            }))
     }
 
     async fn chat_stream(
@@ -849,15 +1009,43 @@ impl Provider for AnthropicCompatibleProvider {
         cancellation_token: CancellationToken,
         sink: SharedSink,
     ) -> crate::provider::ProviderResult<StreamedResponse> {
+        self.chat_stream_with_context(
+            messages,
+            tools,
+            options,
+            &Default::default(),
+            cancellation_token,
+            sink,
+        )
+        .await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+        cancellation_token: CancellationToken,
+        sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        let effective_reasoning = self.reasoning_for_request(messages, options, context)?;
+        let mut request_settings = None;
+        let mut output_ceiling_tokens = None;
         let serialized_body = crate::provider::serialize_request_body(
             "Anthropic",
             || self.ensure_authorized(),
             || {
-                self.request_body_with_reasoning(
-                    messages,
-                    tools,
-                    options.reasoning.unwrap_or(self.reasoning),
-                )
+                let body = self
+                    .prepare_request_for_estimation(messages, tools, options, context)?
+                    .body;
+                output_ceiling_tokens = body.get("max_tokens").and_then(Value::as_u64);
+                request_settings = Some(crate::provider::AnthropicReplaySettings {
+                    reasoning: effective_reasoning,
+                    thinking: body.get("thinking").cloned(),
+                    output_config: body.get("output_config").cloned(),
+                });
+                Ok(body)
             },
             |body| self.request_preview_from_body(body),
             &self.last_request_diagnostics,
@@ -880,14 +1068,39 @@ impl Provider for AnthropicCompatibleProvider {
             return Ok(StreamedResponse::interrupted());
         };
 
-        parse_anthropic_stream(
+        let parsed = parse_anthropic_stream(
             response,
             cancellation_token,
             sink,
             self.splits_inline_think_tags(),
-            Some(&self.thinking_by_call_id),
+            &self.tool_call_identities,
+            &self.tool_call_scope,
         )
-        .await
+        .await?;
+        if let Some(response_id) = &context.response_id
+            && matches!(
+                parsed.response.terminal,
+                crate::provider::StreamTerminal::Completed(_)
+            )
+            && (parsed.replay_blocks.is_some() || !parsed.response.tool_calls.is_empty())
+        {
+            self.native_replay
+                .insert(crate::provider::NativeReplayRecord {
+                    response_id: response_id.clone(),
+                    provider_scope: self.native_replay_scope.clone(),
+                    payload: crate::provider::NativeReplayPayload::AnthropicMessages(
+                        crate::provider::AnthropicNativeReplay {
+                            budget_evidence: Some(crate::provider::NativeBudgetEvidence {
+                                output_tokens: parsed.reported_output_tokens,
+                                output_ceiling_tokens,
+                            }),
+                            content_blocks: parsed.replay_blocks,
+                            request_settings,
+                        },
+                    ),
+                })?;
+        }
+        Ok(parsed.response)
     }
 
     async fn list_models(&self) -> Result<Vec<String>> {
@@ -895,20 +1108,37 @@ impl Provider for AnthropicCompatibleProvider {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn transform_messages(
     messages: &[ChatCompletionRequestMessage],
 ) -> Result<(String, Vec<Value>)> {
-    transform_messages_with_thinking(messages, None)
+    transform_messages_with_replay(
+        messages,
+        &crate::provider::NativeReplayStore::default(),
+        "",
+        &Default::default(),
+    )
 }
 
-/// Like [`transform_messages`], additionally replaying each assistant turn's
-/// captured native thinking blocks (keyed by the turn's first tool-call id)
-/// ahead of its rebuilt content — the Anthropic protocol expects thinking to be
-/// passed back through tool loops.
-pub(crate) fn transform_messages_with_thinking(
+/// Select native assistant content before adjacent role rows are merged. The
+/// sidecar addresses original assistant rows, never the merged wire rows.
+fn transform_messages_with_replay(
     messages: &[ChatCompletionRequestMessage],
-    thinking_by_call_id: Option<&HashMap<String, Vec<Value>>>,
+    replay: &crate::provider::NativeReplayStore,
+    scope: &str,
+    context: &crate::provider::ProviderRequestContext,
 ) -> Result<(String, Vec<Value>)> {
+    context.validate_assistant_count(
+        messages
+            .iter()
+            .filter(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+            .count(),
+    )?;
+    let mut response_ids = context
+        .assistant_response_ids
+        .as_deref()
+        .unwrap_or(&[])
+        .iter();
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
 
@@ -930,15 +1160,31 @@ pub(crate) fn transform_messages_with_thinking(
                 push_anthropic_message(&mut out, "user", content);
             }
             "assistant" => {
+                let response_id = response_ids.next().and_then(Option::as_ref);
+                if response_id.is_none()
+                    && value.get("name").and_then(Value::as_str)
+                        == Some(crate::context::INCOMPLETE_ASSISTANT_MESSAGE_NAME)
+                {
+                    if let Some(text) = transform::content_to_text(value.get("content")) {
+                        push_anthropic_message(
+                            &mut out,
+                            "user",
+                            vec![
+                                json!({"type":"text","text":crate::tool::wrap_untrusted_content("incomplete assistant output from the previous generation",&text)}),
+                            ],
+                        );
+                    }
+                    continue;
+                }
+                if let Some(crate::provider::NativeReplayPayload::AnthropicMessages(native)) =
+                    response_id.and_then(|id| replay.payload_for(scope, id))
+                    && let Some(content_blocks) = native.content_blocks
+                {
+                    push_anthropic_message(&mut out, "assistant", content_blocks);
+                    continue;
+                }
                 let mut blocks: Vec<Value> = Vec::new();
                 let tool_calls = value.get("tool_calls").and_then(Value::as_array);
-                // Thinking must precede the turn's other blocks in the replayed
-                // assistant content.
-                if let Some(items) =
-                    transform::replay_items_for(thinking_by_call_id, tool_calls.map(Vec::as_slice))
-                {
-                    blocks.extend(items.iter().cloned());
-                }
                 if let Some(text) = transform::content_to_text(value.get("content"))
                     && !text.is_empty()
                 {
@@ -1038,18 +1284,61 @@ pub(crate) fn transform_tools(tools: &[ChatCompletionTool]) -> Result<Vec<Value>
         .collect()
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct BlockState {
     tool_id: Option<String>,
     tool_name: Option<String>,
     tool_input: String,
     emitted: bool,
-    /// Set when this content block is a native `thinking` block; its text and
-    /// signature accumulate below so the turn's thinking can be replayed on the
-    /// next request (the Anthropic tool-loop contract).
-    is_thinking: bool,
-    thinking: String,
-    thinking_signature: String,
+    native_block: Option<Value>,
+    tool_call_index: Option<usize>,
+    reconstruction_error: Option<String>,
+}
+
+impl BlockState {
+    fn append_native_text(&mut self, kind: &str, field: &str, text: &str) {
+        let block = self
+            .native_block
+            .get_or_insert_with(|| json!({"type": kind}));
+        if block.get("type").and_then(Value::as_str) != Some(kind) {
+            return;
+        }
+        if let Some(Value::String(value)) = block.get_mut(field) {
+            value.push_str(text);
+        } else {
+            block[field] = Value::String(text.to_string());
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ParsedAnthropicStream {
+    response: StreamedResponse,
+    replay_blocks: Option<Vec<Value>>,
+    reported_output_tokens: Option<u64>,
+}
+
+fn emit_anthropic_text(
+    text: &str,
+    splitter: Option<&mut ThinkTagSplitter>,
+    content: &mut String,
+    reasoning_chars: &mut usize,
+    sink: &SharedSink,
+) {
+    if let Some(splitter) = splitter {
+        let split = splitter.push(text);
+        if !split.visible.is_empty() {
+            content.push_str(&split.visible);
+            sink.assistant_delta(&split.visible);
+        }
+        if !split.reasoning.is_empty() {
+            *reasoning_chars = reasoning_chars.saturating_add(split.reasoning.chars().count());
+            sink.reasoning_delta(&split.reasoning);
+        }
+    } else if !text.is_empty() {
+        content.push_str(text);
+        sink.assistant_delta(text);
+    }
 }
 
 async fn parse_anthropic_stream(
@@ -1057,10 +1346,11 @@ async fn parse_anthropic_stream(
     cancellation_token: CancellationToken,
     sink: SharedSink,
     split_think_tags: bool,
-    thinking_store: Option<&Mutex<HashMap<String, Vec<Value>>>>,
-) -> crate::provider::ProviderResult<StreamedResponse> {
+    identities: &crate::provider::ToolCallIdentityStore,
+    identity_scope: &str,
+) -> crate::provider::ProviderResult<ParsedAnthropicStream> {
     let mut content = String::new();
-    let mut blocks: HashMap<usize, BlockState> = HashMap::new();
+    let mut blocks: BTreeMap<usize, BlockState> = BTreeMap::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut usage = usage::AnthropicUsageAccumulator::default();
     let mut splitter = split_think_tags.then(ThinkTagSplitter::new);
@@ -1068,7 +1358,7 @@ async fn parse_anthropic_stream(
     let mut terminal_seen = false;
     let mut reasoning_chars = 0usize;
 
-    let interrupted = sse::drive_sse(response, cancellation_token, |event, data| {
+    let interrupted = sse::drive_sse(response, cancellation_token.clone(), |event, data| {
         // Anthropic always pairs `event:` with the following `data:`; a data
         // line with no event is ignored, matching the original behaviour.
         match event {
@@ -1092,11 +1382,9 @@ async fn parse_anthropic_stream(
 
     // Flush any text the splitter held back waiting on a possible tag boundary,
     // then signal end-of-message.
-    reasoning_chars = reasoning_chars.saturating_add(streaming::finish_text_stream(
-        splitter.as_mut(),
-        &mut content,
-        &sink,
-    ));
+    let reasoning_tail = streaming::finish_text_stream(splitter.as_mut(), &mut content, &sink);
+    reasoning_chars = reasoning_chars.saturating_add(reasoning_tail.chars().count());
+    let interrupted = interrupted || cancellation_token.is_cancelled();
 
     if !interrupted && !terminal_seen {
         return Err(crate::provider::ProviderFailure::transport(
@@ -1104,32 +1392,17 @@ async fn parse_anthropic_stream(
         ));
     }
 
-    // Capture the turn's native thinking blocks for replay on the next request
-    // (see `streaming::stash_reasoning_for_replay` for the keying contract).
-    if let Some(store) = thinking_store {
-        let mut ordered: Vec<(usize, &BlockState)> = blocks
-            .iter()
-            .filter(|(_, state)| state.is_thinking && !state.thinking.is_empty())
-            .map(|(index, state)| (*index, state))
-            .collect();
-        ordered.sort_by_key(|(index, _)| *index);
-        let items: Vec<Value> = ordered
-            .into_iter()
-            .map(|(_, state)| {
-                let mut block = json!({"type": "thinking", "thinking": state.thinking});
-                if !state.thinking_signature.is_empty() {
-                    block["signature"] = json!(state.thinking_signature);
-                }
-                block
-            })
-            .collect();
-        streaming::stash_reasoning_for_replay(
-            store,
-            &tool_calls,
-            (!items.is_empty()).then_some(items),
-        )?;
-    }
-
+    // A complete native turn includes its text/tool boundaries, not just the
+    // thinking blocks. Keep opaque fields and block order exactly as received.
+    let has_native_thinking = blocks.values().any(|state| {
+        matches!(
+            state
+                .native_block
+                .as_ref()
+                .and_then(|block| block["type"].as_str()),
+            Some("thinking" | "redacted_thinking")
+        )
+    });
     if finish_reason.is_none() && terminal_seen {
         finish_reason = Some(if tool_calls.is_empty() {
             crate::provider::FinishReason::Stop
@@ -1146,12 +1419,47 @@ async fn parse_anthropic_stream(
         )
     };
 
-    Ok(StreamedResponse {
-        content,
-        tool_calls,
-        terminal,
-        usage: usage.into_usage(),
-        reasoning_chars,
+    if has_native_thinking && matches!(terminal, crate::provider::StreamTerminal::Completed(_)) {
+        if !blocks.values().all(|state| state.emitted) {
+            return Err(crate::provider::ProviderFailure::transport(
+                "Anthropic native response ended with an unclosed content block",
+            ));
+        }
+        if let Some(error) = blocks
+            .values()
+            .find_map(|state| state.reconstruction_error.as_deref())
+        {
+            return Err(crate::provider::ProviderFailure::configuration(error));
+        }
+    }
+    identities.assign_calls(identity_scope, &mut tool_calls);
+    let replay_blocks =
+        (has_native_thinking && blocks.values().all(|state| state.emitted)).then(|| {
+            blocks
+                .into_values()
+                .filter_map(|state| {
+                    let mut block = state.native_block?;
+                    if let Some(index) = state.tool_call_index
+                        && let Some(call) = tool_calls.get(index)
+                    {
+                        block["id"] = Value::String(call.id.clone());
+                    }
+                    Some(block)
+                })
+                .collect()
+        });
+
+    let reported_output_tokens = usage.completed_output_tokens();
+    Ok(ParsedAnthropicStream {
+        response: StreamedResponse {
+            content,
+            tool_calls,
+            terminal,
+            usage: usage.into_usage(),
+            reasoning_chars,
+        },
+        replay_blocks,
+        reported_output_tokens,
     })
 }
 
@@ -1159,7 +1467,7 @@ async fn parse_anthropic_stream(
 fn handle_anthropic_event(
     event: &str,
     data: &str,
-    blocks: &mut HashMap<usize, BlockState>,
+    blocks: &mut BTreeMap<usize, BlockState>,
     content: &mut String,
     tool_calls: &mut Vec<ToolCall>,
     usage: &mut usage::AnthropicUsageAccumulator,
@@ -1167,7 +1475,7 @@ fn handle_anthropic_event(
     terminal_seen: &mut bool,
     reasoning_chars: &mut usize,
     sink: &SharedSink,
-    splitter: Option<&mut ThinkTagSplitter>,
+    mut splitter: Option<&mut ThinkTagSplitter>,
 ) -> crate::provider::ProviderResult<()> {
     let Some(payload) = sse::parse_frame(data)? else {
         return Ok(());
@@ -1178,16 +1486,35 @@ fn handle_anthropic_event(
             let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             let block = payload.get("content_block").unwrap_or(&Value::Null);
             let entry = blocks.entry(index).or_default();
-            if block.get("type").and_then(Value::as_str) == Some("thinking") {
-                entry.is_thinking = true;
-                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                    entry.thinking.push_str(text);
+            entry.native_block = Some(block.clone());
+            if matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("thinking" | "redacted_thinking")
+            ) && let Some(splitter) = splitter.as_deref_mut()
+            {
+                let literal = splitter.use_native_reasoning_channel();
+                if !literal.visible.is_empty() {
+                    content.push_str(&literal.visible);
+                    sink.assistant_delta(&literal.visible);
                 }
+            }
+            if block.get("type").and_then(Value::as_str) == Some("thinking")
+                && let Some(text) = block.get("thinking").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                *reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
+                sink.reasoning_delta(text);
+            }
+            if block.get("type").and_then(Value::as_str) == Some("text")
+                && let Some(text) = block.get("text").and_then(Value::as_str)
+            {
+                emit_anthropic_text(text, splitter, content, reasoning_chars, sink);
             }
             if let (Some(id), Some(name)) = (
                 block.get("id").and_then(Value::as_str),
                 block.get("name").and_then(Value::as_str),
-            ) {
+            ) && block.get("type").and_then(Value::as_str) == Some("tool_use")
+            {
                 entry.tool_id = Some(id.to_string());
                 entry.tool_name = Some(name.to_string());
             }
@@ -1202,45 +1529,37 @@ fn handle_anthropic_event(
             match delta_type {
                 "text_delta" => {
                     if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                        if let Some(splitter) = splitter {
-                            // MiniMax and friends inline reasoning as
-                            // `<think>…</think>` in text; route it to the
-                            // reasoning channel and keep `content` (the re-sent
-                            // history) free of the tags.
-                            let split = splitter.push(text);
-                            if !split.visible.is_empty() {
-                                content.push_str(&split.visible);
-                                sink.assistant_delta(&split.visible);
-                            }
-                            if !split.reasoning.is_empty() {
-                                *reasoning_chars =
-                                    reasoning_chars.saturating_add(split.reasoning.chars().count());
-                                sink.reasoning_delta(&split.reasoning);
-                            }
-                        } else {
-                            content.push_str(text);
-                            if !text.is_empty() {
-                                sink.assistant_delta(text);
-                            }
-                        }
+                        blocks
+                            .entry(index)
+                            .or_default()
+                            .append_native_text("text", "text", text);
+                        emit_anthropic_text(text, splitter, content, reasoning_chars, sink);
                     }
                 }
                 "thinking_delta" => {
-                    if let Some(text) = delta.get("thinking").and_then(Value::as_str)
-                        && !text.is_empty()
-                    {
-                        *reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
-                        sink.reasoning_delta(text);
-                        let entry = blocks.entry(index).or_default();
-                        entry.is_thinking = true;
-                        entry.thinking.push_str(text);
+                    if let Some(splitter) = splitter {
+                        let literal = splitter.use_native_reasoning_channel();
+                        if !literal.visible.is_empty() {
+                            content.push_str(&literal.visible);
+                            sink.assistant_delta(&literal.visible);
+                        }
+                    }
+                    if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                        blocks
+                            .entry(index)
+                            .or_default()
+                            .append_native_text("thinking", "thinking", text);
+                        if !text.is_empty() {
+                            *reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
+                            sink.reasoning_delta(text);
+                        }
                     }
                 }
                 "signature_delta" => {
                     if let Some(signature) = delta.get("signature").and_then(Value::as_str)
                         && let Some(entry) = blocks.get_mut(&index)
                     {
-                        entry.thinking_signature.push_str(signature);
+                        entry.append_native_text("thinking", "signature", signature);
                     }
                 }
                 "input_json_delta" => {
@@ -1260,6 +1579,26 @@ fn handle_anthropic_event(
             {
                 entry.emitted = true;
                 if let (Some(id), Some(name)) = (entry.tool_id.take(), entry.tool_name.take()) {
+                    if let Some(block) = &mut entry.native_block {
+                        if !entry.tool_input.is_empty() {
+                            match serde_json::from_str::<Value>(&entry.tool_input) {
+                                Ok(input) => block["input"] = input,
+                                Err(error) => {
+                                    entry.reconstruction_error = Some(format!(
+                                        "Anthropic native tool `{name}` cannot replay its input unchanged: raw arguments {:?}; parse error: {error}",
+                                        entry.tool_input,
+                                    ))
+                                }
+                            }
+                        } else if let Some(input) = block.get("input") {
+                            entry.tool_input = serde_json::to_string(input).map_err(|error| {
+                                crate::provider::ProviderFailure::transport(format!(
+                                    "Anthropic tool `{name}` input serialization failed: {error}"
+                                ))
+                            })?;
+                        }
+                    }
+                    entry.tool_call_index = Some(tool_calls.len());
                     tool_calls.push(ToolCall {
                         id,
                         name,
@@ -1286,7 +1625,7 @@ fn handle_anthropic_event(
             // `message_start` values stand) but carry the final breakdown on
             // MiniMax-style providers — `apply_event_usage` handles both.
             if let Some(u) = payload.pointer("/usage") {
-                usage.apply_event_usage(u);
+                usage.apply_final_event_usage(u);
             }
         }
         "message_stop" => {
@@ -1317,8 +1656,8 @@ mod tests {
     use crate::output::{OutputSink, StdoutSink};
     use crate::provider::minimax_coding_plan::MiniMaxCodingPlanFactory;
     use crate::provider::test_utils::{
-        named_user_message, sample_tool, system_message, tool_call_message, tool_result_message,
-        user_message,
+        assistant_message, named_user_message, sample_tool, system_message, tool_call_message,
+        tool_result_message, user_message,
     };
     use crate::provider::{AuthInput, ProviderFailure};
     use std::sync::{Arc, Mutex};
@@ -1407,6 +1746,37 @@ mod tests {
 
     fn anthropic_provider(session: &ProviderSession) -> Box<dyn Provider> {
         build_test_provider(&AnthropicFactory, session)
+    }
+
+    fn loopback_anthropic_provider(
+        server: &MockServer,
+        model: &str,
+    ) -> AnthropicCompatibleProvider {
+        let url = reqwest::Url::parse(&server.uri()).unwrap();
+        assert!(
+            url.host_str()
+                .unwrap()
+                .parse::<std::net::IpAddr>()
+                .unwrap()
+                .is_loopback()
+        );
+        let mut session = make_session();
+        session.base_url = server.uri();
+        session.model = model.to_string();
+        let target = crate::provider::fallback_run_target(&ANTHROPIC_METADATA, &session);
+        let mut provider = AnthropicCompatibleProvider::new(
+            "anthropic",
+            &session,
+            &target,
+            AnthropicTransportFlags {
+                require_api_key: true,
+                supports_prompt_cache: false,
+                supports_vision: true,
+            },
+            "x-api-key",
+        );
+        provider.http = reqwest::Client::new();
+        provider
     }
 
     fn minimax_provider(session: &ProviderSession) -> Box<dyn Provider> {
@@ -1796,7 +2166,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(anthropic_sse(&[
                 "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"<thi\"}}",
                 "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"nk>weighing options</think>Here\"}}",
-                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" you go\"}}",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" you go <think>literal example</think>\"}}",
                 "event: message_stop\ndata: {\"type\":\"message_stop\"}",
             ])))
             .mount(&server)
@@ -1818,10 +2188,54 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.content, "Here you go");
+        assert_eq!(
+            response.content,
+            "Here you go <think>literal example</think>"
+        );
         assert_eq!(response.reasoning_chars, "weighing options".chars().count());
-        assert_eq!(recording.assistant_deltas().concat(), "Here you go");
+        assert_eq!(
+            recording.assistant_deltas().concat(),
+            "Here you go <think>literal example</think>"
+        );
         assert_eq!(recording.reasoning_deltas().concat(), "weighing options");
+    }
+
+    #[tokio::test]
+    async fn compatible_native_thinking_preserves_leading_literal_tags() {
+        for native_start in [
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"native reasoning\"}}",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/v1/messages")).respond_with(
+                ResponseTemplate::new(200).set_body_string(anthropic_sse(&[
+                    native_start,
+                    "event: content_block_stop\ndata: {\"index\":0}",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"<thi\"}}",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"nk>literal example</think>\"}}",
+                    "event: content_block_stop\ndata: {\"index\":1}",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+                ]))
+            ).mount(&server).await;
+            let mut session = make_session();
+            session.base_url = server.uri();
+            session.model = "MiniMax-M3".to_string();
+            let provider = minimax_provider(&session);
+            let sink = Arc::new(RecordingSink::default());
+            let response = provider
+                .chat_stream(
+                    &[user_message("example")],
+                    &[],
+                    CancellationToken::new(),
+                    sink.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.content, "<think>literal example</think>");
+            assert_eq!(sink.assistant_deltas().concat(), response.content);
+            assert!(!sink.reasoning_deltas().concat().contains("literal example"));
+        }
     }
 
     #[tokio::test]
@@ -1919,7 +2333,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].id, "toolu_01");
+        crate::provider::test_utils::assert_tool_call_identity(
+            provider.as_ref(),
+            &response.tool_calls[0],
+            "toolu_01",
+        );
         assert_eq!(response.tool_calls[0].name, "read");
         assert_eq!(
             response.tool_calls[0].arguments,
@@ -2140,29 +2558,46 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut session = make_session();
-        session.base_url = server.uri();
-        let provider = anthropic_provider(&session);
+        let provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+        let response_id = crate::provider::ResponseId::new();
         let response = provider
-            .chat_stream(
+            .chat_stream_with_context(
                 &[user_message("read foo")],
                 &[],
+                Default::default(),
+                &crate::provider::ProviderRequestContext {
+                    response_id: Some(response_id.clone()),
+                    ..Default::default()
+                },
                 CancellationToken::new(),
                 sink(),
             )
             .await
             .unwrap();
         assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].id, "toolu_1");
+        crate::provider::test_utils::assert_tool_call_identity(
+            &provider,
+            &response.tool_calls[0],
+            "toolu_1",
+        );
 
         // The next request rebuilds history with the same tool-call id; the
         // captured thinking must lead the assistant content.
         let follow_up = vec![
             user_message("read foo"),
-            tool_call_message("toolu_1", "read", "{\"path\":\"foo\"}"),
-            tool_result_message("toolu_1", "file contents"),
+            tool_call_message(&response.tool_calls[0].id, "read", "{\"path\":\"foo\"}"),
+            tool_result_message(&response.tool_calls[0].id, "file contents"),
         ];
-        let preview = provider.preview_request(&follow_up, &[]).unwrap();
+        let preview = provider
+            .preview_request_with_context(
+                &follow_up,
+                &[],
+                &crate::provider::ProviderRequestContext {
+                    assistant_response_ids: Some(vec![Some(response_id)]),
+                    response_id: None,
+                },
+            )
+            .unwrap();
         let assistant = &preview.body["messages"][1];
         assert_eq!(assistant["role"], "assistant");
         let first_block = &assistant["content"][0];
@@ -2170,6 +2605,855 @@ mod tests {
         assert_eq!(first_block["thinking"], "planning the read");
         assert_eq!(first_block["signature"], "sig-abc");
         assert_eq!(assistant["content"][1]["type"], "tool_use");
+        assert_eq!(assistant["content"][1]["id"], "toolu_1");
+    }
+
+    fn native_content_sse(blocks: &[Value], finish: Option<&str>) -> String {
+        let mut frames = vec![format!(
+            "event: message_start\ndata: {}",
+            json!({
+                "message":{"usage":{"input_tokens":12,"output_tokens":1}}
+            })
+        )];
+        for (index, block) in blocks.iter().enumerate() {
+            frames.push(format!(
+                "event: content_block_start\ndata: {}",
+                json!({
+                    "index":index,"content_block":block
+                })
+            ));
+            frames.push(format!(
+                "event: content_block_stop\ndata: {}",
+                json!({"index":index})
+            ));
+        }
+        if let Some(finish) = finish {
+            frames.push(format!(
+                "event: message_delta\ndata: {}",
+                json!({
+                    "delta":{"stop_reason":finish},"usage":{"output_tokens":100}
+                })
+            ));
+            frames.push("event: message_stop\ndata: {}".into());
+        }
+        frames.join("\n\n") + "\n\n"
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_thinking_settings_survive_tool_turn_rebuild_and_release_on_human_input()
+     {
+        use crate::provider::test_utils::named_user_message;
+        use crate::provider::{
+            NativeReplayRecord, NativeReplayStore, ProviderRequestContext, ProviderRequestOptions,
+            ResponseId,
+        };
+        for (codec, initial, requested, output_limit) in [
+            (
+                ReasoningCodec::AnthropicThinking,
+                ReasoningSelection::High,
+                ReasoningSelection::Off,
+                None,
+            ),
+            (
+                ReasoningCodec::AnthropicAdaptive,
+                ReasoningSelection::High,
+                ReasoningSelection::Off,
+                None,
+            ),
+            (
+                ReasoningCodec::AnthropicAdaptive,
+                ReasoningSelection::Off,
+                ReasoningSelection::High,
+                None,
+            ),
+            (
+                ReasoningCodec::AnthropicThinking,
+                ReasoningSelection::BudgetTokens(32768),
+                ReasoningSelection::Off,
+                Some(8192),
+            ),
+            (
+                ReasoningCodec::AnthropicThinkingWithEffort,
+                ReasoningSelection::High,
+                ReasoningSelection::Off,
+                None,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let mut blocks = vec![];
+            if initial != ReasoningSelection::Off {
+                blocks.push(json!({"type":"thinking","thinking":"","signature":"exact=="}));
+            }
+            blocks.push(
+                json!({"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"foo"}}),
+            );
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(native_content_sse(&blocks, Some("tool_use"))),
+                )
+                .mount(&server)
+                .await;
+            let mut provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+            provider.reasoning_codec = codec;
+            provider.native_replay_scope = crate::provider::tool_call_scope(
+                "anthropic-messages-native",
+                &provider.tool_call_scope,
+                &provider.model,
+                &format!("{codec:?}"),
+            );
+            provider.reasoning = initial;
+            provider.output_limit = output_limit;
+            let id = ResponseId::new();
+            let response = provider
+                .chat_stream_with_context(
+                    &[user_message("read foo")],
+                    &[],
+                    ProviderRequestOptions::with_reasoning(initial),
+                    &ProviderRequestContext {
+                        response_id: Some(id.clone()),
+                        ..Default::default()
+                    },
+                    CancellationToken::new(),
+                    sink(),
+                )
+                .await
+                .unwrap();
+            let restored = NativeReplayStore::default();
+            restored
+                .restore(
+                    &serde_json::from_slice::<Vec<NativeReplayRecord>>(
+                        &serde_json::to_vec(&provider.native_replay.snapshot()).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let mut rebuilt = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+            rebuilt.reasoning_codec = codec;
+            rebuilt.native_replay_scope = provider.native_replay_scope.clone();
+            rebuilt.reasoning = requested;
+            rebuilt.output_limit = output_limit;
+            rebuilt.set_native_replay_store(restored.clone());
+            rebuilt
+                .tool_call_identities
+                .restore(&provider.tool_call_identities.snapshot());
+            let history = vec![
+                user_message("read foo"),
+                tool_call_message(&response.tool_calls[0].id, "read", "{\"path\":\"foo\"}"),
+                tool_result_message(&response.tool_calls[0].id, "contents"),
+                crate::agent::test_tool_image_message("image/png", "AAAA", "Image file: foo.png"),
+                named_user_message("bonsai_background", "background note"),
+                named_user_message(
+                    crate::context::PROJECT_STATE_MESSAGE_NAME,
+                    "updated project state",
+                ),
+            ];
+            let second_id = ResponseId::new();
+            let context = ProviderRequestContext {
+                assistant_response_ids: Some(vec![Some(id.clone())]),
+                response_id: Some(second_id.clone()),
+            };
+            assert_eq!(
+                rebuilt
+                    .reasoning_for_request(
+                        &history,
+                        ProviderRequestOptions::with_reasoning(requested),
+                        &context
+                    )
+                    .unwrap(),
+                initial
+            );
+            let mut partial_history = history.clone();
+            partial_history.push(crate::agent::test_incomplete_assistant_message(
+                "partial answer",
+            ));
+            let partial_context = ProviderRequestContext {
+                assistant_response_ids: Some(vec![Some(id.clone()), None]),
+                response_id: None,
+            };
+            let partial_body = rebuilt
+                .request_body_with_context(&partial_history, &[], requested, &partial_context)
+                .unwrap();
+            let last = partial_body["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(
+                last["role"], "user",
+                "interrupted bytes must not become assistant prefill"
+            );
+            assert!(last.to_string().contains("partial answer"));
+            assert!(last.to_string().contains("untrusted"));
+            assert_eq!(
+                rebuilt
+                    .reasoning_for_request(
+                        &partial_history,
+                        ProviderRequestOptions::with_reasoning(requested),
+                        &partial_context
+                    )
+                    .unwrap(),
+                initial
+            );
+            assert_eq!(
+                rebuilt
+                    .request_body_with_context(&partial_history, &[], requested, &partial_context)
+                    .unwrap()
+                    .get("thinking"),
+                provider
+                    .request_body(&[user_message("read foo")], &[])
+                    .unwrap()
+                    .get("thinking")
+            );
+            let completed_context = ProviderRequestContext {
+                assistant_response_ids: Some(vec![Some(id.clone()), Some(ResponseId::new())]),
+                response_id: None,
+            };
+            assert_eq!(
+                rebuilt
+                    .reasoning_for_request(&partial_history, Default::default(), &completed_context)
+                    .unwrap(),
+                requested
+            );
+            let mut legacy_history = history.clone();
+            legacy_history.push(crate::provider::test_utils::assistant_message(
+                "completed legacy answer",
+            ));
+            legacy_history.push(named_user_message("bonsai_harness", "continue"));
+            assert_eq!(
+                rebuilt
+                    .reasoning_for_request(&legacy_history, Default::default(), &partial_context)
+                    .unwrap(),
+                requested
+            );
+            let mut unknown_tool_history = history.clone();
+            unknown_tool_history.push(tool_call_message("other_call", "read", "{}"));
+            unknown_tool_history.push(tool_result_message("other_call", "contents"));
+            assert_eq!(
+                rebuilt
+                    .reasoning_for_request(
+                        &unknown_tool_history,
+                        Default::default(),
+                        &completed_context
+                    )
+                    .unwrap(),
+                requested
+            );
+            let second = rebuilt
+                .chat_stream_with_context(
+                    &history,
+                    &[],
+                    ProviderRequestOptions::with_reasoning(requested),
+                    &context,
+                    CancellationToken::new(),
+                    sink(),
+                )
+                .await
+                .unwrap();
+            let requests = server.received_requests().await.unwrap();
+            let first_body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let second_body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+            assert_eq!(first_body.get("thinking"), second_body.get("thinking"));
+            if let Some(limit) = output_limit {
+                assert!(
+                    first_body["thinking"]["budget_tokens"].as_u64().unwrap() < u64::from(limit)
+                );
+                assert_ne!(first_body["thinking"]["budget_tokens"], json!(32768));
+            }
+            assert_eq!(
+                first_body.get("output_config"),
+                second_body.get("output_config")
+            );
+            let saved = restored.snapshot();
+            assert_eq!(saved.len(), 2);
+            assert!(saved.iter().all(|record|matches!(&record.payload,crate::provider::NativeReplayPayload::AnthropicMessages(native) if native.request_settings.as_ref().is_some_and(|settings|settings.reasoning==initial))));
+
+            let mut next_history = history;
+            next_history.push(tool_call_message(&second.tool_calls[0].id, "read", "{}"));
+            next_history.push(tool_result_message(
+                &second.tool_calls[0].id,
+                "more contents",
+            ));
+            let next_context = ProviderRequestContext {
+                assistant_response_ids: Some(vec![Some(id), Some(second_id)]),
+                response_id: None,
+            };
+            assert_eq!(
+                rebuilt
+                    .reasoning_for_request(&next_history, Default::default(), &next_context)
+                    .unwrap(),
+                initial
+            );
+            next_history.push(user_message("now change the task"));
+            assert_eq!(
+                rebuilt
+                    .reasoning_for_request(&next_history, Default::default(), &next_context)
+                    .unwrap(),
+                requested
+            );
+            let new_body = rebuilt
+                .request_body_with_context(&next_history, &[], requested, &next_context)
+                .unwrap();
+            assert_eq!(
+                new_body.get("thinking"),
+                rebuilt.thinking_payload_for(requested).as_ref()
+            );
+        }
+    }
+
+    #[test]
+    fn native_anthropic_locked_budget_cannot_be_silently_shrunk_by_new_output_limit() {
+        use crate::provider::{
+            AnthropicNativeReplay, AnthropicReplaySettings, NativeReplayPayload,
+            NativeReplayRecord, ProviderRequestContext, ResponseId,
+        };
+        let mut provider = concrete_anthropic_provider(ReasoningSelection::Off, None);
+        let id = ResponseId::new();
+        provider
+            .native_replay
+            .insert(NativeReplayRecord {
+                response_id: id.clone(),
+                provider_scope: provider.native_replay_scope.clone(),
+                payload: NativeReplayPayload::AnthropicMessages(AnthropicNativeReplay {
+                    budget_evidence: None,
+                    content_blocks: None,
+                    request_settings: Some(AnthropicReplaySettings {
+                        reasoning: ReasoningSelection::High,
+                        thinking: Some(json!({"type":"enabled","budget_tokens":8000})),
+                        output_config: None,
+                    }),
+                }),
+            })
+            .unwrap();
+        provider.output_limit = Some(4000);
+        let history = [
+            tool_call_message("call_1", "read", "{}"),
+            tool_result_message("call_1", "contents"),
+        ];
+        let context = ProviderRequestContext {
+            assistant_response_ids: Some(vec![Some(id)]),
+            response_id: None,
+        };
+        let error = provider
+            .request_body_with_context(&history, &[], ReasoningSelection::Off, &context)
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot preserve"));
+        assert!(provider.take_last_request_diagnostics().is_none());
+    }
+
+    #[test]
+    fn native_anthropic_legacy_payload_without_settings_remains_readable() {
+        let native: crate::provider::AnthropicNativeReplay = serde_json::from_value(
+            json!({"content_blocks":[{"type":"thinking","thinking":"","signature":"exact=="}]}),
+        )
+        .unwrap();
+        assert_eq!(native.content_blocks.unwrap()[0]["signature"], "exact==");
+        assert!(native.request_settings.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_final_callback_cancellation_does_not_pin_new_settings() {
+        #[derive(Debug)]
+        struct CancelOnDone(CancellationToken);
+        impl crate::output::OutputSink for CancelOnDone {
+            fn assistant_done(&self) {
+                self.0.cancel();
+            }
+        }
+        use crate::provider::{ProviderRequestContext, ResponseId};
+        let server = MockServer::start().await;
+        let blocks = [
+            json!({"type":"text","text":"partial"}),
+            json!({"type":"tool_use","id":"toolu_1","name":"read","input":{}}),
+        ];
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(native_content_sse(&blocks, Some("tool_use"))),
+            )
+            .mount(&server)
+            .await;
+        let provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+        let cancellation = CancellationToken::new();
+        let response = provider
+            .chat_stream_with_context(
+                &[],
+                &[],
+                Default::default(),
+                &ProviderRequestContext {
+                    response_id: Some(ResponseId::new()),
+                    ..Default::default()
+                },
+                cancellation.clone(),
+                Arc::new(CancelOnDone(cancellation)),
+            )
+            .await
+            .unwrap();
+        assert!(response.is_interrupted());
+        assert!(provider.native_replay.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_content_survives_rebuild_with_redacted_and_empty_signed_blocks() {
+        use crate::provider::{
+            NativeReplayRecord, NativeReplayStore, ProviderRequestContext, ResponseId,
+            ToolCallIdentityStore,
+        };
+        let server = MockServer::start().await;
+        let input = json!({"path":"foo","nested":{"id":"toolu_shared","value":"π"}});
+        let expected = json!([
+            {"type":"thinking","thinking":"initial π then more","signature":"prefix:ABC",
+             "extension":{"id":"toolu_shared","opaque":"exact=="}},
+            {"type":"redacted_thinking","data":"encrypted==","extension":{"id":"opaque"}},
+            {"type":"thinking","thinking":"","signature":"empty:XYZ"},
+            {"type":"text","text":"same answer","extension":"text metadata"},
+            {"type":"tool_use","id":"toolu_shared","name":"read","input":input,
+             "extension":{"id":"toolu_shared"}}
+        ]);
+        let event = |name: &str, value: Value| format!("event: {name}\ndata: {value}");
+        let frames = vec![
+            event(
+                "message_start",
+                json!({"message":{"usage":{"input_tokens":12,"output_tokens":1}}}),
+            ),
+            event(
+                "content_block_start",
+                json!({"index":0,"content_block":{
+                    "type":"thinking","thinking":"initial π ","signature":"prefix:",
+                    "extension":{"id":"toolu_shared","opaque":"exact=="}
+                }}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":0,"delta":{"type":"thinking_delta","thinking":"then more"}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":0,"delta":{"type":"signature_delta","signature":"A"}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":0,"delta":{"type":"signature_delta","signature":"BC"}}),
+            ),
+            event("content_block_stop", json!({"index":0})),
+            event(
+                "content_block_start",
+                json!({"index":1,"content_block":expected[1]}),
+            ),
+            event("content_block_stop", json!({"index":1})),
+            event(
+                "content_block_start",
+                json!({"index":2,"content_block":{"type":"thinking","thinking":"","signature":"empty:"}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":2,"delta":{"type":"thinking_delta","thinking":""}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":2,"delta":{"type":"signature_delta","signature":"XYZ"}}),
+            ),
+            event("content_block_stop", json!({"index":2})),
+            event(
+                "content_block_start",
+                json!({"index":3,"content_block":{"type":"text","text":"same ","extension":"text metadata"}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":3,"delta":{"type":"text_delta","text":"answer"}}),
+            ),
+            event("content_block_stop", json!({"index":3})),
+            event(
+                "content_block_start",
+                json!({"index":4,"content_block":{"type":"tool_use","id":"toolu_shared","name":"read","input":{},"extension":{"id":"toolu_shared"}}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":4,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"foo\","}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"index":4,"delta":{"type":"input_json_delta","partial_json":"\"nested\":{\"id\":\"toolu_shared\",\"value\":\"π\"}}"}}),
+            ),
+            event("content_block_stop", json!({"index":4})),
+            event(
+                "message_delta",
+                json!({"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":100}}),
+            ),
+            event("message_stop", json!({})),
+        ];
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(frames.join("\n\n") + "\n\n"))
+            .mount(&server)
+            .await;
+        let replay = NativeReplayStore::default();
+        let identities = ToolCallIdentityStore::default();
+        let mut provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+        provider.set_native_replay_store(replay.clone());
+        provider.set_tool_call_identity_store(identities.clone());
+        let id = ResponseId::new();
+        let recording = Arc::new(RecordingSink::default());
+        let response = provider
+            .chat_stream_with_context(
+                &[user_message("read foo")],
+                &[],
+                Default::default(),
+                &ProviderRequestContext {
+                    response_id: Some(id.clone()),
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+                recording.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.content, "same answer");
+        assert_eq!(recording.assistant_deltas().concat(), response.content);
+        assert_eq!(recording.reasoning_deltas().concat(), "initial π then more");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.tool_calls[0].arguments).unwrap(),
+            input
+        );
+
+        let restored = NativeReplayStore::default();
+        restored
+            .restore(
+                &serde_json::from_slice::<Vec<NativeReplayRecord>>(
+                    &serde_json::to_vec(&replay.snapshot()).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let restored_ids = ToolCallIdentityStore::default();
+        restored_ids.restore(
+            &serde_json::from_slice::<Vec<crate::provider::ToolCallIdentity>>(
+                &serde_json::to_vec(&identities.snapshot()).unwrap(),
+            )
+            .unwrap(),
+        );
+        let mut rebuilt = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+        rebuilt.set_native_replay_store(restored.clone());
+        rebuilt.set_tool_call_identity_store(restored_ids);
+        let mut assistant = tool_call_message(&response.tool_calls[0].id, "read", "{}");
+        if let ChatCompletionRequestMessage::Assistant(row) = &mut assistant {
+            row.content = Some(
+                async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(
+                    response.content,
+                ),
+            );
+        }
+        let history = [
+            user_message("read foo"),
+            assistant,
+            tool_result_message(&response.tool_calls[0].id, "contents"),
+        ];
+        let context = ProviderRequestContext {
+            assistant_response_ids: Some(vec![Some(id.clone())]),
+            response_id: Some(ResponseId::new()),
+        };
+        rebuilt
+            .chat_stream_with_context(
+                &history,
+                &[],
+                Default::default(),
+                &context,
+                CancellationToken::new(),
+                sink(),
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(body["messages"][1]["content"], expected);
+        assert_eq!(
+            body["messages"][2]["content"][0]["tool_use_id"],
+            "toolu_shared"
+        );
+        assert!(
+            !String::from_utf8(requests[1].body.clone())
+                .unwrap()
+                .contains(
+                    &serde_json::from_value::<String>(serde_json::to_value(&id).unwrap()).unwrap()
+                )
+        );
+        assert_eq!(restored.snapshot().len(), 2);
+        let plain = rebuilt.preview_request(&history, &[]).unwrap().body;
+        assert_eq!(plain["messages"][1]["content"][0]["type"], "text");
+        assert_eq!(plain["messages"][1]["content"][1]["input"], json!({}));
+        let mut other = loopback_anthropic_provider(&server, "claude-haiku-4-5");
+        other.set_native_replay_store(restored);
+        let absent = other
+            .preview_request_with_context(&history, &[], &context)
+            .unwrap()
+            .body;
+        assert_eq!(absent["messages"][1]["content"][0]["type"], "text");
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_repeated_plain_replies_select_provenance_before_role_merge() {
+        use crate::provider::{ProviderRequestContext, ResponseId};
+        let server = MockServer::start().await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .respond_with(move |_: &wiremock::Request| {
+                let index = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(native_content_sse(&[
+                json!({"type":"thinking","thinking":"","signature":format!("trace-{index}")}),
+                json!({"type":"text","text":"same answer"}),
+            ],Some("end_turn")))
+            })
+            .mount(&server)
+            .await;
+        let provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+        let ids = [ResponseId::new(), ResponseId::new()];
+        for id in &ids {
+            let response = provider
+                .chat_stream_with_context(
+                    &[],
+                    &[],
+                    Default::default(),
+                    &ProviderRequestContext {
+                        response_id: Some(id.clone()),
+                        ..Default::default()
+                    },
+                    CancellationToken::new(),
+                    sink(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.content, "same answer");
+        }
+        let history = [
+            assistant_message("same answer"),
+            assistant_message("same answer"),
+            assistant_message("same answer"),
+        ];
+        let preview = provider
+            .preview_request_with_context(
+                &history,
+                &[],
+                &ProviderRequestContext {
+                    assistant_response_ids: Some(vec![
+                        Some(ids[1].clone()),
+                        None,
+                        Some(ids[0].clone()),
+                    ]),
+                    response_id: None,
+                },
+            )
+            .unwrap()
+            .body;
+        let content = preview["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(preview["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(content.len(), 5);
+        assert_eq!(content[0]["signature"], "trace-1");
+        assert_eq!(content[2], json!({"type":"text","text":"same answer"}));
+        assert_eq!(content[3]["signature"], "trace-0");
+        assert!(
+            provider
+                .preview_request_with_context(
+                    &history,
+                    &[],
+                    &ProviderRequestContext {
+                        assistant_response_ids: Some(vec![Some(ids[0].clone())]),
+                        response_id: None,
+                    }
+                )
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_incomplete_failed_and_cancelled_streams_create_no_replay() {
+        use crate::provider::{NativeReplayStore, ProviderRequestContext, ResponseId};
+        let blocks = [
+            json!({"type":"thinking","thinking":"","signature":"opaque=="}),
+            json!({"type":"text","text":"partial"}),
+        ];
+        for finish in [
+            None,
+            Some("max_tokens"),
+            Some("model_context_window_exceeded"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string(native_content_sse(&blocks, finish)),
+                )
+                .mount(&server)
+                .await;
+            let store = NativeReplayStore::default();
+            let mut provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+            provider.set_native_replay_store(store.clone());
+            let result = provider
+                .chat_stream_with_context(
+                    &[],
+                    &[],
+                    Default::default(),
+                    &ProviderRequestContext {
+                        response_id: Some(ResponseId::new()),
+                        ..Default::default()
+                    },
+                    CancellationToken::new(),
+                    sink(),
+                )
+                .await;
+            if finish.is_none() {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(
+                    result.unwrap().finish_reason(),
+                    Some(&crate::provider::FinishReason::Length)
+                );
+            }
+            assert!(store.snapshot().is_empty());
+        }
+        struct CancelOnText(CancellationToken);
+        impl OutputSink for CancelOnText {
+            fn assistant_delta(&self, _: &str) {
+                self.0.cancel();
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(native_content_sse(&blocks, Some("end_turn"))),
+            )
+            .mount(&server)
+            .await;
+        let mut provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+        let store = NativeReplayStore::default();
+        provider.set_native_replay_store(store.clone());
+        let cancel = CancellationToken::new();
+        let response = provider
+            .chat_stream_with_context(
+                &[],
+                &[],
+                Default::default(),
+                &ProviderRequestContext {
+                    response_id: Some(ResponseId::new()),
+                    ..Default::default()
+                },
+                cancel.clone(),
+                Arc::new(CancelOnText(cancel)),
+            )
+            .await
+            .unwrap();
+        assert!(response.is_interrupted());
+        assert!(store.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_unclosed_blocks_cannot_complete_or_admit_tool_calls() {
+        use crate::provider::{NativeReplayStore, ProviderRequestContext, ResponseId};
+        for with_tool in [false, true] {
+            let server = MockServer::start().await;
+            let mut blocks = vec![json!({"type":"thinking","thinking":"","signature":"exact=="})];
+            if with_tool {
+                blocks.push(
+                    json!({"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"foo"}}),
+                );
+            }
+            let stream = native_content_sse(&blocks, None)
+                + &format!(
+                    "event: content_block_start\ndata: {}\n\nevent: message_stop\ndata: {{}}\n\n",
+                    json!({"index":blocks.len(),"content_block":{"type":"text","text":"unfinished"}}),
+                );
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(stream))
+                .mount(&server)
+                .await;
+            let store = NativeReplayStore::default();
+            let mut provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+            provider.set_native_replay_store(store.clone());
+            let error = provider
+                .chat_stream_with_context(
+                    &[],
+                    &[],
+                    Default::default(),
+                    &ProviderRequestContext {
+                        response_id: Some(ResponseId::new()),
+                        ..Default::default()
+                    },
+                    CancellationToken::new(),
+                    sink(),
+                )
+                .await
+                .expect_err("unclosed native blocks cannot complete");
+            assert!(error.to_string().contains("unclosed content block"));
+            assert!(store.snapshot().is_empty());
+            assert!(provider.tool_call_identities.snapshot().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_malformed_inputs_preserve_unsigned_repair_and_reject_signed_reconstruction()
+     {
+        use crate::provider::{NativeReplayStore, ProviderRequestContext, ResponseId};
+        let raw = "{broken π";
+        for signed in [false, true] {
+            let server = MockServer::start().await;
+            let thinking = if signed {
+                vec![json!({"type":"thinking","thinking":"","signature":"exact=="})]
+            } else {
+                vec![]
+            };
+            let index = thinking.len();
+            let stream = native_content_sse(&thinking, None)
+                + &format!(
+                    "event: content_block_start\ndata: {}\n\nevent: content_block_delta\ndata: {}\n\nevent: content_block_stop\ndata: {}\n\nevent: message_delta\ndata: {}\n\nevent: message_stop\ndata: {{}}\n\n",
+                    json!({"index":index,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{}}}),
+                    json!({"index":index,"delta":{"type":"input_json_delta","partial_json":raw}}),
+                    json!({"index":index}),
+                    json!({"delta":{"stop_reason":"tool_use"}}),
+                );
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(stream))
+                .mount(&server)
+                .await;
+            let store = NativeReplayStore::default();
+            let mut provider = loopback_anthropic_provider(&server, "claude-sonnet-4-5");
+            provider.set_native_replay_store(store.clone());
+            let result = provider
+                .chat_stream_with_context(
+                    &[],
+                    &[],
+                    Default::default(),
+                    &ProviderRequestContext {
+                        response_id: Some(ResponseId::new()),
+                        ..Default::default()
+                    },
+                    CancellationToken::new(),
+                    sink(),
+                )
+                .await;
+            if signed {
+                let error = result.expect_err("signed native input cannot be repaired for replay");
+                let detail = error.to_string();
+                assert!(detail.contains("read"));
+                assert!(detail.contains(raw));
+                assert!(detail.contains("parse error"));
+                assert!(!error.is_retryable());
+                assert!(provider.tool_call_identities.snapshot().is_empty());
+                assert!(store.snapshot().is_empty());
+            } else {
+                let response = result.unwrap();
+                assert_eq!(response.tool_calls.len(), 1);
+                assert_eq!(response.tool_calls[0].arguments, raw);
+                assert_eq!(
+                    response.finish_reason(),
+                    Some(&crate::provider::FinishReason::ToolCalls)
+                );
+                let records = store.snapshot();
+                assert_eq!(records.len(), 1);
+                let crate::provider::NativeReplayPayload::AnthropicMessages(native) =
+                    &records[0].payload
+                else {
+                    panic!("wrong transport")
+                };
+                assert!(native.content_blocks.is_none());
+                assert!(native.request_settings.is_some());
+            }
+        }
     }
 
     #[tokio::test]

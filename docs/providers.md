@@ -103,8 +103,12 @@ Notable behaviors:
   so the coding lane, plan lane, and each subagent get separate cache routes
   instead of colliding. The `openrouter-anthropic` cache policy instead sends
   a top-level `cache_control: {type: ephemeral}` and `session_id`.
-- **Inline think tags** — `<think>…</think>` inside streamed content is split
-  out to the reasoning channel.
+- **Inline think tags** — legacy compatible streams can split one leading
+  `<think>…</think>` block into reasoning; later answer examples stay literal.
+- **Native replay** — completed native payloads use immutable response UUIDs,
+  distinct from visible text and tool-call identities. Session snapshots retain
+  them through provider rebuilds and context-source restoration. Missing
+  provenance or a different provider/model/codec scope never selects old data.
 - **Truncation guard** — a stream that ends without a terminal
   `finish_reason` (or a terminal usage frame, for connections that declare
   `usage_frame_ends_stream`) is treated as a retryable transport failure, not
@@ -120,9 +124,20 @@ Anthropic Messages streaming (`anthropic-version: 2023-06-01`):
   definition, the byte-stable head of the system prompt (split at the
   `## Volatile state` heading), and the newest history position (or a rolling
   history point for rolling-history connections).
-- **Thinking replay** — native thinking blocks from a tool-call turn are
-  captured and re-emitted ahead of the assistant content on the next request;
-  dropping them stops extended thinking after the first tool round.
+- **Thinking replay** — completed native responses retain their ordered full
+  content array, including empty signed thinking, redacted data, text boundaries,
+  original tool inputs, and opaque extension fields. Response UUIDs select the
+  persisted payload before adjacent assistant rows merge. Incomplete responses
+  do not create replay records; unclosed completed native blocks are rejected.
+  The actual thinking and output-effort settings are retained through tool
+  results, injected notes, tool images, and explicitly marked partial answers.
+  Retained interrupted text is framed as user-role data in the next request,
+  avoiding an unsupported assistant prefill.
+  A new human turn or completed plain answer releases those settings. Legacy
+  or incompatible response metadata remains unknown; it never selects older
+  settings past a newer completed response. An output cap that cannot preserve
+  the tool-turn thinking budget fails instead of changing it mid-turn.
+  This follows the [Claude tool-loop echo contract](https://platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows).
 - Usage arrives across `message_start` and `message_delta` (MiniMax reports
   final input + cache totals in the latter); both are folded into bonsai's
   cache-inclusive usage convention.
@@ -141,6 +156,14 @@ The ChatGPT-backend Responses API used by Codex subscriptions:
   lane-scoped as above); explicit cache options are rejected by the backend.
 - "Lite"-served models get a reshaped request (`additional_tools`, developer
   messages, `reasoning.context: all_turns`) and a marker header.
+- **Native replay** — `BONSAI_CODEX_REASONING_PERSIST=1` explicitly opts into
+  encrypted replay. Completed supported output items retain their order, phases,
+  opaque fields, and original function strings in the durable response-UUID
+  store. Replay is isolated by endpoint, model, and wire dialect. Incomplete or
+  interrupted responses never create replay records; opted-in sequences that
+  cannot be reconstructed fail instead of silently dropping native items.
+  Live ChatGPT-backend round-trip qualification remains required before enabling
+  this experimental behavior by default.
 
 ## Authentication
 
@@ -178,6 +201,12 @@ somewhere less protected.
 
 ## Errors, retries, and failover
 
+Native reasoning fields or thinking blocks are kept separate from answer text,
+so literal `<think>` examples in answers remain intact. For legacy compatible
+servers that put reasoning in text, only one leading `<think>…</think>` block
+is split out; tags after answer text starts stay literal. This follows the
+[leading-block convention documented by Qwen](https://qwen.readthedocs.io/en/latest/inference/transformers.html#parsing-thinking-content).
+
 Provider failures are typed (`Http {status, retry-after}`, `Transport`,
 `Decode`, `Configuration`):
 
@@ -190,9 +219,21 @@ Provider failures are typed (`Http {status, retry-after}`, `Transport`,
 - A failed attempt's partially streamed output is **discarded and visibly
   retracted** in the TUI before the retry, so the transcript never contains
   half of a failed generation.
-- On a *permanent* error (never on cancellation), the retry loop can activate
-  a **provider fallback** — e.g. a subagent's `fallback_model` — and reset the
-  attempt counter. Failover is sticky for the rest of that delegated run.
+- After a permanent error or exhausted transport retries (never on cancellation),
+  the model-request boundary can activate a **provider fallback** — e.g. a
+  subagent's `fallback_model`. It records the failed attempts under the original
+  model, then rebuilds and admits the request using the backup's context window,
+  tokenizer, cache strategy, and generation limits. Tool restrictions persist;
+  transport retry counts restart. Failover is sticky for that delegated run.
+  Next-turn drop controls stay in force across that logical request.
+- An empty response that reaches its output budget can retry once at a lower
+  supported effort. The retry's prepared settings are counted and admitted
+  before another provider invocation. Cancellation or preparation failure
+  creates no extra usage row; each actual invocation retains its own count,
+  wire diagnostics, latency, and time to first output.
+- Hidden compaction-summary or episode-card failures use deterministic recovery
+  under the current provider. A summary that exceeds a high-confidence context
+  estimate is recovered without sending the oversized hidden request.
 - Per-attempt meters cap streamed characters and generation time; sustained
   rate-limit or quota walls terminate the run as a typed
   [budget exhaustion](sessions.md#budgets) rather than a generic failure.

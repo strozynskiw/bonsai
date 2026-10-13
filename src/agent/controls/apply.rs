@@ -4,6 +4,12 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Copy)]
+enum ExchangeControlExpansion {
+    Drop,
+    Restore,
+}
+
 impl Agent {
     pub fn restore_context_controls(
         &mut self,
@@ -11,6 +17,9 @@ impl Agent {
         summary_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
         summary_source_stable_ids: HashMap<String, Vec<String>>,
     ) {
+        // Source bytes are being replaced; their provenance must be restored
+        // explicitly with the corresponding native snapshot, never inherited.
+        self.native_source_response_bindings.clear();
         self.context_controls = controls
             .into_iter()
             .filter(|(_id, state)| state.is_active())
@@ -24,6 +33,7 @@ impl Agent {
             .into_iter()
             .map(|(id, stable_ids)| (self.canonical_context_control_id_for(&id), stable_ids))
             .collect();
+        self.normalize_dropped_tool_exchanges();
         self.prune_context_controls_to_current_messages();
     }
 
@@ -85,18 +95,121 @@ impl Agent {
         mut set: impl FnMut(&mut ContextControlState, bool),
     ) -> bool {
         let targets = self.context_control_targets_for(id, action);
+        let targets = if matches!(action, ContextControlAction::ToggleDropNextTurn) {
+            self.expand_tool_exchange_targets(&targets, ExchangeControlExpansion::Drop)
+        } else {
+            targets
+        };
         if targets.is_empty() {
             return false;
         }
         let enabled = !targets
             .iter()
             .all(|target| self.context_controls.get(target).copied().is_some_and(&get));
+        let targets = if matches!(action, ContextControlAction::ToggleDropNextTurn) && !enabled {
+            self.expand_tool_exchange_targets(&targets, ExchangeControlExpansion::Restore)
+        } else {
+            targets
+        };
         for target in &targets {
             let state = self.context_controls.entry(target.clone()).or_default();
             set(state, enabled);
             self.remove_inactive_context_control(target);
         }
         true
+    }
+
+    /// A tool exchange is indivisible on the wire. Materialize its drop flags
+    /// so request projection, the context ledger, and read/recall liveness all
+    /// agree. Scan to the next assistant boundary to cover older histories
+    /// with image/user attachments between sibling tool results.
+    fn expand_tool_exchange_targets(
+        &self,
+        targets: &[String],
+        expansion: ExchangeControlExpansion,
+    ) -> Vec<String> {
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let mut expanded = targets.to_vec();
+        let mut seen = targets.iter().cloned().collect::<HashSet<_>>();
+        let mut exchanges = Vec::new();
+        for (index, message) in self.messages.iter().enumerate() {
+            let Some(calls) = assistant_tool_calls(message).filter(|calls| !calls.is_empty())
+            else {
+                continue;
+            };
+            let call_ids = calls
+                .iter()
+                .map(|call| call.call_id.as_str())
+                .collect::<HashSet<_>>();
+            let end = self.messages[index + 1..]
+                .iter()
+                .position(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+                .map_or(self.messages.len(), |offset| index + 1 + offset);
+            let rows = std::iter::once(index)
+                .chain((index + 1..end).filter(|&result_index| {
+                    tool_message_call_id(&self.messages[result_index])
+                        .is_some_and(|call_id| call_ids.contains(call_id.as_str()))
+                }))
+                .collect::<Vec<_>>();
+            let exchange_ids = rows
+                .iter()
+                .copied()
+                .flat_map(|row| self.message_control_ids_for(row, &self.messages[row]))
+                .collect::<Vec<_>>();
+            let dependencies = rows
+                .into_iter()
+                .flat_map(|row| self.reuse_source_call_ids(&self.messages[row]))
+                .map(|call_id| ContextNodeId::tool(&call_id).into_string())
+                .collect::<Vec<_>>();
+            exchanges.push((exchange_ids, dependencies));
+        }
+        // A retained pointer cannot supply bytes its source drop removes.
+        // Include dependent exchanges transitively. Inspect stored pointer
+        // metadata even when already dropped so toggling the source back on
+        // restores the same complete set.
+        loop {
+            let mut changed = false;
+            for (ids, dependencies) in &exchanges {
+                let member_selected = ids.iter().any(|id| seen.contains(id));
+                let selected = match expansion {
+                    ExchangeControlExpansion::Drop => {
+                        member_selected || dependencies.iter().any(|id| seen.contains(id))
+                    }
+                    ExchangeControlExpansion::Restore => member_selected,
+                };
+                if selected {
+                    // Restoring a pointer also restores its sources, but does
+                    // not revive unrelated downstream pointers the user hid.
+                    let sources = matches!(expansion, ExchangeControlExpansion::Restore)
+                        .then_some(dependencies.as_slice())
+                        .unwrap_or_default();
+                    for id in ids.iter().chain(sources) {
+                        if seen.insert(id.clone()) {
+                            expanded.push(id.clone());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        expanded
+    }
+
+    pub(in crate::agent) fn normalize_dropped_tool_exchanges(&mut self) {
+        let dropped = self
+            .context_controls
+            .iter()
+            .filter(|(_, state)| state.drop_next_turn)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in self.expand_tool_exchange_targets(&dropped, ExchangeControlExpansion::Drop) {
+            self.context_controls.entry(id).or_default().drop_next_turn = true;
+        }
     }
 
     fn restore_summary_sources_for_target(&mut self, id: &str) -> bool {
@@ -192,6 +305,18 @@ impl Agent {
         if index >= self.messages.len() {
             return false;
         }
+        if let Some(bindings) = self.native_source_response_bindings.get(id)
+            && self
+                .summary_sources
+                .get(id)
+                .is_none_or(|source| source.len() != bindings.len())
+        {
+            tracing::error!(
+                source_id = id,
+                "native response provenance does not align with restored originals"
+            );
+            return false;
+        }
         let Some(source) = self.summary_sources.remove(id) else {
             return false;
         };
@@ -202,6 +327,20 @@ impl Agent {
         let original_len = self.messages.len();
         let inserted_len = source.len();
         let inserted_ids = self.allocate_context_message_ids(inserted_len);
+        let response_ids = self
+            .native_source_response_bindings
+            .remove(id)
+            .unwrap_or_else(|| vec![None; inserted_len]);
+        for ((message_id, response_id), message) in
+            inserted_ids.iter().zip(response_ids).zip(&source)
+        {
+            if matches!(message, ChatCompletionRequestMessage::Assistant(_))
+                && let Some(response_id) = response_id
+            {
+                self.native_response_bindings
+                    .insert(message_id.clone(), response_id);
+            }
+        }
         self.note_summary_source_restored(id, &source, &source_stable_ids, &inserted_ids);
         self.messages.splice(index..=index, source);
         self.message_ids.splice(index..=index, inserted_ids.clone());

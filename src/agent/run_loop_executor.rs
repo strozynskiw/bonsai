@@ -1166,7 +1166,7 @@ pub(super) fn skipped_tool_results(
 /// precedes them; without the label a batch that read two images hands back two
 /// indistinguishable messages and the model cannot tell which file is which.
 /// See `Agent::execute_tool_calls`.
-pub(super) fn image_user_message(
+pub(crate) fn image_user_message(
     mime_type: &str,
     base64_data: &str,
     label: &str,
@@ -1202,7 +1202,7 @@ pub(super) fn image_user_message(
             ),
             image_part,
         ]),
-        name: None,
+        name: MessageProvenance::ToolImage.wire_name().map(str::to_string),
     })
 }
 
@@ -1254,6 +1254,9 @@ mod tests {
         );
         let json = serde_json::to_string(&message).unwrap();
         assert!(json.contains("data:image/png;base64,AAAA"));
+        assert!(
+            matches!(message, ChatCompletionRequestMessage::User(user) if user.name.as_deref() == Some("bonsai_tool_image"))
+        );
     }
 
     #[test]

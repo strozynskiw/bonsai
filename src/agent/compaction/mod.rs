@@ -132,6 +132,35 @@ struct RepackTelemetry {
 }
 
 impl Agent {
+    pub(super) fn validate_prompt_estimate(&self, estimate: &PromptEstimate) -> Result<()> {
+        if estimate
+            .input_tokens
+            .saturating_add(self.output_reserve_tokens())
+            > self.budget.context_budget_tokens
+            && (matches!(estimate.confidence, EstimateConfidence::High)
+                || estimate.native_opaque_reserve_tokens > 0
+                || estimate.native_cost_unknown)
+        {
+            bail!("{}", self.prompt_budget_message(estimate));
+        }
+        Ok(())
+    }
+
+    fn prompt_budget_message(&self, estimate: &PromptEstimate) -> String {
+        let mut message = format!(
+            "prompt estimate {} + reserve {} exceeds context window {} ({}, {})",
+            estimate.input_tokens,
+            self.output_reserve_tokens(),
+            self.budget.context_budget_tokens,
+            estimate.source.label(),
+            estimate.confidence.label()
+        );
+        if estimate.native_cost_unknown {
+            message.push_str("; native opaque cost is unknown: neither completion usage nor an original output ceiling is available");
+        }
+        message
+    }
+
     /// Project the current messages into the outgoing form and estimate their
     /// token cost. The single place `prepare_context_for_model` re-derives
     /// `(request_messages, estimate)` after a step that may have changed
@@ -141,17 +170,25 @@ impl Agent {
         &self,
         tool_schema: &ToolSchemaPayload,
         perf: &mut PreflightPerfCapture,
-    ) -> (Vec<ChatCompletionRequestMessage>, PromptEstimate) {
-        let request_messages = self.outgoing_messages_for(&self.messages);
+        cancellation: &CancellationToken,
+    ) -> Result<(PreparedModelRequest, PromptEstimate)> {
+        let mut request_messages = self
+            .context_projection_for_controls(
+                &self.messages,
+                &self.message_ids,
+                &self.context_controls,
+            )
+            .into_prepared_model_request();
         let estimate = self
             .estimate_prompt_for_preflight(
-                &request_messages,
+                &mut request_messages,
                 tool_schema.tools(),
                 tool_schema.model_tool_schema_tokens(),
                 perf,
+                cancellation,
             )
-            .await;
-        (request_messages, estimate)
+            .await?;
+        Ok((request_messages, estimate))
     }
 
     pub(in crate::agent) async fn prepare_context_for_model(
@@ -160,7 +197,7 @@ impl Agent {
         sink: &SharedSink,
         cancellation_token: CancellationToken,
         perf: &mut PreflightPerfCapture,
-    ) -> Result<Vec<ChatCompletionRequestMessage>> {
+    ) -> Result<PreparedModelRequest> {
         // Episode lifecycle: consume any pending
         // title-change boundary first — preflight is the only point where the
         // turn is guaranteed to sit at a complete group boundary — then let
@@ -193,8 +230,9 @@ impl Agent {
         // actually under context pressure. Below the GC trigger the cached
         // prefix stays byte-stable and the cache stays warm.
         self.apply_context_gc(false);
-        let (mut request_messages, mut estimate) =
-            self.reestimate_outgoing(tool_schema, perf).await;
+        let (mut request_messages, mut estimate) = self
+            .reestimate_outgoing(tool_schema, perf, &cancellation_token)
+            .await?;
         // One batched reclaim when over the trigger. Closed episodes get first
         // refusal when their aggregate savings justify a cache break or resolve
         // the pressure alone; otherwise GC handles the pass without an
@@ -212,12 +250,16 @@ impl Agent {
                 > 0
             {
                 self.refresh_stale_read_advisory();
-                (request_messages, estimate) = self.reestimate_outgoing(tool_schema, perf).await;
+                (request_messages, estimate) = self
+                    .reestimate_outgoing(tool_schema, perf, &cancellation_token)
+                    .await?;
             }
             if estimate.input_tokens >= self.context_gc_trigger_tokens()
                 && self.apply_context_gc(true) > 0
             {
-                (request_messages, estimate) = self.reestimate_outgoing(tool_schema, perf).await;
+                (request_messages, estimate) = self
+                    .reestimate_outgoing(tool_schema, perf, &cancellation_token)
+                    .await?;
             }
         }
         // Fire only when over the trigger *and* actually above the target.
@@ -229,7 +271,8 @@ impl Agent {
             && estimate.input_tokens > target_tokens
         {
             sink.status("Compacting conversation…");
-            let mut request = CompactionRequest::automatic(target_tokens, cancellation_token);
+            let mut request =
+                CompactionRequest::automatic(target_tokens, cancellation_token.clone());
             if self.smol_applies_to_active_persona() {
                 request = request.with_summary_policy(CompactionSummaryPolicy::DeterministicOnly);
             }
@@ -237,7 +280,9 @@ impl Agent {
             if report.has_changes() {
                 let session_count = self.compaction_events.last().map_or(0, |event| event.seq);
                 sink.compaction_status(&compaction_done_status(&report, session_count));
-                (request_messages, estimate) = self.reestimate_outgoing(tool_schema, perf).await;
+                (request_messages, estimate) = self
+                    .reestimate_outgoing(tool_schema, perf, &cancellation_token)
+                    .await?;
             }
         }
 
@@ -246,21 +291,13 @@ impl Agent {
             .saturating_add(self.output_reserve_tokens())
             > self.budget.context_budget_tokens;
         self.caches.last_prompt_estimate = Some(estimate.clone());
+        self.caches.last_prompt_estimate_fingerprint = request_messages.estimate_fingerprint;
         self.caches.last_sent_prompt_estimate = Some(estimate.clone());
         self.emit_context_updated(sink);
 
         if still_over_budget {
-            let message = format!(
-                "prompt estimate {} + reserve {} exceeds context window {} ({}, {})",
-                estimate.input_tokens,
-                self.output_reserve_tokens(),
-                self.budget.context_budget_tokens,
-                estimate.source.label(),
-                estimate.confidence.label()
-            );
-            if matches!(estimate.confidence, EstimateConfidence::High) {
-                bail!("{message}");
-            }
+            self.validate_prompt_estimate(&estimate)?;
+            let message = self.prompt_budget_message(&estimate);
             sink.status(&format!(
                 "{message}; continuing because the estimate is low confidence"
             ));
@@ -344,14 +381,14 @@ impl Agent {
         let tool_schema = self.active_tool_schema();
         let before_messages = self.messages.len();
         let before_tokens = self
-            .prompt_estimator
-            .estimate_prompt_with_tool_schema_tokens(
-                &self.outgoing_messages_for(&self.messages),
-                tool_schema.tools(),
-                tool_schema.model_tool_schema_tokens(),
+            .estimate_candidate_tokens(
+                &self.messages,
+                &self.message_ids,
+                &self.context_controls,
+                &tool_schema,
+                &request.cancellation_token,
             )
-            .await
-            .input_tokens;
+            .await?;
         let target_tokens = request
             .target_tokens
             .unwrap_or_else(|| self.default_compaction_target_tokens())
@@ -377,8 +414,9 @@ impl Agent {
                     &candidate.message_ids,
                     &candidate.controls,
                     &tool_schema,
+                    &request.cancellation_token,
                 )
-                .await;
+                .await?;
             return Ok(CompactionReport::from_candidate(
                 request.mode,
                 true,
@@ -447,8 +485,9 @@ impl Agent {
                 &candidate.message_ids,
                 &candidate.controls,
                 &tool_schema,
+                &request.cancellation_token,
             )
-            .await;
+            .await?;
         // Captured before the fields below are moved out of `candidate`.
         let counts = candidate.report_counts();
         let after_messages = candidate.messages.len();
@@ -488,6 +527,8 @@ impl Agent {
         self.context_controls = candidate.controls;
         self.summary_sources = candidate.summary_sources;
         self.summary_source_stable_ids = candidate.summary_source_stable_ids;
+        self.native_source_response_bindings = candidate.native_source_response_bindings;
+        self.prune_native_response_bindings();
         self.caches.last_prompt_estimate = None;
         self.caches.last_sent_prompt_estimate = None;
 

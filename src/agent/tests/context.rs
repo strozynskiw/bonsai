@@ -2,6 +2,784 @@ use super::*;
 use crate::context_view::ContextSourceKind;
 use crate::interaction::InteractionService;
 
+fn native_loopback_provider(session: &crate::session::ProviderSession) -> Box<dyn Provider> {
+    let url = reqwest::Url::parse(&session.base_url).unwrap();
+    assert!(
+        url.host_str()
+            .unwrap()
+            .parse::<std::net::IpAddr>()
+            .unwrap()
+            .is_loopback()
+    );
+    let target = crate::provider::fallback_run_target(
+        &crate::provider::opencode::OPENCODE_METADATA,
+        session,
+    );
+    Box::new(
+        crate::provider::opencode::OpenAiCompatibleProvider::with_api_key_policy(
+            "opencode",
+            session,
+            &target,
+            crate::provider::opencode::ApiKeyPolicy::Required,
+            crate::provider::ProviderCapabilities::new(
+                crate::provider::NO_REASONING,
+                crate::provider::NO_PARAMETERS,
+            )
+            .with_reasoning_content_echo(),
+        )
+        .with_test_http_client(),
+    )
+}
+
+#[tokio::test]
+async fn native_budget_structured_thinking_row_and_total_follow_drop_and_restore() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let thought = "nested thought ".repeat(1000);
+    let frame = serde_json::json!({"choices":[{"delta":{"content":[
+        {"type":"thinking","thinking":[{"type":"text","text":thought}]},
+        {"type":"text","text":"done"}
+    ]},"finish_reason":"stop"}]});
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let session = crate::provider::test_utils::provider_session(
+        "test",
+        &server.uri(),
+        "mistral-medium-latest",
+    );
+    let mut target = crate::provider::fallback_run_target(
+        &crate::provider::opencode::OPENCODE_METADATA,
+        &session,
+    );
+    target.reasoning_codec = crate::provider::ReasoningCodec::MistralChatCompletions;
+    let provider = crate::provider::opencode::OpenAiCompatibleProvider::with_api_key_policy(
+        "mistral",
+        &session,
+        &target,
+        crate::provider::opencode::ApiKeyPolicy::Required,
+        crate::provider::ProviderCapabilities::new(
+            crate::provider::NO_REASONING,
+            crate::provider::NO_PARAMETERS,
+        ),
+    )
+    .with_test_http_client();
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .system_context("")
+    .context_budget_tokens(1_000_000)
+    .build()
+    .unwrap();
+    agent
+        .run(
+            "reply once",
+            CancellationToken::new(),
+            Arc::new(super::super::SilentSink),
+        )
+        .await
+        .unwrap();
+    let original = agent.context_report();
+    let native = find_context_node(
+        &original.ledger,
+        ContextNodeKind::OutputText,
+        "Native reasoning",
+    )
+    .expect("structured native thinking has its own ledger row");
+    assert_eq!(
+        native.tokens,
+        agent.prompt_estimator.estimate_text_for_report(&thought)
+    );
+    assert!(native.tokens > 1000);
+    assert!(
+        !native.preview.contains(&thought),
+        "the ledger metadata need not duplicate the native trace"
+    );
+    let row = agent
+        .messages
+        .iter()
+        .zip(&agent.message_ids)
+        .rev()
+        .find(|(message, _)| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+        .unwrap()
+        .1
+        .clone();
+    assert!(agent.apply_context_control_action(&row, ContextControlAction::ToggleDropNextTurn));
+    let dropped = agent.context_report();
+    assert!(
+        find_context_node(
+            &dropped.ledger,
+            ContextNodeKind::OutputText,
+            "Native reasoning"
+        )
+        .is_none()
+    );
+    assert!(original.used_tokens() > dropped.used_tokens() + native.tokens / 2);
+    assert!(agent.apply_context_control_action(&row, ContextControlAction::ToggleDropNextTurn));
+    let restored = agent.context_report();
+    assert_eq!(restored.used_tokens(), original.used_tokens());
+    assert_eq!(
+        find_context_node(
+            &restored.ledger,
+            ContextNodeKind::OutputText,
+            "Native reasoning"
+        )
+        .unwrap()
+        .tokens,
+        native.tokens
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn native_budget_missing_opaque_evidence_stops_continuation_before_model_invocation() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let frame = serde_json::json!({"choices":[{"delta":{"tool_calls":[{
+        "index":0,"id":"opaque-call","function":{"name":"mock_tool","arguments":"{}"},
+        "extra_content":{"google":{"thought_signature":"opaque=="}}
+    }]},"finish_reason":"tool_calls"}]});
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = TestFixture::new();
+    let session =
+        crate::provider::test_utils::provider_session("test", &server.uri(), "gemini-3.6-flash");
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MockTool::new("mock_tool", "result")));
+    let mut agent = Agent::new(
+        native_loopback_provider(&session),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let error = agent
+        .run(
+            "reply once",
+            CancellationToken::new(),
+            Arc::new(super::super::SilentSink),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("native opaque cost is unknown"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let records = agent.native_replay.snapshot();
+    let crate::provider::NativeReplayPayload::OpenAiChat(native) = &records[0].payload else {
+        panic!("chat replay")
+    };
+    assert_eq!(
+        native.budget_evidence.unwrap(),
+        crate::provider::NativeBudgetEvidence::default()
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn native_budget_tool_ledger_allocates_arguments_once_and_preserves_native_and_visible_text()
+{
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let arguments = serde_json::json!({"items":vec![serde_json::Value::Null;1000]}).to_string();
+    let frame = serde_json::json!({"choices":[{"delta":{
+        "content":[{"type":"thinking","thinking":[{"type":"text","text":"retained thought"}]},{"type":"text","text":"calling tool"}],
+        "tool_calls":[{"index":0,"id":"call","function":{"name":"mock_tool","arguments":arguments}}]
+    },"finish_reason":"tool_calls"}]});
+    let count = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            let frame = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                frame.clone()
+            } else {
+                serde_json::json!({"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]})
+            };
+            ResponseTemplate::new(200).set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n"))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let session = crate::provider::test_utils::provider_session(
+        "test",
+        &server.uri(),
+        "mistral-medium-latest",
+    );
+    let mut target = crate::provider::fallback_run_target(
+        &crate::provider::opencode::OPENCODE_METADATA,
+        &session,
+    );
+    target.reasoning_codec = crate::provider::ReasoningCodec::MistralChatCompletions;
+    let provider = crate::provider::opencode::OpenAiCompatibleProvider::with_api_key_policy(
+        "mistral",
+        &session,
+        &target,
+        crate::provider::opencode::ApiKeyPolicy::Required,
+        crate::provider::ProviderCapabilities::new(
+            crate::provider::NO_REASONING,
+            crate::provider::NO_PARAMETERS,
+        ),
+    )
+    .with_test_http_client();
+    let fixture = TestFixture::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MockTool::new("mock_tool", "result")));
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent
+        .run(
+            "reply once",
+            CancellationToken::new(),
+            Arc::new(super::super::SilentSink),
+        )
+        .await
+        .unwrap();
+    let report = agent.context_report();
+    let chat = top_context_node(&report.ledger, ContextNodeKind::ChatRoot).unwrap();
+    let assistant = chat
+        .children
+        .iter()
+        .find(|node| {
+            node.children
+                .iter()
+                .any(|child| child.label == "Native reasoning")
+        })
+        .unwrap();
+    let native = assistant
+        .children
+        .iter()
+        .find(|child| child.label == "Native reasoning")
+        .unwrap();
+    assert!(native.tokens > 0);
+    assert!(
+        assistant
+            .children
+            .iter()
+            .any(|child| child.preview.contains("calling tool"))
+    );
+    let children = assistant
+        .children
+        .iter()
+        .map(ContextNode::counted_tokens)
+        .sum::<usize>();
+    assert!(assistant.tokens >= children);
+    assert!(
+        assistant.tokens < 100,
+        "tool arguments are already allocated under tools: {assistant:?}"
+    );
+    let tools = top_context_node(&report.ledger, ContextNodeKind::ToolsRoot).unwrap();
+    assert!(tools.tokens > 1000);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn malformed_opaque_tool_calls_do_not_execute_or_rewrite_native_replay_after_resume() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct NeverExecute(Arc<AtomicUsize>);
+    #[async_trait]
+    impl Tool for NeverExecute {
+        fn name(&self) -> &str {
+            "read"
+        }
+        fn description(&self) -> &str {
+            "Read a file"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})
+        }
+        async fn execute(&self, _: serde_json::Value) -> anyhow::Result<ToolOutput> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::Text("unexpected execution".into()))
+        }
+    }
+    let server = MockServer::start().await;
+    let count = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST")).respond_with(move |_: &wiremock::Request| {
+        let frame = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0,"id":"provider-call","function":{"name":"read","arguments":"{malformed π"},
+                "extra_content":{"google":{"thought_signature":"opaque=="}}
+            }]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":20}})
+        } else {
+            serde_json::json!({"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]})
+        };
+        ResponseTemplate::new(200).set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n"))
+    }).expect(3).mount(&server).await;
+    let fixture = TestFixture::new();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NeverExecute(executions.clone())));
+    let registry = Arc::new(registry);
+    let session =
+        crate::provider::test_utils::provider_session("test", &server.uri(), "gemini-3.6-flash");
+    let make_agent = || {
+        Agent::builder(
+            native_loopback_provider(&session),
+            registry.clone(),
+            empty_registry(),
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .system_context("")
+        .build()
+        .unwrap()
+    };
+    let mut agent = make_agent();
+    let sink: SharedSink = Arc::new(super::super::SilentSink);
+    agent
+        .run(
+            "give a short explanation",
+            CancellationToken::new(),
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    let tool_row = agent
+        .messages
+        .iter()
+        .find(|message| matches!(message, ChatCompletionRequestMessage::Tool(_)))
+        .unwrap();
+    let error = serde_json::to_value(tool_row).unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("{malformed π"), "{error}");
+    assert!(error.contains("path"), "{error}");
+    let assistant = agent
+        .messages
+        .iter()
+        .find(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(assistant).unwrap()["tool_calls"][0]["function"]["arguments"],
+        "{}"
+    );
+    let storage = crate::storage::test_utils::TestStorage::new().await;
+    let session_id = storage.start_session().await;
+    crate::session_persist::persist_agent_state(
+        &storage.storage,
+        session_id,
+        &crate::session_persist::AgentStateSnapshot::capture(&agent),
+        &mut Default::default(),
+    )
+    .await;
+    let snapshot = storage
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut resumed = make_agent();
+    crate::session_persist::restore_agent_state(&mut resumed, &snapshot).await;
+    resumed
+        .run(
+            "give another short explanation",
+            CancellationToken::new(),
+            sink,
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    for request in &requests[1..] {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let call = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|row| row["tool_calls"].as_array().and_then(|calls| calls.first()))
+            .unwrap();
+        assert_eq!(call["function"]["arguments"], "{malformed π");
+        assert_eq!(
+            call["extra_content"]["google"]["thought_signature"],
+            "opaque=="
+        );
+        assert_eq!(call["id"], "provider-call");
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn native_response_provenance_survives_drop_compaction_restore_resume_and_hard_reset() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let count = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            let trace = format!("trace-{}", count.fetch_add(1, Ordering::SeqCst));
+            let frame = serde_json::json!({"choices":[{"delta":{
+            "reasoning_content":trace,"content":"same answer"},"finish_reason":"stop"}]});
+            ResponseTemplate::new(200).set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n"))
+        })
+        .expect(5)
+        .mount(&server)
+        .await;
+    let fixture = TestFixture::new();
+    let session =
+        crate::provider::test_utils::provider_session("test", &server.uri(), "deepseek-v4-flash");
+    let make_agent = || {
+        Agent::builder(
+            native_loopback_provider(&session),
+            empty_registry(),
+            empty_registry(),
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .system_context("")
+        .context_budget_tokens(1_000_000)
+        .build()
+        .unwrap()
+    };
+    let mut agent = make_agent();
+    let sink: SharedSink = Arc::new(super::super::SilentSink);
+    for prompt in [
+        "reply with the same short answer",
+        "reply again with the same short answer",
+    ] {
+        assert!(matches!(
+            agent
+                .run(prompt, CancellationToken::new(), sink.clone())
+                .await
+                .unwrap(),
+            AgentRunResult::Completed(_)
+        ));
+    }
+    let original_bindings = agent.native_response_bindings.clone();
+    assert_eq!(original_bindings.len(), 2);
+    let newest = agent
+        .messages
+        .iter()
+        .zip(&agent.message_ids)
+        .rev()
+        .find(|(message, _)| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+        .unwrap()
+        .1
+        .clone();
+    assert!(agent.apply_context_control_action(&newest, ContextControlAction::ToggleDropNextTurn));
+    agent
+        .run(
+            "reply once more with the same short answer",
+            CancellationToken::new(),
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let third: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    let traces = |body: &serde_json::Value| {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["role"] == "assistant")
+            .map(|row| row["reasoning_content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(traces(&third), ["trace-0"]);
+
+    for index in 0..32 {
+        agent.push_user_message_raw(&format!("older note {index}: {}", "reference ".repeat(800)));
+    }
+    let report = agent
+        .compact_context(
+            CompactionRequest::manual(false, CancellationToken::new())
+                .with_target_tokens(12_000)
+                .with_summary_policy(super::super::CompactionSummaryPolicy::DeterministicOnly),
+        )
+        .await
+        .unwrap();
+    assert!(report.messages_omitted > 0);
+    for index in 0..32 {
+        agent.push_user_message_raw(&format!("newer note {index}: {}", "reference ".repeat(800)));
+    }
+    let second_report = agent
+        .compact_context(
+            CompactionRequest::manual(false, CancellationToken::new())
+                .with_target_tokens(12_000)
+                .with_summary_policy(super::super::CompactionSummaryPolicy::DeterministicOnly),
+        )
+        .await
+        .unwrap();
+    assert!(second_report.messages_omitted > 0);
+    let source_id = agent
+        .native_source_response_bindings
+        .iter()
+        .find(|(_, ids)| {
+            original_bindings
+                .values()
+                .all(|id| ids.iter().any(|candidate| candidate.as_ref() == Some(id)))
+        })
+        .unwrap()
+        .0
+        .clone();
+    assert!(
+        agent.summary_source_stable_ids[&source_id].len() > agent.summary_sources[&source_id].len(),
+        "nested source aliases deliberately do not align with original-message provenance"
+    );
+    for id in original_bindings.keys() {
+        assert!(!agent.native_response_bindings.contains_key(id));
+    }
+
+    let storage = crate::storage::test_utils::TestStorage::new().await;
+    let session_id = storage.start_session().await;
+    crate::session_persist::persist_agent_state(
+        &storage.storage,
+        session_id,
+        &crate::session_persist::AgentStateSnapshot::capture(&agent),
+        &mut Default::default(),
+    )
+    .await;
+    let snapshot = storage
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut resumed = make_agent();
+    crate::session_persist::restore_agent_state(&mut resumed, &snapshot).await;
+    assert!(
+        resumed
+            .apply_context_control_action(&source_id, ContextControlAction::RestoreSummarySource)
+    );
+    for (old_row, response_id) in &original_bindings {
+        assert!(!resumed.native_response_bindings.contains_key(old_row));
+        assert!(
+            resumed
+                .native_response_bindings
+                .values()
+                .any(|id| id == response_id)
+        );
+    }
+    let prepared = resumed
+        .context_projection_for_controls(
+            &resumed.messages,
+            &resumed.message_ids,
+            &resumed.context_controls,
+        )
+        .into_prepared_model_request();
+    let preview = resumed
+        .provider
+        .preview_request_with_context(&prepared, &[], &prepared.context)
+        .unwrap();
+    assert_eq!(traces(&preview.body), ["trace-0", "trace-1", "trace-2"]);
+    resumed
+        .run(
+            "reply with the same answer after restoration",
+            CancellationToken::new(),
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let fourth: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
+    assert_eq!(traces(&fourth), ["trace-0", "trace-1", "trace-2"]);
+    resumed
+        .implement_plan_from(&crate::plan::PlanDoc::default(), None)
+        .await;
+    assert!(resumed.native_response_bindings.is_empty());
+    assert_eq!(resumed.native_replay.snapshot().len(), 4);
+    resumed
+        .run(
+            "reply with the same short answer",
+            CancellationToken::new(),
+            sink,
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let fifth: serde_json::Value = serde_json::from_slice(&requests[4].body).unwrap();
+    assert!(traces(&fifth).is_empty());
+    assert!(
+        resumed
+            .native_response_bindings
+            .values()
+            .all(|id| !original_bindings.values().any(|old| old == id))
+    );
+    resumed.clear().await;
+    assert_eq!(
+        resumed.native_replay_snapshot(),
+        super::super::NativeReplaySnapshot::default()
+    );
+}
+
+#[tokio::test]
+async fn tool_identities_survive_discarded_context_and_provider_rebuild_on_resume() {
+    let fixture = TestFixture::new();
+    let session =
+        crate::provider::test_utils::provider_session("test", "http://localhost/v1", "qwen3.7-max");
+    let target = crate::provider::fallback_run_target(
+        &crate::provider::opencode::OPENCODE_METADATA,
+        &session,
+    );
+    let scope = crate::provider::tool_call_scope(
+        "openai-chat",
+        "opencode",
+        "http://localhost/v1",
+        target
+            .endpoint_path
+            .as_deref()
+            .unwrap_or("chat/completions"),
+    );
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .system_context("")
+    .build()
+    .unwrap();
+    let mut calls = [crate::provider::ToolCall {
+        id: "repeated".into(),
+        name: "read".into(),
+        arguments: "{}".into(),
+    }];
+    agent.tool_call_identities.assign_calls(&scope, &mut calls);
+    let old_id = calls[0].id.clone();
+    agent.push_message(assistant_tool_call_message(&old_id, "read", "{}"));
+    agent.push_message(tool_result_message(&old_id, "old result"));
+    agent
+        .implement_plan_from(&crate::plan::PlanDoc::default(), None)
+        .await;
+    assert!(agent.messages.iter().all(|message| {
+        crate::context_view::tool_message_call_id(message).as_deref() != Some(old_id.as_str())
+    }));
+
+    // No UI transcript or archive is available to reconstruct the mapping.
+    let storage = crate::storage::test_utils::TestStorage::new().await;
+    let session_id = storage.start_session().await;
+    let captured = crate::session_persist::AgentStateSnapshot::capture(&agent);
+    crate::session_persist::persist_agent_state(
+        &storage.storage,
+        session_id,
+        &captured,
+        &mut crate::session_persist::AgentStateSignatures::default(),
+    )
+    .await;
+    let snapshot = storage
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.transcript.is_empty());
+    assert!(snapshot.episodes.is_empty());
+    assert_eq!(snapshot.tool_call_identities.len(), 1);
+
+    let provider = crate::provider::opencode::OpenAiCompatibleProvider::with_api_key_policy(
+        "opencode",
+        &session,
+        &target,
+        crate::provider::opencode::ApiKeyPolicy::Required,
+        crate::provider::ProviderCapabilities::new(
+            crate::provider::NO_REASONING,
+            crate::provider::NO_PARAMETERS,
+        ),
+    );
+    let mut resumed = Agent::builder(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .system_context("")
+    .build()
+    .unwrap();
+    crate::session_persist::restore_agent_state(&mut resumed, &snapshot).await;
+    let restored_history = [
+        assistant_tool_call_message(&old_id, "read", "{}"),
+        tool_result_message(&old_id, "old result"),
+    ];
+    let body = resumed
+        .provider
+        .preview_request(&restored_history, &[])
+        .unwrap()
+        .body;
+    assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "repeated");
+    assert_eq!(body["messages"][1]["tool_call_id"], "repeated");
+    let mut next = [crate::provider::ToolCall {
+        id: "repeated".into(),
+        name: "read".into(),
+        arguments: "{}".into(),
+    }];
+    resumed.tool_call_identities.assign_calls(&scope, &mut next);
+    assert_ne!(next[0].id, old_id);
+    resumed.clear().await;
+    assert!(resumed.tool_call_identity_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn context_updates_skip_report_construction_through_sink_wrappers() {
+    #[derive(Default)]
+    struct ContextSubscriber(std::sync::atomic::AtomicUsize);
+
+    impl OutputSink for ContextSubscriber {
+        fn context_updated(&self, _report: ContextReport) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let fixture = TestFixture::new();
+    let agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker,
+        fixture.project_root,
+    )
+    .system_context("")
+    .build()
+    .unwrap();
+    agent.tool_schema_cache().clear();
+
+    let silent: SharedSink = Arc::new(super::super::SilentSink);
+    let (perf, _) = super::super::perf::PerfSink::shared(silent);
+    assert!(!perf.wants_context_updates());
+    agent.emit_context_updated(&perf);
+    assert!(
+        agent.tool_schema_cache().is_empty(),
+        "discarded reports must not construct their schema/projection"
+    );
+
+    let subscriber = Arc::new(ContextSubscriber::default());
+    let (perf, _) = super::super::perf::PerfSink::shared(subscriber.clone());
+    assert!(perf.wants_context_updates());
+    agent.emit_context_updated(&perf);
+    assert!(!agent.tool_schema_cache().is_empty());
+    assert_eq!(subscriber.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
 fn cache_strategy_test_context() -> crate::context::ProjectContextSnapshot {
     crate::context::ProjectContextSnapshot {
         environment: "## Environment\n- cwd: /repo".to_string(),
@@ -1550,11 +2328,21 @@ async fn context_report_rows_keep_report_estimator_source_after_preflight_count(
         .unwrap();
     agent.prompt_estimator =
         PromptEstimator::for_tests("claude-test", TokenCounterKind::AnthropicCountTokens, None);
+    agent.caches.last_prompt_estimate_fingerprint = agent
+        .context_projection_with_estimate_for_controls(
+            &agent.messages,
+            &agent.message_ids,
+            &agent.context_controls,
+            &agent.tool_schema_for_mode(agent.mode),
+        )
+        .estimate_fingerprint();
     agent.caches.last_prompt_estimate = Some(PromptEstimate {
         input_tokens: 10_000,
         source: TokenCounterKind::AnthropicCountTokens,
         confidence: EstimateConfidence::High,
         tool_schema_tokens: 0,
+        native_opaque_reserve_tokens: 0,
+        native_cost_unknown: false,
     });
 
     let report = agent.context_report();
@@ -1568,6 +2356,46 @@ async fn context_report_rows_keep_report_estimator_source_after_preflight_count(
         .expect("system row should be present");
     assert_eq!(system.source, TokenCounterKind::Heuristic);
     assert_eq!(system.confidence, EstimateConfidence::Low);
+}
+
+#[tokio::test]
+async fn native_budget_report_reuses_counts_only_for_identical_prepared_requests() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::new(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.push_user_message_raw("first prompt");
+    agent.prompt_estimator =
+        PromptEstimator::for_tests("claude-test", TokenCounterKind::AnthropicCountTokens, None);
+    let projection = agent.context_projection_with_estimate_for_controls(
+        &agent.messages,
+        &agent.message_ids,
+        &agent.context_controls,
+        &agent.active_tool_schema(),
+    );
+    agent.caches.last_prompt_estimate_fingerprint = projection.estimate_fingerprint();
+    agent.caches.last_prompt_estimate = Some(PromptEstimate {
+        input_tokens: 10_000,
+        source: TokenCounterKind::AnthropicCountTokens,
+        confidence: EstimateConfidence::High,
+        tool_schema_tokens: 0,
+        native_opaque_reserve_tokens: 0,
+        native_cost_unknown: false,
+    });
+    assert_eq!(agent.context_report().used_tokens(), 10_000);
+    // Same row count with changed bytes must invalidate the total even when a
+    // mutation path has failed to explicitly clear the advisory cache.
+    *agent.messages.last_mut().unwrap() = test_user_message("a substantially different prompt");
+    let report = agent.context_report();
+    assert_ne!(report.used_tokens(), 10_000);
+    assert_eq!(report.estimate_source, TokenCounterKind::Heuristic);
+    assert_eq!(report.estimate_confidence, EstimateConfidence::Low);
 }
 
 #[tokio::test]

@@ -18,6 +18,8 @@ use pulldown_cmark::{Event, Parser, Tag};
 pub const VOLATILE_STATE_HEADING: &str = "## Volatile state";
 /// Wire marker used for immutable project-state snapshots in stored history.
 pub const PROJECT_STATE_MESSAGE_NAME: &str = "bonsai_project_state";
+/// Provenance for retained partial assistant text that did not finish its turn.
+pub(crate) const INCOMPLETE_ASSISTANT_MESSAGE_NAME: &str = "bonsai_incomplete";
 /// Human-readable envelope around a project-state snapshot. Carries the
 /// `Harness note:` provenance convention in the text itself: the snapshot rides
 /// as a named user-role message for cache reasons, but strict chat templates

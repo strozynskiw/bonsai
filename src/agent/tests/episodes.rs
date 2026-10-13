@@ -2305,7 +2305,8 @@ async fn repeat_recall_collapses_to_pointer_only_while_prior_page_is_live() {
     // Identical args + identical live bytes → pointer.
     let pointer = agent
         .recall_reuse_pointer(&test_tool_call("recall-2", "recall", args), page)
-        .expect("a live identical prior page collapses to a pointer");
+        .expect("a live identical prior page collapses to a pointer")
+        .pointer;
     assert!(pointer.starts_with("[reused previous recall]"), "{pointer}");
     assert!(pointer.contains("recall-1"), "{pointer}");
 
@@ -2368,5 +2369,203 @@ async fn recalled_output_is_gc_stubbable_under_pressure() {
         stubbed,
         "recall outputs must be GC-eligible or every recall becomes permanent dead weight: {:?}",
         agent.context_controls()
+    );
+    assert!(
+        !agent
+            .outgoing_messages_for(&agent.messages)
+            .iter()
+            .any(|message| { message_content(message).contains("RECALL_END") })
+    );
+    assert!(
+        agent
+            .recall_reuse_pointer(
+                &test_tool_call("recall-new", "recall", r#"{"episode":1}"#),
+                &recalled,
+            )
+            .is_none(),
+        "GC-hidden originals cannot satisfy recall reuse"
+    );
+}
+
+#[tokio::test]
+async fn recall_reuse_respects_user_context_controls() {
+    for action in [
+        ContextControlAction::ToggleStub,
+        ContextControlAction::ToggleDropNextTurn,
+    ] {
+        let (mut agent, _store, _fixture) = episode_agent();
+        push_user_turn(&mut agent, "task");
+        let args = r#"{"episode":3}"#;
+        let page = "archived page";
+        push_recall_result(&mut agent, "recall-1", args, page);
+        assert!(agent.apply_context_control_action("tool-recall-1", action));
+        assert!(
+            agent
+                .recall_reuse_pointer(&test_tool_call("recall-2", "recall", args), page,)
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn hidden_or_removed_recall_pointer_releases_its_source() {
+    for action in [
+        Some(ContextControlAction::ToggleStub),
+        Some(ContextControlAction::ToggleDropNextTurn),
+        None,
+    ] {
+        let (mut agent, _store, _fixture) = episode_agent();
+        agent.set_context_budget_tokens(24_000);
+        push_user_turn(&mut agent, "task");
+        let args = r#"{"episode":3}"#;
+        let page = "archived line\n".repeat(4_000);
+        push_recall_result(&mut agent, "recall-1", args, &page);
+        let reuse = agent
+            .recall_reuse_pointer(&test_tool_call("recall-2", "recall", args), &page)
+            .unwrap();
+        push_recall_result(&mut agent, "recall-2", args, &reuse.pointer);
+        agent
+            .tool_context_details
+            .get_mut("recall-2")
+            .unwrap()
+            .reuse_target_call_id = Some(reuse.target_call_id);
+        assert!(!agent.read_reuse_target_indices().is_empty());
+        let source_index = agent
+            .messages
+            .iter()
+            .position(|message| {
+                crate::context_view::tool_message_call_id(message).as_deref() == Some("recall-1")
+            })
+            .unwrap();
+        assert!(agent.read_reuse_target_referenced_outside_span(
+            source_index,
+            source_index - 1,
+            source_index
+        ));
+        if let Some(action) = action {
+            assert!(agent.apply_context_control_action("tool-recall-2", action));
+        } else {
+            let start = agent.messages.len() - 2;
+            agent.messages.drain(start..);
+            agent.message_ids.drain(start..);
+        }
+        assert!(agent.read_reuse_target_indices().is_empty());
+        assert!(!agent.read_reuse_target_referenced_outside_span(
+            source_index,
+            source_index - 1,
+            source_index
+        ));
+        for index in 0..4 {
+            push_tool_group(&mut agent, &format!("new-{index}"), "src/x.rs");
+            push_user_turn(&mut agent, "later work");
+        }
+        assert!(agent.apply_context_gc(true) > 0);
+        assert!(
+            agent
+                .context_controls()
+                .get("tool-recall-1")
+                .is_some_and(|state| state.stubbed)
+        );
+    }
+}
+
+#[tokio::test]
+async fn reused_recall_protects_original_through_gc_and_resume() {
+    let fixture = TestFixture::new();
+    let args = r#"{"title":"page"}"#;
+    let page = format!("{}RECALL_END", "archived line\n".repeat(4_000));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MockTool::new("recall", &page)));
+    let responses = ["recall-1", "recall-2"]
+        .into_iter()
+        .map(|id| {
+            Ok(StreamedResponse {
+                tool_calls: vec![test_tool_call(id, "recall", args)],
+                ..StreamedResponse::default()
+            })
+        })
+        .chain(std::iter::once(Ok(StreamedResponse {
+            content: "Recalled the page.".to_string(),
+            ..StreamedResponse::default()
+        })))
+        .collect();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_episode_store(SharedEpisodeStore::default());
+    agent
+        .run(
+            "Recall the page twice",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    agent.set_context_budget_tokens(24_000);
+    assert_eq!(
+        agent.tool_context_details["recall-2"]
+            .reuse_target_call_id
+            .as_deref(),
+        Some("recall-1")
+    );
+    for index in 0..4 {
+        push_tool_group(&mut agent, &format!("new-{index}"), "src/x.rs");
+        push_user_turn(&mut agent, "later work");
+    }
+    agent.apply_context_gc(true);
+    assert!(
+        !agent
+            .context_controls()
+            .get("tool-recall-1")
+            .is_some_and(|state| state.stubbed)
+    );
+    assert!(
+        agent
+            .outgoing_messages_for(&agent.messages)
+            .iter()
+            .any(|message| message_content(message).contains("RECALL_END"))
+    );
+
+    // Session restoration need not retain runtime tool details: dependency
+    // metadata travels in the pointer text as well.
+    agent.tool_context_details.clear();
+    let source_index = agent
+        .messages
+        .iter()
+        .position(|message| {
+            crate::context_view::tool_message_call_id(message).as_deref() == Some("recall-1")
+        })
+        .unwrap();
+    assert!(agent.read_reuse_target_indices().contains(&source_index));
+    assert!(agent.read_reuse_target_referenced_outside_span(
+        source_index,
+        source_index - 1,
+        source_index
+    ));
+    agent
+        .compact_context(
+            CompactionRequest::manual(false, CancellationToken::new())
+                .with_target_tokens(1)
+                .with_summary_policy(crate::agent::CompactionSummaryPolicy::DeterministicOnly),
+        )
+        .await
+        .unwrap();
+    assert!(
+        agent
+            .outgoing_messages_for(&agent.messages)
+            .iter()
+            .any(|message| message_content(message).contains("RECALL_END"))
+    );
+    assert!(
+        !agent
+            .context_controls()
+            .get("tool-recall-1")
+            .is_some_and(|state| state.stubbed)
     );
 }

@@ -21,11 +21,20 @@ pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const MAX_ERROR_MESSAGE_CHARS: usize = 500;
 const MAX_ERROR_IDENTIFIER_CHARS: usize = 128;
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNKNOWN_ERROR_MESSAGE: &str = "unrecognized provider error response";
 
 /// Map a non-2xx response to [`ProviderFailure::Http`], reading the status,
 /// numeric `retry-after`, and a recognized, bounded error envelope.
 pub(crate) async fn error_from_response(response: reqwest::Response) -> ProviderFailure {
+    error_from_response_with_timeout(response, ERROR_BODY_TIMEOUT).await
+}
+
+async fn error_from_response_with_timeout(
+    response: reqwest::Response,
+    body_timeout: Duration,
+) -> ProviderFailure {
     let status = response.status();
     let retry_after_secs = response
         .headers()
@@ -33,8 +42,8 @@ pub(crate) async fn error_from_response(response: reqwest::Response) -> Provider
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse().ok());
     let status_code = status.as_u16();
-    let text = match response.text().await {
-        Ok(text) => text,
+    let body = match read_error_body(response, body_timeout).await {
+        Ok(body) => body,
         Err(error) => {
             return ProviderFailure::http_with_details(
                 status_code,
@@ -43,11 +52,11 @@ pub(crate) async fn error_from_response(response: reqwest::Response) -> Provider
                 None,
                 None,
                 retry_after_secs,
-                Some(crate::provider::ProviderFailureSource::new(error)),
+                Some(error),
             );
         }
     };
-    let details = serde_json::from_str::<Value>(&text)
+    let details = serde_json::from_slice::<Value>(&body)
         .ok()
         .map(|value| error_details(value.get("error").unwrap_or(&value)))
         .unwrap_or_else(ErrorDetails::unknown);
@@ -69,6 +78,31 @@ pub(crate) async fn error_from_response(response: reqwest::Response) -> Provider
             None,
         )
     }
+}
+
+async fn read_error_body(
+    mut response: reqwest::Response,
+    body_timeout: Duration,
+) -> Result<Vec<u8>, crate::provider::ProviderFailureSource> {
+    let read = async {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(crate::provider::ProviderFailureSource::new)?
+        {
+            if chunk.len() > MAX_ERROR_BODY_BYTES.saturating_sub(body.len()) {
+                return Err(crate::provider::ProviderFailureSource::new(
+                    std::io::Error::other("provider error body exceeds byte limit"),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    };
+    timeout(body_timeout, read)
+        .await
+        .map_err(crate::provider::ProviderFailureSource::new)?
 }
 
 #[derive(Debug)]
@@ -253,6 +287,12 @@ where
     let mut stream = response.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
     let mut interrupted = token.is_cancelled();
+    let mut on_active_event = |event: Option<&str>, data: &str| {
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        on_event(event, data)
+    };
 
     while !token.is_cancelled() {
         let chunk = tokio::select! {
@@ -281,8 +321,10 @@ where
             ProviderFailure::transport_with_source(format!("Stream read error: {error}"), error)
         })?;
         buffer.extend_from_slice(&chunk);
-        drain_frames(&mut buffer, &mut on_event)?;
+        drain_frames(&mut buffer, &mut on_active_event)?;
     }
+
+    interrupted |= token.is_cancelled();
 
     // Flush a final frame the server left unterminated at EOF (e.g. a trailing
     // `data:{…}` or `[DONE]` with no closing blank line) instead of silently
@@ -293,7 +335,8 @@ where
     // only residue (a stray trailing newline) is left alone.
     if !interrupted && buffer.iter().any(|&byte| !byte.is_ascii_whitespace()) {
         buffer.extend_from_slice(b"\n\n");
-        drain_frames(&mut buffer, &mut on_event)?;
+        drain_frames(&mut buffer, &mut on_active_event)?;
+        interrupted |= token.is_cancelled();
     }
 
     Ok(interrupted)
@@ -373,6 +416,71 @@ fn find_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_during_frame_dispatch_skips_buffered_tail() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("data: {\"ok\":true}\n\ndata: {broken"),
+            )
+            .mount(&server)
+            .await;
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        let mut dispatched = 0;
+        let interrupted = drive_sse(response, token.clone(), |_name, data| {
+            parse_frame(data)?;
+            dispatched += 1;
+            token.cancel();
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(interrupted);
+        assert_eq!(dispatched, 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_frame_dispatch_skips_complete_buffered_frames() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("data: {\"ok\":true}\n\ndata: {broken\n\n"),
+            )
+            .mount(&server)
+            .await;
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        let mut dispatched = 0;
+        let interrupted = drive_sse(response, token.clone(), |_name, data| {
+            parse_frame(data)?;
+            dispatched += 1;
+            token.cancel();
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(interrupted);
+        assert_eq!(dispatched, 1);
+    }
 
     #[tokio::test]
     async fn invalid_request_configuration_is_not_retryable() {
@@ -525,6 +633,71 @@ mod tests {
         assert!(error.is_retryable());
         assert!(source.is_some());
         assert!(error.source().and_then(std::error::Error::source).is_some());
+    }
+
+    #[tokio::test]
+    async fn oversized_error_body_keeps_status_and_retry_after() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "7")
+                    .set_body_string("x".repeat(MAX_ERROR_BODY_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
+        let error = error_from_response(response).await;
+        assert!(matches!(
+            error,
+            ProviderFailure::Http {
+                status: 429,
+                retry_after_secs: Some(7),
+                source: Some(_),
+                ..
+            }
+        ));
+        assert!(error.is_retryable());
+        assert!(!error.to_string().contains("xxxxx"));
+    }
+
+    #[tokio::test]
+    async fn stalled_error_body_times_out_without_losing_http_status() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 32\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let error = error_from_response_with_timeout(response, Duration::from_millis(25)).await;
+        server.abort();
+        assert!(matches!(
+            error,
+            ProviderFailure::Http {
+                status: 503,
+                source: Some(_),
+                ..
+            }
+        ));
+        assert!(error.is_retryable());
     }
 
     #[tokio::test]

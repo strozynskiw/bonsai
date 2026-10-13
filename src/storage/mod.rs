@@ -346,6 +346,8 @@ pub struct SessionSnapshot {
     pub transcript: Vec<TranscriptItem>,
     pub context_messages: Vec<ChatCompletionRequestMessage>,
     pub context_message_ids: Vec<String>,
+    pub tool_call_identities: Vec<crate::provider::ToolCallIdentity>,
+    pub(crate) native_replay: crate::agent::NativeReplaySnapshot,
     pub context_controls: HashMap<String, ContextControlState>,
     pub context_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
     pub context_source_stable_ids: HashMap<String, Vec<String>>,
@@ -549,16 +551,44 @@ impl Storage {
     pub(crate) async fn persist_session_rotation_snapshot(
         &self,
         session_id: SessionId,
-        compaction_events: &[crate::context_view::CompactionEvent],
-        verification_runs: &[crate::verification::VerificationRunRecord],
-        self_review_runs: &[crate::self_review::SelfReviewRunRecord],
+        snapshot: &crate::agent::SessionRotationSnapshot,
     ) -> Result<()> {
         self.with_session_snapshot_tx("session rotation snapshot", async move |tx, now| {
-            self.sync_compaction_events_ledger_in_tx(tx, session_id, compaction_events, now)
+            self.replace_context_snapshot_in_tx(tx, session_id, &snapshot.context, now)
                 .await?;
-            self.replace_verification_runs_snapshot_in_tx(tx, session_id, verification_runs, now)
+            self.replace_context_control_snapshot_in_tx(
+                tx,
+                session_id,
+                &snapshot.context_controls,
+                &snapshot.context_sources,
+                &snapshot.context_source_stable_ids,
+                now,
+            )
+            .await?;
+            self.replace_native_replay_in_tx(tx, session_id, &snapshot.native_replay)
                 .await?;
-            self.replace_self_review_runs_snapshot_in_tx(tx, session_id, self_review_runs, now)
+            self.sync_compaction_events_ledger_in_tx(
+                tx,
+                session_id,
+                &snapshot.compaction_events,
+                now,
+            )
+            .await?;
+            self.replace_verification_runs_snapshot_in_tx(
+                tx,
+                session_id,
+                &snapshot.verification_runs,
+                now,
+            )
+            .await?;
+            self.replace_self_review_runs_snapshot_in_tx(
+                tx,
+                session_id,
+                &snapshot.self_review_runs,
+                now,
+            )
+            .await?;
+            self.replace_tool_call_identities_in_tx(tx, session_id, &snapshot.tool_call_identities)
                 .await
         })
         .await

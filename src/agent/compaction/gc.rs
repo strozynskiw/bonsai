@@ -72,14 +72,17 @@ impl Agent {
         let mut changed = 0usize;
         for candidate in &plan.candidates {
             if !self.summary_sources.contains_key(&candidate.tool_id) {
-                let (sources, stable_ids) = self.original_source_snapshot_for_message(
-                    candidate.decision.index,
-                    &candidate.stub.original,
-                );
+                let (sources, stable_ids, response_ids) = self
+                    .original_source_snapshot_for_message(
+                        candidate.decision.index,
+                        &candidate.stub.original,
+                    );
                 self.summary_sources
                     .insert(candidate.tool_id.clone(), sources);
                 self.summary_source_stable_ids
                     .insert(candidate.tool_id.clone(), stable_ids);
+                self.native_source_response_bindings
+                    .insert(candidate.tool_id.clone(), response_ids);
             }
             let state = self
                 .context_controls
@@ -264,6 +267,7 @@ impl Agent {
         for id in sources_to_remove {
             self.summary_sources.remove(&id);
             self.summary_source_stable_ids.remove(&id);
+            self.native_source_response_bindings.remove(&id);
         }
 
         self.context_controls.retain(|_id, state| state.is_active());

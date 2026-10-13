@@ -63,8 +63,38 @@ const IMPLEMENTATION_STALL_EVIDENCE_HISTORY: usize = 4;
 /// compaction was cancelled mid-preflight and the turn should end as
 /// interrupted rather than treat that as an error.
 enum ModelCallOutcome {
-    Response(StreamedResponse),
+    Response(StreamedResponse, crate::provider::ResponseId),
     Interrupted,
+}
+
+#[derive(Debug)]
+enum ModelCallFailure {
+    Other(anyhow::Error),
+    Provider(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ModelCallFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl ModelCallFailure {
+    fn from_retry_error(error: anyhow::Error) -> Self {
+        if error.is::<ProviderFailure>()
+            || matches!(
+                error.downcast_ref::<crate::run_budget::RunBudgetExhaustion>(),
+                Some(
+                    crate::run_budget::RunBudgetExhaustion::ProviderRateLimit { .. }
+                        | crate::run_budget::RunBudgetExhaustion::ProviderQuota
+                )
+            )
+        {
+            Self::Provider(error)
+        } else {
+            Self::Other(error)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,16 +445,71 @@ impl Agent {
     /// treating it as an error.
     async fn call_model(
         &mut self,
-        tool_schema: &ToolSchemaPayload,
+        tool_registry: &Arc<ToolRegistry>,
+        tool_schema: &mut ToolSchemaPayload,
         sink: &SharedSink,
         cancellation_token: CancellationToken,
     ) -> Result<ModelCallOutcome> {
+        let mut failovers = 0;
+        loop {
+            if cancellation_token.is_cancelled() {
+                if failovers > 0 {
+                    self.clear_drop_next_turn_controls();
+                }
+                return Ok(ModelCallOutcome::Interrupted);
+            }
+            match self
+                .call_model_on_current_provider(tool_schema, sink, cancellation_token.clone())
+                .await
+            {
+                Ok(ModelCallOutcome::Interrupted) if failovers > 0 => {
+                    self.clear_drop_next_turn_controls();
+                    return Ok(ModelCallOutcome::Interrupted);
+                }
+                Ok(outcome) => return Ok(outcome),
+                Err(ModelCallFailure::Provider(error)) => {
+                    if cancellation_token.is_cancelled() {
+                        self.clear_drop_next_turn_controls();
+                        return Ok(ModelCallOutcome::Interrupted);
+                    }
+                    if let Some(exhaustion) = self.session_budget_exhaustion() {
+                        self.clear_drop_next_turn_controls();
+                        return Err(anyhow::Error::new(exhaustion));
+                    }
+                    let Some(model) = self.activate_provider_fallback() else {
+                        self.clear_drop_next_turn_controls();
+                        return Err(error);
+                    };
+                    sink.status(&format!("[provider failover] switching to {model}"));
+                    failovers += 1;
+                    // Retain the coordinator's tool restrictions, including a
+                    // conclusion-only registry, but count their schemas with
+                    // the newly active estimator. The next pass rebuilds the
+                    // messages and runs GC/compaction/admission from scratch.
+                    *tool_schema = self.tool_schema_for_registry(tool_registry);
+                }
+                Err(ModelCallFailure::Other(error)) => {
+                    if failovers > 0 {
+                        self.clear_drop_next_turn_controls();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    async fn call_model_on_current_provider(
+        &mut self,
+        tool_schema: &ToolSchemaPayload,
+        sink: &SharedSink,
+        cancellation_token: CancellationToken,
+    ) -> std::result::Result<ModelCallOutcome, ModelCallFailure> {
         if let Some(exhaustion) = self.session_budget_exhaustion() {
-            return Err(anyhow::Error::new(exhaustion));
+            return Err(anyhow::Error::new(exhaustion).into());
         }
         let mut preflight_capture = PreflightPerfCapture::default();
         let preflight_started_at = std::time::Instant::now();
-        let request_messages = match self
+        let mut request_messages = match self
             .prepare_context_for_model(
                 tool_schema,
                 sink,
@@ -437,12 +522,14 @@ impl Agent {
             Err(err) if is_compaction_cancelled(&err) => {
                 return Ok(ModelCallOutcome::Interrupted);
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         };
-        let preflight = preflight_capture.finish(preflight_started_at.elapsed());
+        let mut preflight = preflight_capture.finish(preflight_started_at.elapsed());
+        let request_options = request_messages.options;
         sink.thinking("Calling model");
         self.log_request(&request_messages, tool_schema.tools());
         let provider_started_at = std::time::Instant::now();
+        let mut retry_count_duration = std::time::Duration::ZERO;
         // Everything from here to the end of the response handling is model
         // work: retries inside the helper and the low-effort second stream
         // below both belong to this one interval.
@@ -455,15 +542,14 @@ impl Agent {
             None,
         );
         let (provider_sink, first_output) = PerfSink::shared(sink.clone());
-        let verification_reasoning = self.verification_reasoning_for_request();
-        let request_options = verification_reasoning
-            .map(crate::provider::ProviderRequestOptions::with_reasoning)
-            .unwrap_or_default();
+        let mut response_id = crate::provider::ResponseId::new();
+        request_messages.context.response_id = Some(response_id.clone());
         let first_call = match self
-            .chat_stream_with_retry_options(
+            .chat_stream_with_retry_context(
                 &request_messages,
                 tool_schema.tools(),
                 request_options,
+                &request_messages.context,
                 cancellation_token.clone(),
                 provider_sink,
             )
@@ -487,15 +573,24 @@ impl Agent {
                 let effective_reasoning = request_options
                     .reasoning
                     .unwrap_or_else(|| self.provider.reasoning());
-                self.record_usage_details(None, false, None, 0, attempts, effective_reasoning);
-                self.clear_drop_next_turn_controls();
+                if !attempts.is_empty() {
+                    self.record_usage_details(None, false, None, 0, attempts, effective_reasoning);
+                }
                 self.timing.end(model_span);
-                return Err(err);
+                let failure = ModelCallFailure::from_retry_error(err);
+                if matches!(failure, ModelCallFailure::Other(_)) {
+                    self.clear_drop_next_turn_controls();
+                }
+                return Err(failure);
             }
         };
-        let mut attempts = first_call.attempts;
+        let mut response_attempts = first_call.attempts;
+        // Performance covers the complete logical request, while usage rows
+        // account for each provider invocation exactly once.
+        let mut attempts = response_attempts.clone();
         let mut response = first_call.response;
         let mut budget_exhaustion = first_call.budget_exhaustion;
+        let mut response_invocation_timing = None;
         let mut effective_reasoning = request_options
             .reasoning
             .unwrap_or_else(|| self.provider.reasoning());
@@ -512,24 +607,146 @@ impl Agent {
                         | crate::provider::FinishReason::GenerationBudget
                 )
             )
-            && let Some(lower_effort) = verification_reasoning
-                .unwrap_or_else(|| self.provider.reasoning())
-                .lower_for_retry()
+            && let Some(lower_effort) = effective_reasoning.lower_for_retry()
+            && self
+                .provider
+                .reasoning_for_request(
+                    &request_messages,
+                    crate::provider::ProviderRequestOptions::with_reasoning(lower_effort),
+                    &request_messages.context,
+                )
+                .is_ok_and(|effective| effective == lower_effort)
         {
-            self.record_streamed_usage(&response, attempts.clone(), effective_reasoning);
+            let first_perf = self.build_perf_report(
+                preflight.clone(),
+                ProviderPerf {
+                    first_output_duration: first_output.duration_since(provider_started_at),
+                    total_duration: provider_started_at.elapsed(),
+                    attempts: attempts.clone(),
+                    generation_budget: self.generation_budget(),
+                },
+                tool_schema,
+                &request_messages,
+            );
+            self.caches.last_perf_report = Some(first_perf);
+            self.record_streamed_usage(&response, response_attempts.clone(), effective_reasoning);
+            let retry_admission = if let Some(exhaustion) = self.session_budget_exhaustion() {
+                Err(anyhow::Error::new(exhaustion))
+            } else {
+                let count_started_at = std::time::Instant::now();
+                let estimate = self
+                    .estimate_prompt_for_request_options(
+                        &mut request_messages,
+                        tool_schema.tools(),
+                        tool_schema.model_tool_schema_tokens(),
+                        crate::provider::ProviderRequestOptions::with_reasoning(lower_effort),
+                        &cancellation_token,
+                    )
+                    .await;
+                retry_count_duration = count_started_at.elapsed();
+                preflight.total_duration = preflight
+                    .total_duration
+                    .saturating_add(retry_count_duration);
+                preflight.token_count_duration = preflight
+                    .token_count_duration
+                    .saturating_add(retry_count_duration);
+                preflight.token_count_calls = preflight.token_count_calls.saturating_add(1);
+                estimate.and_then(|estimate| {
+                    self.validate_prompt_estimate(&estimate)?;
+                    Ok(estimate)
+                })
+            };
+            let retry_estimate = match retry_admission {
+                Ok(estimate) => estimate,
+                Err(error) => {
+                    // The first invocation has already been accounted for.
+                    // Counting/preparation never creates another usage row or
+                    // replaces the original request's wire diagnostics.
+                    if let Some(report) = self.caches.last_perf_report.as_mut() {
+                        report.preflight = preflight;
+                        report.provider.total_duration = provider_started_at
+                            .elapsed()
+                            .saturating_sub(retry_count_duration);
+                    }
+                    self.timing.end(model_span);
+                    if is_compaction_cancelled(&error) {
+                        self.clear_drop_next_turn_controls();
+                        return Ok(ModelCallOutcome::Interrupted);
+                    }
+                    let failure = ModelCallFailure::from_retry_error(error);
+                    if matches!(failure, ModelCallFailure::Other(_)) {
+                        self.clear_drop_next_turn_controls();
+                    }
+                    return Err(failure);
+                }
+            };
+            self.caches.last_prompt_estimate = Some(retry_estimate.clone());
+            self.caches.last_sent_prompt_estimate = Some(retry_estimate);
+            self.caches.last_prompt_estimate_fingerprint = request_messages.estimate_fingerprint;
             sink.status(&format!(
                 "Generation reached its output budget; retrying this turn once at {lower_effort} effort."
             ));
-            let retry = self
-                .chat_stream_with_retry_options(
+            response_id = crate::provider::ResponseId::new();
+            request_messages.context.response_id = Some(response_id.clone());
+            let retry_started_at = std::time::Instant::now();
+            let (retry_sink, retry_first_output) = PerfSink::shared(sink.clone());
+            let retry_result = self
+                .chat_stream_with_retry_context(
                     &request_messages,
                     tool_schema.tools(),
-                    crate::provider::ProviderRequestOptions::with_reasoning(lower_effort),
+                    request_messages.options,
+                    &request_messages.context,
                     cancellation_token.clone(),
-                    sink.clone(),
+                    retry_sink,
                 )
-                .await?;
-            attempts.extend(retry.attempts);
+                .await;
+            let retry_timing = super::perf::InvocationTiming {
+                total_duration: retry_started_at.elapsed(),
+                first_output_duration: retry_first_output.duration_since(retry_started_at),
+            };
+            let retry = match retry_result {
+                Ok(retry) => retry,
+                Err(failure) => {
+                    let (err, retry_attempts) = failure.into_parts();
+                    attempts.extend(retry_attempts.iter().cloned());
+                    let provider = ProviderPerf {
+                        first_output_duration: first_output.duration_since(provider_started_at),
+                        total_duration: provider_started_at
+                            .elapsed()
+                            .saturating_sub(retry_count_duration),
+                        attempts,
+                        generation_budget: self.generation_budget(),
+                    };
+                    self.caches.last_perf_report = Some(self.build_perf_report(
+                        preflight,
+                        provider,
+                        tool_schema,
+                        &request_messages,
+                    ));
+                    if !retry_attempts.is_empty() {
+                        self.record_usage_details(
+                            None,
+                            false,
+                            None,
+                            0,
+                            retry_attempts,
+                            lower_effort,
+                        );
+                        self.apply_last_usage_invocation_timing(retry_timing);
+                    }
+                    self.timing.end(model_span);
+                    let failure = ModelCallFailure::from_retry_error(err);
+                    if matches!(failure, ModelCallFailure::Other(_)) {
+                        self.clear_drop_next_turn_controls();
+                    }
+                    return Err(failure);
+                }
+            };
+            response_attempts = retry.attempts;
+            if !response_attempts.is_empty() {
+                response_invocation_timing = Some(retry_timing);
+            }
+            attempts.extend(response_attempts.iter().cloned());
             response = retry.response;
             budget_exhaustion = retry.budget_exhaustion;
             effective_reasoning = lower_effort;
@@ -543,8 +760,10 @@ impl Agent {
         );
         let provider = ProviderPerf {
             first_output_duration: first_output.duration_since(provider_started_at),
-            total_duration: provider_started_at.elapsed(),
-            attempts: attempts.clone(),
+            total_duration: provider_started_at
+                .elapsed()
+                .saturating_sub(retry_count_duration),
+            attempts,
             generation_budget: self.generation_budget(),
         };
         self.caches.last_perf_report =
@@ -552,18 +771,20 @@ impl Agent {
         self.clear_drop_next_turn_controls();
         self.timing.end(model_span);
 
-        self.record_streamed_usage(&response, attempts, effective_reasoning);
+        self.record_streamed_usage(&response, response_attempts, effective_reasoning);
+        if let Some(timing) = response_invocation_timing {
+            self.apply_last_usage_invocation_timing(timing);
+        }
         if let Some(warning) = self.new_cache_warning() {
             sink.status(&warning);
         }
-        let usage_report = self.context_report();
-        sink.context_updated(usage_report);
+        self.emit_context_updated(sink);
 
         if let Some(exhaustion) = terminal_budget_exhaustion {
-            return Err(anyhow::Error::new(exhaustion));
+            return Err(anyhow::Error::new(exhaustion).into());
         }
 
-        Ok(ModelCallOutcome::Response(response))
+        Ok(ModelCallOutcome::Response(response, response_id))
     }
 
     /// Batch `tool_calls`, execute each batch (selecting against
@@ -3560,6 +3781,108 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    struct SchemaRecordingProvider {
+        tools: Arc<StdMutex<Vec<Vec<String>>>>,
+        failure: Option<ProviderFailure>,
+    }
+
+    #[async_trait]
+    impl Provider for SchemaRecordingProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[ChatCompletionRequestMessage],
+            tools: &[ChatCompletionTool],
+            _cancellation_token: CancellationToken,
+            _sink: SharedSink,
+        ) -> crate::provider::ProviderResult<StreamedResponse> {
+            self.tools.lock().unwrap().push(
+                tools
+                    .iter()
+                    .map(|tool| tool.function.name.clone())
+                    .collect(),
+            );
+            match &self.failure {
+                Some(failure) => Err(failure.clone()),
+                None => Ok(StreamedResponse {
+                    content: "hello".to_string(),
+                    ..StreamedResponse::default()
+                }),
+            }
+        }
+
+        async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_recounts_schemas_without_expanding_the_requested_registry() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let primary_tools = Arc::new(StdMutex::new(Vec::new()));
+        let backup_tools = Arc::new(StdMutex::new(Vec::new()));
+        let mut full = ToolRegistry::new();
+        full.register(Arc::new(ReadyTool));
+        full.register(Arc::new(BackgroundModeProbeTool));
+        let mut agent = Agent::new(
+            Box::new(SchemaRecordingProvider {
+                tools: primary_tools.clone(),
+                failure: Some(ProviderFailure::configuration("unavailable")),
+            }),
+            Arc::new(full),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        agent.set_provider_fallback(crate::tool::SubagentProviderConfig::new(
+            Box::new(SchemaRecordingProvider {
+                tools: backup_tools.clone(),
+                failure: None,
+            }),
+            32_000,
+            PromptEstimator::for_tests("gpt-5.5", TokenCounterKind::Tiktoken, None),
+            "backup".to_string(),
+        ));
+        let mut restricted = ToolRegistry::new();
+        restricted.register(Arc::new(ReadyTool));
+        let restricted = Arc::new(restricted);
+        let mut schema = agent.tool_schema_for_registry(&restricted);
+        let original_tokens = schema.model_tool_schema_tokens();
+        let sink: SharedSink = Arc::new(SilentSink);
+
+        let result = agent
+            .call_model(&restricted, &mut schema, &sink, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(result, ModelCallOutcome::Response(..)));
+        assert_eq!(
+            *primary_tools.lock().unwrap(),
+            vec![vec!["ready".to_string()]]
+        );
+        assert_eq!(
+            *backup_tools.lock().unwrap(),
+            vec![vec!["ready".to_string()]]
+        );
+        assert_eq!(
+            schema.model_tool_schema_tokens(),
+            agent
+                .prompt_estimator
+                .estimate_tool_schema_tokens_from_bytes(&schema.serialized_bytes)
+        );
+        assert_ne!(schema.model_tool_schema_tokens(), original_tokens);
+        assert_eq!(
+            agent
+                .caches
+                .last_sent_prompt_estimate
+                .as_ref()
+                .unwrap()
+                .source,
+            TokenCounterKind::Tiktoken
+        );
+    }
 
     struct SlowTool {
         cancellation: Arc<StdMutex<Option<CancellationToken>>>,

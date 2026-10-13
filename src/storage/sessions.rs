@@ -830,15 +830,40 @@ impl Storage {
         let Some(summary) = self.session_summary(session_id).await? else {
             return Ok(None);
         };
-        let context_snapshot = self.load_context_messages(session_id).await?;
+        // Cross-linked rows must share a SQLite read snapshot. A writer may
+        // commit an atomic replacement while resume is preparing its state.
+        let mut context_tx = self.pool.begin().await?;
+        let context_snapshot = self
+            .load_context_messages(&mut context_tx, session_id)
+            .await?;
+        let context_sources = self
+            .load_context_sources(&mut context_tx, session_id)
+            .await?;
+        let native_replay = self.load_native_replay(&mut context_tx, session_id).await?;
+        let context_controls = self
+            .load_context_controls(&mut context_tx, session_id)
+            .await?;
+        let context_source_stable_ids = self
+            .load_context_source_stable_ids(&mut context_tx, session_id)
+            .await?;
+        native_replay
+            .validate(
+                &context_snapshot.messages,
+                &context_snapshot.ids,
+                &context_sources,
+            )
+            .with_context(|| format!("Invalid native response replay for session {session_id}"))?;
+        context_tx.commit().await?;
         Ok(Some(SessionSnapshot {
             summary,
             transcript: self.load_transcript_items(session_id).await?,
             context_messages: context_snapshot.messages,
             context_message_ids: context_snapshot.ids,
-            context_controls: self.load_context_controls(session_id).await?,
-            context_sources: self.load_context_sources(session_id).await?,
-            context_source_stable_ids: self.load_context_source_stable_ids(session_id).await?,
+            tool_call_identities: self.load_tool_call_identities(session_id).await?,
+            native_replay,
+            context_controls,
+            context_sources,
+            context_source_stable_ids,
             read_evidence: self.load_read_evidence(session_id).await?,
             inspection_events: self.load_inspection_events(session_id).await?,
             compaction_events: self.load_compaction_events(session_id).await?,

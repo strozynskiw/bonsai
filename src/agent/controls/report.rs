@@ -114,6 +114,9 @@ impl Agent {
         if mode == self.mode
             && messages.len() == self.messages.len()
             && pending_messages.is_empty()
+            && projection.estimate_error().is_none()
+            && projection.estimate_fingerprint().is_some()
+            && projection.estimate_fingerprint() == self.caches.last_prompt_estimate_fingerprint
             && let Some(last_estimate) = &self.caches.last_prompt_estimate
         {
             estimate = last_estimate.clone();
@@ -159,6 +162,7 @@ impl Agent {
             messages,
             message_ids: &message_ids,
             message_tokens: &message_tokens,
+            native_message_budgets: projection.native_message_budgets(),
             tools: tool_schema.tools(),
             estimate: &estimate,
             row_metadata,
@@ -183,6 +187,18 @@ impl Agent {
             );
         }
         add_framing_adjustment(&mut ledger, estimate.input_tokens, &estimate);
+        if let Some(error) = projection.estimate_error() {
+            ledger.push(ContextNode::leaf(
+                ContextNodeId::raw("request-estimate-error"),
+                ContextNodeKind::FramingAdjustment,
+                ContextInclusion::Adjustment,
+                None,
+                "Request estimate unavailable",
+                0,
+                error,
+                ContextTokenMetadata::from_estimate(&report_estimate),
+            ));
+        }
         let payload_preview = self
             .caches
             .last_perf_report

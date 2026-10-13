@@ -318,13 +318,14 @@ impl Agent {
         // the archived bytes in context. A first recall is never blocked.
         let model_content = if success && tool_call.name == "recall" {
             match self.recall_reuse_pointer(&tool_call, &model_content) {
-                Some(pointer) => {
+                Some(reuse) => {
                     if let Some(detail) = self.tool_context_details.get_mut(&tool_call.id) {
                         detail.result = ToolContextResult::Text {
-                            rendered: pointer.clone(),
+                            rendered: reuse.pointer.clone(),
                         };
+                        detail.reuse_target_call_id = Some(reuse.target_call_id);
                     }
-                    pointer
+                    reuse.pointer
                 }
                 None => model_content,
             }
@@ -337,6 +338,14 @@ impl Agent {
                 .tool_call_id(&tool_call.id)
                 .build()?,
         );
+        if self
+            .tool_context_details
+            .get(&tool_call.id)
+            .is_some_and(|detail| detail.reuse_target_call_id.is_some())
+        {
+            self.tool_call_identities
+                .set_reuse_sources(&tool_call.id, self.reuse_source_call_ids(&tool_message));
+        }
         self.push_message(tool_message);
 
         if let ToolOutput::Image {

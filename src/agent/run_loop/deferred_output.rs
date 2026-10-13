@@ -52,6 +52,10 @@ impl DeferredAssistantSink {
 }
 
 impl OutputSink for DeferredAssistantSink {
+    fn wants_context_updates(&self) -> bool {
+        self.inner.wants_context_updates()
+    }
+
     fn assistant_delta(&self, text: &str) {
         if let Ok(mut output) = self.assistant.lock() {
             output.text.push_str(text);
@@ -174,6 +178,14 @@ mod tests {
                 .expect("recording sink mutex should not be poisoned")
                 .push(format!("thinking:{text}"));
         }
+    }
+
+    #[test]
+    fn preserves_context_subscription_when_deferring_assistant_output() {
+        let silent: SharedSink = Arc::new(crate::agent::SilentSink);
+        assert!(!DeferredAssistantSink::new(silent).wants_context_updates());
+        let subscriber: SharedSink = Arc::new(RecordingSink::default());
+        assert!(DeferredAssistantSink::new(subscriber).wants_context_updates());
     }
 
     #[test]

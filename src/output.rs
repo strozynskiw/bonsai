@@ -182,6 +182,12 @@ pub trait OutputSink: Send + Sync {
     /// as mutations made by a successful shell command.
     fn workspace_changed(&self, _paths: &[String], _intent: &str) {}
     fn queued_user_message_sent(&self, _id: u64, _text: &str) {}
+    /// Whether this sink consumes context reports. Agent callers can skip
+    /// report construction and tokenization when the sink discards them.
+    /// Defaults to true to preserve updates for existing subscribers.
+    fn wants_context_updates(&self) -> bool {
+        true
+    }
     fn context_updated(&self, _report: ContextReport) {}
     /// An immediate confirmation that display surfaces may show without
     /// retaining in their transcript. Sinks without a transient surface retain

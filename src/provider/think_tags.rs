@@ -9,6 +9,11 @@
 //! tail that could be the start of a tag and only commits it once it knows
 //! whether a tag completed. Call [`ThinkTagSplitter::finish`] at end of stream
 //! to flush whatever remains.
+//!
+//! Only one leading block is eligible. Once answer text starts, all later tags
+//! are literal content, including code examples. Transports with native
+//! reasoning use [`ThinkTagSplitter::use_native_reasoning_channel`] before
+//! feeding answer text, preserving even a literal tag at its start.
 
 const OPEN: &str = "<think>";
 const CLOSE: &str = "</think>";
@@ -16,17 +21,25 @@ const CLOSE: &str = "</think>";
 /// Text routed out of one [`ThinkTagSplitter::push`]/[`finish`](ThinkTagSplitter::finish) call.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ThinkSplit {
-    /// Text outside `<think>` blocks — the visible assistant answer.
+    /// Visible assistant answer text, with later literal tags preserved.
     pub visible: String,
-    /// Text inside `<think>` blocks — the model's reasoning.
+    /// Text inside the leading inline reasoning block.
     pub reasoning: String,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ThinkTagSplitter {
-    in_think: bool,
+    state: ThinkState,
     /// Bytes held back because they might be the leading part of a split tag.
     pending: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ThinkState {
+    #[default]
+    Prefix,
+    Reasoning,
+    Answer,
 }
 
 impl ThinkTagSplitter {
@@ -34,29 +47,69 @@ impl ThinkTagSplitter {
         Self::default()
     }
 
+    /// Native reasoning makes the text channel an answer channel. Flush a
+    /// possible opening-tag fragment literally before any later answer delta.
+    /// If a legacy inline block already opened, finish that block normally;
+    /// streamed reasoning cannot be retroactively reclassified.
+    pub(crate) fn use_native_reasoning_channel(&mut self) -> ThinkSplit {
+        if self.state == ThinkState::Reasoning {
+            return ThinkSplit::default();
+        }
+        self.state = ThinkState::Answer;
+        ThinkSplit {
+            visible: std::mem::take(&mut self.pending),
+            reasoning: String::new(),
+        }
+    }
+
     /// Feed a text delta, returning the visible and reasoning text it yields.
     pub(crate) fn push(&mut self, chunk: &str) -> ThinkSplit {
+        if self.state == ThinkState::Answer {
+            return ThinkSplit {
+                visible: chunk.to_string(),
+                reasoning: String::new(),
+            };
+        }
         self.pending.push_str(chunk);
         let mut out = ThinkSplit::default();
         loop {
-            let (tag, bucket) = if self.in_think {
-                (CLOSE, &mut out.reasoning)
-            } else {
-                (OPEN, &mut out.visible)
-            };
-            if let Some(idx) = self.pending.find(tag) {
-                bucket.push_str(&self.pending[..idx]);
-                self.pending.drain(..idx + tag.len());
-                self.in_think = !self.in_think;
-                continue;
+            match self.state {
+                ThinkState::Prefix => {
+                    let after_whitespace = self.pending.trim_start_matches(char::is_whitespace);
+                    let leading = self.pending.len() - after_whitespace.len();
+                    out.visible.push_str(&self.pending[..leading]);
+                    if after_whitespace.starts_with(OPEN) {
+                        self.pending.drain(..leading + OPEN.len());
+                        self.state = ThinkState::Reasoning;
+                    } else if OPEN.starts_with(after_whitespace) {
+                        // Hold only a possible opening tag, never an arbitrary
+                        // amount of whitespace or answer text.
+                        self.pending.drain(..leading);
+                        break;
+                    } else {
+                        self.pending.drain(..leading);
+                        self.state = ThinkState::Answer;
+                    }
+                }
+                ThinkState::Reasoning => {
+                    if let Some(idx) = self.pending.find(CLOSE) {
+                        out.reasoning.push_str(&self.pending[..idx]);
+                        self.pending.drain(..idx + CLOSE.len());
+                        self.state = ThinkState::Answer;
+                        continue;
+                    }
+                    let keep = partial_suffix(&self.pending, CLOSE);
+                    let cut = self.pending.len() - keep;
+                    out.reasoning.push_str(&self.pending[..cut]);
+                    self.pending.drain(..cut);
+                    break;
+                }
+                ThinkState::Answer => {
+                    out.visible.push_str(&self.pending);
+                    self.pending.clear();
+                    break;
+                }
             }
-            // No complete tag: emit everything except a trailing run that could
-            // be the start of `tag` once the next chunk arrives.
-            let keep = partial_suffix(&self.pending, tag);
-            let cut = self.pending.len() - keep;
-            bucket.push_str(&self.pending[..cut]);
-            self.pending.drain(..cut);
-            break;
         }
         out
     }
@@ -67,7 +120,7 @@ impl ThinkTagSplitter {
     pub(crate) fn finish(&mut self) -> ThinkSplit {
         let rest = std::mem::take(&mut self.pending);
         let mut out = ThinkSplit::default();
-        if self.in_think {
+        if self.state == ThinkState::Reasoning {
             out.reasoning = rest;
         } else {
             out.visible = rest;
@@ -132,17 +185,17 @@ mod tests {
     }
 
     #[test]
-    fn text_before_and_after_think_block() {
+    fn tags_after_answer_text_stay_literal() {
         let out = run(&["hi <think>hmm</think> there"]);
-        assert_eq!(out.visible, "hi  there");
-        assert_eq!(out.reasoning, "hmm");
+        assert_eq!(out.visible, "hi <think>hmm</think> there");
+        assert_eq!(out.reasoning, "");
     }
 
     #[test]
-    fn multiple_think_blocks() {
+    fn later_think_blocks_are_answer_content() {
         let out = run(&["<think>one</think>A<think>two</think>B"]);
-        assert_eq!(out.reasoning, "onetwo");
-        assert_eq!(out.visible, "AB");
+        assert_eq!(out.reasoning, "one");
+        assert_eq!(out.visible, "A<think>two</think>B");
     }
 
     #[test]
@@ -164,7 +217,60 @@ mod tests {
     fn multibyte_text_around_partial_tag() {
         // A held-back partial-tag suffix must not slice through a multibyte char.
         let out = run(&["café <", "think>π</think> δ"]);
-        assert_eq!(out.visible, "café  δ");
+        assert_eq!(out.visible, "café <think>π</think> δ");
+        assert_eq!(out.reasoning, "");
+    }
+
+    #[test]
+    fn initial_whitespace_does_not_hide_the_prefix() {
+        let out = run(&["\n\t", "<th", "ink>π</th", "ink> café"]);
+        assert_eq!(out.visible, "\n\t café");
         assert_eq!(out.reasoning, "π");
+    }
+
+    #[test]
+    fn markdown_example_is_preserved_across_every_chunk_boundary() {
+        let text = "```xml\n<think>café π</think>\n```";
+        for boundary in (0..=text.len()).filter(|offset| text.is_char_boundary(*offset)) {
+            let out = run(&[&text[..boundary], &text[boundary..]]);
+            assert_eq!(out.visible, text, "boundary {boundary}");
+            assert!(out.reasoning.is_empty());
+        }
+    }
+
+    #[test]
+    fn reasoning_prefix_then_literal_example_is_chunk_invariant() {
+        let text = "<think>π café</think><think>literal example</think>";
+        for boundary in (0..=text.len()).filter(|offset| text.is_char_boundary(*offset)) {
+            let out = run(&[&text[..boundary], &text[boundary..]]);
+            assert_eq!(
+                out.visible, "<think>literal example</think>",
+                "boundary {boundary}"
+            );
+            assert_eq!(out.reasoning, "π café", "boundary {boundary}");
+        }
+    }
+
+    #[test]
+    fn native_channel_preserves_an_opening_tag_fragment() {
+        let mut splitter = ThinkTagSplitter::new();
+        assert_eq!(splitter.push("<thi"), ThinkSplit::default());
+        assert_eq!(splitter.use_native_reasoning_channel().visible, "<thi");
+        let next = splitter.push("nk>literal</think>");
+        assert_eq!(next.visible, "nk>literal</think>");
+        assert!(next.reasoning.is_empty());
+    }
+
+    #[test]
+    fn native_channel_does_not_reclassify_started_inline_reasoning() {
+        let mut splitter = ThinkTagSplitter::new();
+        assert_eq!(splitter.push("<think>π</thi").reasoning, "π");
+        assert_eq!(
+            splitter.use_native_reasoning_channel(),
+            ThinkSplit::default()
+        );
+        let next = splitter.push("nk><think>literal</think>");
+        assert_eq!(next.visible, "<think>literal</think>");
+        assert!(next.reasoning.is_empty());
     }
 }

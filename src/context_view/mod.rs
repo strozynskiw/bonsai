@@ -454,7 +454,21 @@ pub(crate) fn add_framing_adjustment(
         .iter()
         .map(ContextNode::counted_tokens)
         .sum::<usize>();
-    if prompt_estimate_tokens <= counted {
+    if prompt_estimate_tokens == counted {
+        return;
+    }
+    if prompt_estimate_tokens < counted {
+        let difference = counted - prompt_estimate_tokens;
+        ledger.push(ContextNode::leaf(
+            ContextNodeId::raw("framing-adjustment"),
+            ContextNodeKind::FramingAdjustment,
+            ContextInclusion::Adjustment,
+            None,
+            format!("Provider framing/tokenizer delta -{difference}"),
+            0,
+            &format!("Prepared request estimate {prompt_estimate_tokens} is {difference} below the local per-row allocation {counted}; the request estimate remains the reported total."),
+            ContextTokenMetadata::from_estimate(estimate),
+        ));
         return;
     }
     let delta = prompt_estimate_tokens - counted;
@@ -470,10 +484,18 @@ pub(crate) fn add_framing_adjustment(
     ));
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NativeMessageBudget {
+    pub(crate) reasoning_tokens: usize,
+    pub(crate) opaque_reserve_tokens: usize,
+    pub(crate) opaque_cost_unknown: bool,
+}
+
 pub(crate) struct ContextLedgerBuildInput<'a> {
     pub(crate) messages: &'a [ChatCompletionRequestMessage],
     pub(crate) message_ids: &'a [String],
     pub(crate) message_tokens: &'a [usize],
+    pub(crate) native_message_budgets: &'a HashMap<usize, NativeMessageBudget>,
     pub(crate) tools: &'a [ChatCompletionTool],
     pub(crate) estimate: &'a PromptEstimate,
     pub(crate) row_metadata: ContextTokenMetadata,
@@ -516,16 +538,17 @@ pub(crate) fn context_ledger_for_messages(input: ContextLedgerBuildInput<'_>) ->
                 .unwrap_or(ContextInclusion::Included)
         };
 
+        let mut tool_input_tokens = 0usize;
         if inclusion == ContextInclusion::Included
             && let Some(calls) = assistant_tool_calls(message)
         {
             for call in calls {
-                tool_calls.record_input(
+                tool_input_tokens = tool_input_tokens.saturating_add(tool_calls.record_input(
                     call,
                     input.row_metadata,
                     input.prompt_estimator,
                     message_source.clone(),
-                );
+                ));
             }
         }
 
@@ -554,7 +577,7 @@ pub(crate) fn context_ledger_for_messages(input: ContextLedgerBuildInput<'_>) ->
             )
         };
         let id = ContextNodeId::raw(id);
-        let children = message_children(
+        let mut children = message_children(
             &input,
             &id,
             message,
@@ -565,6 +588,36 @@ pub(crate) fn context_ledger_for_messages(input: ContextLedgerBuildInput<'_>) ->
             inclusion,
             &message_source,
         );
+        if let Some(native) = input.native_message_budgets.get(&index) {
+            if native.reasoning_tokens > 0 {
+                children.push(ContextNode::leaf(
+                    id.child("native-reasoning"),
+                    ContextNodeKind::OutputText,
+                    inclusion,
+                    Some(role),
+                    "Native reasoning",
+                    native.reasoning_tokens,
+                    "Plaintext reasoning retained in the provider request; its local allocation is an estimate.",
+                    input.row_metadata,
+                ).with_source(message_source.clone()));
+            }
+            if native.opaque_reserve_tokens > 0 || native.opaque_cost_unknown {
+                children.push(ContextNode::leaf(
+                    id.child("native-opaque-allowance"),
+                    ContextNodeKind::FramingAdjustment,
+                    inclusion,
+                    Some(role),
+                    "Opaque reasoning allowance",
+                    native.opaque_reserve_tokens,
+                    if native.opaque_cost_unknown {
+                        "Local fallback allowance: native reasoning has no output measurement or original output ceiling, so a full context window is reserved. A remote count replaces this allowance in the request total."
+                    } else {
+                        "Local fallback allowance from the original output measurement or output ceiling, counted once for this response. A remote count replaces it in the request total; ciphertext length is not a token count."
+                    },
+                    ContextTokenMetadata { source: input.row_metadata.source, confidence: EstimateConfidence::Low },
+                ).with_source(message_source.clone()));
+            }
+        }
 
         if role == ContextRole::Assistant
             && children.is_empty()
@@ -573,6 +626,28 @@ pub(crate) fn context_ledger_for_messages(input: ContextLedgerBuildInput<'_>) ->
         {
             continue;
         }
+
+        // Tool arguments already have an allocation in the tools ledger.
+        // Subtract only from the ordinary assistant portion: pretty arguments
+        // can exceed the typed estimate, but native and visible child costs
+        // must remain intact.
+        let native_tokens = input
+            .native_message_budgets
+            .get(&index)
+            .map_or(0, |native| {
+                native
+                    .reasoning_tokens
+                    .saturating_add(native.opaque_reserve_tokens)
+            });
+        let child_tokens = children
+            .iter()
+            .filter(|child| child.inclusion.counts_toward_prompt())
+            .fold(0usize, |total, child| total.saturating_add(child.tokens));
+        let tokens = tokens
+            .saturating_sub(native_tokens)
+            .saturating_sub(tool_input_tokens)
+            .saturating_add(native_tokens)
+            .max(child_tokens);
 
         let node = message_node_with_framing(
             ContextNode::parent(

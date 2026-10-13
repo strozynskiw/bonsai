@@ -7,16 +7,29 @@ use super::*;
 pub(in crate::agent) struct ContextProjection {
     control_messages: Vec<ChatCompletionRequestMessage>,
     wire_messages: Vec<ChatCompletionRequestMessage>,
+    wire_request_context: crate::provider::ProviderRequestContext,
     source_message_tokens: Vec<usize>,
     estimate: Option<PromptEstimate>,
+    estimate_error: Option<String>,
+    estimate_fingerprint: Option<blake3::Hash>,
+    native_message_budgets: HashMap<usize, crate::context_view::NativeMessageBudget>,
     items: Vec<ContextProjectionItem>,
 }
 
 impl ContextProjection {
+    pub(in crate::agent) fn into_prepared_model_request(self) -> PreparedModelRequest {
+        PreparedModelRequest {
+            messages: self.wire_messages,
+            context: self.wire_request_context,
+            options: Default::default(),
+            estimate_fingerprint: self.estimate_fingerprint,
+        }
+    }
     pub(in crate::agent) fn control_messages(&self) -> &[ChatCompletionRequestMessage] {
         &self.control_messages
     }
 
+    #[cfg(test)]
     pub(in crate::agent) fn wire_messages(&self) -> &[ChatCompletionRequestMessage] {
         &self.wire_messages
     }
@@ -27,6 +40,20 @@ impl ContextProjection {
 
     pub(in crate::agent) fn estimate(&self) -> Option<&PromptEstimate> {
         self.estimate.as_ref()
+    }
+
+    pub(in crate::agent) fn estimate_error(&self) -> Option<&str> {
+        self.estimate_error.as_deref()
+    }
+
+    pub(in crate::agent) fn estimate_fingerprint(&self) -> Option<blake3::Hash> {
+        self.estimate_fingerprint
+    }
+
+    pub(in crate::agent) fn native_message_budgets(
+        &self,
+    ) -> &HashMap<usize, crate::context_view::NativeMessageBudget> {
+        &self.native_message_budgets
     }
 
     pub(in crate::agent) fn volatile_terminal_tokens(&self) -> usize {
@@ -237,7 +264,7 @@ impl Agent {
             });
         }
 
-        let estimate = tool_schema.map(|tool_schema| {
+        let mut estimate = tool_schema.map(|tool_schema| {
             let (payload_tokens, estimate) = self
                 .prompt_estimator
                 .estimate_messages_for_report_with_tool_schema_tokens(
@@ -276,11 +303,134 @@ impl Agent {
             });
         }
 
-        let wire_messages = if self.smol_applies_to_active_persona() {
-            self.smol_outgoing_messages(control_messages.clone())
+        let (wire_messages, wire_source_indices) = if self.smol_applies_to_active_persona() {
+            self.smol_outgoing_messages_with_sources(control_messages.clone())
         } else {
-            control_messages.clone()
+            (
+                control_messages.clone(),
+                (0..control_messages.len()).map(Some).collect(),
+            )
         };
+        let assistant_response_ids = wire_messages
+            .iter()
+            .zip(wire_source_indices.iter().copied())
+            .filter_map(|(message, source_index)| {
+                if !matches!(message, ChatCompletionRequestMessage::Assistant(_)) {
+                    return None;
+                }
+                let id = source_index
+                    .and_then(|index| control_message_item_indices.get(index))
+                    .and_then(|&index| items.get(index))
+                    .filter(|item| item.transform == ContextProjectionTransform::None)
+                    .and_then(|item| item.source.message_index())
+                    .and_then(|index| message_ids.get(index))
+                    .and_then(|id| self.native_response_bindings.get(id))
+                    .cloned();
+                Some(id)
+            })
+            .collect();
+        let wire_request_context = crate::provider::ProviderRequestContext {
+            assistant_response_ids: Some(assistant_response_ids),
+            response_id: None,
+        };
+        let mut estimate_error = None;
+        let mut estimate_fingerprint = None;
+        let mut native_message_budgets = HashMap::new();
+        if let Some(tool_schema) = tool_schema {
+            let options = self
+                .verification_reasoning_for_request()
+                .map(crate::provider::ProviderRequestOptions::with_reasoning)
+                .unwrap_or_default();
+            let prepared = self.provider.prepare_request_for_estimation(
+                &wire_messages,
+                tool_schema.tools(),
+                options,
+                &wire_request_context,
+            );
+            match prepared.and_then(|prepared| {
+                estimate_fingerprint = Some(prepared.estimate_fingerprint().map_err(|error| {
+                    crate::provider::ProviderFailure::configuration(format!(
+                        "Failed to identify prepared prompt: {error}"
+                    ))
+                })?);
+                let counted = self
+                    .prompt_estimator
+                    .estimate_prepared_for_report(
+                        &prepared,
+                        tool_schema.report_tool_schema_tokens(),
+                        self.budget.context_budget_tokens,
+                    )
+                    .map_err(|error| {
+                        crate::provider::ProviderFailure::configuration(format!("{error:#}"))
+                    })?;
+                let native_by_slot = prepared
+                    .native_budget
+                    .iter()
+                    .map(|native| (native.assistant_slot, native))
+                    .collect::<HashMap<_, _>>();
+                // SMOL can remove old assistant rows; use its source sidecar,
+                // rather than the ordinal of untransformed control rows.
+                let mut assistant_slot = 0usize;
+                for (message, source) in wire_messages.iter().zip(wire_source_indices) {
+                    if !matches!(message, ChatCompletionRequestMessage::Assistant(_)) {
+                        continue;
+                    }
+                    if let Some(native) = native_by_slot.get(&assistant_slot)
+                        && let Some(item_index) = source
+                            .and_then(|source| control_message_item_indices.get(source))
+                            .copied()
+                    {
+                        let allowance = if native.opaque {
+                            native
+                                .opaque_allowance_tokens
+                                .map(|tokens| {
+                                    usize::try_from(tokens)
+                                        .unwrap_or(self.budget.context_budget_tokens)
+                                        .min(self.budget.context_budget_tokens)
+                                })
+                                .unwrap_or(self.budget.context_budget_tokens)
+                        } else {
+                            0
+                        };
+                        let text_tokens = if native.reasoning_text.is_empty() {
+                            0
+                        } else {
+                            self.prompt_estimator
+                                .estimate_text_for_report(&native.reasoning_text)
+                        };
+                        let extra = text_tokens.saturating_add(allowance);
+                        items[item_index].tokens = items[item_index].tokens.saturating_add(extra);
+                        if let Some(index) = items[item_index].source.message_index() {
+                            source_message_tokens[index] =
+                                source_message_tokens[index].saturating_add(extra);
+                            native_message_budgets.insert(
+                                index,
+                                crate::context_view::NativeMessageBudget {
+                                    reasoning_tokens: text_tokens,
+                                    opaque_reserve_tokens: allowance,
+                                    opaque_cost_unknown: native.opaque
+                                        && native.opaque_allowance_tokens.is_none(),
+                                },
+                            );
+                        }
+                    }
+                    assistant_slot += 1;
+                }
+                Ok(counted)
+            }) {
+                Ok(counted) => estimate = Some(counted),
+                Err(error) => {
+                    estimate_error = Some(error.to_string());
+                    let mut unavailable = PromptEstimate::heuristic(
+                        self.budget.context_budget_tokens,
+                        tool_schema.report_tool_schema_tokens(),
+                        TokenCounterKind::Heuristic,
+                    );
+                    unavailable.native_cost_unknown = true;
+                    estimate = Some(unavailable);
+                }
+            }
+        }
         if self.smol_applies_to_active_persona() {
             mark_smol_transforms(&mut items, &control_messages, &wire_messages);
         }
@@ -288,8 +438,12 @@ impl Agent {
         ContextProjection {
             control_messages,
             wire_messages,
+            wire_request_context,
             source_message_tokens,
             estimate,
+            estimate_error,
+            estimate_fingerprint,
+            native_message_budgets,
             items,
         }
     }
@@ -393,6 +547,7 @@ mod trust_tests {
             MessageProvenance::Peer,
             MessageProvenance::Background,
             MessageProvenance::Terminal,
+            MessageProvenance::ToolImage,
             MessageProvenance::UntrustedData,
         ] {
             let message = crate::agent::messages::provenance_message(provenance, "external data");

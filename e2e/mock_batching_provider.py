@@ -51,11 +51,12 @@ class BatchingServer(ThreadingHTTPServer):
         self.server_name = "127.0.0.1"
         self.server_port = self.server_address[1]
 
-    def __init__(self, address, request_log):
+    def __init__(self, address, request_log, repeat_call_ids=False):
         super().__init__(address, BatchingHandler)
         self.request_log = request_log
         self.request_count = 0
         self.request_lock = threading.Lock()
+        self.repeat_call_ids = repeat_call_ids
 
     def record_request(self, payload):
         with self.request_lock:
@@ -87,6 +88,8 @@ class BatchingHandler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(content_length))
         request_id = self.server.record_request(payload)
         content, calls = SCRIPT.get(request_id, (FINAL_TEXT, []))
+        if self.server.repeat_call_ids and request_id == 2:
+            calls = singleton("lib.sh")
         self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -105,7 +108,7 @@ class BatchingHandler(BaseHTTPRequestHandler):
                                 "tool_calls": [
                                     {
                                         "index": index,
-                                        "id": f"call-{request_id}-{index}",
+                                        "id": "same-wire-id" if self.server.repeat_call_ids else f"call-{request_id}-{index}",
                                         "type": "function",
                                         "function": {
                                             "name": call["name"],
@@ -130,12 +133,12 @@ class BatchingHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: mock_batching_provider.py <ready-file> <request-log>")
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and sys.argv[3] != "--repeat-call-ids"):
+        raise SystemExit("usage: mock_batching_provider.py <ready-file> <request-log> [--repeat-call-ids]")
     ready_file = Path(sys.argv[1])
     request_log = Path(sys.argv[2])
     request_log.write_text("", encoding="utf-8")
-    with BatchingServer(("127.0.0.1", 0), request_log) as server:
+    with BatchingServer(("127.0.0.1", 0), request_log, len(sys.argv) == 4) as server:
         ready_file.write_text(
             f"http://127.0.0.1:{server.server_port}/v1", encoding="utf-8"
         )

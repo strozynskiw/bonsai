@@ -1030,6 +1030,10 @@ impl RecordingSink {
 }
 
 impl OutputSink for RecordingSink {
+    fn wants_context_updates(&self) -> bool {
+        false
+    }
+
     fn assistant_delta(&self, text: &str) {
         self.registry.append_activity(&self.id, text);
     }
@@ -1348,6 +1352,7 @@ mod tests {
         let reg = Arc::new(SubagentRegistry::new());
         let id = reg.register("explore", "p", false);
         let sink = RecordingSink::new(reg.clone(), id.clone());
+        assert!(!sink.wants_context_updates());
         sink.tool_started("t1", "grep", "{\"query\":\"Skill\"}");
         sink.tool_finished(
             "t1",

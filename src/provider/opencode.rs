@@ -43,8 +43,8 @@ pub static OPENCODE_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         // after stable history. Keeping that state inside the system head made
         // 20 of 91 turns re-tokenize 40k+ prompts from byte 0.
         // The Go gateway's DeepSeek adapter additionally requires `reasoning_content`
-        // on assistant tool-call messages — see
-        // [`ensure_reasoning_content_on_tool_call_messages`].
+        // on assistant history when tools are present — see
+        // [`ensure_native_reasoning_content`].
         ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS)
             .with_prompt_cache()
             .with_reasoning_content_echo(),
@@ -164,52 +164,19 @@ pub struct OpenAiCompatibleProvider {
     /// set it here. Its presence normally suppresses the body
     /// `prompt_cache_key`; TokenHub's explicit policy sends both.
     prompt_cache_header: Option<Box<str>>,
-    /// Native reasoning captured for assistant tool-call turns, keyed by the
-    /// first call id so it can be restored when that turn re-enters history.
-    reasoning_by_call_id: std::sync::Mutex<HashMap<String, String>>,
-    /// Hunyuan preserved thinking applies to every assistant turn, including
-    /// plain text replies without tool calls. Match exact visible content and
-    /// call ids in history order so its native trace can be replayed.
-    hunyuan_reasoning_replay: std::sync::Mutex<Vec<HunyuanReasoningReplay>>,
-    /// Provider-specific metadata captured on streamed tool calls and replayed
-    /// on the matching assistant tool-call entry. Gemini 3 places its required
-    /// encrypted thought signature under `extra_content`.
-    tool_call_extra_content_by_id: std::sync::Mutex<HashMap<String, Value>>,
-    /// Mistral reasoning arrives as structured assistant content rather than a
-    /// side-channel field. Keep each completed native content array so later
-    /// requests can replace Bonsai's text-only history projection with the
-    /// exact thinking/text shape required by Mistral.
-    mistral_content_replay: std::sync::Mutex<Vec<MistralContentReplay>>,
-    /// OpenRouter normalizes routed providers' preserved reasoning into an
-    /// opaque `reasoning_details` sequence. Tool follow-ups must replay that
-    /// sequence byte-for-byte on the assistant turn that produced it.
-    openrouter_reasoning_replay: std::sync::Mutex<Vec<OpenRouterReasoningReplay>>,
     last_request_diagnostics: std::sync::Mutex<Option<ProviderRequestDiagnostics>>,
-}
-
-#[derive(Debug, Clone)]
-struct MistralContentReplay {
-    visible_content: String,
-    tool_call_ids: Vec<String>,
-    parts: Vec<Value>,
-}
-
-#[derive(Debug, Clone)]
-struct OpenRouterReasoningReplay {
-    visible_content: String,
-    tool_call_ids: Vec<String>,
-    reasoning_details: Vec<Value>,
-    legacy_reasoning: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct HunyuanReasoningReplay {
-    visible_content: String,
-    tool_call_ids: Vec<String>,
-    reasoning_content: String,
+    tool_call_identities: crate::provider::ToolCallIdentityStore,
+    tool_call_scope: String,
+    native_replay: crate::provider::NativeReplayStore,
+    native_replay_scope: String,
 }
 
 impl OpenAiCompatibleProvider {
+    #[cfg(test)]
+    pub(crate) fn with_test_http_client(mut self) -> Self {
+        self.http = reqwest::Client::new();
+        self
+    }
     pub(crate) fn with_api_key_policy(
         provider_id: impl Into<String>,
         session: &ProviderSession,
@@ -222,18 +189,34 @@ impl OpenAiCompatibleProvider {
         let supports_prompt_cache =
             capabilities.supports_prompt_cache || is_official_openai_api_base_url(&base_url);
         let model = target.remote_model_id.to_string();
+        let provider_id = provider_id.into();
+        let endpoint_path = target
+            .endpoint_path
+            .as_deref()
+            .unwrap_or("chat/completions")
+            .to_string();
+        let tool_call_scope = crate::provider::tool_call_scope(
+            "openai-chat",
+            &provider_id,
+            &base_url,
+            &endpoint_path,
+        );
+        // Native traces are model/codec-specific protocol data. A shared field
+        // name does not establish replay compatibility with another model.
+        let native_replay_scope = crate::provider::tool_call_scope(
+            "openai-chat-native",
+            &tool_call_scope,
+            &model,
+            &format!("{:?}", target.reasoning_codec),
+        );
 
         Self {
-            provider_id: provider_id.into(),
+            provider_id,
             http: crate::provider::http_client(),
             model,
             base_url,
             api_key,
-            endpoint_path: target
-                .endpoint_path
-                .as_deref()
-                .unwrap_or("chat/completions")
-                .to_string(),
+            endpoint_path,
             output_limit: target.output_limit,
             reasoning: target.reasoning,
             reasoning_escalation: target.reasoning_escalation,
@@ -249,12 +232,11 @@ impl OpenAiCompatibleProvider {
             supports_vision: target.supports_vision || capabilities.supports_vision,
             prompt_cache_key: crate::provider::new_conversation_cache_key(),
             prompt_cache_header: target.prompt_cache_header.clone(),
-            reasoning_by_call_id: std::sync::Mutex::new(HashMap::new()),
-            hunyuan_reasoning_replay: std::sync::Mutex::new(Vec::new()),
-            tool_call_extra_content_by_id: std::sync::Mutex::new(HashMap::new()),
-            mistral_content_replay: std::sync::Mutex::new(Vec::new()),
-            openrouter_reasoning_replay: std::sync::Mutex::new(Vec::new()),
             last_request_diagnostics: std::sync::Mutex::new(None),
+            tool_call_identities: crate::provider::ToolCallIdentityStore::default(),
+            tool_call_scope,
+            native_replay: crate::provider::NativeReplayStore::default(),
+            native_replay_scope,
         }
     }
 
@@ -293,11 +275,68 @@ impl OpenAiCompatibleProvider {
         self.request_body_with_reasoning(messages, tools, self.reasoning)
     }
 
+    #[cfg(test)]
+    async fn chat_stream_for_replay_test(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        response_id: &crate::provider::ResponseId,
+        cancellation_token: CancellationToken,
+        sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        self.chat_stream_with_context(
+            messages,
+            tools,
+            crate::provider::ProviderRequestOptions::default(),
+            &crate::provider::ProviderRequestContext {
+                assistant_response_ids: None,
+                response_id: Some(response_id.clone()),
+            },
+            cancellation_token,
+            sink,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    fn replay_body_for_test(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        response_ids: &[crate::provider::ResponseId],
+    ) -> Result<Value> {
+        self.request_body_with_context(
+            messages,
+            tools,
+            self.reasoning,
+            &crate::provider::ProviderRequestContext {
+                assistant_response_ids: Some(response_ids.iter().cloned().map(Some).collect()),
+                response_id: None,
+            },
+        )
+    }
+
+    #[cfg(test)]
     fn request_body_with_reasoning(
         &self,
         messages: &[ChatCompletionRequestMessage],
         tools: &[ChatCompletionTool],
         reasoning: crate::provider::ReasoningSelection,
+    ) -> Result<Value> {
+        self.request_body_with_context(
+            messages,
+            tools,
+            reasoning,
+            &crate::provider::ProviderRequestContext::default(),
+        )
+    }
+
+    fn request_body_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        reasoning: crate::provider::ReasoningSelection,
+        context: &crate::provider::ProviderRequestContext,
     ) -> Result<Value> {
         let mut request_builder = CreateChatCompletionRequestArgs::default();
         // IMPORTANT CACHE COMPATIBILITY: automatic Chat Completions caching
@@ -351,46 +390,23 @@ impl OpenAiCompatibleProvider {
 
         let mut body = serde_json::to_value(&request)?;
         normalize_request_tool_call_arguments(&mut body);
-        if self.echoes_reasoning_content && self.reasoning_codec == ReasoningCodec::Hunyuan {
-            let replay = self
-                .hunyuan_reasoning_replay
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Hunyuan reasoning replay state lock is poisoned"))?;
-            ensure_hunyuan_reasoning_content(&mut body, &replay);
-        } else if self.echoes_reasoning_content {
-            let reasoning_by_call_id = self
-                .reasoning_by_call_id
-                .lock()
-                .map_err(|_| anyhow::anyhow!("reasoning replay state lock is poisoned"))?;
-            if self.reasoning_codec == ReasoningCodec::MimoThinking {
-                ensure_mimo_reasoning_content(&mut body, &reasoning_by_call_id);
-            } else {
-                ensure_reasoning_content_on_tool_call_messages(&mut body, &reasoning_by_call_id);
-            }
+        self.native_replay
+            .project_chat_request(&self.native_replay_scope, context, &mut body)?;
+        if self.echoes_reasoning_content {
+            ensure_native_reasoning_content(
+                &mut body,
+                self.reasoning_codec,
+                self.model.to_ascii_lowercase().contains("deepseek"),
+            );
         }
-        {
-            let extra_content_by_call_id = self
-                .tool_call_extra_content_by_id
-                .lock()
-                .map_err(|_| anyhow::anyhow!("tool-call metadata replay state lock is poisoned"))?;
-            ensure_tool_call_extra_content(&mut body, &extra_content_by_call_id);
-        }
-        if self.reasoning_codec == ReasoningCodec::MistralChatCompletions {
-            let replay = self
-                .mistral_content_replay
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Mistral content replay state lock is poisoned"))?;
-            ensure_mistral_structured_content(&mut body, &replay);
-        }
-        if self.reasoning_codec == ReasoningCodec::OpenRouter {
-            let replay = self.openrouter_reasoning_replay.lock().map_err(|_| {
-                anyhow::anyhow!("OpenRouter reasoning replay state lock is poisoned")
-            })?;
-            ensure_openrouter_reasoning(&mut body, &replay);
-        }
-        // After the reasoning echo: `reasoning_by_call_id` is keyed by original
-        // wire ids, so the lookup must run before duplicates are renamed.
+        // Replay state uses canonical Bonsai IDs. Restore the original provider
+        // correlators only after attaching its opaque metadata.
+        let identity_ids = self
+            .tool_call_identities
+            .project_request(&self.tool_call_scope, &mut body);
         dedupe_request_tool_call_ids(&mut body);
+        self.tool_call_identities
+            .project_reuse_references(&mut body, &identity_ids);
         // Ask for a final usage chunk; servers that don't support it ignore it.
         body["stream_options"] = serde_json::json!({ "include_usage": true });
         // IMPORTANT CACHE INVARIANT: pin the warm prefix to one backend across
@@ -467,110 +483,6 @@ impl OpenAiCompatibleProvider {
     }
 }
 
-/// Restore Mistral's structured assistant content on the text-only message
-/// history retained by the agent. Tool-call turns use their stable call ids;
-/// plain assistant turns match visible content in chronological order.
-fn ensure_mistral_structured_content(body: &mut Value, replay: &[MistralContentReplay]) {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    let mut used = HashSet::new();
-    for message in messages {
-        let Some(message) = message.as_object_mut() else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let call_ids = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|call| call.get("id").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-        let visible_content = message
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let match_index = replay.iter().enumerate().find_map(|(index, entry)| {
-            if used.contains(&index) {
-                return None;
-            }
-            let calls_match = !call_ids.is_empty()
-                && call_ids
-                    .iter()
-                    .any(|call_id| entry.tool_call_ids.iter().any(|stored| stored == call_id));
-            let text_match = call_ids.is_empty()
-                && entry.tool_call_ids.is_empty()
-                && entry.visible_content == visible_content;
-            (calls_match || text_match).then_some(index)
-        });
-        if let Some(index) = match_index {
-            used.insert(index);
-            message.insert(
-                "content".to_string(),
-                Value::Array(replay[index].parts.clone()),
-            );
-        }
-    }
-}
-
-/// Restore OpenRouter's exact normalized reasoning sequence on assistant
-/// history. OpenRouter explicitly requires preserved blocks to remain
-/// consecutive and unmodified, including encrypted data and signatures.
-fn ensure_openrouter_reasoning(body: &mut Value, replay: &[OpenRouterReasoningReplay]) {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    let mut used = HashSet::new();
-    for message in messages {
-        let Some(message) = message.as_object_mut() else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let call_ids = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|call| call.get("id").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-        let visible_content = message
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let match_index = replay.iter().enumerate().find_map(|(index, entry)| {
-            if used.contains(&index) {
-                return None;
-            }
-            let calls_match = !call_ids.is_empty()
-                && call_ids
-                    .iter()
-                    .any(|call_id| entry.tool_call_ids.iter().any(|stored| stored == call_id));
-            let text_match = call_ids.is_empty()
-                && entry.tool_call_ids.is_empty()
-                && entry.visible_content == visible_content;
-            (calls_match || text_match).then_some(index)
-        });
-        let Some(index) = match_index else {
-            continue;
-        };
-        used.insert(index);
-        let entry = &replay[index];
-        if !entry.reasoning_details.is_empty() {
-            message.insert(
-                "reasoning_details".to_string(),
-                Value::Array(entry.reasoning_details.clone()),
-            );
-        } else if let Some(reasoning) = &entry.legacy_reasoning {
-            message.insert("reasoning".to_string(), Value::String(reasoning.clone()));
-        }
-    }
-}
-
 fn append_mistral_text_part(parts: &mut Vec<Value>, text: &str) {
     if text.is_empty() {
         return;
@@ -599,6 +511,53 @@ fn mistral_thinking_text(thinking: &[Value]) -> String {
 /// Restored sessions cannot recover this provider-native field. Drop an entire
 /// unrecoverable assistant/tool exchange rather than inventing an empty trace
 /// or leaving orphan tool results that the API will reject.
+fn ensure_native_reasoning_content(body: &mut Value, codec: ReasoningCodec, deepseek: bool) {
+    if codec == ReasoningCodec::MimoThinking {
+        let reasoning_by_call_id = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|message| {
+                let reasoning = message.get("reasoning_content")?.as_str()?;
+                let id = message
+                    .get("tool_calls")?
+                    .as_array()?
+                    .first()?
+                    .get("id")?
+                    .as_str()?;
+                Some((id.to_string(), reasoning.to_string()))
+            })
+            .collect();
+        ensure_mimo_reasoning_content(body, &reasoning_by_call_id);
+        return;
+    }
+    let all_assistants = codec == ReasoningCodec::Hunyuan
+        || (deepseek
+            && body
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| !tools.is_empty()));
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
+            let has_calls = message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+            if (all_assistants || has_calls)
+                && let Some(message) = message.as_object_mut()
+            {
+                message
+                    .entry("reasoning_content")
+                    .or_insert_with(|| Value::String(String::new()));
+            }
+        }
+    }
+}
+
 fn ensure_mimo_reasoning_content(body: &mut Value, reasoning_by_call_id: &HashMap<String, String>) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
@@ -643,129 +602,6 @@ fn ensure_mimo_reasoning_content(body: &mut Value, reasoning_by_call_id: &HashMa
     });
 }
 
-/// Give every assistant message that carries non-empty `tool_calls` its
-/// captured `reasoning_content`, defaulting to an empty string when the
-/// provider did not return one (including history restored from disk).
-///
-/// The OpenCode Go gateway's DeepSeek adapter requires the field's presence;
-/// strict providers remain protected by the capability gate at the call site.
-fn ensure_reasoning_content_on_tool_call_messages(
-    body: &mut Value,
-    reasoning_by_call_id: &HashMap<String, String>,
-) {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for message in messages {
-        let Some(message) = message.as_object_mut() else {
-            continue;
-        };
-        // Presence of the key is not enough: a plain assistant message can
-        // serialize as `"tool_calls": null`, and those must stay untouched.
-        let tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .filter(|tool_calls| !tool_calls.is_empty());
-        let Some(tool_calls) = tool_calls else {
-            continue;
-        };
-        let reasoning = tool_calls
-            .first()
-            .and_then(|tool_call| tool_call.get("id"))
-            .and_then(Value::as_str)
-            .and_then(|call_id| reasoning_by_call_id.get(call_id))
-            .cloned()
-            .unwrap_or_default();
-        message
-            .entry("reasoning_content")
-            .or_insert_with(|| Value::String(reasoning));
-    }
-}
-
-/// Restore Hunyuan's preserved thinking on every matching assistant turn.
-///
-/// Unlike DeepSeek-style tool-only replay, Hy3 requires the exact
-/// `reasoning_content` returned for plain assistant replies too. Tool rounds
-/// match their complete call-id sequence; plain replies match visible content
-/// from newest to oldest so compaction cannot assign an omitted older turn's
-/// trace to a retained duplicate.
-fn ensure_hunyuan_reasoning_content(body: &mut Value, replay: &[HunyuanReasoningReplay]) {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    let mut replay_upper_bound = replay.len();
-    for message in messages.iter_mut().rev() {
-        let Some(message) = message.as_object_mut() else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let call_ids = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|call| call.get("id").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-        let visible_content = message
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let match_index = replay[..replay_upper_bound].iter().rposition(|entry| {
-            let calls_match = !call_ids.is_empty()
-                && call_ids.len() == entry.tool_call_ids.len()
-                && call_ids
-                    .iter()
-                    .zip(&entry.tool_call_ids)
-                    .all(|(current, stored)| *current == stored);
-            let text_match = call_ids.is_empty()
-                && entry.tool_call_ids.is_empty()
-                && entry.visible_content == visible_content;
-            calls_match || text_match
-        });
-        let reasoning = match_index
-            .map(|index| {
-                replay_upper_bound = index;
-                replay[index].reasoning_content.clone()
-            })
-            .unwrap_or_default();
-        if match_index.is_some() || !call_ids.is_empty() {
-            message
-                .entry("reasoning_content")
-                .or_insert_with(|| Value::String(reasoning));
-        }
-    }
-}
-
-/// Replay provider-returned tool-call metadata on its exact assistant call.
-///
-/// Gemini 3 validates the encrypted `extra_content.google.thought_signature`
-/// on every function-call step in the current user turn. Other compatible
-/// providers either omit `extra_content` or receive only fields they returned,
-/// so preserving it is safe and protocol-generic.
-fn ensure_tool_call_extra_content(
-    body: &mut Value,
-    extra_content_by_call_id: &HashMap<String, Value>,
-) {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for message in messages {
-        let Some(tool_calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for tool_call in tool_calls {
-            let Some(id) = tool_call.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if let Some(extra_content) = extra_content_by_call_id.get(id) {
-                tool_call["extra_content"] = extra_content.clone();
-            }
-        }
-    }
-}
-
 /// Kimi K2 mints deterministic `name:index` tool-call ids, so a replayed
 /// history can carry the same id twice — verified live against
 /// api.moonshot.ai: two parallel calls sharing an id inside ONE assistant
@@ -782,6 +618,41 @@ fn ensure_tool_call_extra_content(
 /// prefix caching. Deliberate mixed-model seam — do not "simplify" by
 /// trusting wire ids to be unique.
 fn dedupe_request_tool_call_ids(body: &mut Value) {
+    fn has_opaque_replay(message: &Value, call: &Value) -> bool {
+        call.get("extra_content")
+            .is_some_and(|value| !value.is_null())
+            || message
+                .get("reasoning_details")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| !parts.is_empty())
+            || message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        matches!(
+                            part.get("type").and_then(Value::as_str),
+                            Some("thinking" | "reasoning")
+                        )
+                    })
+                })
+    }
+    let mut original_ids = HashSet::new();
+    let mut protected_ids = HashSet::new();
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                for call in calls {
+                    if let Some(id) = call.get("id").and_then(Value::as_str) {
+                        original_ids.insert(id.to_string());
+                        if has_opaque_replay(message, call) {
+                            protected_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
@@ -789,6 +660,16 @@ fn dedupe_request_tool_call_ids(body: &mut Value) {
     // Current assistant turn only: original id -> queue of assigned wire ids.
     let mut assigned: HashMap<String, std::collections::VecDeque<String>> = HashMap::new();
     for message in messages {
+        let protected_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| {
+                calls
+                    .iter()
+                    .map(|call| has_opaque_replay(message, call))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let Some(message) = message.as_object_mut() else {
             continue;
         };
@@ -801,12 +682,17 @@ fn dedupe_request_tool_call_ids(body: &mut Value) {
                 else {
                     continue;
                 };
-                for tool_call in tool_calls {
+                for (index, tool_call) in tool_calls.iter_mut().enumerate() {
                     let Some(id) = tool_call.get("id").and_then(Value::as_str) else {
                         continue;
                     };
                     let id = id.to_string();
-                    let unique = if seen.insert(id.clone()) {
+                    let unique = if protected_calls[index] {
+                        // Signed/opaque replay must keep the exact received ID.
+                        // Internal UUID identities already distinguish these calls.
+                        seen.insert(id.clone());
+                        id.clone()
+                    } else if !protected_ids.contains(&id) && seen.insert(id.clone()) {
                         id.clone()
                     } else {
                         let mut suffix = 2usize;
@@ -814,7 +700,8 @@ fn dedupe_request_tool_call_ids(body: &mut Value) {
                             // `-dup2` over `#2`: strict gateways are pickier
                             // about id charsets than about length.
                             let candidate = format!("{id}-dup{suffix}");
-                            if seen.insert(candidate.clone()) {
+                            if !original_ids.contains(&candidate) && seen.insert(candidate.clone())
+                            {
                                 break candidate;
                             }
                             suffix += 1;
@@ -891,6 +778,40 @@ fn is_official_openai_api_base_url(base_url: &str) -> bool {
 
 #[async_trait]
 impl Provider for OpenAiCompatibleProvider {
+    fn prepare_request_for_estimation(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<crate::provider::PreparedProviderRequest> {
+        let reasoning = self.reasoning_for_request(messages, options, context)?;
+        let body = self
+            .request_body_with_context(messages, tools, reasoning, context)
+            .map_err(|error| {
+                crate::provider::ProviderFailure::configuration(format!("{error:#}"))
+            })?;
+        Ok(crate::provider::PreparedProviderRequest {
+            protocol: Some(Protocol::OpenAiChat),
+            body,
+            reasoning,
+            native_budget: self.native_replay.selected_budgets(
+                &self.native_replay_scope,
+                context,
+                Protocol::OpenAiChat,
+            ),
+            count_endpoint: Some(format!("{}/tokenizer", self.base_url.trim_end_matches('/'))),
+            count_auth_header: None,
+        })
+    }
+    fn set_tool_call_identity_store(&mut self, store: crate::provider::ToolCallIdentityStore) {
+        self.tool_call_identities = store;
+    }
+
+    fn set_native_replay_store(&mut self, store: crate::provider::NativeReplayStore) {
+        self.native_replay = store;
+    }
+
     fn project_state_cache_strategy(&self) -> crate::provider::ProjectStateCacheStrategy {
         if self.prompt_cache_policy.uses_append_only_project_state() {
             // IMPORTANT OPENCODE CACHE CONTRACT: Chat Completions has no
@@ -928,6 +849,17 @@ impl Provider for OpenAiCompatibleProvider {
         Ok(self.request_preview_from_body(body))
     }
 
+    #[cfg(test)]
+    fn preview_request_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        context: &crate::provider::ProviderRequestContext,
+    ) -> Result<ProviderRequestPreview> {
+        let body = self.request_body_with_context(messages, tools, self.reasoning, context)?;
+        Ok(self.request_preview_from_body(body))
+    }
+
     fn take_last_request_diagnostics(&self) -> Option<ProviderRequestDiagnostics> {
         ProviderRequestDiagnostics::take(&self.last_request_diagnostics)
     }
@@ -957,15 +889,39 @@ impl Provider for OpenAiCompatibleProvider {
         cancellation_token: CancellationToken,
         sink: SharedSink,
     ) -> crate::provider::ProviderResult<StreamedResponse> {
+        self.chat_stream_with_context(
+            messages,
+            tools,
+            options,
+            &crate::provider::ProviderRequestContext::default(),
+            cancellation_token,
+            sink,
+        )
+        .await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+        cancellation_token: CancellationToken,
+        sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        let mut output_ceiling_tokens = None;
         let serialized_body = crate::provider::serialize_request_body(
             "OpenAI-compatible",
             || self.ensure_authorized(),
             || {
-                self.request_body_with_reasoning(
-                    messages,
-                    tools,
-                    options.reasoning.unwrap_or(self.reasoning),
-                )
+                let prepared =
+                    self.prepare_request_for_estimation(messages, tools, options, context)?;
+                output_ceiling_tokens = prepared
+                    .body
+                    .get("max_completion_tokens")
+                    .or_else(|| prepared.body.get("max_tokens"))
+                    .and_then(Value::as_u64);
+                Ok(prepared.body)
             },
             |body| self.request_preview_from_body(body),
             &self.last_request_diagnostics,
@@ -1002,6 +958,7 @@ impl Provider for OpenAiCompatibleProvider {
         let mut content = String::new();
         let mut tool_call_accumulator = tool_calls::ChatToolCallAccumulator::default();
         let mut token_usage: Option<crate::provider::TokenUsage> = None;
+        let mut reported_output_tokens = None;
         // Whether any choice carried a terminal `finish_reason`. A stream that
         // ends without one (and without a usage frame) did not complete — the
         // connection dropped mid-response. Indistinguishable from success
@@ -1011,15 +968,26 @@ impl Provider for OpenAiCompatibleProvider {
         let mut finish_reason: Option<crate::provider::FinishReason> = None;
         let mut reasoning_chars = 0usize;
         let mut reasoning_for_replay = String::new();
+        let mut saw_native_reasoning_text = false;
         let mut mistral_content_parts = Vec::new();
         let mut saw_mistral_structured_content = false;
         let mut openrouter_reasoning_details = Vec::new();
-        // Open models on this transport (DeepSeek, Qwen, GLM, …) emit reasoning
-        // inline as `<think>…</think>` in the content channel; route it to the
-        // reasoning channel rather than letting the tags leak into the answer.
-        // Official OpenAI-style models never put `<think>` in content, so this is
-        // inert for them.
+        let mut saw_openrouter_reasoning_details = false;
+        let mut openrouter_legacy_reasoning: Option<String> = None;
+        // Legacy compatible servers may put a leading <think> block in text.
+        // Known native codecs keep all text literal from the start, including
+        // examples that begin with <think>. Other servers select native mode
+        // as soon as their stream declares a dedicated reasoning channel.
         let mut splitter = ThinkTagSplitter::new();
+        if matches!(
+            self.reasoning_codec,
+            ReasoningCodec::OpenAiChatCompletions
+                | ReasoningCodec::MistralChatCompletions
+                | ReasoningCodec::OpenRouter
+                | ReasoningCodec::Hunyuan
+        ) {
+            splitter.use_native_reasoning_channel();
+        }
 
         // OpenAI-compatible chat completions send bare `data:` frames (event
         // name unused) whose JSON carries the streamed delta.
@@ -1049,6 +1017,9 @@ impl Provider for OpenAiCompatibleProvider {
             // The final chunk (with include_usage) carries totals and no choices.
             if let Some(u) = json.get("usage").filter(|u| !u.is_null()) {
                 token_usage = Some(usage::chat_completions_usage_from_value(u));
+                if let Some(tokens) = u.get("completion_tokens").and_then(Value::as_u64) {
+                    reported_output_tokens = Some(tokens);
+                }
             }
 
             if let Some(choices) = json["choices"].as_array() {
@@ -1061,11 +1032,31 @@ impl Provider for OpenAiCompatibleProvider {
                         finish_reason = Some(crate::provider::FinishReason::from_openai(reason));
                     }
                     let delta = &choice["delta"];
+                    // Check the native shape before parsing text in this same
+                    // frame. Empty strings/arrays still identify a separate
+                    // channel; null placeholders do not. Flush a held opening
+                    // fragment first so visible text keeps its wire order.
+                    let native_reasoning_text = [
+                        "reasoning_summary",
+                        "reasoning_summary_text",
+                        "reasoning_content",
+                        "reasoning",
+                    ]
+                    .into_iter()
+                    .any(|key| delta[key].is_string());
+                    if native_reasoning_text || delta["reasoning_details"].is_array() {
+                        let literal = splitter.use_native_reasoning_channel();
+                        if !literal.visible.is_empty() {
+                            content.push_str(&literal.visible);
+                            sink.assistant_delta(&literal.visible);
+                        }
+                    }
                     let has_openrouter_reasoning_details = self.reasoning_codec
                         == ReasoningCodec::OpenRouter
                         && delta["reasoning_details"]
                             .as_array()
                             .is_some_and(|reasoning_details| {
+                                saw_openrouter_reasoning_details = true;
                                 for detail in reasoning_details {
                                     if let Some(text) = detail
                                         .get("text")
@@ -1143,6 +1134,23 @@ impl Provider for OpenAiCompatibleProvider {
                         }
                     }
 
+                    // Native replay is independent of display selection. A
+                    // summary and full trace can arrive in the same frame.
+                    if let Some(text) = delta["reasoning_content"]
+                        .as_str()
+                        .or_else(|| delta["reasoning"].as_str())
+                    {
+                        saw_native_reasoning_text = true;
+                        reasoning_for_replay.push_str(text);
+                    }
+                    if self.reasoning_codec == ReasoningCodec::OpenRouter
+                        && let Some(text) = delta["reasoning"].as_str()
+                    {
+                        openrouter_legacy_reasoning
+                            .get_or_insert_default()
+                            .push_str(text);
+                    }
+
                     // Providers surface streamed reasoning under different keys:
                     // OpenAI Responses uses reasoning_summary / reasoning_summary_text,
                     // DeepSeek uses reasoning_content, and OpenRouter/vLLM use
@@ -1159,11 +1167,6 @@ impl Provider for OpenAiCompatibleProvider {
                         .find_map(|key| delta[key].as_str().filter(|text| !text.is_empty()))
                     {
                         reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
-                        if delta["reasoning_content"].as_str() == Some(text)
-                            || delta["reasoning"].as_str() == Some(text)
-                        {
-                            reasoning_for_replay.push_str(text);
-                        }
                         sink.reasoning_delta(text);
                     }
 
@@ -1204,100 +1207,71 @@ impl Provider for OpenAiCompatibleProvider {
 
         // Flush any text held back at a possible `<think>` boundary, then signal
         // end-of-message.
-        reasoning_chars = reasoning_chars.saturating_add(streaming::finish_text_stream(
-            Some(&mut splitter),
-            &mut content,
-            &sink,
-        ));
+        let reasoning_tail =
+            streaming::finish_text_stream(Some(&mut splitter), &mut content, &sink);
+        reasoning_chars = reasoning_chars.saturating_add(reasoning_tail.chars().count());
+        reasoning_for_replay.push_str(&reasoning_tail);
 
         let accumulated_tool_calls = tool_call_accumulator.into_tool_calls_with_extra_content();
         let mut captured_extra_content = Vec::new();
+        let mut captured_tool_functions = std::collections::BTreeMap::new();
         let tool_calls = accumulated_tool_calls
             .into_iter()
-            .map(|tool_call| {
+            .map(|mut tool_call| {
+                self.tool_call_identities.assign_calls(
+                    &self.tool_call_scope,
+                    std::slice::from_mut(&mut tool_call.call),
+                );
                 if let Some(extra_content) = tool_call.extra_content {
+                    captured_tool_functions.insert(
+                        tool_call.call.id.clone(),
+                        crate::provider::NativeToolFunction {
+                            name: tool_call.call.name.clone(),
+                            arguments: tool_call.call.arguments.clone(),
+                        },
+                    );
                     captured_extra_content.push((tool_call.call.id.clone(), extra_content));
                 }
                 tool_call.call
             })
             .collect::<Vec<_>>();
-        if !interrupted && !captured_extra_content.is_empty() {
-            let mut extra_content_by_call_id =
-                self.tool_call_extra_content_by_id.lock().map_err(|_| {
-                    crate::provider::ProviderFailure::transport(
-                        "tool-call metadata replay state lock is poisoned",
-                    )
-                })?;
-            extra_content_by_call_id.extend(captured_extra_content);
-        }
-        if self.reasoning_codec == ReasoningCodec::OpenRouter
+        if let Some(response_id) = &context.response_id
             && !interrupted
-            && (!openrouter_reasoning_details.is_empty() || !reasoning_for_replay.is_empty())
+            && !matches!(
+                finish_reason,
+                Some(
+                    crate::provider::FinishReason::Length
+                        | crate::provider::FinishReason::GenerationBudget
+                )
+            )
         {
-            let legacy_reasoning = if openrouter_reasoning_details.is_empty() {
-                Some(std::mem::take(&mut reasoning_for_replay))
-            } else {
-                None
+            let mut payload = crate::provider::ChatNativeReplay {
+                budget_evidence: None,
+                reasoning_content: (self.echoes_reasoning_content
+                    && (saw_native_reasoning_text || !reasoning_for_replay.is_empty()))
+                .then(|| std::mem::take(&mut reasoning_for_replay)),
+                content_parts: (self.reasoning_codec == ReasoningCodec::MistralChatCompletions
+                    && saw_mistral_structured_content)
+                    .then_some(mistral_content_parts),
+                reasoning_details: (self.reasoning_codec == ReasoningCodec::OpenRouter
+                    && saw_openrouter_reasoning_details)
+                    .then_some(openrouter_reasoning_details),
+                legacy_reasoning: openrouter_legacy_reasoning,
+                tool_extra_content: captured_extra_content.into_iter().collect(),
+                tool_functions: captured_tool_functions,
             };
-            let entry = OpenRouterReasoningReplay {
-                visible_content: content.clone(),
-                tool_call_ids: tool_calls.iter().map(|call| call.id.clone()).collect(),
-                reasoning_details: openrouter_reasoning_details,
-                legacy_reasoning,
-            };
-            self.openrouter_reasoning_replay
-                .lock()
-                .map_err(|_| {
-                    crate::provider::ProviderFailure::transport(
-                        "OpenRouter reasoning replay state lock is poisoned",
-                    )
-                })?
-                .push(entry);
-        }
-        if self.reasoning_codec == ReasoningCodec::Hunyuan
-            && self.echoes_reasoning_content
-            && !interrupted
-            && !reasoning_for_replay.is_empty()
-        {
-            let entry = HunyuanReasoningReplay {
-                visible_content: content.clone(),
-                tool_call_ids: tool_calls.iter().map(|call| call.id.clone()).collect(),
-                reasoning_content: std::mem::take(&mut reasoning_for_replay),
-            };
-            self.hunyuan_reasoning_replay
-                .lock()
-                .map_err(|_| {
-                    crate::provider::ProviderFailure::transport(
-                        "Hunyuan reasoning replay state lock is poisoned",
-                    )
-                })?
-                .push(entry);
-        // Other `reasoning_content`-echoing backends replay only tool-call
-        // turns (see `streaming::stash_reasoning_for_replay`).
-        } else if self.echoes_reasoning_content && !interrupted {
-            streaming::stash_reasoning_for_replay(
-                &self.reasoning_by_call_id,
-                &tool_calls,
-                (!reasoning_for_replay.is_empty()).then_some(reasoning_for_replay),
-            )?;
-        }
-        if self.reasoning_codec == ReasoningCodec::MistralChatCompletions
-            && saw_mistral_structured_content
-            && !interrupted
-        {
-            let entry = MistralContentReplay {
-                visible_content: content.clone(),
-                tool_call_ids: tool_calls.iter().map(|call| call.id.clone()).collect(),
-                parts: mistral_content_parts,
-            };
-            self.mistral_content_replay
-                .lock()
-                .map_err(|_| {
-                    crate::provider::ProviderFailure::transport(
-                        "Mistral content replay state lock is poisoned",
-                    )
-                })?
-                .push(entry);
+            if payload != crate::provider::ChatNativeReplay::default() {
+                payload.budget_evidence = Some(crate::provider::NativeBudgetEvidence {
+                    output_tokens: reported_output_tokens,
+                    output_ceiling_tokens,
+                });
+                self.native_replay
+                    .insert(crate::provider::NativeReplayRecord {
+                        response_id: response_id.clone(),
+                        provider_scope: self.native_replay_scope.clone(),
+                        payload: crate::provider::NativeReplayPayload::OpenAiChat(payload),
+                    })?;
+            }
         }
         let terminal = if interrupted {
             crate::provider::StreamTerminal::Interrupted
@@ -1397,6 +1371,28 @@ mod tests {
             ApiKeyPolicy::Required,
             PLAIN,
         )
+    }
+
+    fn loopback_opencode_provider(session: &ProviderSession) -> OpenAiCompatibleProvider {
+        let url = reqwest::Url::parse(&session.base_url).unwrap();
+        let host = url.host_str().unwrap().parse::<std::net::IpAddr>().unwrap();
+        assert!(
+            host.is_loopback(),
+            "stream tests must stay on their loopback mock"
+        );
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, session);
+        let mut provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN,
+        );
+        // Tokio tests own separate runtimes. A process-global idle connection
+        // can still refer to a dispatch task from an already finished test if
+        // a mock-server port is reused. Keep this fixture's pool local.
+        provider.http = reqwest::Client::new();
+        provider
     }
 
     #[test]
@@ -1879,61 +1875,74 @@ mod tests {
     }
 
     #[test]
-    fn hunyuan_replays_plain_and_tool_reasoning_content_in_order() {
-        let replay = vec![
-            HunyuanReasoningReplay {
-                visible_content: "same answer".to_string(),
-                tool_call_ids: Vec::new(),
-                reasoning_content: "first trace".to_string(),
-            },
-            HunyuanReasoningReplay {
-                visible_content: "same answer".to_string(),
-                tool_call_ids: Vec::new(),
-                reasoning_content: "second trace".to_string(),
-            },
-            HunyuanReasoningReplay {
-                visible_content: String::new(),
-                tool_call_ids: vec!["call-1".to_string()],
-                reasoning_content: "tool trace".to_string(),
-            },
+    fn hunyuan_replays_plain_and_tool_reasoning_content_by_response_uuid() {
+        let store = crate::provider::NativeReplayStore::default();
+        let ids = [
+            crate::provider::ResponseId::new(),
+            crate::provider::ResponseId::new(),
+            crate::provider::ResponseId::new(),
         ];
-        let mut body = serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": "same answer"},
-                {"role": "user", "content": "again"},
-                {"role": "assistant", "content": "same answer"},
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{"id": "call-1", "type": "function"}]
+        for (id, trace) in ids
+            .iter()
+            .zip(["first trace", "second trace", "tool trace"])
+        {
+            store
+                .insert(crate::provider::NativeReplayRecord {
+                    response_id: id.clone(),
+                    provider_scope: "scope".into(),
+                    payload: crate::provider::NativeReplayPayload::OpenAiChat(
+                        crate::provider::ChatNativeReplay {
+                            reasoning_content: Some(trace.into()),
+                            ..Default::default()
+                        },
+                    ),
+                })
+                .unwrap();
+        }
+        let mut body = serde_json::json!({"messages":[
+            {"role":"assistant","content":"same answer"},
+            {"role":"user","content":"again"},
+            {"role":"assistant","content":"same answer"},
+            {"role":"assistant","tool_calls":[{"id":"call-1"}]},
+            {"role":"assistant","tool_calls":[{"id":"restored-call"}]}
+        ]});
+        store
+            .project_chat_request(
+                "scope",
+                &crate::provider::ProviderRequestContext {
+                    assistant_response_ids: Some(vec![
+                        Some(ids[0].clone()),
+                        Some(ids[1].clone()),
+                        Some(ids[2].clone()),
+                        None,
+                    ]),
+                    response_id: None,
                 },
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{"id": "restored-call", "type": "function"}]
-                }
-            ]
-        });
-
-        ensure_hunyuan_reasoning_content(&mut body, &replay);
-
+                &mut body,
+            )
+            .unwrap();
+        ensure_native_reasoning_content(&mut body, ReasoningCodec::Hunyuan, false);
         assert_eq!(body["messages"][0]["reasoning_content"], "first trace");
         assert_eq!(body["messages"][2]["reasoning_content"], "second trace");
         assert_eq!(body["messages"][3]["reasoning_content"], "tool trace");
-        assert_eq!(
-            body["messages"][4]["reasoning_content"], "",
-            "restored tool turns still need the required field"
-        );
+        assert_eq!(body["messages"][4]["reasoning_content"], "");
         assert!(body["messages"][1].get("reasoning_content").is_none());
-
-        let mut compacted = serde_json::json!({
-            "messages": [{"role": "assistant", "content": "same answer"}]
-        });
-        ensure_hunyuan_reasoning_content(&mut compacted, &replay);
-        assert_eq!(
-            compacted["messages"][0]["reasoning_content"], "second trace",
-            "a retained duplicate must replay its latest matching trace"
-        );
+        for (id, expected) in ids[..2].iter().zip(["first trace", "second trace"]) {
+            let mut compacted =
+                serde_json::json!({"messages":[{"role":"assistant","content":"same answer"}]});
+            store
+                .project_chat_request(
+                    "scope",
+                    &crate::provider::ProviderRequestContext {
+                        assistant_response_ids: Some(vec![Some(id.clone())]),
+                        response_id: None,
+                    },
+                    &mut compacted,
+                )
+                .unwrap();
+            ensure_native_reasoning_content(&mut compacted, ReasoningCodec::Hunyuan, false);
+            assert_eq!(compacted["messages"][0]["reasoning_content"], expected);
+        }
     }
 
     #[tokio::test]
@@ -1975,10 +1984,12 @@ mod tests {
         provider.set_conversation_cache_key("bonsai-tokenhub-session");
 
         let request_messages = [system_message("stable"), user_message("hello")];
+        let response_id = crate::provider::ResponseId::new();
         let response = provider
-            .chat_stream(
+            .chat_stream_for_replay_test(
                 &request_messages,
                 &[sample_tool()],
+                &response_id,
                 CancellationToken::new(),
                 std::sync::Arc::new(crate::output::StdoutSink),
             )
@@ -2002,7 +2013,9 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let replayed = provider.request_body(&[assistant], &[]).unwrap();
+        let replayed = provider
+            .replay_body_for_test(&[assistant], &[], std::slice::from_ref(&response_id))
+            .unwrap();
         assert_eq!(
             replayed["messages"][0]["reasoning_content"],
             "inspect exactly"
@@ -3038,7 +3051,7 @@ mod tests {
         // without one is treated as truncated.
         let sse = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"<think>weigh\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"ing</think>Done\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ing</think>Done <think>literal example</think>\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             "data: [DONE]\n\n",
         );
@@ -3073,13 +3086,16 @@ mod tests {
             .await
             .expect("chat stream succeeds");
 
-        assert_eq!(response.content, "Done");
+        assert_eq!(response.content, "Done <think>literal example</think>");
         assert_eq!(
             response.finish_reason(),
             Some(&crate::provider::FinishReason::Stop)
         );
         assert_eq!(response.reasoning_chars, "weighing".chars().count());
-        assert_eq!(*sink.assistant.lock().unwrap(), "Done");
+        assert_eq!(
+            *sink.assistant.lock().unwrap(),
+            "Done <think>literal example</think>"
+        );
         assert_eq!(*sink.reasoning.lock().unwrap(), "weighing");
         let diagnostics = provider.take_last_request_diagnostics().unwrap();
         assert_eq!(
@@ -3087,6 +3103,430 @@ mod tests {
             provider.request_body(&[], &[]).unwrap()
         );
         assert_eq!(provider.take_last_request_diagnostics(), None);
+    }
+
+    #[tokio::test]
+    async fn native_reasoning_preserves_literal_tags_in_content_and_followup_history() {
+        use crate::provider::test_utils::RecordingSink;
+        use crate::provider::test_utils::assistant_message;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Native channels can be empty (thinking off) or carry text, and can
+        // arrive with content in the same frame. All are answer boundaries.
+        for (native, chunks, expected_content, expected_reasoning) in [
+            (
+                serde_json::json!({"reasoning_content":"native π", "content":"<thi"}),
+                vec![serde_json::json!({"content":"nk>literal</think>"})],
+                "<think>literal</think>",
+                "native π",
+            ),
+            (
+                serde_json::json!({"reasoning_content":"", "content":"<think>literal</think>"}),
+                vec![],
+                "<think>literal</think>",
+                "",
+            ),
+            (
+                serde_json::json!({"reasoning_summary":"native π", "content":"<think>literal</think>"}),
+                vec![],
+                "<think>literal</think>",
+                "native π",
+            ),
+            (
+                serde_json::json!({"reasoning_summary_text":"native π", "content":"<think>literal</think>"}),
+                vec![],
+                "<think>literal</think>",
+                "native π",
+            ),
+            (
+                serde_json::json!({"reasoning":"native π", "content":"<think>literal</think>"}),
+                vec![],
+                "<think>literal</think>",
+                "native π",
+            ),
+            (
+                serde_json::json!({"reasoning_details":[], "content":"<think>literal</think>"}),
+                vec![],
+                "<think>literal</think>",
+                "",
+            ),
+            (
+                serde_json::json!({"content":"<thi"}),
+                vec![
+                    serde_json::json!({"reasoning_content":"native π", "content":"nk>literal</think>"}),
+                ],
+                "<think>literal</think>",
+                "native π",
+            ),
+            (
+                serde_json::json!({"reasoning_content":null, "reasoning_details":null, "content":"<think>genuine</think>answer"}),
+                vec![],
+                "answer",
+                "genuine",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let mut sse = format!(
+                "data: {}\n\n",
+                serde_json::json!({"choices":[{"delta":native}]})
+            );
+            for delta in chunks {
+                sse.push_str(&format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"choices":[{"delta":delta}]})
+                ));
+            }
+            sse.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+                .mount(&server)
+                .await;
+            let session = provider_session("test", &server.uri(), "qwen3.7-max");
+            let provider = loopback_opencode_provider(&session);
+            let sink = std::sync::Arc::new(RecordingSink::default());
+
+            let response = provider
+                .chat_stream(&[], &[], CancellationToken::new(), sink.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(response.content, expected_content);
+            assert_eq!(sink.assistant_deltas().concat(), response.content);
+            assert_eq!(response.reasoning_chars, expected_reasoning.chars().count());
+            assert_eq!(sink.reasoning_deltas().concat(), expected_reasoning);
+            let followup = provider
+                .preview_request(&[assistant_message(&response.content)], &[])
+                .unwrap();
+            assert_eq!(followup.body["messages"][0]["content"], response.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn known_native_codecs_preserve_leading_literal_tags_without_a_reasoning_frame() {
+        use crate::provider::test_utils::RecordingSink;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"<think>literal</think>\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+        )).mount(&server).await;
+        for codec in [
+            ReasoningCodec::OpenAiChatCompletions,
+            ReasoningCodec::OpenRouter,
+            ReasoningCodec::MistralChatCompletions,
+            ReasoningCodec::Hunyuan,
+        ] {
+            let session = provider_session("test", &server.uri(), "qwen3.7-max");
+            let mut provider = loopback_opencode_provider(&session);
+            provider.reasoning_codec = codec;
+            let sink = std::sync::Arc::new(RecordingSink::default());
+            let response = provider
+                .chat_stream(&[], &[], CancellationToken::new(), sink.clone())
+                .await
+                .unwrap();
+            assert_eq!(response.content, "<think>literal</think>", "{codec:?}");
+            assert_eq!(sink.assistant_deltas().concat(), response.content);
+            assert!(sink.reasoning_deltas().is_empty(), "{codec:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_inline_reasoning_tail_is_replayed_exactly_with_its_tool_turn() {
+        use crate::provider::test_utils::RecordingSink;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let sse = [
+            serde_json::json!({"choices":[{"delta":{"content":"<think>trace π</thi"}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tail-call","function":{"name":"read","arguments":"{}"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ].into_iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>();
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let session = provider_session("test", &server.uri(), "qwen3.7-max");
+        let mut provider = loopback_opencode_provider(&session);
+        provider.echoes_reasoning_content = true;
+        let sink = std::sync::Arc::new(RecordingSink::default());
+
+        let response_id = crate::provider::ResponseId::new();
+        let response = provider
+            .chat_stream_for_replay_test(
+                &[],
+                &[sample_tool()],
+                &response_id,
+                CancellationToken::new(),
+                sink.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.tool_calls.len(), 1);
+        assert!(response.content.is_empty());
+        assert_eq!(sink.reasoning_deltas().concat(), "trace π</thi");
+        assert_eq!(response.reasoning_chars, "trace π</thi".chars().count());
+        let call = &response.tool_calls[0];
+        let history = [
+            tool_call_message(&call.id, &call.name, &call.arguments),
+            tool_result_message(&call.id, "result"),
+        ];
+        let body = provider
+            .replay_body_for_test(
+                &history,
+                &[sample_tool()],
+                std::slice::from_ref(&response_id),
+            )
+            .unwrap();
+        assert_eq!(body["messages"][0]["reasoning_content"], "trace π</thi");
+    }
+
+    #[tokio::test]
+    async fn plain_native_traces_follow_response_identity_after_provider_rebuild() {
+        use crate::provider::test_utils::{RecordingSink, assistant_message, user_message};
+        use crate::provider::{NativeReplayStore, ProviderRequestContext, ResponseId};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let count = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .respond_with(move |_: &wiremock::Request| {
+                let trace = format!("native trace {} π", count.fetch_add(1, Ordering::SeqCst));
+                let frame = serde_json::json!({"choices":[{"delta":{
+                "reasoning_content":trace,"content":"same answer"},"finish_reason":"stop"}]});
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n"))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let session = provider_session("test", &server.uri(), "deepseek-v4-flash");
+        let store = NativeReplayStore::default();
+        let mut provider = loopback_opencode_provider(&session);
+        provider.echoes_reasoning_content = true;
+        provider.set_native_replay_store(store.clone());
+        let old = ResponseId::new();
+        let first = provider
+            .chat_stream_with_context(
+                &[],
+                &[sample_tool()],
+                crate::provider::ProviderRequestOptions::default(),
+                &ProviderRequestContext {
+                    assistant_response_ids: Some(vec![]),
+                    response_id: Some(old.clone()),
+                },
+                CancellationToken::new(),
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.snapshot().len(), 1);
+        let bytes = serde_json::to_vec(&store.snapshot()).unwrap();
+        let restored = NativeReplayStore::default();
+        restored
+            .restore(
+                &serde_json::from_slice::<Vec<crate::provider::NativeReplayRecord>>(&bytes)
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut rebuilt = loopback_opencode_provider(&session);
+        rebuilt.echoes_reasoning_content = true;
+        rebuilt.set_native_replay_store(restored.clone());
+        let recent = ResponseId::new();
+        let second = rebuilt
+            .chat_stream_with_context(
+                &[
+                    assistant_message(&first.content),
+                    user_message("next human turn"),
+                ],
+                &[sample_tool()],
+                crate::provider::ProviderRequestOptions::default(),
+                &ProviderRequestContext {
+                    assistant_response_ids: Some(vec![Some(old.clone())]),
+                    response_id: Some(recent.clone()),
+                },
+                CancellationToken::new(),
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.content, second.content);
+        let requests = server.received_requests().await.unwrap();
+        let sent: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(sent["messages"][0]["reasoning_content"], "native trace 0 π");
+        let encoded = serde_json::to_string(&sent).unwrap();
+        assert!(!encoded.contains(serde_json::to_value(&old).unwrap().as_str().unwrap()));
+        for (id, expected) in [
+            (Some(old), "native trace 0 π"),
+            (Some(recent), "native trace 1 π"),
+            (None, ""),
+        ] {
+            let body = rebuilt
+                .request_body_with_context(
+                    &[assistant_message("same answer")],
+                    &[sample_tool()],
+                    rebuilt.reasoning,
+                    &ProviderRequestContext {
+                        assistant_response_ids: Some(vec![id]),
+                        response_id: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(body["messages"][0]["reasoning_content"], expected);
+        }
+        let mut different_model =
+            loopback_opencode_provider(&provider_session("test", &server.uri(), "another-model"));
+        different_model.echoes_reasoning_content = true;
+        different_model.set_native_replay_store(restored.clone());
+        let body = different_model
+            .request_body_with_context(
+                &[assistant_message("same answer")],
+                &[sample_tool()],
+                different_model.reasoning,
+                &ProviderRequestContext {
+                    assistant_response_ids: Some(vec![Some(
+                        restored.snapshot()[0].response_id.clone(),
+                    )]),
+                    response_id: None,
+                },
+            )
+            .unwrap();
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_replay_capture_is_independent_of_summary_display_and_empty_fields() {
+        use crate::provider::test_utils::{RecordingSink, assistant_message};
+        use crate::provider::{ProviderRequestContext, ResponseId};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (codec, echo, delta, expected_fields, displayed) in [
+            (
+                ReasoningCodec::OpenAiCompatible,
+                true,
+                serde_json::json!({"reasoning_summary":"short summary", "reasoning_content":"full trace π", "content":"answer"}),
+                serde_json::json!({"reasoning_content":"full trace π"}),
+                "short summary",
+            ),
+            (
+                ReasoningCodec::OpenRouter,
+                false,
+                serde_json::json!({"reasoning_details":[], "reasoning":"legacy π", "content":"answer"}),
+                serde_json::json!({"reasoning_details":[], "reasoning":"legacy π"}),
+                "legacy π",
+            ),
+            (
+                ReasoningCodec::OpenRouter,
+                false,
+                serde_json::json!({"reasoning_details":[{"type":"reasoning.encrypted", "data":"opaque=="}], "reasoning":"legacy π", "content":"answer"}),
+                serde_json::json!({"reasoning_details":[{"type":"reasoning.encrypted", "data":"opaque=="}], "reasoning":"legacy π"}),
+                "",
+            ),
+            (
+                ReasoningCodec::OpenRouter,
+                false,
+                serde_json::json!({"reasoning_details":[], "reasoning":"", "content":"answer"}),
+                serde_json::json!({"reasoning_details":[], "reasoning":""}),
+                "",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let frame = serde_json::json!({"choices":[{"delta":delta,"finish_reason":"stop"}]});
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(format!("data: {frame}\n\ndata: [DONE]\n\n")),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut provider =
+                loopback_opencode_provider(&provider_session("test", &server.uri(), "test-model"));
+            provider.reasoning_codec = codec;
+            provider.echoes_reasoning_content = echo;
+            let response_id = ResponseId::new();
+            let sink = std::sync::Arc::new(RecordingSink::default());
+            let response = provider
+                .chat_stream_with_context(
+                    &[],
+                    &[sample_tool()],
+                    crate::provider::ProviderRequestOptions::default(),
+                    &ProviderRequestContext {
+                        assistant_response_ids: Some(vec![]),
+                        response_id: Some(response_id.clone()),
+                    },
+                    CancellationToken::new(),
+                    sink.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(sink.reasoning_deltas().concat(), displayed);
+            assert_eq!(response.reasoning_chars, displayed.chars().count());
+            let body = provider
+                .request_body_with_context(
+                    &[assistant_message(&response.content)],
+                    &[sample_tool()],
+                    provider.reasoning,
+                    &ProviderRequestContext {
+                        assistant_response_ids: Some(vec![Some(response_id)]),
+                        response_id: None,
+                    },
+                )
+                .unwrap();
+            for (key, value) in expected_fields.as_object().unwrap() {
+                assert_eq!(&body["messages"][0][key], value, "{codec:?}: {key}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_native_responses_never_register_reusable_payloads() {
+        use crate::provider::test_utils::RecordingSink;
+        use crate::provider::{NativeReplayStore, ProviderRequestContext, ResponseId};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"partial\",\"content\":\"unfinished\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n"
+        )).expect(1).mount(&server).await;
+        let store = NativeReplayStore::default();
+        let mut provider = loopback_opencode_provider(&provider_session(
+            "test",
+            &server.uri(),
+            "deepseek-v4-flash",
+        ));
+        provider.echoes_reasoning_content = true;
+        provider.set_native_replay_store(store.clone());
+        let response = provider
+            .chat_stream_with_context(
+                &[],
+                &[],
+                crate::provider::ProviderRequestOptions::default(),
+                &ProviderRequestContext {
+                    assistant_response_ids: Some(vec![]),
+                    response_id: Some(ResponseId::new()),
+                },
+                CancellationToken::new(),
+                std::sync::Arc::new(RecordingSink::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.finish_reason(),
+            Some(&crate::provider::FinishReason::Length)
+        );
+        assert!(store.snapshot().is_empty());
     }
 
     #[tokio::test]
@@ -3142,8 +3582,15 @@ mod tests {
         );
 
         let sink = std::sync::Arc::new(RecordingSink::default());
+        let response_id = crate::provider::ResponseId::new();
         let response = provider
-            .chat_stream(&[], &[], CancellationToken::new(), sink.clone())
+            .chat_stream_for_replay_test(
+                &[],
+                &[],
+                &response_id,
+                CancellationToken::new(),
+                sink.clone(),
+            )
             .await
             .unwrap();
 
@@ -3161,7 +3608,9 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let body = provider.request_body(&[assistant], &[]).unwrap();
+        let body = provider
+            .replay_body_for_test(&[assistant], &[], std::slice::from_ref(&response_id))
+            .unwrap();
         assert_eq!(body["reasoning_effort"], serde_json::json!("high"));
         assert_eq!(body["max_tokens"], serde_json::json!(32_000));
         assert!(body.get("max_completion_tokens").is_none());
@@ -3219,22 +3668,34 @@ mod tests {
             CACHING,
         );
 
+        let response_id = crate::provider::ResponseId::new();
         let response = provider
-            .chat_stream(
+            .chat_stream_for_replay_test(
                 &[],
                 &[],
+                &response_id,
                 CancellationToken::new(),
                 std::sync::Arc::new(crate::output::StdoutSink),
             )
             .await
             .unwrap();
-        assert_eq!(response.tool_calls[0].id, "call_1");
+        crate::provider::test_utils::assert_tool_call_identity(
+            &provider,
+            &response.tool_calls[0],
+            "call_1",
+        );
 
         let history = [
-            tool_call_message("call_1", "read", "{\"path\":\"Cargo.toml\"}"),
-            tool_result_message("call_1", "contents"),
+            tool_call_message(
+                &response.tool_calls[0].id,
+                "read",
+                "{\"path\":\"Cargo.toml\"}",
+            ),
+            tool_result_message(&response.tool_calls[0].id, "contents"),
         ];
-        let body = provider.request_body(&history, &[]).unwrap();
+        let body = provider
+            .replay_body_for_test(&history, &[], std::slice::from_ref(&response_id))
+            .unwrap();
 
         assert_eq!(
             body["messages"][0]["content"],
@@ -3308,18 +3769,25 @@ mod tests {
         session.reasoning = crate::provider::ReasoningSelection::High;
         let mut target = resolved.run_target(server.uri().into(), session.reasoning);
         target.endpoint_path = Some("chat/completions".into());
+        // Select the wire codec and effort explicitly: this replay fixture's
+        // synthetic model need not have reasoning metadata in the catalog.
+        target.reasoning_codec = ReasoningCodec::OpenRouter;
+        target.reasoning = crate::provider::ReasoningSelection::High;
         let provider = OpenAiCompatibleProvider::with_api_key_policy(
             "openrouter",
             &session,
             &target,
             ApiKeyPolicy::Required,
             CACHING,
-        );
+        )
+        .with_test_http_client();
 
+        let response_id = crate::provider::ResponseId::new();
         let response = provider
-            .chat_stream(
+            .chat_stream_for_replay_test(
                 &[],
                 &[],
+                &response_id,
                 CancellationToken::new(),
                 std::sync::Arc::new(crate::output::StdoutSink),
             )
@@ -3330,14 +3798,22 @@ mod tests {
             "inspect the project".chars().count(),
             "legacy reasoning alongside details must not be displayed twice"
         );
-        assert_eq!(response.tool_calls[0].id, "call_1");
+        crate::provider::test_utils::assert_tool_call_identity(
+            &provider,
+            &response.tool_calls[0],
+            "call_1",
+        );
 
         let history = [
-            tool_call_message("call_1", "read", "{\"path\":\"Cargo.toml\"}"),
-            tool_result_message("call_1", "contents"),
+            tool_call_message(
+                &response.tool_calls[0].id,
+                "read",
+                "{\"path\":\"Cargo.toml\"}",
+            ),
+            tool_result_message(&response.tool_calls[0].id, "contents"),
         ];
         let body = provider
-            .request_body_with_reasoning(&history, &[], crate::provider::ReasoningSelection::High)
+            .replay_body_for_test(&history, &[], std::slice::from_ref(&response_id))
             .unwrap();
 
         assert_eq!(
@@ -3354,6 +3830,7 @@ mod tests {
             body["messages"][0]["reasoning_details"],
             serde_json::json!([first_detail, encrypted_detail, summary_detail])
         );
+        assert_eq!(body["messages"][0]["reasoning"], "inspect the project");
         assert!(body["messages"][0].get("reasoning_content").is_none());
     }
 
@@ -3403,7 +3880,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].id, "call_1");
+        crate::provider::test_utils::assert_tool_call_identity(
+            &provider,
+            &response.tool_calls[0],
+            "call_1",
+        );
         assert_eq!(response.tool_calls[0].name, "read");
         assert_eq!(
             response.tool_calls[0].arguments,
@@ -3444,22 +3925,37 @@ mod tests {
             PLAIN.with_reasoning_content_echo(),
         );
 
+        let response_id = crate::provider::ResponseId::new();
         let response = provider
-            .chat_stream(
+            .chat_stream_for_replay_test(
                 &[],
                 &[],
+                &response_id,
                 CancellationToken::new(),
                 std::sync::Arc::new(crate::output::StdoutSink),
             )
             .await
             .unwrap();
-        assert_eq!(response.tool_calls[0].id, "call_1");
+        crate::provider::test_utils::assert_tool_call_identity(
+            &provider,
+            &response.tool_calls[0],
+            "call_1",
+        );
 
         let history = [
-            tool_call_message("call_1", "read", "{\"path\":\"Cargo.toml\"}"),
-            crate::provider::test_utils::tool_result_message("call_1", "contents"),
+            tool_call_message(
+                &response.tool_calls[0].id,
+                "read",
+                "{\"path\":\"Cargo.toml\"}",
+            ),
+            crate::provider::test_utils::tool_result_message(
+                &response.tool_calls[0].id,
+                "contents",
+            ),
         ];
-        let body = provider.request_body(&history, &[]).unwrap();
+        let body = provider
+            .replay_body_for_test(&history, &[], std::slice::from_ref(&response_id))
+            .unwrap();
         assert_eq!(
             body["messages"][0]["reasoning_content"],
             serde_json::json!("inspect the file")
@@ -3492,28 +3988,155 @@ mod tests {
             PLAIN,
         );
 
+        let response_id = crate::provider::ResponseId::new();
         let response = provider
-            .chat_stream(
+            .chat_stream_for_replay_test(
                 &[],
                 &[],
+                &response_id,
                 CancellationToken::new(),
                 std::sync::Arc::new(crate::output::StdoutSink),
             )
             .await
             .unwrap();
-        assert_eq!(response.tool_calls[0].id, "call_1");
+        crate::provider::test_utils::assert_tool_call_identity(
+            &provider,
+            &response.tool_calls[0],
+            "call_1",
+        );
 
         let history = [
-            tool_call_message("call_1", "read", "{\"path\":\"Cargo.toml\"}"),
-            crate::provider::test_utils::tool_result_message("call_1", "contents"),
+            tool_call_message(
+                &response.tool_calls[0].id,
+                "read",
+                "{\"path\":\"Cargo.toml\"}",
+            ),
+            crate::provider::test_utils::tool_result_message(
+                &response.tool_calls[0].id,
+                "contents",
+            ),
         ];
-        let body = provider.request_body(&history, &[]).unwrap();
+        let body = provider
+            .replay_body_for_test(&history, &[], std::slice::from_ref(&response_id))
+            .unwrap();
+        assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
         assert_eq!(
             body["messages"][0]["tool_calls"][0]["extra_content"],
             serde_json::json!({
                 "google": {"thought_signature": "encrypted-signature"}
             })
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_wire_ids_preserve_each_turns_reasoning_and_signature() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let session = provider_session("sk-test", &server.uri(), "qwen3.7-max");
+        let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        let provider = OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN.with_reasoning_content_echo(),
+        );
+        let mut history = Vec::new();
+        let mut canonical_ids = Vec::new();
+        let mut response_ids = Vec::new();
+        for turn in ["first", "second"] {
+            server.reset().await;
+            let delta = serde_json::json!({"choices":[{"delta":{
+                "reasoning_content": format!("reasoning-{turn}"),
+                "tool_calls":[{"index":0,"id":"repeated","function":{"name":"read","arguments":"{}"},
+                    "extra_content":{"google":{"thought_signature":format!("signature-{turn}")}}}]
+            }}]});
+            let terminal =
+                serde_json::json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]});
+            let sse = format!("data: {delta}\n\ndata: {terminal}\n\ndata: [DONE]\n\n");
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+                .mount(&server)
+                .await;
+            let response_id = crate::provider::ResponseId::new();
+            let response = provider
+                .chat_stream_with_context(
+                    &history,
+                    &[],
+                    crate::provider::ProviderRequestOptions::default(),
+                    &crate::provider::ProviderRequestContext {
+                        assistant_response_ids: Some(
+                            response_ids.iter().cloned().map(Some).collect(),
+                        ),
+                        response_id: Some(response_id.clone()),
+                    },
+                    CancellationToken::new(),
+                    std::sync::Arc::new(crate::output::StdoutSink),
+                )
+                .await
+                .unwrap();
+            let call = &response.tool_calls[0];
+            canonical_ids.push(call.id.clone());
+            response_ids.push(response_id);
+            history.push(tool_call_message(&call.id, &call.name, &call.arguments));
+            history.push(tool_result_message(&call.id, turn));
+        }
+        assert_ne!(canonical_ids[0], canonical_ids[1]);
+        let body = provider
+            .replay_body_for_test(&history, &[], &response_ids)
+            .unwrap();
+        assert_eq!(
+            body,
+            provider
+                .replay_body_for_test(&history, &[], &response_ids)
+                .unwrap(),
+            "stable replay body"
+        );
+        for (index, turn) in [(0, "first"), (2, "second")] {
+            let assistant = &body["messages"][index];
+            assert_eq!(assistant["reasoning_content"], format!("reasoning-{turn}"));
+            assert_eq!(
+                assistant["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+                format!("signature-{turn}")
+            );
+            assert_eq!(assistant["tool_calls"][0]["id"], "repeated");
+            assert_eq!(body["messages"][index + 1]["tool_call_id"], "repeated");
+        }
+        let sent: Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(sent["messages"][0]["reasoning_content"], "reasoning-first");
+        assert_eq!(
+            sent["messages"][0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "signature-first"
+        );
+    }
+
+    #[test]
+    fn request_deduplication_preserves_signed_ids_and_later_original_suffixes() {
+        let mut body = serde_json::json!({"messages":[
+            {"role":"assistant","tool_calls":[{"id":"x"},{"id":"x"},{"id":"x-dup2"}]},
+            {"role":"tool","tool_call_id":"x"},
+            {"role":"tool","tool_call_id":"x"},
+            {"role":"tool","tool_call_id":"x-dup2"},
+            {"role":"assistant","tool_calls":[{"id":"signed","extra_content":{"signature":"opaque"}}]},
+            {"role":"tool","tool_call_id":"signed"},
+            {"role":"assistant","tool_calls":[{"id":"signed","extra_content":{"signature":"second"}}]},
+            {"role":"tool","tool_call_id":"signed"}
+        ]});
+        dedupe_request_tool_call_ids(&mut body);
+        assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "x");
+        assert_eq!(body["messages"][0]["tool_calls"][1]["id"], "x-dup3");
+        assert_eq!(body["messages"][0]["tool_calls"][2]["id"], "x-dup2");
+        assert_eq!(body["messages"][2]["tool_call_id"], "x-dup3");
+        for index in [4, 6] {
+            assert_eq!(body["messages"][index]["tool_calls"][0]["id"], "signed");
+        }
+        for index in [5, 7] {
+            assert_eq!(body["messages"][index]["tool_call_id"], "signed");
+        }
     }
 
     #[tokio::test]

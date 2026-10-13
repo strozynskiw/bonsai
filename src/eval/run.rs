@@ -1165,7 +1165,11 @@ async fn run_task(
     let completion_guard = agent.completion_guard_trace();
     let execution_policy = agent.execution_policy_snapshot().map(str::to_owned);
     let usage = UsageReport::from_totals(usage_totals);
-    let usage_turns = agent.context_report().usage_turns;
+    let usage_turns = agent
+        .usage_turns()
+        .iter()
+        .map(crate::agent::UsageTurnReport::from)
+        .collect::<Vec<_>>();
     let repair_turns = agent
         .verification_runs()
         .iter()
@@ -2049,6 +2053,40 @@ impl EvalProviderStats {
 
 #[async_trait]
 impl Provider for CountingProvider {
+    fn prepare_request_for_estimation(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<crate::provider::PreparedProviderRequest> {
+        self.inner
+            .prepare_request_for_estimation(messages, tools, options, context)
+    }
+    fn reasoning_for_request(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<ReasoningSelection> {
+        self.inner.reasoning_for_request(messages, options, context)
+    }
+    fn set_tool_call_identity_store(&mut self, store: crate::provider::ToolCallIdentityStore) {
+        self.inner.set_tool_call_identity_store(store);
+    }
+
+    fn set_native_replay_store(&mut self, store: crate::provider::NativeReplayStore) {
+        self.inner.set_native_replay_store(store);
+    }
+
+    fn set_conversation_cache_key(&mut self, key: &str) {
+        self.inner.set_conversation_cache_key(key);
+    }
+
+    fn project_state_cache_strategy(&self) -> crate::provider::ProjectStateCacheStrategy {
+        self.inner.project_state_cache_strategy()
+    }
+
     fn reasoning(&self) -> ReasoningSelection {
         self.inner.reasoning()
     }
@@ -2087,6 +2125,22 @@ impl Provider for CountingProvider {
             .map_err(|error| crate::provider::ProviderFailure::configuration(error.to_string()))?;
         self.inner
             .chat_stream_with_options(messages, tools, options, cancellation_token, sink)
+            .await
+    }
+
+    async fn chat_stream_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+        cancellation_token: CancellationToken,
+        sink: SharedSink,
+    ) -> crate::provider::ProviderResult<StreamedResponse> {
+        self.record_attempt(messages, tools)
+            .map_err(|error| crate::provider::ProviderFailure::configuration(error.to_string()))?;
+        self.inner
+            .chat_stream_with_context(messages, tools, options, context, cancellation_token, sink)
             .await
     }
 
@@ -2284,6 +2338,10 @@ fn record_changed_paths(state: &mut EvalSinkState, paths: &[String]) {
 }
 
 impl OutputSink for EvalSink {
+    fn wants_context_updates(&self) -> bool {
+        false
+    }
+
     fn tool_calls_started(&self, calls: &[ToolCallStart]) {
         let mut state = self
             .state

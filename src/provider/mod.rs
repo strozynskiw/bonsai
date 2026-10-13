@@ -5,8 +5,10 @@ mod discovery;
 mod endpoint;
 mod metadata;
 pub(crate) mod minimax_coding_plan;
+mod native_replay;
 mod openai_catalog;
 pub(crate) mod opencode;
+mod prepared;
 mod reasoning;
 mod registry;
 mod request_preview;
@@ -16,6 +18,7 @@ mod streaming;
 pub(crate) mod test_utils;
 mod think_tags;
 mod token;
+mod tool_call_identity;
 mod tool_calls;
 pub(crate) mod transform;
 mod usage;
@@ -31,6 +34,12 @@ pub use metadata::{
     NO_PARAMETERS, NO_REASONING, ParameterPreview, Protocol, ProviderCapabilities,
     ProviderMetadata, ReasoningEffort, ReasoningOption, ReasoningSelection,
 };
+pub use native_replay::{
+    AnthropicNativeReplay, AnthropicReplaySettings, ChatNativeReplay, CodexNativeReplay,
+    NativeBudgetAttribution, NativeBudgetEvidence, NativeReplayPayload, NativeReplayRecord,
+    NativeReplayStore, NativeToolFunction, ProviderRequestContext, ResponseId,
+};
+pub use prepared::PreparedProviderRequest;
 pub(crate) use reasoning::ReasoningCodec;
 pub use registry::ProviderRegistry;
 pub use request_preview::{
@@ -44,6 +53,8 @@ pub use token::{
     EstimateConfidence, ModelPricing, ModelPricingSchedule, ModelPricingTier, PromptEstimate,
     PromptEstimator, TokenCounterKind, UtcPricingWindow,
 };
+pub(crate) use tool_call_identity::tool_call_scope;
+pub use tool_call_identity::{ToolCallIdentity, ToolCallIdentityStore};
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -833,7 +844,9 @@ impl FinishReason {
         match value {
             "stop" | "end_turn" | "stop_sequence" => Self::Stop,
             "tool_calls" | "tool_use" => Self::ToolCalls,
-            "length" | "max_tokens" | "max_output_tokens" => Self::Length,
+            "length" | "max_tokens" | "max_output_tokens" | "model_context_window_exceeded" => {
+                Self::Length
+            }
             "generation_budget" => Self::GenerationBudget,
             "content_filter" | "refusal" => Self::ContentFilter,
             other => Self::Other(other.to_string()),
@@ -925,6 +938,40 @@ pub(crate) fn serialize_request_body(
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Build protocol data without authorization, IO, diagnostic capture, or
+    /// mutation. Counting and transmission share this pure boundary.
+    ///
+    /// # Errors
+    /// Returns provenance-alignment and request-construction failures.
+    fn prepare_request_for_estimation(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: ProviderRequestOptions,
+        context: &ProviderRequestContext,
+    ) -> ProviderResult<PreparedProviderRequest> {
+        context.validate_assistant_count(
+            messages
+                .iter()
+                .filter(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+                .count(),
+        )?;
+        let reasoning = self.reasoning_for_request(messages, options, context)?;
+        let messages = serde_json::to_value(messages).map_err(|error| {
+            ProviderFailure::configuration(format!("Failed to prepare messages: {error}"))
+        })?;
+        let tools = serde_json::to_value(tools).map_err(|error| {
+            ProviderFailure::configuration(format!("Failed to prepare tools: {error}"))
+        })?;
+        Ok(PreparedProviderRequest {
+            protocol: None,
+            body: serde_json::json!({"messages":messages,"tools":tools}),
+            reasoning,
+            native_budget: Vec::new(),
+            count_endpoint: None,
+            count_auth_header: None,
+        })
+    }
     /// Select the provider's project-state cache representation.
     ///
     /// IMPORTANT CACHE COMPATIBILITY CONTRACT: the default deliberately keeps
@@ -942,6 +989,13 @@ pub trait Provider: Send + Sync {
     /// keep the same warm cache route after resume or a provider rebuild. Other
     /// transports intentionally ignore it.
     fn set_conversation_cache_key(&mut self, _key: &str) {}
+
+    /// Attach the durable session's tool identities before provider invocation.
+    /// Implementations allocate canonical IDs before recording replay state.
+    fn set_tool_call_identity_store(&mut self, _store: ToolCallIdentityStore) {}
+
+    /// Attach native protocol data owned by the durable conversation.
+    fn set_native_replay_store(&mut self, _store: NativeReplayStore) {}
 
     /// Reasoning selection baked into this provider's current run target.
     fn reasoning(&self) -> ReasoningSelection {
@@ -987,10 +1041,34 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    #[cfg(test)]
+    fn preview_request_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        _context: &ProviderRequestContext,
+    ) -> Result<ProviderRequestPreview> {
+        self.preview_request(messages, tools)
+    }
+
     /// Remove diagnostics captured from the most recent JSON request body.
     /// Providers that do not own a JSON transport may leave this unsupported.
     fn take_last_request_diagnostics(&self) -> Option<ProviderRequestDiagnostics> {
         None
+    }
+
+    /// Resolve effective effort without issuing a request or changing state.
+    /// A transport may pin settings while continuing a native tool turn.
+    ///
+    /// # Errors
+    /// Returns a failure if request provenance cannot be safely aligned.
+    fn reasoning_for_request(
+        &self,
+        _messages: &[ChatCompletionRequestMessage],
+        options: ProviderRequestOptions,
+        _context: &ProviderRequestContext,
+    ) -> ProviderResult<ReasoningSelection> {
+        Ok(options.reasoning.unwrap_or_else(|| self.reasoning()))
     }
 
     async fn chat_stream(
@@ -1013,6 +1091,22 @@ pub trait Provider: Send + Sync {
     ) -> ProviderResult<StreamedResponse> {
         let _ = options;
         self.chat_stream(messages, tools, cancellation_token, sink)
+            .await
+    }
+
+    /// Stream with immutable response provenance kept outside wire messages.
+    /// Providers without native replay inherit their normal request behavior.
+    async fn chat_stream_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: ProviderRequestOptions,
+        context: &ProviderRequestContext,
+        cancellation_token: tokio_util::sync::CancellationToken,
+        sink: SharedSink,
+    ) -> ProviderResult<StreamedResponse> {
+        let _ = context;
+        self.chat_stream_with_options(messages, tools, options, cancellation_token, sink)
             .await
     }
 

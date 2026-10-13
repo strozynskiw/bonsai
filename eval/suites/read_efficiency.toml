@@ -4,7 +4,7 @@ seed = 272
 [[tasks]]
 id = "broad_review"
 fixture = "fixtures/broad_review"
-prompt = "Review every file under src for correctness bugs. Do not edit files. Report each concrete bug with its file path and explain the behavioral impact."
+prompt = "Review every file under src for correctness bugs. Do not edit files. Report each concrete bug with its file path, explain the behavioral impact, and include the minimal corrected Rust code in the report."
 
 [tasks.budgets]
 max_logical_turns = 8

@@ -264,6 +264,10 @@ struct VersionedJson<'a, T> {
 }
 
 impl OutputSink for HeadlessSink {
+    fn wants_context_updates(&self) -> bool {
+        self.format == OutputFormat::StreamJson
+    }
+
     fn begin_completion_run(&self) {
         self.completion_evidence.begin_run();
     }
@@ -755,6 +759,7 @@ mod tests {
         let (stdout, stdout_buffer) = BufferWriter::new();
         let (stderr, _stderr_buffer) = BufferWriter::new();
         let sink = HeadlessSink::new(OutputFormat::StreamJson, Box::new(stdout), Box::new(stderr));
+        assert!(sink.wants_context_updates());
 
         sink.context_updated(crate::agent::ContextReport {
             budget_tokens: 100,
@@ -774,6 +779,14 @@ mod tests {
         assert_eq!(value["used_tokens"], 25);
         assert_eq!(value["budget_tokens"], 100);
         assert_eq!(value["session_cost_micros"], 123);
+    }
+
+    #[test]
+    fn non_stream_headless_sinks_skip_context_reports() {
+        for format in [OutputFormat::Text, OutputFormat::Json] {
+            let sink = HeadlessSink::new(format, Box::new(io::sink()), Box::new(io::sink()));
+            assert!(!sink.wants_context_updates());
+        }
     }
 
     #[test]

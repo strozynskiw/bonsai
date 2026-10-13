@@ -50,6 +50,7 @@ impl CompactionDraft {
 pub(in crate::agent) struct CompactionOmittedMessage {
     pub(in crate::agent) originals: Vec<ChatCompletionRequestMessage>,
     pub(in crate::agent) stable_ids: Vec<String>,
+    pub(in crate::agent) response_ids: Vec<Option<crate::provider::ResponseId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +74,8 @@ pub(super) struct CompactionCandidate {
     pub(super) controls: HashMap<String, ContextControlState>,
     pub(super) summary_sources: HashMap<String, Vec<ChatCompletionRequestMessage>>,
     pub(super) summary_source_stable_ids: HashMap<String, Vec<String>>,
+    pub(super) native_source_response_bindings:
+        std::collections::BTreeMap<String, Vec<Option<crate::provider::ResponseId>>>,
     pub(super) messages_omitted: usize,
     pub(super) tool_outputs_stubbed: usize,
     pub(super) summary_source_available: bool,

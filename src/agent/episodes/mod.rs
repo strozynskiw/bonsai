@@ -374,12 +374,17 @@ impl Agent {
         &self,
         tool_call: &ToolCall,
         content: &str,
-    ) -> Option<String> {
+    ) -> Option<ReadReuse> {
         if self.episode_store.is_none() || tool_call.name != "recall" {
             return None;
         }
         let new_arguments = serde_json::from_str::<serde_json::Value>(&tool_call.arguments).ok()?;
-        for message in &self.messages {
+        for (index, message) in self.messages.iter().enumerate() {
+            if self.message_has_control(index, message, |state| {
+                state.stubbed || state.drop_next_turn
+            }) {
+                continue;
+            }
             let Some(call_id) = tool_message_call_id(message) else {
                 continue;
             };
@@ -396,7 +401,7 @@ impl Agent {
             if prior_arguments.as_ref() != Some(&new_arguments) {
                 continue;
             }
-            let (_role, text) = describe_message_full(message);
+            let text = message_content_string(message);
             let trimmed = text.trim_start();
             if trimmed.starts_with("[Compacted tool output]")
                 || trimmed.starts_with("[reused previous recall]")
@@ -404,11 +409,14 @@ impl Agent {
                 continue;
             }
             if text == content {
-                return Some(format!(
-                    "[reused previous recall] The identical recall page (call {call_id}) is \
+                return Some(ReadReuse {
+                    pointer: format!(
+                        "[reused previous recall] The identical recall page (call {call_id}) is \
                      still live earlier in this conversation; its bytes were not re-emitted. \
-                     Consult that earlier result — it is complete and current."
-                ));
+                     Consult that earlier result — it is complete and current.\nsource_calls: {call_id}"
+                    ),
+                    target_call_id: call_id,
+                });
             }
         }
         None
