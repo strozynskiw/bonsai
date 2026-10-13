@@ -39,12 +39,18 @@ tests), `scripts/` (release tooling), `site/`.
 ## Startup
 
 `main.rs` loads `.env`, parses the CLI, and builds a tokio runtime per mode.
-The TUI path (`bootstrap.rs`): open storage (run migrations, taking a
-pre-upgrade backup) → resolve the project → load the **workspace trust**
+The TUI path (`bootstrap.rs`): open storage (serialize startup across processes,
+take a unique pre-upgrade backup, and run migrations atomically) → resolve the
+project → load the **workspace trust**
 gate *before* any project-owned config → load the model catalog (project
 layer only if trusted; background models.dev refresh) → build the provider
 registry from the catalog → load session state → build the interaction
 channel → `RuntimeBuilder::build`.
+
+SQLite startup holds a persistent owner-only file lock while taking the backup
+and committing the migration transaction. A failed upgrade rolls back all pending
+migrations without replacing the live database or its WAL files; the backup stays
+available for recovery. This preserves writes from clients already using the store.
 
 `RuntimeBuilder` (`runtime.rs`) is the surface-neutral assembly used by both
 TUI and headless. It wires, in order: permissions, config (project layer

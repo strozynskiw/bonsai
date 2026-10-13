@@ -500,21 +500,35 @@ async fn artifact_startup_upgrades_supported_store_and_preserves_failures() -> R
     .execute(&pool)
     .await?;
     pool.close().await;
-    let (output, _) = scenario_at(
-        project.path(),
-        home.path(),
-        tool_response("bash", serde_json::json!({"command":"pwd"})),
-        "yolo",
-        "off",
-        false,
-    )
-    .await?;
-    assert!(
-        output.status.success(),
-        "supported store startup failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let other_project = tempfile::tempdir()?;
+    let (first, second) = tokio::join!(
+        scenario_at(
+            project.path(),
+            home.path(),
+            tool_response("bash", serde_json::json!({"command":"pwd"})),
+            "yolo",
+            "off",
+            false,
+        ),
+        scenario_at(
+            other_project.path(),
+            home.path(),
+            tool_response("bash", serde_json::json!({"command":"pwd"})),
+            "yolo",
+            "off",
+            false,
+        ),
     );
+    for result in [first, second] {
+        let (output, _) = result?;
+        assert!(
+            output.status.success(),
+            "concurrent supported store startup failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(std::fs::read_dir(state.join("backups"))?.count(), 1);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&database))
         .await?;

@@ -2733,11 +2733,11 @@ async fn schema_upgrade_preserves_state_and_creates_restorable_backup() {
 }
 
 #[tokio::test]
-async fn failed_schema_upgrade_restores_pre_upgrade_database() {
+async fn failed_schema_upgrade_rolls_back_all_pending_migrations() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let paths = BonsaiPaths::from_home_dir(temp_dir.path().to_path_buf());
     seed_upgrade_test_database(&paths).await;
-    let broken_v2 = upgrade_test_migrator(&[
+    let broken_v3 = upgrade_test_migrator(&[
         (
             1,
             "public state",
@@ -2745,15 +2745,21 @@ async fn failed_schema_upgrade_restores_pre_upgrade_database() {
         ),
         (
             2,
+            "add state kind",
+            "ALTER TABLE public_state ADD COLUMN kind TEXT NOT NULL DEFAULT 'saved';",
+        ),
+        (
+            3,
             "broken upgrade",
-            "ALTER TABLE public_state ADD COLUMN kind TEXT; THIS IS NOT SQL;",
+            "CREATE TABLE partial_upgrade (value TEXT); THIS IS NOT SQL;",
         ),
     ]);
 
-    let error = Storage::open_paths_with_migrator(paths.clone(), &broken_v2)
+    let error = Storage::open_paths_with_migrator(paths.clone(), &broken_v3)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("restored the database"));
+    assert!(error.to_string().contains("rolled back the upgrade"));
+    assert!(error.to_string().contains("pre-upgrade backup retained"));
 
     let pool = SqlitePoolOptions::new()
         .connect_with(
@@ -2781,8 +2787,175 @@ async fn failed_schema_upgrade_restores_pre_upgrade_database() {
     .await
     .unwrap();
     assert_eq!(kind_column_count, 0);
+    let partial_table_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'partial_upgrade'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(partial_table_count, 0);
     assert_eq!(upgrade_backup_files(&paths).len(), 1);
     pool.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_startup_migrates_once_and_preserves_state() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BonsaiPaths::from_home_dir(home.path().to_path_buf());
+    let v1 = upgrade_test_migrator(&[(
+        1,
+        "public state",
+        "CREATE TABLE public_state (value TEXT NOT NULL);",
+    )]);
+    let (first, second) = tokio::join!(
+        Storage::open_paths_with_migrator(paths.clone(), &v1),
+        Storage::open_paths_with_migrator(paths.clone(), &v1),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    sqlx::query("INSERT INTO public_state VALUES ('keep-me')")
+        .execute(&first.pool)
+        .await
+        .unwrap();
+    first.close().await;
+    second.close().await;
+    assert!(!paths.home_dir().join(UPGRADE_BACKUP_DIR).exists());
+
+    let v2 = upgrade_test_migrator(&[
+        (
+            1,
+            "public state",
+            "CREATE TABLE public_state (value TEXT NOT NULL);",
+        ),
+        (
+            2,
+            "add state kind",
+            "ALTER TABLE public_state ADD COLUMN kind TEXT NOT NULL DEFAULT 'saved';",
+        ),
+    ]);
+    let (first, second) = tokio::join!(
+        Storage::open_paths_with_migrator(paths.clone(), &v2),
+        Storage::open_paths_with_migrator(paths.clone(), &v2),
+    );
+    for storage in [first.unwrap(), second.unwrap()] {
+        let row: (String, String) = sqlx::query_as("SELECT value, kind FROM public_state")
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(row, ("keep-me".to_string(), "saved".to_string()));
+        let versions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(versions, 2);
+        storage.close().await;
+    }
+    assert_eq!(upgrade_backup_files(&paths).len(), 1);
+}
+
+#[tokio::test]
+async fn failed_upgrade_preserves_existing_clients_writes_after_backup() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BonsaiPaths::from_home_dir(home.path().to_path_buf());
+    seed_upgrade_test_database(&paths).await;
+    let client = SqlitePoolOptions::new()
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(paths.db_path())
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+    let broken_v2 = upgrade_test_migrator(&[
+        (
+            1,
+            "public state",
+            "CREATE TABLE public_state (value TEXT NOT NULL);",
+        ),
+        (
+            2,
+            "broken upgrade",
+            "ALTER TABLE public_state ADD COLUMN kind TEXT; THIS IS NOT SQL;",
+        ),
+    ]);
+    let _guard = startup_lock::StartupLock::acquire(paths.db_path())
+        .await
+        .unwrap();
+    let backup = prepare_upgrade_backup(&client, &paths, &broken_v2, true)
+        .await
+        .unwrap()
+        .unwrap();
+    // A running older client does not acquire the new startup lock.
+    sqlx::query("INSERT INTO public_state VALUES ('after-backup')")
+        .execute(&client)
+        .await
+        .unwrap();
+    let error = run_startup_migrations(&client, &broken_v2, Some(&backup))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("rolled back the upgrade"));
+    sqlx::query("INSERT INTO public_state VALUES ('after-failure')")
+        .execute(&client)
+        .await
+        .unwrap();
+    let values: Vec<String> = sqlx::query_scalar("SELECT value FROM public_state ORDER BY rowid")
+        .fetch_all(&client)
+        .await
+        .unwrap();
+    assert_eq!(values, ["keep-me", "after-backup", "after-failure"]);
+    assert_eq!(current_migration_version(&client).await.unwrap(), Some(1));
+    let backup_pool = SqlitePoolOptions::new()
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&backup.path)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    let backup_values: Vec<String> = sqlx::query_scalar("SELECT value FROM public_state")
+        .fetch_all(&backup_pool)
+        .await
+        .unwrap();
+    assert_eq!(backup_values, ["keep-me"]);
+    backup_pool.close().await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn simultaneous_upgrade_snapshots_have_independent_destinations() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BonsaiPaths::from_home_dir(home.path().to_path_buf());
+    seed_upgrade_test_database(&paths).await;
+    let pool = SqlitePoolOptions::new()
+        .connect_with(SqliteConnectOptions::new().filename(paths.db_path()))
+        .await
+        .unwrap();
+    let v2 = upgrade_test_migrator(&[(2, "later schema", "CREATE TABLE later (value TEXT);")]);
+    let (first, second) = tokio::join!(
+        prepare_upgrade_backup(&pool, &paths, &v2, true),
+        prepare_upgrade_backup(&pool, &paths, &v2, true),
+    );
+    let first = first.unwrap().unwrap();
+    let second = second.unwrap().unwrap();
+    assert_ne!(first.path, second.path);
+    assert_eq!(upgrade_backup_files(&paths).len(), 2);
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn startup_rejects_nontransactional_migrations_before_database_mutation() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BonsaiPaths::from_home_dir(home.path().to_path_buf());
+    let mut migrator = upgrade_test_migrator(&[(1, "nontransactional", "VACUUM;")]);
+    migrator.migrations.to_mut()[0].no_tx = true;
+    let error = Storage::open_paths_with_migrator(paths.clone(), &migrator)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("must support atomic transactions")
+    );
+    assert!(!paths.db_path().exists());
 }
 
 /// Cross-session dashboard aggregates: day buckets, per-model rollups with

@@ -54,6 +54,7 @@ mod recovery;
 mod self_review;
 mod session_kind;
 mod sessions;
+mod startup_lock;
 mod task_runs;
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -442,6 +443,14 @@ impl Storage {
             )
         })?;
 
+        let _startup_lock = startup_lock::StartupLock::acquire(paths.db_path()).await?;
+        if migrator
+            .iter()
+            .any(|migration| migration.migration_type.is_up_migration() && migration.no_tx)
+        {
+            anyhow::bail!("SQLite startup migrations must support atomic transactions");
+        }
+
         let database_existed =
             std::fs::metadata(paths.db_path()).is_ok_and(|metadata| metadata.len() > 0);
 
@@ -458,21 +467,9 @@ impl Storage {
             .with_context(|| format!("Failed to open SQLite database {:?}", paths.db_path()))?;
 
         let backup = prepare_upgrade_backup(&pool, &paths, migrator, database_existed).await?;
-        if let Err(error) = migrator.run(&pool).await {
+        if let Err(error) = run_startup_migrations(&pool, migrator, backup.as_ref()).await {
             pool.close().await;
-            if let Some(backup) = backup {
-                restore_upgrade_backup(&paths, &backup).with_context(|| {
-                    format!(
-                        "Failed to restore pre-upgrade backup {:?} after migration error: {error}",
-                        backup.path
-                    )
-                })?;
-                anyhow::bail!(
-                    "Failed to run SQLite migrations; restored the database from {:?}: {error}",
-                    backup.path
-                );
-            }
-            return Err(error).context("Failed to run SQLite migrations");
+            return Err(error);
         }
 
         #[cfg(unix)]
@@ -746,8 +743,9 @@ async fn prepare_upgrade_backup(
         .map(|version| format!("v{version}"))
         .unwrap_or_else(|| "unversioned".to_string());
     let backup_path = backup_dir.join(format!(
-        "bonsai-{source_label}-before-v{target_version}-{}.db",
-        now_ms()
+        "bonsai-{source_label}-before-v{target_version}-{}-{}.db",
+        now_ms(),
+        uuid::Uuid::now_v7()
     ));
     sqlx::query("VACUUM INTO ?")
         .bind(backup_path.to_string_lossy().as_ref())
@@ -783,52 +781,33 @@ async fn current_migration_version(pool: &SqlitePool) -> Result<Option<i64>> {
         .context("Failed to read the current SQLite migration version")
 }
 
-fn restore_upgrade_backup(paths: &BonsaiPaths, backup: &UpgradeBackup) -> Result<()> {
-    let db_path = paths.db_path();
-    let restore_path = paths
-        .home_dir()
-        .join(format!(".{DB_FILE}.restore-{}.tmp", now_ms()));
-    std::fs::copy(&backup.path, &restore_path).with_context(|| {
-        format!(
-            "Failed to stage upgrade backup {:?} at {:?}",
-            backup.path, restore_path
-        )
-    })?;
-    #[cfg(unix)]
-    set_unix_mode(&restore_path, 0o600)?;
-
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = sidecar_path(db_path, suffix);
-        if sidecar.exists() {
-            std::fs::remove_file(&sidecar)
-                .with_context(|| format!("Failed to remove stale SQLite sidecar {sidecar:?}"))?;
-        }
-    }
-
-    let failed_path = paths
-        .home_dir()
-        .join(format!(".{DB_FILE}.failed-upgrade-{}.tmp", now_ms()));
-    if db_path.exists() {
-        std::fs::rename(db_path, &failed_path).with_context(|| {
-            format!("Failed to move the failed upgrade database to {failed_path:?}")
+/// SQLite's migrator uses savepoints inside this transaction. Roll back the
+/// entire upgrade on failure rather than replacing a database still used by
+/// other clients. VACUUM backups are made before entering the transaction.
+async fn run_startup_migrations(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+    backup: Option<&UpgradeBackup>,
+) -> Result<()> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .context("Failed to begin atomic SQLite migrations")?;
+    if let Err(error) = migrator.run(&mut *transaction).await {
+        transaction.rollback().await.with_context(|| {
+            format!("Failed to roll back SQLite migrations after migration error: {error}")
         })?;
+        let backup_note = backup
+            .map(|backup| format!("; pre-upgrade backup retained at {:?}", backup.path))
+            .unwrap_or_default();
+        return Err(error).with_context(|| {
+            format!("Failed to run SQLite migrations; rolled back the upgrade{backup_note}")
+        });
     }
-    if let Err(error) = std::fs::rename(&restore_path, db_path) {
-        if failed_path.exists() {
-            let _ = std::fs::rename(&failed_path, db_path);
-        }
-        return Err(error).context("Failed to activate the restored pre-upgrade database");
-    }
-    if failed_path.exists()
-        && let Err(error) = std::fs::remove_file(&failed_path)
-    {
-        tracing::warn!(
-            path = %failed_path.display(),
-            error = %error,
-            "restored upgrade backup but could not remove failed temporary database"
-        );
-    }
-    Ok(())
+    transaction
+        .commit()
+        .await
+        .context("Failed to commit atomic SQLite migrations")
 }
 
 /// Restrict the on-disk session store to the owner. The database and its
