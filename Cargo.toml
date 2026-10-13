@@ -23,6 +23,21 @@ unsafe_code = "deny"
 # Debug scaffolding must never reach a commit; `dbg!` is a hard error.
 dbg_macro = "deny"
 
+# The large binary test harness exceeds macOS compact-unwind offsets at opt=0.
+# Optimize only this package's test builds; dependencies keep their default
+# debug settings, and development/release builds retain their existing profiles.
+[profile.test.package.bonsai]
+opt-level = 1
+# Preserve dev-sized LLVM partitions when incremental compilation is disabled.
+codegen-units = 256
+# Keep line-number backtraces without multi-gigabyte test type/debug artifacts.
+debug = "line-tables-only"
+
+[profile.test]
+# Repeated agent/test builds accumulated multi-gigabyte incremental caches.
+# Cargo still reuses unchanged compiled dependencies without that query cache.
+incremental = false
+
 [dependencies]
 async-openai = { version = "0.42.1", features = ["chat-completion", "model"] }
 reqwest = { version = "0.13.5", features = ["stream", "json", "gzip", "brotli"] }
