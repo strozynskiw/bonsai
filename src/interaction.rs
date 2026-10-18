@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use tokio::sync::Notify;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -136,6 +139,8 @@ pub enum EscalationDecision {
 #[derive(Debug, Clone)]
 pub enum InteractionAnswer {
     Choices(Vec<usize>),
+    /// The question deadline elapsed; this is an assumption, not user consent.
+    Recommended(usize),
     /// Reserved: a free-text answer. Only constructed in tests today; the TUI
     /// question modal doesn't yet collect custom input.
     #[cfg(test)]
@@ -157,6 +162,9 @@ pub enum InteractionStatus {
 
 #[derive(Clone)]
 pub struct InteractionService {
+    question_results: Arc<Mutex<QuestionResults>>,
+    question_changed: Arc<Notify>,
+    goal_question_timeout: Arc<AtomicU64>,
     sender: mpsc::UnboundedSender<InteractionRequest>,
     pending: Arc<Mutex<PendingState>>,
     noninteractive: bool,
@@ -170,9 +178,27 @@ pub struct InteractionService {
 }
 
 #[derive(Default)]
+struct QuestionResults {
+    active: usize,
+    completed: Vec<String>,
+}
+
+struct InteractionWait {
+    ledger: SharedTimingLedger,
+    span: TimingSpan,
+}
+
+impl Drop for InteractionWait {
+    fn drop(&mut self) {
+        self.ledger.end(self.span);
+    }
+}
+
+#[derive(Default)]
 struct PendingState {
     next_request_id: u64,
     responders: BTreeMap<u64, oneshot::Sender<InteractionOutcome>>,
+    questions: BTreeMap<u64, InteractionRequest>,
 }
 
 impl PendingState {
@@ -191,6 +217,9 @@ impl InteractionService {
         let (tx, rx) = mpsc::unbounded_channel();
         (
             Self {
+                question_results: Arc::new(Mutex::new(QuestionResults::default())),
+                question_changed: Arc::new(Notify::new()),
+                goal_question_timeout: Arc::new(AtomicU64::new(0)),
                 sender: tx,
                 pending: Arc::new(Mutex::new(PendingState::default())),
                 noninteractive: false,
@@ -203,6 +232,9 @@ impl InteractionService {
     pub fn noninteractive() -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
         Self {
+            question_results: Arc::new(Mutex::new(QuestionResults::default())),
+            question_changed: Arc::new(Notify::new()),
+            goal_question_timeout: Arc::new(AtomicU64::new(0)),
             sender: tx,
             pending: Arc::new(Mutex::new(PendingState::default())),
             noninteractive: true,
@@ -245,18 +277,13 @@ impl InteractionService {
     /// service and the run's ledger, so a child's prompt currently lands in the
     /// parent's wait total; separating that needs the child's lane to travel
     /// with the request, which today it does not.
-    fn begin_wait(&self, request: &InteractionRequest) -> Option<TimingSpan> {
+    fn begin_wait(&self, request: &InteractionRequest) -> Option<InteractionWait> {
         let ledger = self.timing.as_ref()?;
         let (category, owner, reason) = Self::wait_labels(request);
-        Some(ledger.begin(category, TimingLane::Parent, Some(owner), Some(reason)))
-    }
-
-    /// Close a wait interval. Closing twice is a no-op, so a cancelled prompt
-    /// and its responder cannot both count the same wait.
-    fn end_wait(&self, span: TimingSpan) {
-        if let Some(ledger) = self.timing.as_ref() {
-            ledger.end(span);
-        }
+        Some(InteractionWait {
+            ledger: ledger.clone(),
+            span: ledger.begin(category, TimingLane::Parent, Some(owner), Some(reason)),
+        })
     }
 
     pub(crate) fn is_noninteractive(&self) -> bool {
@@ -267,14 +294,162 @@ impl InteractionService {
     /// service. Completion gates use this authoritative state instead of
     /// inferring pending user input from assistant prose.
     pub(crate) async fn pending_count(&self) -> usize {
-        self.pending.lock().await.responders.len()
+        self.pending
+            .lock()
+            .await
+            .responders
+            .values()
+            .filter(|sender| !sender.is_closed())
+            .count()
+    }
+
+    pub(crate) fn set_goal_question_timeout(&self, seconds: Option<u64>) {
+        self.goal_question_timeout
+            .store(seconds.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    pub(crate) fn goal_question_timeout(&self) -> Option<u64> {
+        match self.goal_question_timeout.load(Ordering::Relaxed) {
+            0 => None,
+            seconds => Some(seconds),
+        }
+    }
+
+    /// Pending question snapshots let the UI reopen a dismissed prompt without
+    /// restarting its deadline or inventing a second responder.
+    pub(crate) async fn pending_questions(&self) -> Vec<InteractionRequest> {
+        let pending = self.pending.lock().await;
+        pending
+            .questions
+            .iter()
+            .filter(|(id, _)| {
+                pending
+                    .responders
+                    .get(id)
+                    .is_some_and(|sender| !sender.is_closed())
+            })
+            .map(|(_, request)| request.clone())
+            .collect()
+    }
+
+    pub(crate) async fn is_pending(&self, id: u64) -> bool {
+        self.pending
+            .lock()
+            .await
+            .responders
+            .get(&id)
+            .is_some_and(|sender| !sender.is_closed())
+    }
+
+    pub(crate) async fn request_question(
+        &self,
+        build: impl FnOnce(u64) -> InteractionRequest,
+        timeout_seconds: Option<u64>,
+        recommended: usize,
+    ) -> Result<InteractionOutcome, InteractionStatus> {
+        self.request_inner(
+            build,
+            None,
+            timeout_seconds.map(|seconds| (Duration::from_secs(seconds), recommended)),
+            true,
+        )
+        .await
+    }
+
+    /// Ask without parking the tool loop. The coordinator consumes the answer
+    /// at its next safe boundary and waits for it before claiming completion.
+    pub(crate) async fn spawn_question(
+        &self,
+        build: impl FnOnce(u64) -> InteractionRequest + Send + 'static,
+        timeout_seconds: Option<u64>,
+        recommended: usize,
+        render: impl FnOnce(Result<InteractionOutcome, InteractionStatus>) -> String + Send + 'static,
+    ) -> Result<u64, InteractionStatus> {
+        if self.noninteractive {
+            return Err(InteractionStatus::Noninteractive);
+        }
+        self.question_results.lock().await.active += 1;
+        let service = self.clone();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut id = 0;
+            let outcome = service
+                .request_inner(
+                    |request_id| {
+                        id = request_id;
+                        let _ = tx.send(request_id);
+                        build(request_id)
+                    },
+                    None,
+                    timeout_seconds.map(|seconds| (Duration::from_secs(seconds), recommended)),
+                    false,
+                )
+                .await;
+            let text = format!("Question #{id}: {}", render(outcome));
+            let mut results = service.question_results.lock().await;
+            results.active = results.active.saturating_sub(1);
+            results.completed.push(text);
+            drop(results);
+            service.question_changed.notify_one();
+        });
+        rx.await.map_err(|_| InteractionStatus::Cancelled)
+    }
+
+    pub(crate) async fn take_question_results(&self) -> Vec<String> {
+        std::mem::take(&mut self.question_results.lock().await.completed)
+    }
+
+    pub(crate) async fn has_question_work(&self) -> bool {
+        let results = self.question_results.lock().await;
+        results.active > 0 || !results.completed.is_empty()
+    }
+
+    pub(crate) async fn wait_question_results(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Vec<String> {
+        let mut wait = None;
+        loop {
+            let changed = self.question_changed.notified();
+            {
+                let mut results = self.question_results.lock().await;
+                if !results.completed.is_empty() || results.active == 0 {
+                    return std::mem::take(&mut results.completed);
+                }
+            }
+            if wait.is_none() {
+                wait = self.timing.as_ref().map(|ledger| InteractionWait {
+                    ledger: ledger.clone(),
+                    span: ledger.begin(
+                        TimingCategory::UserWait,
+                        TimingLane::Parent,
+                        Some("questions"),
+                        Some("Waiting for pending question answers"),
+                    ),
+                });
+            }
+            tokio::select! {
+                () = changed => {},
+                () = cancellation.cancelled() => return Vec::new(),
+            }
+        }
+    }
+
+    /// Only questions are cancelled; approval responders are never answered
+    /// by this path or by a question deadline.
+    pub(crate) async fn cancel_questions(&self) {
+        let mut pending = self.pending.lock().await;
+        let questions = std::mem::take(&mut pending.questions);
+        for id in questions.keys() {
+            pending.responders.remove(id);
+        }
     }
 
     pub async fn request(
         &self,
         build: impl FnOnce(u64) -> InteractionRequest,
     ) -> Result<InteractionOutcome, InteractionStatus> {
-        self.request_inner(build, None).await
+        self.request_inner(build, None, None, true).await
     }
 
     /// Submit an interaction request and stop waiting if `cancellation_token`
@@ -284,13 +459,16 @@ impl InteractionService {
         build: impl FnOnce(u64) -> InteractionRequest,
         cancellation_token: CancellationToken,
     ) -> Result<InteractionOutcome, InteractionStatus> {
-        self.request_inner(build, Some(cancellation_token)).await
+        self.request_inner(build, Some(cancellation_token), None, true)
+            .await
     }
 
     async fn request_inner(
         &self,
         build: impl FnOnce(u64) -> InteractionRequest,
         cancellation_token: Option<CancellationToken>,
+        question_timeout: Option<(Duration, usize)>,
+        record_wait: bool,
     ) -> Result<InteractionOutcome, InteractionStatus> {
         if self.noninteractive {
             return Err(InteractionStatus::Noninteractive);
@@ -299,17 +477,32 @@ impl InteractionService {
         let mut pending = self.pending.lock().await;
         let request_id = pending.next_request_id();
         let request = build(request_id);
+        // Timeout defaults are only permitted for the question tool. Approval
+        // requests always retain their explicit permission path.
+        let question_timeout = if matches!(request, InteractionRequest::Question { .. }) {
+            pending.questions.insert(request_id, request.clone());
+            question_timeout
+        } else {
+            None
+        };
         pending.responders.insert(request_id, tx);
         drop(pending);
         // From here the user has been asked and the run is blocked until they
         // answer, cancel, or the prompt dies with the UI. That whole stretch is
         // one wait interval, attributed to the prompt rather than to the tool
         // call that asked for it.
-        let wait = self.begin_wait(&request);
+        let wait = record_wait.then(|| self.begin_wait(&request)).flatten();
         let outcome = if self.sender.send(request).is_err() {
             self.remove_pending(request_id).await;
             Err(InteractionStatus::Cancelled)
-        } else if let Some(cancellation_token) = cancellation_token {
+        } else {
+            let cancellation_token = cancellation_token.unwrap_or_default();
+            let deadline = async {
+                match question_timeout {
+                    Some((duration, _)) => tokio::time::sleep(duration).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 outcome = rx => match outcome {
                     Ok(outcome) => Ok(outcome),
@@ -321,26 +514,24 @@ impl InteractionService {
                 () = cancellation_token.cancelled() => {
                     self.remove_pending(request_id).await;
                     Err(InteractionStatus::Cancelled)
-                }
-            }
-        } else {
-            match rx.await {
-                Ok(outcome) => Ok(outcome),
-                Err(_) => {
+                },
+                () = deadline => {
                     self.remove_pending(request_id).await;
-                    Err(InteractionStatus::Cancelled)
+                    Ok(InteractionOutcome::Question(Some(InteractionAnswer::Recommended(
+                        question_timeout.map_or(0, |(_, index)| index),
+                    ))))
                 }
             }
         };
-        if let Some(span) = wait {
-            self.end_wait(span);
-        }
+        self.remove_pending(request_id).await;
+        drop(wait);
         outcome
     }
 
     async fn remove_pending(&self, request_id: u64) {
         let mut pending = self.pending.lock().await;
         pending.responders.remove(&request_id);
+        pending.questions.remove(&request_id);
     }
 
     pub async fn respond(
@@ -349,6 +540,7 @@ impl InteractionService {
         outcome: InteractionOutcome,
     ) -> Result<(), InteractionStatus> {
         let mut pending = self.pending.lock().await;
+        pending.questions.remove(&request_id);
         if let Some(responder) = pending.responders.remove(&request_id) {
             if responder.send(outcome).is_err() {
                 return Err(InteractionStatus::Cancelled);
@@ -362,6 +554,102 @@ impl InteractionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_background_question_does_not_exclude_independent_work_from_time_budget() {
+        let ledger = Arc::new(crate::timing::TimingLedger::system(
+            crate::timing::TimingPolicy::ActiveCompute,
+        ));
+        let (service, mut rx) = InteractionService::new();
+        let service = service.with_timing(ledger.clone());
+        service
+            .spawn_question(
+                |request_id| InteractionRequest::Question {
+                    request_id,
+                    prompt: "Pick".into(),
+                    header: None,
+                    options: vec![QuestionOption::new("A", ""), QuestionOption::new("B", "")],
+                    multiple: false,
+                    origin: None,
+                },
+                Some(60),
+                0,
+                |_| "resolved".into(),
+            )
+            .await
+            .unwrap();
+        let _ = rx.recv().await.unwrap();
+        assert_eq!(ledger.snapshot().open_interval_count, 0);
+        let waiter = tokio::spawn({
+            let service = service.clone();
+            async move {
+                service
+                    .wait_question_results(&CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(ledger.snapshot().open_interval_count, 1);
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            ledger.snapshot().open_interval_count,
+            0,
+            "steering drops the wait future and must close its timing interval"
+        );
+        service.cancel_questions().await;
+        let _ = service
+            .wait_question_results(&CancellationToken::new())
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn goal_timeout_never_answers_permission_or_sandbox_requests() {
+        let (service, mut rx) = InteractionService::new();
+        service.set_goal_question_timeout(Some(1));
+        for sandbox in [false, true] {
+            let cancellation = CancellationToken::new();
+            let prompt = tokio::spawn({
+                let service = service.clone();
+                let cancellation = cancellation.clone();
+                async move {
+                    service
+                        .request_with_cancellation(
+                            |request_id| {
+                                if sandbox {
+                                    InteractionRequest::SandboxEscalation {
+                                        request_id,
+                                        command: "deploy".into(),
+                                        origin: None,
+                                        kind: SandboxEscalationKind::SandboxOnly,
+                                    }
+                                } else {
+                                    InteractionRequest::Permission {
+                                        request_id,
+                                        command: "deploy".into(),
+                                        origin: None,
+                                    }
+                                }
+                            },
+                            cancellation,
+                        )
+                        .await
+                }
+            });
+            let _ = rx.recv().await.unwrap();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            assert!(
+                !prompt.is_finished(),
+                "goal timeout must never authorize an action"
+            );
+            assert_eq!(service.pending_count().await, 1);
+            cancellation.cancel();
+            assert!(matches!(
+                prompt.await.unwrap(),
+                Err(InteractionStatus::Cancelled)
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn permission_waits_are_recorded_on_the_run_ledger() {

@@ -448,6 +448,8 @@ pub(crate) struct ReadEvidenceMap {
 type ProviderFallbackModelObserver = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct Agent {
+    pub(crate) goal: crate::goal::GoalService,
+    goal_run_id: Option<String>,
     provider: Box<dyn Provider>,
     tool_call_identities: crate::provider::ToolCallIdentityStore,
     native_replay: crate::provider::NativeReplayStore,
@@ -1990,6 +1992,7 @@ mod completion;
 mod controls;
 mod episodes;
 mod finalization;
+mod goal;
 mod lifecycle;
 mod memory_recall;
 mod message_injection;

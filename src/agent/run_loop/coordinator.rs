@@ -215,6 +215,18 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
     }
 
     async fn advance_turn(&mut self) -> Result<TurnOutcome> {
+        if !self.agent.refresh_goal_context().await? {
+            return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
+                String::new(),
+            )));
+        }
+        if self.agent.execution_lane.kind == ExecutionLaneKind::Parent
+            && let Some(interaction) = self.agent.interaction.clone()
+        {
+            for result in interaction.take_question_results().await {
+                self.agent.push_harness_note(&result);
+            }
+        }
         if self.agent.take_read_only_conclusion_turn() {
             self.tool_registry = Arc::new(ToolRegistry::new());
             self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
@@ -363,6 +375,39 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         response_id: crate::provider::ResponseId,
         deferred_sink: &DeferredAssistantSink,
     ) -> Result<TurnOutcome> {
+        if self.agent.execution_lane.kind == ExecutionLaneKind::Parent
+            && let Some(interaction) = self.agent.interaction.clone()
+            && interaction.has_question_work().await
+        {
+            deferred_sink.discard();
+            self.sink
+                .status("Waiting for pending questions; /questions opens them.");
+            let results = tokio::select! {
+                results = interaction.wait_question_results(&self.cancellation_token) => results,
+                command = async {
+                    match self.queued_messages.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match command {
+                        Some(QueuedUserMessageCommand::Send(message)) => self.pending_queued_messages.push_back(message),
+                        Some(QueuedUserMessageCommand::Cancel(id)) => { self.cancelled_queued_message_ids.insert(id); },
+                        None => self.queued_messages = None,
+                    }
+                    Vec::new()
+                },
+            };
+            for result in results {
+                self.agent.push_harness_note(&result);
+            }
+            if self.cancellation_token.is_cancelled() {
+                return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
+                    String::new(),
+                )));
+            }
+            return Ok(TurnOutcome::Continue);
+        }
         self.agent.log_response(&response, false);
         self.agent.log_turn_line(
             &[],

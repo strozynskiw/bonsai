@@ -1356,6 +1356,9 @@ pub(in crate::tui) async fn resume_session(
         .collect::<Vec<_>>();
     reconcile_self_review_tool_calls(&mut transcript_items, &snapshot.self_review_runs);
     let lost_terminal_ids = normalize_lost_interactive_terminals(&mut transcript_items);
+    // Validate the durable objective before committing the session switch,
+    // alongside provider/context preparation.
+    deps.storage.current_goal(session_id).await?;
     let prepared = PreparedResume {
         conversation_cache_key: deps.storage.conversation_cache_key(session_id).await?,
         model_identity: crate::model_resolution::active_model_identity(&session_snapshot),
@@ -1467,6 +1470,9 @@ pub(in crate::tui) async fn resume_session(
         agent.set_project_info_provider(project_info_provider);
         agent.set_execution_lane(crate::agent::ExecutionLane::parent(session_id.to_string()));
         crate::session_persist::restore_agent_state(&mut agent, &snapshot).await;
+        if let Err(error) = agent.goal.bind(deps.storage.clone(), session_id).await {
+            tracing::error!(%error, "failed to restore session goal");
+        }
         if !lost_terminal_ids.is_empty() {
             agent.push_user_context_note(&crate::tool::wrap_untrusted_content(
                 "terminal:resume",

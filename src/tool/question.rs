@@ -20,6 +20,12 @@ struct QuestionArgs {
     options: Vec<RawOption>,
     #[serde(default)]
     multi_select: bool,
+    #[serde(default)]
+    recommended_index: usize,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    wait_for_answer: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +56,29 @@ impl QuestionTool {
         if args.options.len() < 2 {
             anyhow::bail!("at least two options are required");
         }
-        let options: Vec<QuestionOption> = args
+        anyhow::ensure!(args.options.len() <= 4, "at most four options are allowed");
+        anyhow::ensure!(
+            args.recommended_index < args.options.len(),
+            "recommended_index is out of range"
+        );
+        if let Some(seconds) = args.timeout_seconds {
+            anyhow::ensure!(
+                (1..=3600).contains(&seconds),
+                "timeout_seconds must be between 1 and 3600"
+            );
+        }
+        let timeout = args
+            .timeout_seconds
+            .or_else(|| self.interaction.goal_question_timeout());
+        let recommended = args.recommended_index;
+        let wait_for_answer = args
+            .wait_for_answer
+            .unwrap_or(origin.is_some() || self.interaction.goal_question_timeout().is_none());
+        anyhow::ensure!(
+            wait_for_answer || origin.is_none(),
+            "Delegated questions must wait for their own answer"
+        );
+        let mut options: Vec<QuestionOption> = args
             .options
             .into_iter()
             .map(|opt| QuestionOption {
@@ -60,59 +88,102 @@ impl QuestionTool {
             })
             .collect();
         let option_labels: Vec<String> = options.iter().map(|opt| opt.label.clone()).collect();
+        if timeout.is_some() {
+            options[recommended].label.push_str(" (Recommended)");
+        }
         // `args.options` was already moved out by `into_iter` above, so the
         // remaining fields can be moved rather than cloned.
         let prompt = args.question;
-        let header = args.header;
+        let header = match timeout {
+            Some(seconds) => Some(format!(
+                "{} · recommended in {seconds}s",
+                args.header.as_deref().unwrap_or("Question")
+            )),
+            None => args.header,
+        };
         let multi = args.multi_select;
         let origin = origin.map(str::to_string);
+        let question_text = prompt.clone();
+        let build = move |id| crate::interaction::InteractionRequest::Question {
+            request_id: id,
+            prompt,
+            header,
+            options,
+            multiple: multi,
+            origin,
+        };
+        if !wait_for_answer {
+            let id = self
+                .interaction
+                .spawn_question(build, timeout, recommended, move |outcome| {
+                    let answer = match render_answer(outcome, &option_labels) {
+                        Ok(ToolOutput::Text(text)) => text,
+                        Ok(_) => String::new(),
+                        Err(error) => error.to_string(),
+                    };
+                    format!("{question_text}\n{answer}")
+                })
+                .await
+                .map_err(|status| anyhow::anyhow!("Question unavailable: {status:?}"))?;
+            return Ok(ToolOutput::Text(format!(
+                "Question #{id} pending. Continue independent work; the response or timed recommendation will be delivered automatically. Use /questions to reopen it."
+            )));
+        }
         let outcome = self
             .interaction
-            .request(|id| crate::interaction::InteractionRequest::Question {
-                request_id: id,
-                prompt,
-                header,
-                options,
-                multiple: multi,
-                origin,
-            })
+            .request_question(build, timeout, recommended)
             .await;
-        match outcome {
-            Ok(InteractionOutcome::Question(Some(InteractionAnswer::Choices(indices)))) => {
-                let mut labels = Vec::with_capacity(indices.len());
-                for idx in indices {
-                    // An out-of-range index means the answer payload and the
-                    // option list disagree; surface it instead of silently
-                    // dropping the choice.
-                    let label = option_labels.get(idx).ok_or_else(|| {
+        render_answer(outcome, &option_labels)
+    }
+}
+
+fn render_answer(
+    outcome: Result<InteractionOutcome, InteractionStatus>,
+    option_labels: &[String],
+) -> anyhow::Result<ToolOutput> {
+    match outcome {
+        Ok(InteractionOutcome::Question(Some(InteractionAnswer::Recommended(index)))) => {
+            let label = option_labels
+                .get(index)
+                .ok_or_else(|| anyhow::anyhow!("Recommended option is out of range"))?;
+            Ok(ToolOutput::Text(format!(
+                "Question timed out. Automatically assumed recommended option: {label}. This was not a user response or permission approval; the user may correct it while work continues."
+            )))
+        }
+        Ok(InteractionOutcome::Question(Some(InteractionAnswer::Choices(indices)))) => {
+            let mut labels = Vec::with_capacity(indices.len());
+            for idx in indices {
+                // An out-of-range index means the answer payload and the
+                // option list disagree; surface it instead of silently
+                // dropping the choice.
+                let label = option_labels.get(idx).ok_or_else(|| {
                         anyhow::anyhow!(
                             "Question prompt returned out-of-range choice index {idx} ({} options available)",
                             option_labels.len()
                         )
                     })?;
-                    labels.push(label.clone());
-                }
-                if labels.is_empty() {
-                    anyhow::bail!("Question prompt returned no selected options");
-                }
-                Ok(ToolOutput::Text(format!("Selected: {}", labels.join(", "))))
+                labels.push(label.clone());
             }
-            #[cfg(test)]
-            Ok(InteractionOutcome::Question(Some(InteractionAnswer::Custom(text)))) => {
-                Ok(ToolOutput::Text(format!("Custom answer: {text}")))
+            if labels.is_empty() {
+                anyhow::bail!("Question prompt returned no selected options");
             }
-            Ok(InteractionOutcome::Question(None)) => {
-                anyhow::bail!("Question prompt cancelled by user");
-            }
-            Ok(_) => {
-                anyhow::bail!("Question prompt received an unexpected response");
-            }
-            Err(InteractionStatus::Cancelled) => {
-                anyhow::bail!("Question prompt cancelled by user");
-            }
-            Err(InteractionStatus::Noninteractive) => {
-                anyhow::bail!("Question prompts are unavailable in noninteractive mode");
-            }
+            Ok(ToolOutput::Text(format!("Selected: {}", labels.join(", "))))
+        }
+        #[cfg(test)]
+        Ok(InteractionOutcome::Question(Some(InteractionAnswer::Custom(text)))) => {
+            Ok(ToolOutput::Text(format!("Custom answer: {text}")))
+        }
+        Ok(InteractionOutcome::Question(None)) => {
+            anyhow::bail!("Question prompt cancelled by user");
+        }
+        Ok(_) => {
+            anyhow::bail!("Question prompt received an unexpected response");
+        }
+        Err(InteractionStatus::Cancelled) => {
+            anyhow::bail!("Question prompt cancelled by user");
+        }
+        Err(InteractionStatus::Noninteractive) => {
+            anyhow::bail!("Question prompts are unavailable in noninteractive mode");
         }
     }
 }
@@ -128,7 +199,7 @@ impl Tool for QuestionTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a multiple-choice question and wait for their response. Use options to suggest 2-4 short, distinct choices."
+        "Ask the user a multiple-choice question. Suggest 2-4 choices with the recommended option first. In goal mode, unanswered questions automatically assume the recommendation after 60 seconds. Never use a question timeout as permission for an external or destructive action."
     }
 
     fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
@@ -138,6 +209,20 @@ impl Tool for QuestionTool {
     fn parameters_schema(&self) -> serde_json::Value {
         object(
             [
+                (
+                    "wait_for_answer",
+                    boolean_property(
+                        "Wait for the answer before doing other work. Defaults to false in goal mode; true otherwise.",
+                    ),
+                ),
+                (
+                    "recommended_index",
+                    serde_json::json!({"type":"integer", "minimum":0, "description":"Zero-based recommended option; defaults to 0. Used on timeout."}),
+                ),
+                (
+                    "timeout_seconds",
+                    serde_json::json!({"type":"integer", "minimum":1, "maximum":3600, "description":"Optional question timeout; goal mode defaults to 60 seconds. Timeout assumes the recommended option."}),
+                ),
                 (
                     "question",
                     string_property("The question to present to the user"),
@@ -201,6 +286,99 @@ impl Tool for QuestionTool {
 mod tests {
     use super::*;
     use crate::interaction::InteractionRequest;
+
+    #[tokio::test(start_paused = true)]
+    async fn goal_question_returns_pending_then_delivers_recommended_timeout_once() {
+        let (service, mut rx) = InteractionService::new();
+        service.set_goal_question_timeout(Some(60));
+        let service = Arc::new(service);
+        let tool = QuestionTool::new(service.clone());
+        let output = tool
+            .execute(serde_json::json!({
+                "question": "Which storage?",
+                "options": [{"label":"A"}, {"label":"B"}],
+                "recommended_index": 1,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(output, ToolOutput::Text(text) if text.contains("pending")));
+        let InteractionRequest::Question {
+            request_id,
+            options,
+            ..
+        } = rx.recv().await.unwrap()
+        else {
+            panic!("question expected")
+        };
+        assert!(options[1].label.contains("Recommended"));
+        assert!(service.is_pending(request_id).await);
+        tokio::time::advance(std::time::Duration::from_secs(59)).await;
+        assert!(service.is_pending(request_id).await);
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let results = service
+            .wait_question_results(&tokio_util::sync::CancellationToken::new())
+            .await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("recommended option: B"));
+        assert!(!service.is_pending(request_id).await);
+        assert!(service.take_question_results().await.is_empty());
+        assert!(
+            service
+                .respond(
+                    request_id,
+                    InteractionOutcome::Question(Some(InteractionAnswer::Choices(vec![0])))
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_question_delivers_user_answer_before_deadline() {
+        let (service, mut rx) = InteractionService::new();
+        service.set_goal_question_timeout(Some(60));
+        let service = Arc::new(service);
+        let tool = QuestionTool::new(service.clone());
+        tool.execute(serde_json::json!({
+            "question":"Pick", "options":[{"label":"A"},{"label":"B"}]
+        }))
+        .await
+        .unwrap();
+        let InteractionRequest::Question { request_id, .. } = rx.recv().await.unwrap() else {
+            panic!("question expected")
+        };
+        assert_eq!(service.pending_questions().await.len(), 1);
+        service
+            .respond(
+                request_id,
+                InteractionOutcome::Question(Some(InteractionAnswer::Choices(vec![1]))),
+            )
+            .await
+            .unwrap();
+        let results = service
+            .wait_question_results(&tokio_util::sync::CancellationToken::new())
+            .await;
+        assert!(results[0].contains("Selected: B"));
+        assert!(!results[0].contains("timed out"));
+        assert!(service.pending_questions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn question_rejects_invalid_recommendation_and_timeout() {
+        let tool = QuestionTool::new(Arc::new(InteractionService::noninteractive()));
+        for extra in [
+            serde_json::json!({"recommended_index":2}),
+            serde_json::json!({"timeout_seconds":0}),
+            serde_json::json!({"timeout_seconds":3601}),
+        ] {
+            let mut args =
+                serde_json::json!({"question":"Pick", "options":[{"label":"A"},{"label":"B"}]});
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(tool.execute(args).await.is_err());
+        }
+    }
 
     #[tokio::test]
     async fn question_passes_through_choices() {

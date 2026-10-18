@@ -331,6 +331,10 @@ pub(super) async fn drain_background_work_wakes(
         return false;
     };
     let wake = pending_wakes.remove(wake_index);
+    if !agent.lock().await.goal.automatic_work_allowed().await {
+        pending_wakes.push(wake);
+        return false;
+    }
     app.waiting_for_background_work = None;
     *pending_background_wake = None;
     match wake.wait.target_kind {
@@ -447,6 +451,9 @@ pub(super) async fn maybe_start_background_wake(
     }
 
     *pending_background_wake = None;
+    if !agent.lock().await.goal.automatic_work_allowed().await {
+        return false;
+    }
     // A background-task wake is not a peer hop — reset the anti-loop chain so
     // sends from this turn count as fresh (peers P3).
     peer_bus.begin_turn(crate::peer::TurnOrigin::Human);

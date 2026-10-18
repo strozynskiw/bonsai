@@ -37,6 +37,7 @@ use super::{
 };
 
 mod git;
+mod goals;
 mod inspection_reuse;
 mod mocks;
 mod read_efficiency_replay;

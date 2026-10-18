@@ -75,6 +75,18 @@ const fn tui_only_no_args(headless_message: &'static str) -> CommandSurface {
 /// completion popover. Single source of truth — add new commands here.
 pub(crate) const COMMANDS: &[CommandMetadata] = &[
     CommandMetadata {
+        name: "/goal",
+        description: "Set, inspect, pause, resume, or clear the session goal",
+        usage_hint: Some("[status|pause|resume|clear|<objective>]"),
+        surface: tui_only("Use /goal inside the bonsai TUI."),
+    },
+    CommandMetadata {
+        name: "/questions",
+        description: "Reopen pending questions without resetting their timeout",
+        usage_hint: None,
+        surface: tui_only_no_args("Use /questions inside the bonsai TUI."),
+    },
+    CommandMetadata {
         name: "/help",
         description: "List commands",
         usage_hint: None,
@@ -557,6 +569,11 @@ pub(crate) fn busy_behavior_for(input: &str) -> BusyCommandBehavior {
     let args = parts.collect::<Vec<_>>();
 
     match canonical_command_name(command) {
+        "/goal" if args.is_empty() || args.as_slice() == ["status"] => {
+            BusyCommandBehavior::ReadOnlyNow
+        }
+        "/goal" => BusyCommandBehavior::RunNow,
+        "/questions" => BusyCommandBehavior::ReadOnlyNow,
         "/help" | "/keys" | "/select" | "/ctx" | "/episodes" | "/perf" | "/cost" | "/usage"
         | "/sessions" | "/skills" | "/agents" | "/subagents" | "/peers" => {
             BusyCommandBehavior::ReadOnlyNow

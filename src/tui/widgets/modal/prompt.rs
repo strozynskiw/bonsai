@@ -269,6 +269,7 @@ pub(super) fn question_prompt_footer_lines(multiple: bool) -> Vec<Line<'static>>
         hints.push(("Space", "toggle"));
     }
     hints.push(("Enter", "select"));
+    hints.push(("Tab", "hide · /questions to reopen"));
     hints.push(("Esc", "cancel"));
     vec![footer_hint_line(&hints)]
 }

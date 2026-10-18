@@ -51,6 +51,7 @@ enum ReviewWorkflow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TaskRunIntent {
+    ExplicitGoal { id: String, objective: String },
     Start(String),
     ContinueLatestOrStart(String),
     ContinueActive,
@@ -368,6 +369,23 @@ impl TaskController {
                     return;
                 }
             };
+            let explicit_goal = match completion.as_ref() {
+                Some(context) => context
+                    .agent
+                    .lock()
+                    .await
+                    .goal
+                    .snapshot()
+                    .await
+                    .filter(|goal| goal.state == crate::goal::GoalState::Active),
+                None => None,
+            };
+            let task_run_intent = explicit_goal.as_ref().map_or(task_run_intent, |goal| {
+                TaskRunIntent::ExplicitGoal {
+                    id: goal.id.clone(),
+                    objective: goal.objective.clone(),
+                }
+            });
             let task_run_id = match begin_task_run(
                 session_runtime_budget.as_ref(),
                 session_timing.map(|(session_id, _)| session_id),
@@ -579,6 +597,31 @@ impl TaskController {
                     outcome = crate::tui::event::AgentRunOutcome::Failed;
                 }
                 completion_report = Some(report);
+            }
+            if let (Some(goal), Some(context)) = (explicit_goal.as_ref(), completion.as_ref()) {
+                use crate::goal::GoalState;
+                use crate::tui::event::AgentRunOutcome;
+                let terminal = match &outcome {
+                    AgentRunOutcome::BudgetExhausted(exhaustion) => {
+                        Some((GoalState::BudgetLimited, exhaustion.to_string()))
+                    }
+                    AgentRunOutcome::Failed => Some((
+                        GoalState::Blocked,
+                        "Required completion evidence failed.".into(),
+                    )),
+                    _ => None,
+                };
+                if let Some((state, reason)) = terminal
+                    && let Err(error) = context
+                        .agent
+                        .lock()
+                        .await
+                        .goal
+                        .reconcile_terminal(&goal.id, state, &reason)
+                        .await
+                {
+                    tracing::error!(%error, "failed to reconcile goal terminal state");
+                }
             }
             persist_task_timing(
                 session_runtime_budget.as_ref(),
@@ -1383,6 +1426,11 @@ async fn begin_task_run(
         return Ok(None);
     };
     match intent {
+        TaskRunIntent::ExplicitGoal { id, objective } => runtime
+            .storage
+            .start_task_run_with_goal_id(session_id, None, &id, &objective)
+            .await
+            .map(|task| Some(task.id)),
         TaskRunIntent::Start(goal) => runtime
             .storage
             .start_task_run(session_id, None, &goal)

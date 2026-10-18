@@ -887,6 +887,12 @@ fn compact_command_dispatches_model_work(input: &str) -> bool {
 }
 
 fn submitted_input_dispatches_model_work(input: &str) -> bool {
+    if matches!(
+        crate::goal::GoalCommand::parse(input),
+        Some(crate::goal::GoalCommand::Set(_) | crate::goal::GoalCommand::Resume)
+    ) {
+        return true;
+    }
     if !input.starts_with('/') {
         return true;
     }
@@ -958,7 +964,29 @@ async fn handle_toplevel_submit_command(
     subagents: &crate::subagent::SubagentRegistry,
     peer_bus: &crate::peer::PeerBus,
     update_config: &crate::config::UpdateConfig,
+    goal: &crate::goal::GoalService,
 ) -> bool {
+    if let Some(command) = crate::goal::GoalCommand::parse(input) {
+        app.reduce(AppAction::SubmitCommandInput(input.to_string()));
+        if let Err(error) = super::goal::handle_goal_command(command, app, tasks, goal).await {
+            push_command_message(app, CommandOutputKind::Error, &format!("{error:#}"));
+        }
+        return true;
+    }
+    if input.trim() == "/questions" {
+        app.reduce(AppAction::SubmitCommandInput(input.to_string()));
+        let pending = deps.interaction.pending_questions().await;
+        if pending.is_empty() {
+            push_command_message(app, CommandOutputKind::Status, "No pending questions.");
+        } else {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            for question in pending {
+                let _ = tx.send(question);
+            }
+            apply_interaction_request(app, &mut rx);
+        }
+        return true;
+    }
     if app.handle_copy_command(input) {
         app.reduce(AppAction::SubmitCommandInput(input.to_string()));
         return true;
@@ -2019,6 +2047,9 @@ async fn maybe_start_peer_wake(
         *pending_peer_wake = None;
         return false;
     }
+    if !agent.lock().await.goal.automatic_work_allowed().await {
+        return false;
+    }
     if !solicited && !peer_bus.try_consume_wake_slot() {
         *pending_peer_wake = None;
         return false;
@@ -2147,6 +2178,9 @@ async fn rotate_persisted_session_on_clear(
             }
             agent_guard
                 .set_execution_lane(crate::agent::ExecutionLane::parent(next_id.to_string()));
+            if let Err(error) = agent_guard.goal.bind(storage.clone(), next_id).await {
+                tracing::error!(%error, "failed to attach new session goal");
+            }
             drop(agent_guard);
             if let Err(err) = cache_key {
                 tracing::warn!(
@@ -2688,6 +2722,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             .await?
     };
     let conversation_cache_key = storage.conversation_cache_key(current_session_id).await?;
+    let goal_service = agent.goal.clone();
+    goal_service
+        .bind(storage.clone(), current_session_id)
+        .await?;
     agent.set_conversation_cache_key(&conversation_cache_key);
     agent.set_execution_lane(crate::agent::ExecutionLane::parent(
         current_session_id.to_string(),
@@ -3231,7 +3269,24 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         .await;
         maybe_recheck_peer_wait(&mut pending_peer_wait_recheck, &app, &tasks, &peer_bus).await;
 
+        if let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
+            request_id,
+            ..
+        })) = app.modal.as_ref()
+            && !interaction.is_pending(*request_id).await
+        {
+            app.modal = None;
+            app.focus = Focus::Input;
+            push_command_message(
+                &mut app,
+                CommandOutputKind::Status,
+                "Question resolved; work continues. Use /questions for pending questions.",
+            );
+            frame_needs_redraw = true;
+        }
         frame_needs_redraw |= apply_interaction_request(&mut app, &mut interaction_rx);
+        frame_needs_redraw |=
+            super::goal::maybe_start_goal(&mut app, &mut tasks, &goal_service, &agent, &sink).await;
 
         app.reduce(AppAction::Tick);
         // A growing bonsai animates at the poll cadence; without this the
@@ -3431,7 +3486,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                     if let Some(submission) =
                                         take_budget_warning_submission(&mut app)
                                     {
-                                        let input = submission.display_text.trim().to_string();
+                                        let input = super::goal::command_input(&submission);
                                         let mut persistence = PersistenceCommandState {
                                             current_session_id: &mut current_session_id,
                                             signatures: &mut persisted_signatures,
@@ -3445,6 +3500,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                             &subagents,
                                             &peer_bus,
                                             &update_config,
+                                            &goal_service,
                                         )
                                         .await
                                         {
@@ -3539,7 +3595,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                 // `submission.input` carries the expanded model
                                 // payload (chip text spliced in, images attached).
                                 let submission = app.composer.submission();
-                                let input = submission.display_text.trim().to_string();
+                                let input = super::goal::command_input(&submission);
                                 if input.is_empty() {
                                     continue;
                                 }
@@ -3568,6 +3624,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
                                     &subagents,
                                     &peer_bus,
                                     &update_config,
+                                    &goal_service,
                                 )
                                 .await
                                 {
@@ -4759,6 +4816,37 @@ async fn start_pending_queued_run_if_idle(
     }
     if app.first_queued_input().is_none() {
         return false;
+    }
+
+    let goal = agent.lock().await.goal.clone();
+    if goal.start_requested() {
+        return false;
+    }
+    if let Some(record) = goal.snapshot().await
+        && !matches!(
+            record.state,
+            crate::goal::GoalState::Active | crate::goal::GoalState::Complete
+        )
+    {
+        // Esc with staged steering replaces the foreground turn while keeping
+        // its objective. A real pause holds the queue until explicit resume.
+        if record.state == crate::goal::GoalState::Paused
+            && record.reason.as_deref() == Some(crate::goal::FOREGROUND_INTERRUPTED)
+            && app
+                .queued_inputs
+                .iter()
+                .any(|input| input.delivery == FollowUpDelivery::Steer)
+        {
+            if let Err(error) = goal
+                .transition(&record.id, crate::goal::GoalState::Active, None)
+                .await
+            {
+                push_command_message(app, CommandOutputKind::Error, &format!("{error:#}"));
+                return false;
+            }
+        } else {
+            return false;
+        }
     }
 
     let warning_submission = app.first_queued_input().map(|queued| {
