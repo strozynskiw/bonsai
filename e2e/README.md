@@ -93,7 +93,9 @@ e2e/
     13_truncated_response.sh # length-truncated answers recover before completion
     14_repeated_tool_ids.sh # repeated wire IDs retain distinct finished tool cards
     15_literal_think_tags.sh # literal examples survive rendering and follow-up history
+    18_context_continuity.sh # memory provenance, rolling compaction, restore, fallback, resume
   mock_streaming_provider.py # deterministic loopback SSE provider
+  mock_context_provider.py   # finite context-continuity and oversized-summary scenarios
 ```
 
 ## Writing a new case

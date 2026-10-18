@@ -47,7 +47,7 @@ impl Agent {
         // Same hygiene as other injected context: never carry a secret that
         // leaked into a memory file back into the conversation.
         crate::redact::redact_in_place(&mut note);
-        self.push_user_message_raw(&note);
+        self.push_message(provenance_message(MessageProvenance::Memory, &note));
     }
 
     pub(super) fn rebuild_recalled_memory_from_messages(&self) {

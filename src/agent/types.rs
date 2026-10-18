@@ -110,6 +110,7 @@ pub(crate) enum MessageProvenance {
     Background,
     Terminal,
     ToolImage,
+    Memory,
     UntrustedData,
 }
 
@@ -123,6 +124,7 @@ impl MessageProvenance {
             Self::Background => Some("bonsai_background"),
             Self::Terminal => Some("bonsai_terminal"),
             Self::ToolImage => Some("bonsai_tool_image"),
+            Self::Memory => Some("bonsai_memory"),
             Self::UntrustedData => Some("bonsai_untrusted"),
         }
     }

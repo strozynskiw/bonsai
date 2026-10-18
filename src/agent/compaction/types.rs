@@ -48,6 +48,8 @@ impl CompactionDraft {
 
 #[derive(Debug, Clone)]
 pub(in crate::agent) struct CompactionOmittedMessage {
+    /// Live row to summarize; archived originals are reserved for restoration.
+    pub(in crate::agent) summary_input: ChatCompletionRequestMessage,
     pub(in crate::agent) originals: Vec<ChatCompletionRequestMessage>,
     pub(in crate::agent) stable_ids: Vec<String>,
     pub(in crate::agent) response_ids: Vec<Option<crate::provider::ResponseId>>,

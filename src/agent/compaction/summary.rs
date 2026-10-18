@@ -7,9 +7,20 @@ impl Agent {
     pub(super) async fn provider_compaction_summary(
         &mut self,
         draft: &CompactionDraft,
+        summary_token_budget: usize,
         cancellation_token: CancellationToken,
     ) -> Result<String> {
-        let messages = self.compaction_summary_prompt(draft).await?;
+        let mut messages = self.compaction_summary_prompt(draft).await?;
+        if let Some(ChatCompletionRequestMessage::System(system)) = messages.first_mut()
+            && let async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(text) =
+                &mut system.content
+        {
+            use std::fmt::Write;
+            let _ = write!(
+                text,
+                "\nKeep the summary within {summary_token_budget} tokens; prioritize user constraints, decisions, unfinished work, and evidence freshness."
+            );
+        }
         // Summary generation must fit the active provider too. If summarizing
         // the omitted bytes would overflow its window, the caller uses the
         // deterministic summary without sending an inadmissible hidden request.
@@ -30,25 +41,22 @@ impl Agent {
             .await?
             .ok_or(CompactionCancelled)?;
         if matches!(estimate.confidence, EstimateConfidence::High)
-            && estimate
-                .input_tokens
-                .saturating_add(self.output_reserve_tokens())
+            && estimate.input_tokens.saturating_add(summary_token_budget)
                 > self.budget.context_budget_tokens
         {
             bail!(
                 "context summary prompt estimate {} + reserve {} exceeds context window {}",
                 estimate.input_tokens,
-                self.output_reserve_tokens(),
+                summary_token_budget,
                 self.budget.context_budget_tokens
             );
         }
+        let mut generation_budget = self.generation_budget();
+        generation_budget.max_streamed_chars = generation_budget
+            .max_streamed_chars
+            .min(summary_token_budget.saturating_mul(4).max(1));
         let retried = self
-            .chat_stream_with_retry(
-                &messages,
-                &[],
-                cancellation_token.clone(),
-                Arc::new(SilentSink),
-            )
+            .chat_stream_with_retry_budget(&messages, generation_budget, cancellation_token.clone())
             .await;
         let (response, attempts, failure) = match retried {
             Ok(retried) => (retried.response, retried.attempts, None),
@@ -102,6 +110,9 @@ impl Agent {
         if summary.is_empty() {
             bail!("provider returned an empty context summary");
         }
+        if response.content.chars().count() > generation_budget.max_streamed_chars {
+            bail!("provider context summary exceeded its output budget");
+        }
         Ok(format_provider_compaction_summary(summary))
     }
 
@@ -118,7 +129,7 @@ impl Agent {
         // keeps the summary bytes steadier turn-to-turn, which is cache-friendly.
         let mut prior_summary: Option<String> = None;
         let mut omitted_parts: Vec<String> = Vec::new();
-        for message in draft.omitted_originals() {
+        for message in draft.omitted.iter().map(|item| &item.summary_input) {
             let (_, text) = describe_message_full(message);
             if prior_summary.is_none()
                 && text.trim_start().starts_with("# Compacted Context Summary")
@@ -203,8 +214,10 @@ impl Agent {
             .rev()
             .find_map(|kept| {
                 let (role, text) = describe_message_full(&kept.message);
-                (role == ContextRole::User && !text.trim().is_empty())
-                    .then(|| format!("- {}", one_line_preview(text.trim(), 280)))
+                (role == ContextRole::User
+                    && is_human_user_message(&kept.message)
+                    && !text.trim().is_empty())
+                .then(|| format!("- {}", one_line_preview(text.trim(), 280)))
             })
             .unwrap_or_else(|| "- Restore this row from /ctx for the full prior goal.".to_string());
         let tool_findings = draft

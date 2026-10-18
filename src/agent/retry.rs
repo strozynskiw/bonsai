@@ -85,6 +85,13 @@ impl Default for GenerationBudget {
     }
 }
 
+/// Overrides shared by every attempt of a single logical provider request.
+struct RetryRequestPolicy<'a> {
+    options: crate::provider::ProviderRequestOptions,
+    context: &'a crate::provider::ProviderRequestContext,
+    generation_budget: GenerationBudget,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct AttemptOutput {
     assistant_chars: usize,
@@ -370,6 +377,49 @@ impl Agent {
         cancellation_token: CancellationToken,
         sink: SharedSink,
     ) -> std::result::Result<RetriedStream, ProviderRetryError> {
+        self.chat_stream_with_retry_policy(
+            messages,
+            tools,
+            RetryRequestPolicy {
+                options,
+                context,
+                generation_budget: self.generation_budget(),
+            },
+            cancellation_token,
+            sink,
+        )
+        .await
+    }
+
+    /// Bound hidden-summary generation without changing the foreground budget.
+    pub(super) async fn chat_stream_with_retry_budget(
+        &mut self,
+        messages: &[ChatCompletionRequestMessage],
+        generation_budget: GenerationBudget,
+        cancellation_token: CancellationToken,
+    ) -> std::result::Result<RetriedStream, ProviderRetryError> {
+        self.chat_stream_with_retry_policy(
+            messages,
+            &[],
+            RetryRequestPolicy {
+                options: crate::provider::ProviderRequestOptions::default(),
+                context: &crate::provider::ProviderRequestContext::default(),
+                generation_budget,
+            },
+            cancellation_token,
+            Arc::new(SilentSink),
+        )
+        .await
+    }
+
+    async fn chat_stream_with_retry_policy(
+        &mut self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[async_openai::types::chat::ChatCompletionTool],
+        policy: RetryRequestPolicy<'_>,
+        cancellation_token: CancellationToken,
+        sink: SharedSink,
+    ) -> std::result::Result<RetriedStream, ProviderRetryError> {
         let mut attempt = 0;
         let mut attempts = Vec::new();
         if let Some(exhaustion) = self.session_budget_exhaustion() {
@@ -378,7 +428,7 @@ impl Agent {
                 attempts,
             ));
         }
-        let base_budget = self.generation_budget();
+        let base_budget = policy.generation_budget;
         let mut session_output_remaining = self.budget.max_session_output_chars.map(|limit| {
             (
                 limit,
@@ -403,8 +453,8 @@ impl Agent {
             let provider_call = self.provider.chat_stream_with_context(
                 messages,
                 tools,
-                options,
-                context,
+                policy.options,
+                policy.context,
                 attempt_cancellation.clone(),
                 provider_sink,
             );
@@ -1011,6 +1061,45 @@ mod tests {
 
         assert_eq!(budget.max_duration, Some(Duration::from_secs(7)));
         assert_eq!(budget.max_streamed_chars, 9);
+    }
+
+    #[tokio::test]
+    async fn hidden_generation_limit_does_not_change_the_foreground_budget() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let mut agent = Agent::new(
+            Box::new(SlowStreamingProvider {
+                deltas: 4,
+                step: Duration::ZERO,
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        let foreground_budget = agent.generation_budget();
+        let mut hidden_budget = foreground_budget;
+        hidden_budget.max_streamed_chars = 2;
+        let hidden = agent
+            .chat_stream_with_retry_budget(&[], hidden_budget, cancellation.clone())
+            .await
+            .unwrap();
+        assert!(hidden.budget_exhaustion.is_some());
+        assert_eq!(hidden.attempts.len(), 1);
+        assert!(
+            hidden.response.content.is_empty(),
+            "partial summary must be discarded"
+        );
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(agent.generation_budget(), foreground_budget);
+        let foreground = agent
+            .chat_stream_with_retry(&[], &[], cancellation, Arc::new(CapturingSink::default()))
+            .await
+            .unwrap();
+        assert_eq!(foreground.response.content, "xxxx");
+        assert!(foreground.budget_exhaustion.is_none());
     }
 
     #[test]

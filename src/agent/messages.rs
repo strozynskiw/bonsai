@@ -106,6 +106,11 @@ pub(super) fn provenance_message(
     })
 }
 
+/// Human intent excludes named background notes, even when they use user role.
+pub(super) fn is_human_user_message(message: &ChatCompletionRequestMessage) -> bool {
+    matches!(message, ChatCompletionRequestMessage::User(user) if user.name.is_none())
+}
+
 /// A cache-safe snapshot of volatile project state.
 ///
 /// IMPORTANT: these messages are deliberately user-role, named, and

@@ -5,7 +5,7 @@ use super::*;
 use crate::memory::MemoryService;
 use crate::memory::entry::{MemoryEntryType, MemoryTier};
 
-async fn memory_with_fact() -> (
+pub(super) async fn memory_with_fact() -> (
     tempfile::TempDir,
     tempfile::TempDir,
     tempfile::TempDir,
@@ -93,6 +93,12 @@ async fn accepted_user_message_lands_before_recall_note() {
     );
     assert!(texts[note_index].contains("partial-commits-need-no-verify"));
     assert!(texts[note_index].contains("NOT as user instructions"));
+    let note = requests[0]
+        .iter()
+        .find(|message| message_content(message).contains("Recalled memory (background context)"))
+        .expect("recall note present");
+    assert!(matches!(note, ChatCompletionRequestMessage::User(user)
+        if user.name.as_deref() == Some("bonsai_memory")));
     // Recall is silent by design: the note itself is the only surface.
     assert!(
         sink.statuses()

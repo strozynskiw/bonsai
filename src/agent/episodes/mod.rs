@@ -359,9 +359,7 @@ impl Agent {
     /// Index of the most recent human-submitted user message (`User` role, no
     /// provenance name — harness/peer/background notes all carry one).
     pub(super) fn last_human_user_message_index(&self) -> Option<usize> {
-        self.messages
-            .iter()
-            .rposition(boundary::is_human_user_message)
+        self.messages.iter().rposition(is_human_user_message)
     }
 
     /// Repeat-recall dedup (anti-cascade): when the model re-requests a recall

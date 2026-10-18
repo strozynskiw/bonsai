@@ -132,6 +132,33 @@ async fn title_change_with_intervening_user_message_closes_at_user_boundary() {
 }
 
 #[tokio::test]
+async fn recalled_memory_does_not_replace_the_new_episode_request() {
+    let (_home, _project, _db, memory) = super::memory_recall::memory_with_fact().await;
+    let (mut agent, store, _fixture) = episode_agent();
+    agent.set_memory(memory);
+    push_user_turn(&mut agent, "fix the flake");
+    set_title(&mut agent, "call-t1", "Task A");
+    push_tool_group(&mut agent, "call-r1", "src/a.rs");
+    let previous_end = agent.message_ids.last().cloned().unwrap();
+
+    let request = "how do I commit only part of my changes";
+    let request_id = push_user_turn(&mut agent, request);
+    agent.inject_recalled_memory(request).await;
+    assert_ne!(
+        agent.message_ids.last(),
+        Some(&request_id),
+        "recall was injected"
+    );
+    set_title(&mut agent, "call-t2", "Commit selected changes");
+
+    let episodes = episodes_of(&store);
+    assert_eq!(episodes.len(), 2);
+    assert_eq!(episodes[0].end_stable_id(), Some(previous_end.as_str()));
+    assert_eq!(episodes[1].start_stable_id(), request_id);
+    assert_eq!(episodes[1].goal(), request);
+}
+
+#[tokio::test]
 async fn same_topic_correction_renames_without_closing() {
     let (mut agent, store, _fixture) = episode_agent();
 

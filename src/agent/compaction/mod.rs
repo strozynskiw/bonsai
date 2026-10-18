@@ -436,6 +436,23 @@ impl Agent {
             return Err(CompactionCancelled.into());
         }
 
+        let input_limit = self
+            .budget
+            .context_budget_tokens
+            .saturating_sub(self.output_reserve_tokens());
+        let kept = self.compaction_candidate(&draft, None, None)?;
+        let (_, kept_estimate) = self.payload_message_token_estimate(
+            &kept.messages,
+            &kept.message_ids,
+            &kept.controls,
+            &tool_schema,
+        );
+        let summary_token_budget = input_limit
+            .min(before_tokens.saturating_sub(1))
+            .saturating_sub(kept_estimate.input_tokens)
+            .min(estimated_compaction_summary_tokens(draft.omitted.len()))
+            .min(self.output_reserve_tokens())
+            .max(1);
         let mut summary_source = CompactionSummarySource::None;
         let summary_text = if draft.omitted.is_empty() {
             None
@@ -443,12 +460,16 @@ impl Agent {
             match request.summary_policy {
                 CompactionSummaryPolicy::DeterministicOnly => {
                     summary_source = CompactionSummarySource::Deterministic;
-                    Some(deterministic_summary)
+                    Some(deterministic_summary.clone())
                 }
                 CompactionSummaryPolicy::ProviderOnly
                 | CompactionSummaryPolicy::ProviderThenDeterministic => {
                     match self
-                        .provider_compaction_summary(&draft, request.cancellation_token.clone())
+                        .provider_compaction_summary(
+                            &draft,
+                            summary_token_budget,
+                            request.cancellation_token.clone(),
+                        )
                         .await
                     {
                         Ok(summary) => {
@@ -463,7 +484,7 @@ impl Agent {
                         {
                             tracing::debug!(%err, "provider compaction summary failed; using deterministic fallback");
                             summary_source = CompactionSummarySource::Deterministic;
-                            Some(deterministic_summary)
+                            Some(deterministic_summary.clone())
                         }
                         Err(err) => return Err(err),
                     }
@@ -474,12 +495,12 @@ impl Agent {
         let summary_message_id = summary_text
             .as_ref()
             .map(|_summary| self.next_context_message_id());
-        let candidate = self.compaction_candidate(
+        let mut candidate = self.compaction_candidate(
             &draft,
             summary_text.as_deref(),
             summary_message_id.as_deref(),
         )?;
-        let after_tokens = self
+        let mut after_tokens = self
             .estimate_candidate_tokens(
                 &candidate.messages,
                 &candidate.message_ids,
@@ -488,6 +509,48 @@ impl Agent {
                 &request.cancellation_token,
             )
             .await?;
+        if (after_tokens >= before_tokens || after_tokens > input_limit)
+            && summary_source == CompactionSummarySource::Provider
+            && request.summary_policy == CompactionSummaryPolicy::ProviderThenDeterministic
+        {
+            let fallback = self.compaction_candidate(
+                &draft,
+                Some(&deterministic_summary),
+                summary_message_id.as_deref(),
+            )?;
+            let fallback_tokens = self
+                .estimate_candidate_tokens(
+                    &fallback.messages,
+                    &fallback.message_ids,
+                    &fallback.controls,
+                    &tool_schema,
+                    &request.cancellation_token,
+                )
+                .await?;
+            if fallback_tokens < after_tokens {
+                candidate = fallback;
+                after_tokens = fallback_tokens;
+                summary_source = CompactionSummarySource::Deterministic;
+            }
+        }
+        if request.cancellation_token.is_cancelled() {
+            return Err(CompactionCancelled.into());
+        }
+        if after_tokens >= before_tokens {
+            return Ok(CompactionReport::no_change(
+                request.mode,
+                false,
+                before_tokens,
+                target_tokens,
+                before_messages,
+            ));
+        }
+        anyhow::ensure!(
+            after_tokens <= input_limit,
+            "compacted prompt estimate {after_tokens} + reserve {} exceeds context window {}; protected system instructions, pinned rows, or recent messages prevent further reduction; inspect /ctx or choose a larger context window",
+            self.output_reserve_tokens(),
+            self.budget.context_budget_tokens,
+        );
         // Captured before the fields below are moved out of `candidate`.
         let counts = candidate.report_counts();
         let after_messages = candidate.messages.len();

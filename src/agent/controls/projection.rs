@@ -548,6 +548,7 @@ mod trust_tests {
             MessageProvenance::Background,
             MessageProvenance::Terminal,
             MessageProvenance::ToolImage,
+            MessageProvenance::Memory,
             MessageProvenance::UntrustedData,
         ] {
             let message = crate::agent::messages::provenance_message(provenance, "external data");

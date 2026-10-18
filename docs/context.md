@@ -108,10 +108,21 @@ is built:
   be forced.
 
 Always protected: the system message, the last three message groups, the two
-latest user messages, and read-reuse pointer targets. Summaries carry a
+latest human user messages, and read-reuse pointer targets. Recalled memory
+is named background data and cannot replace a human request in this protection
+or anchor an episode boundary. Summaries carry a
 trust guard marking them lossy reference data. Every compaction records a
 telemetry event (tokens before/after, prefix hashes, cache impact) visible
 in `/ctx`.
+
+Hidden summary generation has a separate bounded output allowance. Before a
+rewrite is committed, the actual candidate must save tokens and fit the input
+window after reserving response headroom. The default policy can replace an
+oversized generated summary with the deterministic fallback. A target below
+the protected content is best-effort; a candidate that still exceeds the hard
+window is rejected with guidance to inspect `/ctx` or use a larger window.
+Repeated compaction updates the live summary and new omissions; the complete
+originals are kept separately for restoration.
 
 `/compact [preview] [target=<tokens>] [fallback|provider|deterministic]`
 runs or previews one manually.

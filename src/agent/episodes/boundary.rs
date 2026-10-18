@@ -7,13 +7,6 @@
 use super::*;
 use crate::episode::{EpisodeAction, PendingEpisodeTitleSignal};
 
-/// A human-submitted user turn: `User` role with no provenance name. Harness,
-/// peer, background, and untrusted notes are user-role too but always carry a
-/// wire name, so they never anchor a boundary.
-pub(super) fn is_human_user_message(message: &ChatCompletionRequestMessage) -> bool {
-    matches!(message, ChatCompletionRequestMessage::User(user) if user.name.is_none())
-}
-
 #[derive(serde::Deserialize)]
 struct EpisodeTitleSignalArgs {
     title: String,

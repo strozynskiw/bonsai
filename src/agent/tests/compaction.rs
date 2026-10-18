@@ -1,6 +1,11 @@
 use super::*;
 use crate::agent::{CompactionSummaryPolicy, ExecutionLaneKind, ProviderAttemptOutcome};
 
+// Omitted history must outweigh the replacement summary for a useful rewrite.
+fn compaction_history_message(index: usize) -> String {
+    format!("old message {index}: {}", "historical detail ".repeat(80))
+}
+
 async fn tool_exchange_control_agent(interleaved: bool) -> Agent {
     let fixture = TestFixture::new();
     let mut agent = Agent::new(
@@ -406,7 +411,7 @@ async fn compaction_preserves_pins_and_summary_source_can_restore() {
         )
         .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
     assert!(agent.apply_context_control_action("msg-1", ContextControlAction::TogglePin));
 
@@ -423,7 +428,11 @@ async fn compaction_preserves_pins_and_summary_source_can_restore() {
         .iter()
         .map(message_content)
         .collect::<Vec<_>>();
-    assert!(contents.iter().any(|content| content == "old message 0"));
+    assert!(
+        contents
+            .iter()
+            .any(|content| content == &compaction_history_message(0))
+    );
     let summary_index = contents
         .iter()
         .position(|content| content.contains("Compacted Context Summary"))
@@ -439,7 +448,7 @@ async fn compaction_preserves_pins_and_summary_source_can_restore() {
     );
     let pinned_index = contents
         .iter()
-        .position(|content| content == "old message 0")
+        .position(|content| content == &compaction_history_message(0))
         .expect("pinned old message should survive compaction");
     assert!(
         pinned_index > summary_index,
@@ -457,7 +466,11 @@ async fn compaction_preserves_pins_and_summary_source_can_restore() {
         .iter()
         .map(message_content)
         .collect::<Vec<_>>();
-    assert!(restored.iter().any(|content| content == "old message 1"));
+    assert!(
+        restored
+            .iter()
+            .any(|content| content == &compaction_history_message(1))
+    );
     assert!(!agent.summary_sources().contains_key(&summary_id));
 }
 
@@ -477,7 +490,7 @@ async fn compaction_records_history_event() {
     )
     .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
     assert!(agent.compaction_events().is_empty());
 
@@ -610,7 +623,7 @@ async fn compaction_preserves_typed_self_review_outcome() {
     };
     agent.restore_self_review_runs(vec![review.clone()]);
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
 
     agent
@@ -636,7 +649,7 @@ async fn compaction_preview_does_not_record_history_event() {
     )
     .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
 
     agent
@@ -676,7 +689,7 @@ async fn compaction_carries_forward_summary_sources_and_prunes_omitted_controls(
         vec![test_user_message("original source message")],
     );
     for index in 0..24 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
     assert!(agent.apply_context_control_action("msg-2", ContextControlAction::ToggleDropNextTurn));
 
@@ -726,7 +739,7 @@ async fn manual_compaction_preview_does_not_mutate_or_call_provider() {
     )
     .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
     let before = agent.context_messages().to_vec();
 
@@ -883,7 +896,7 @@ async fn cancelled_manual_compaction_leaves_context_unchanged() {
     )
     .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
     let before = agent.context_messages().to_vec();
     let token = CancellationToken::new();
@@ -919,7 +932,7 @@ async fn manual_compaction_counts_hidden_summary_usage_only_for_safeguards() {
         )
         .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
 
     let report = agent
@@ -956,7 +969,7 @@ async fn manual_compaction_uses_deterministic_fallback_on_summary_error() {
     )
     .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
 
     let report = agent
@@ -994,7 +1007,7 @@ async fn provider_only_manual_compaction_returns_summary_error() {
     )
     .unwrap();
     for index in 0..25 {
-        agent.push_user_message_raw(&format!("old message {index}"));
+        agent.push_user_message_raw(&compaction_history_message(index));
     }
 
     let err = agent
@@ -3284,6 +3297,7 @@ async fn rolling_summary_updates_a_prior_summary_instead_of_resummarizing() {
     .unwrap();
 
     let omitted = |text: &str| CompactionOmittedMessage {
+        summary_input: test_user_message(text),
         originals: vec![test_user_message(text)],
         stable_ids: Vec::new(),
         response_ids: vec![None],
@@ -3331,4 +3345,253 @@ async fn rolling_summary_updates_a_prior_summary_instead_of_resummarizing() {
     let text = joined(agent.compaction_summary_prompt(&scratch).await.unwrap());
     assert!(!text.contains("UPDATE the previous summary"), "{text}");
     assert!(text.contains("You summarize prior chat history"), "{text}");
+}
+
+#[tokio::test]
+async fn repeated_compaction_rolls_forward_live_summary_and_restores_all_originals() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            content: "# Compacted Context Summary\n\n## Decisions\nFIRST_SUMMARY_DECISION".into(),
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            content: "# Compacted Context Summary\n\n## Decisions\nSECOND_SUMMARY_DECISION".into(),
+            ..StreamedResponse::default()
+        }),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+    let mut originals = agent.context_messages().to_vec();
+    for phase in 0..2 {
+        for index in 0..25 {
+            let message = test_user_message(&format!(
+                "phase {phase} original {index}: {}",
+                "detail ".repeat(100)
+            ));
+            originals.push(message.clone());
+            agent.push_message(message);
+        }
+        agent
+            .compact_context(
+                CompactionRequest::manual(false, CancellationToken::new())
+                    .with_target_tokens(1)
+                    .with_summary_policy(CompactionSummaryPolicy::ProviderOnly),
+            )
+            .await
+            .unwrap();
+    }
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    let second_input = requests[1]
+        .iter()
+        .map(message_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(second_input.contains("UPDATE the previous summary"));
+    assert!(second_input.contains("FIRST_SUMMARY_DECISION"));
+    assert!(second_input.contains("phase 1 original 0"));
+    assert!(
+        !second_input.contains("phase 0 original 0"),
+        "archived originals must not be replayed"
+    );
+    drop(requests);
+
+    let summary_id = stable_message_id_containing(&agent, "SECOND_SUMMARY_DECISION");
+    assert!(
+        agent.apply_context_control_action(&summary_id, ContextControlAction::RestoreSummarySource)
+    );
+    assert_eq!(agent.context_messages(), originals);
+}
+
+#[tokio::test]
+async fn oversized_generated_summary_falls_back_without_growing_context() {
+    let fixture = TestFixture::new();
+    let provider = MockProvider::new(vec![Ok(StreamedResponse {
+        content: "excessive summary ".repeat(5_000),
+        ..StreamedResponse::default()
+    })]);
+    let requests = provider.requests();
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+    for index in 0..25 {
+        agent.push_user_message_raw(&format!("old {index}: {}", "detail ".repeat(200)));
+    }
+    let report = agent
+        .compact_context(CompactionRequest::automatic(1, CancellationToken::new()))
+        .await
+        .unwrap();
+    assert_eq!(
+        report.summary_source,
+        CompactionSummarySource::Deterministic
+    );
+    assert!(report.after_tokens < report.before_tokens);
+    assert_eq!(requests.lock().await.len(), 1);
+    assert_eq!(agent.compaction_events().len(), 1);
+}
+
+#[tokio::test]
+async fn token_dense_summary_is_checked_after_generation() {
+    let fixture = TestFixture::new();
+    // Fits the character ceiling but costs far more tokens than ordinary prose.
+    let summary = "\u{10ffff}".repeat(900);
+    let provider = MockProvider::new(vec![Ok(StreamedResponse {
+        content: summary.clone(),
+        ..StreamedResponse::default()
+    })]);
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+    agent.set_prompt_estimator(PromptEstimator::for_tests(
+        "gpt-4o",
+        TokenCounterKind::Tiktoken,
+        None,
+    ));
+    for index in 0..25 {
+        agent.push_user_message_raw(&format!("old {index}: {}", "detail ".repeat(40)));
+    }
+    let report = agent
+        .compact_context(CompactionRequest::automatic(1, CancellationToken::new()))
+        .await
+        .unwrap();
+    assert_eq!(
+        report.summary_source,
+        CompactionSummarySource::Deterministic
+    );
+    assert!(report.after_tokens < report.before_tokens);
+    assert!(
+        !agent
+            .context_messages()
+            .iter()
+            .any(|message| message_content(message).contains(&summary))
+    );
+}
+
+#[tokio::test]
+async fn compaction_with_no_token_savings_leaves_context_and_ledger_unchanged() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+    for _ in 0..25 {
+        agent.push_user_message_raw("x");
+    }
+    let before = agent.context_message_snapshot();
+    let report = agent
+        .compact_context(
+            CompactionRequest::automatic(1, CancellationToken::new())
+                .with_summary_policy(CompactionSummaryPolicy::DeterministicOnly),
+        )
+        .await
+        .unwrap();
+    assert!(!report.has_changes());
+    assert_eq!(agent.context_message_snapshot(), before);
+    assert!(agent.compaction_events().is_empty());
+    assert!(agent.summary_sources().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_cannot_commit_an_oversized_protected_tail() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .context_budget_tokens(4_000)
+    .build()
+    .unwrap();
+    for index in 0..25 {
+        agent.push_user_message_raw(&format!(
+            "request {index}: {}",
+            "protected detail ".repeat(1_000)
+        ));
+    }
+    let before = agent.context_message_snapshot();
+    let error = agent
+        .compact_context(
+            CompactionRequest::automatic(1, CancellationToken::new())
+                .with_summary_policy(CompactionSummaryPolicy::DeterministicOnly),
+        )
+        .await
+        .expect_err("protected tail cannot fit");
+    assert!(
+        error
+            .to_string()
+            .contains("protected system instructions, pinned rows, or recent messages")
+    );
+    assert!(error.to_string().contains("/ctx"));
+    assert_eq!(agent.context_message_snapshot(), before);
+    assert!(agent.compaction_events().is_empty());
+    assert!(agent.summary_sources().is_empty());
+}
+
+#[tokio::test]
+async fn memory_notes_do_not_displace_recent_human_requests_during_compaction() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+    for index in 0..25 {
+        agent.push_user_message_raw(&compaction_history_message(index));
+    }
+    for _ in 0..10 {
+        agent.push_message(super::super::messages::provenance_message(
+            super::super::MessageProvenance::Memory,
+            &"background memory ".repeat(100),
+        ));
+    }
+    agent
+        .compact_context(
+            CompactionRequest::automatic(1, CancellationToken::new())
+                .with_summary_policy(CompactionSummaryPolicy::DeterministicOnly),
+        )
+        .await
+        .unwrap();
+    let contents = agent
+        .context_messages()
+        .iter()
+        .map(message_content)
+        .collect::<Vec<_>>();
+    for index in 23..25 {
+        assert!(
+            contents.contains(&compaction_history_message(index)),
+            "human request {index} must be retained"
+        );
+    }
 }

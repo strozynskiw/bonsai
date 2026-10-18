@@ -151,6 +151,7 @@ impl Agent {
                 let (originals, stable_ids, response_ids) =
                     self.original_source_snapshot_for_message(index, message);
                 omitted.push(CompactionOmittedMessage {
+                    summary_input: message.clone(),
                     originals,
                     stable_ids,
                     response_ids,

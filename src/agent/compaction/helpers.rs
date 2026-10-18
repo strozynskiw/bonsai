@@ -64,10 +64,7 @@ pub(super) fn latest_user_message_indices(
         .iter()
         .enumerate()
         .rev()
-        .filter_map(|(index, message)| {
-            let (role, _text) = describe_message_full(message);
-            (role == ContextRole::User).then_some(index)
-        })
+        .filter_map(|(index, message)| is_human_user_message(message).then_some(index))
         .take(count)
         .collect()
 }
