@@ -2016,6 +2016,8 @@ fn every_registered_command_declares_its_busy_behavior() {
         ("/mode", RunNow),
         ("/settings", Block),
         ("/tasks", ReadOnlyNow),
+        ("/goal", ReadOnlyNow),
+        ("/questions", ReadOnlyNow),
         ("/init", Block),
         ("/skills", ReadOnlyNow),
         ("/skill", Block),

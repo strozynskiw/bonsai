@@ -217,6 +217,8 @@ impl Agent {
             lsp_hub: builder.lsp_hub,
             todo_store: None,
             completion: CompletionGuardState::default(),
+            goal: crate::goal::GoalService::default(),
+            goal_run_id: None,
             read_only_task_progress: ReadOnlyTaskProgress::default(),
             finalization: FinalizationState::default(),
             messages: vec![system_message],

@@ -671,6 +671,10 @@ impl CompletionGuardState {
 }
 
 impl Agent {
+    pub(super) fn prompt_authorizes_background_work(prompt: &str) -> bool {
+        !TaskPromptKind::classify(prompt).is_continuation()
+            && TaskCompletionContract::inferred(prompt).goal_kind == CompletionGoalKind::Action
+    }
     pub(super) fn tool_registry_for_current_task(&self) -> Arc<ToolRegistry> {
         self.tool_registry.clone()
     }
@@ -733,11 +737,24 @@ impl Agent {
     }
 
     pub(super) fn merge_completion_steering(&mut self, prompt: &str) {
-        self.completion.merge_steering(
-            prompt,
-            self.verification.verification_runs.len(),
-            self.self_review_runs.len(),
-        );
+        if self.goal_run_id.is_some() {
+            // An explicit session objective changes only through /goal. A
+            // mid-run message may add requirements without discarding the
+            // original contract or its evidence baseline.
+            self.completion.contract = self
+                .completion
+                .contract
+                .merge(TaskCompletionContract::inferred(prompt));
+            self.completion.continuation_used = false;
+            self.completion.attempts.clear();
+            self.completion.disposition = None;
+        } else {
+            self.completion.merge_steering(
+                prompt,
+                self.verification.verification_runs.len(),
+                self.self_review_runs.len(),
+            );
+        }
         self.read_only_task_progress.reset();
         // Queued human steering is explicit authority for more work. It must
         // reopen finalization so a prior green gate blocks only unsolicited

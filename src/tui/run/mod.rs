@@ -63,6 +63,7 @@ use crate::yolo::YoloMode;
 mod commands;
 mod ctrl_c;
 mod event_loop;
+mod goal;
 mod persistence;
 mod setup;
 mod terminal_input;

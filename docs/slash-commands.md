@@ -29,9 +29,49 @@ completion popup; `Tab` completes names and arguments.
 | `/forget` | `<id>` | delete a saved session | no |
 | `/search` | `<query>` | full-text search across saved messages | no |
 | `/retry` | `[shortcut]` | retry the latest user turn, optionally on a shortcut model | no |
+| `/goal` | `[status\|pause\|resume\|clear\|<objective>]` | manage a persistent session objective and foreground work | no |
+| `/questions` | — | reopen a pending question, preserving its deadline | no |
 | `/compact` | `[preview] [target=<tokens>] [fallback\|provider\|deterministic]` | compact context now / preview the plan | yes |
 | `/copy` | `[all]` | copy focused row / entire transcript | no |
 | `/quit` | — | exit | yes |
+
+### Persistent goals
+
+`/goal Implement export with CSV and JSON formats, with tests` establishes an
+objective and starts work. `/goal` or `/goal status` shows the objective, state,
+stop reason, session usage, and pending work. A later `/goal <objective>` replaces
+the objective; ordinary messages provide corrections, additional requirements,
+or status requests while preserving it. Use `/goal set <objective>` when the
+objective itself is a reserved word such as `pause`.
+
+`/goal pause` interrupts foreground work and prevents further goal continuation.
+`/goal resume` explicitly starts another attempt from the existing workspace and
+context. `/goal clear` stops goal work and removes the current objective while
+retaining history and evidence. Pausing and clearing work while the agent is
+busy. A replacement starts after the previous foreground task releases its
+slot. Esc and Ctrl+C retain their existing interruption semantics; interrupted
+goal work is paused. Esc with staged steering continues the same goal under
+the replacement turn. Detached children retain their existing independent
+lifecycle. Pausing holds queued steering until resume; replacement or clear
+retires it with a transcript notice.
+
+Goals survive compaction, model/provider changes, and session restoration.
+Restoring an active goal pauses it; opening a session never starts it silently.
+Existing turn, token, cost, and time limits still apply, including cumulative
+session usage. An exhausted goal reports a limited state; it cannot be resumed
+by bypassing that state. Inspect its limits and evidence before establishing a
+new attempt. Completion uses the normal structured completion and verification
+gates; a progress report alone does not complete a goal.
+
+In goal mode the `question` tool normally returns immediately so independent
+work can continue. Unanswered questions assume the recommended option after
+60 seconds; the model may specify a timeout from 1 to 3600 seconds and a
+different recommended option. The result states whether the user answered or
+the deadline selected an assumption. Press **Tab** to hide a question and
+continue typing; `/questions` reopens it without restarting the timer. **Esc**
+cancels the question. Before delivering a final answer, the agent waits for any
+outstanding background questions. Permission and sandbox prompts always keep
+their explicit approval requirements.
 
 ## Models and providers
 

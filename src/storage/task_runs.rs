@@ -211,7 +211,7 @@ impl Storage {
         .await
     }
 
-    async fn start_task_run_with_goal_id(
+    pub(crate) async fn start_task_run_with_goal_id(
         &self,
         session_id: SessionId,
         episode_seq: Option<usize>,

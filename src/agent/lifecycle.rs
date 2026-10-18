@@ -72,6 +72,7 @@ impl Agent {
     /// context inside the same durable session and must preserve accumulated
     /// verification and review evidence.
     pub(crate) async fn reset_for_new_session(&mut self) {
+        self.goal.detach().await;
         // Episode hard boundary: must run before the message buffer is
         // replaced, or the active span's end could never be resolved.
         self.close_active_episode_for_hard_boundary();

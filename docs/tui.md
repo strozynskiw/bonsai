@@ -37,6 +37,17 @@ under it.
 
 ## Transcript
 
+Use `/goal <objective>` for work with a persistent objective. `/goal status`
+shows its state and stop reason; `/goal pause`, `/goal resume`, and `/goal clear`
+control it while retaining the conversation. Messages sent during work steer
+the active objective. A restored session waits for explicit `/goal resume`.
+
+Goal questions can remain pending while the agent does independent work.
+**Tab** hides the question so you can type; `/questions` brings it back.
+The recommended choice is assumed after 60 seconds unless the question declares
+another timeout. **Enter** answers and **Esc** cancels. See
+[persistent goals](slash-commands.md#persistent-goals) for lifecycle and limits.
+
 Item types: user messages, queued user messages, assistant text (markdown
 with syntax-highlighted code fences), reasoning summaries, tool cards,
 execution groups, command output, diffs/edit cards, todo updates, completion

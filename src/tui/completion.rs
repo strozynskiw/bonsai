@@ -222,6 +222,12 @@ fn arg_completion(app: &AppState, cmd: &str, arg: &str) -> Option<Completion> {
             ["preview", "target=", "provider", "deterministic"],
         ),
         "/copy" => literal_arg_completion(cmd, &lower, "scope", ["all"]),
+        "/goal" => literal_arg_completion(
+            cmd,
+            &lower,
+            "goal",
+            ["status", "pause", "resume", "clear", "set"],
+        ),
         "/sessions" => literal_arg_completion(cmd, &lower, "scope", ["all"]),
         "/doctor" => doctor_arg_completion(cmd, arg),
         "/autonomy" => literal_arg_completion(
@@ -915,6 +921,7 @@ mod tests {
     #[test]
     fn command_argument_hints_have_completion_or_are_free_form() {
         let completion_commands = [
+            "/goal",
             "/authorize",
             "/autonomy",
             "/compact",

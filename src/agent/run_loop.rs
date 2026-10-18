@@ -256,9 +256,21 @@ impl Agent {
             bus.begin_turn(crate::peer::TurnOrigin::Human);
         }
         self.begin_verification_observation_window();
+        self.goal
+            .begin_human_turn(Self::prompt_authorizes_background_work(&input.text))
+            .await;
         self.refresh_execution_policy_snapshot();
         self.set_planning_advisory(None);
-        let continuation_goal = self.begin_inferred_completion_task(&input.text);
+        let explicit_goal = self
+            .goal
+            .snapshot()
+            .await
+            .filter(|goal| goal.state == crate::goal::GoalState::Active);
+        let continuation_goal = self.begin_inferred_completion_task(
+            explicit_goal
+                .as_ref()
+                .map_or(&input.text, |goal| goal.objective.as_str()),
+        );
         if let Some(goal) = continuation_goal {
             self.push_harness_note(&format!(
                 "Continuation handoff: the latest human message resumes the established task; it \
@@ -271,7 +283,11 @@ impl Agent {
         // run-loop iteration, which covers the first model call too — no
         // begin_run refresh needed. Self-review and memory recall key off the
         // model-facing text (chip placeholders already expanded).
-        self.arm_self_review_for_coding_task(&input.text).await;
+        self.arm_self_review_for_coding_task_with_goal_context(
+            &input.text,
+            explicit_goal.as_ref().map(|goal| goal.objective.as_str()),
+        )
+        .await;
         self.push_live_user_message(input).await?;
         self.observe_user_turn_for_episodes(&input.text);
         self.last_retryable_turn = true;
@@ -373,6 +389,12 @@ impl Agent {
         queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
         session_title_policy: SessionTitleRunPolicy,
     ) -> Result<AgentRunResult> {
+        let goal = self
+            .goal
+            .snapshot()
+            .await
+            .filter(|goal| goal.state == crate::goal::GoalState::Active);
+        self.goal_run_id = goal.as_ref().map(|goal| goal.id.clone());
         let result = coordinator::run(
             self,
             cancellation,
@@ -381,6 +403,16 @@ impl Agent {
             session_title_policy,
         )
         .await;
+        self.goal_run_id = None;
+        if self.execution_lane.kind == ExecutionLaneKind::Parent
+            && let Some(interaction) = &self.interaction
+        {
+            interaction.set_goal_question_timeout(None);
+            interaction.cancel_questions().await;
+        }
+        if let Some(goal) = goal {
+            self.finish_goal_run(&goal.id, &result).await?;
+        }
         // Every run variant funnels through here, so this is the one terminal
         // outcome line the support lifecycle log needs.
         let outcome = match &result {

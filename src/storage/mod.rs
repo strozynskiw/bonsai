@@ -41,6 +41,7 @@ mod background_wakes;
 mod builtin_subagents;
 mod context;
 mod episodes;
+mod goals;
 pub(crate) use episodes::content_snippet as episode_content_snippet;
 mod inspection_stats;
 mod memory;

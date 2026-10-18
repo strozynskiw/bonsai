@@ -16,6 +16,7 @@ mod doctor;
 mod episode;
 mod eval;
 mod extension;
+mod goal;
 mod headless;
 mod hooks;
 mod interaction;

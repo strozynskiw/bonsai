@@ -103,6 +103,10 @@ pub(super) fn map_prompt_decision_key(family: PromptFamily, key: KeyEvent) -> Ke
 
 pub(super) fn map_question_prompt_key(key: KeyEvent) -> KeyIntent {
     match key.code {
+        KeyCode::Tab => KeyIntent::Action(AppAction::CloseModal),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyIntent::CancelOrQuit
+        }
         KeyCode::Esc => KeyIntent::Action(AppAction::QuestionCancel),
         // q mirrors Esc — cancel the multi-select question rather than
         // closing the modal silently and leaving the request unanswered.
