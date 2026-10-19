@@ -15,7 +15,7 @@ const expected = new Set(tasks.flatMap(task => [1, 2, 3].flatMap(attempt =>
 for (const record of baseline.records) {
   assert.ok(expected.delete(`${record.task}/${record.attempt}/${record.harness}`), 'unexpected or duplicate identity');
   assert.equal(record.code_correct, record.checksPass && record.scopePass);
-  assert.equal(record.strict_success, record.code_correct && record.terminal === 'completed' && record.code === 0 && !record.timedOut);
+  assert.equal(record.strict_success, record.code_correct && record.terminal === 'completed' && record.code === 0 && !record.timedOut && !record.outputLimited);
   assert.equal(record.normalized_usage.input + record.normalized_usage.output, record.normalized_usage.total);
 }
 assert.equal(expected.size, 0);

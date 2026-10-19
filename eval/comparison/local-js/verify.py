@@ -35,6 +35,9 @@ for task in tasks:
         for harness in ('bonsai', 'dsh'):
             base = root / 'runs' / f"{task['id']}-{attempt}-{harness}"
             record = load(base / 'result.json')
+            execution = load(base / 'execution.json')
+            assert record['code'] == execution['code'] and record['timedOut'] == execution['timedOut']
+            record['outputLimited'] = execution.get('outputLimited', False)
             assert (record['task'], record['attempt'], record['harness']) in expected
             workspace = base / 'workspace'
             actual = []
@@ -81,7 +84,7 @@ for task in tasks:
                 record['local_estimated_usd'] = usage['cost_micros'] / 1000000
             assert record['normalized_usage']['input'] + record['normalized_usage']['output'] == record['normalized_usage']['total']
             record['code_correct'] = checks_pass and scope_pass
-            record['strict_success'] = record['code_correct'] and record['terminal'] == 'completed' and record['code'] == 0 and not record['timedOut']
+            record['strict_success'] = record['code_correct'] and record['terminal'] == 'completed' and record['code'] == 0 and not record['timedOut'] and not record['outputLimited']
             records.append(record)
 assert len(records) == 60 and len({(r['task'], r['attempt'], r['harness']) for r in records}) == 60
 assert len(list((root / 'runs').glob('*/reservation.json'))) == 60

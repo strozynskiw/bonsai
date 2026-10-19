@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 export const OUTPUT_LIMIT = 4 * 1024 * 1024;
+// An exit-zero signal handler cannot turn an interrupted execution into success.
+export const succeeded = result => result?.code === 0 && !result.timedOut && !result.outputLimited;
 function kill(pid, signal) {
   if (!pid) return;
   try { process.kill(-pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
