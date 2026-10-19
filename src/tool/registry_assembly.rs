@@ -536,12 +536,9 @@ pub(crate) fn build_tool_registries(
             ToolProfile::CustomSubagent,
             RegistrationStage::Standard,
         );
-        // Delegated agents get the same extension surface as the parent, so a
-        // subagent is never blind to a tool the parent was told to use. A built-in
-        // subagent's read-only set widens to the MCP namespace here; each call
-        // still passes the same `ExtensionGate` at `McpTool::execute`, so the
-        // approval boundary is identical wherever the tool is invoked from.
-        crate::mcp::register_mcp_tools(&mut subagent_registry, &mcp_tools, &extensions);
+        // MCP effects are not an enforced read-only contract. Keep built-ins
+        // and unscoped custom agents read-only; explicit custom tool grants may
+        // opt into MCP through the full registry and retain the ExtensionGate.
         crate::mcp::register_mcp_tools(&mut full_sub_registry, &mcp_tools, &extensions);
         let registry_factory = subagent_tool_registry_factory(SubagentToolRunDeps {
             project_root: project_root.clone(),
@@ -1518,7 +1515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tools_reach_every_agent_profile() {
+    async fn mcp_tools_preserve_read_only_subagents() {
         let (interaction, _rx) = crate::interaction::InteractionService::new();
         let interaction = Arc::new(interaction);
         let extensions = Arc::new(crate::extension::status::ExtensionRegistry::new());
@@ -1594,11 +1591,26 @@ mod tests {
         });
         let runner = runner.expect("subagent factory must build a runner");
 
+        assert!(
+            !runner
+                .read_only_registry()
+                .names()
+                .any(crate::extension::is_mcp_wire_name),
+            "built-ins and unscoped custom agents must not inherit MCP tools"
+        );
+        let agent = coding.get("agent").expect("agent tool is registered");
+        for name in ["explore", "research", "review", "security-review"] {
+            assert_eq!(
+                agent.delegation_is_read_only(&serde_json::json!({"agent": name})),
+                Some(true),
+                "{name} must remain eligible for read-only background delegation with MCP enabled"
+            );
+        }
+
         for (profile, registry) in [
             ("coding", &coding),
             ("planning", &planning),
             ("SMOL", &smol),
-            ("builtin subagent", runner.read_only_registry()),
             ("custom subagent", runner.full_registry()),
         ] {
             assert!(
