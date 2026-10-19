@@ -36,9 +36,18 @@ forbid "background gate does not reject built-ins" "only supported for read-only
 python3 - "$provider_requests" <<'PY'
 import json
 import sys
+import time
 
-with open(sys.argv[1], encoding="utf-8") as stream:
-    requests = [json.loads(line) for line in stream if line.strip()]
+# Launch acknowledgements precede the children's first provider requests.
+deadline = time.monotonic() + 15
+while True:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        # Ignore a final partial JSONL row while the provider is appending it.
+        requests = [json.loads(line) for line in stream if line.endswith("\n")]
+    children = [p for p in requests if not any(t["function"]["name"] == "agent" for t in p.get("tools", []))]
+    if len(children) >= 4 or time.monotonic() >= deadline:
+        break
+    time.sleep(0.05)
 parents = [p for p in requests if any(t["function"]["name"] == "agent" for t in p.get("tools", []))]
 assert any(t["function"]["name"].startswith("mcp__") for t in parents[0]["tools"]), "MCP fixture was not discovered"
 results = "\n".join(str(m.get("content", "")) for p in parents for m in p["messages"] if m.get("role") == "tool")
