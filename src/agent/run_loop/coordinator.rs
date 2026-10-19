@@ -60,8 +60,10 @@ struct TurnPolicies {
     single_call_streak: SingleCallStreakGuard,
     serial_delegation: SerialDelegationGuard,
     implementation_stall: ImplementationStallGuard,
+    recovery: super::recovery::RecoveryAdvisory,
     empty_response_nudges: usize,
     truncated_response_nudges: usize,
+    contract_checkpoint_sent: bool,
 }
 
 impl TurnPolicies {
@@ -80,15 +82,18 @@ impl TurnPolicies {
         self.repeated_inspection.reset();
         self.read_storm.reset();
         self.repeated_failure.reset();
+        self.recovery = super::recovery::RecoveryAdvisory::default();
         self.single_call_streak = SingleCallStreakGuard::default();
         self.serial_delegation = SerialDelegationGuard::default();
         self.reset_implementation_stall_for_external_progress("user steering received");
         self.empty_response_nudges = 0;
         self.truncated_response_nudges = 0;
+        self.contract_checkpoint_sent = false;
     }
 
     fn observe_tool_execution(&mut self, execution: &ToolExecutionOutcome) {
         self.session_title.observe(&execution.tool_observations);
+        self.recovery.observe(&execution.tool_observations);
         self.repeated_failure
             .observe(&execution.tool_observations, execution.reset_loop_guards);
         if execution
@@ -99,6 +104,7 @@ impl TurnPolicies {
             self.empty_response_nudges = 0;
         }
         if execution.reset_loop_guards {
+            self.recovery = super::recovery::RecoveryAdvisory::default();
             self.session_title
                 .reset(SessionTitleRunPolicy::ContinuationOrAutomatic);
             self.planning_research.reset();
@@ -274,6 +280,27 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             self.refresh_tool_registry();
         }
 
+        if let Some(note) = self
+            .state
+            .policies
+            .recovery
+            .next_note(self.state.turns_started, self.agent.budget.max_iterations)
+        {
+            self.agent.push_harness_note(&note);
+        }
+        if !self.state.policies.contract_checkpoint_sent
+            && self.agent.mode == AgentMode::Coding
+            && self.agent.execution_lane.kind == ExecutionLaneKind::Parent
+            && self.agent.self_review.workspace_mutated()
+        {
+            self.state.policies.contract_checkpoint_sent = true;
+            self.agent.push_message(ChatCompletionRequestMessage::User(
+                async_openai::types::chat::ChatCompletionRequestUserMessage {
+                    name: MessageProvenance::Harness.wire_name().map(str::to_string),
+                    content: "Behavioral contract checkpoint: before final delivery, compare the changed implementation with the user's requirements and existing interfaces, not only the passing examples. Identify required outcomes not exercised by your checks. Use focused behavioral tests or direct code reasoning to close those gaps; derive expectations from the specification, never from the current implementation. For stateful or concurrent code, trace transitions and terminal outcomes. Reuse current passing evidence; do not repeat checks without a reason. If coverage is already sufficient, deliver the result. This checkpoint runs once, does not authorize new effects, and does not extend the hard turn limit.".into(),
+                },
+            ));
+        }
         self.agent.caches.last_perf_report = None;
         let deferred_sink = DeferredAssistantSink::new(self.sink.clone());
         let model_sink: SharedSink = deferred_sink.clone();

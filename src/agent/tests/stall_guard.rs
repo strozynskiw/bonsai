@@ -183,6 +183,57 @@ fn stall_notes_in(agent: &Agent) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn recovery_advisory_reaches_model_without_extending_turn_limit() {
+    let fixture = TestFixture::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(FailedBashTool {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    registry.register(Arc::new(MockTool::new("read", "diagnostic context")));
+    let mut responses = vec![Ok(StreamedResponse {
+        tool_calls: vec![test_tool_call(
+            "failure",
+            "bash",
+            r#"{"command":"node test.mjs"}"#,
+        )],
+        ..StreamedResponse::default()
+    })];
+    responses.extend((1..6).map(distinct_read_turn));
+    let provider = MockProvider::new(responses);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.budget.max_iterations = 6;
+    let error = agent
+        .run(
+            "repair the implementation",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<crate::run_budget::RunBudgetExhaustion>(),
+        Some(&crate::run_budget::RunBudgetExhaustion::MaxTurns { limit: 6 })
+    );
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 6);
+    let fourth_request = serde_json::to_string(&requests[3]).unwrap();
+    assert!(fourth_request.contains("Recovery checkpoint"));
+    let fifth_request = serde_json::to_string(&requests[4]).unwrap();
+    assert!(fifth_request.contains("2 model turns remain"));
+    let last_request = serde_json::to_string(&requests[5]).unwrap();
+    assert!(last_request.contains("Final model turn"));
+}
+
+#[tokio::test]
 async fn stall_guard_terminates_unchanged_reads_with_typed_failure() {
     let fixture = TestFixture::new();
     let read_tool = Arc::new(MockTool::new("read", "read result"));

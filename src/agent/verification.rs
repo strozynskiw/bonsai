@@ -1430,6 +1430,8 @@ fn observed_verification_kind(command: &str) -> Option<VerificationKind> {
             | ("pnpm" | "yarn" | "bun", ["test", ..])
             | ("deno", ["test", ..])
             | ("cargo", ["bench", ..]) => VerificationKind::Test,
+            ("node", ["--test", ..]) => VerificationKind::Test,
+            ("node", [script, ..]) if is_direct_node_test(script) => VerificationKind::Test,
             ("cargo", ["build" | "check" | "clippy" | "doc", ..])
             | ("go", ["build" | "vet", ..])
             | ("npm" | "pnpm" | "yarn" | "bun", ["run", "build" | "lint", ..])
@@ -1444,6 +1446,17 @@ fn observed_verification_kind(command: &str) -> Option<VerificationKind> {
         saw_build = true;
     }
     saw_build.then_some(VerificationKind::Build)
+}
+
+// Direct scripts count only when their file name explicitly identifies a test.
+// This observes an executed check; it neither authorizes execution nor proves a pass.
+fn is_direct_node_test(script: &str) -> bool {
+    let name = script.rsplit('/').next().unwrap_or(script);
+    ["js", "mjs", "cjs"].iter().any(|extension| {
+        name == format!("test.{extension}")
+            || name.ends_with(&format!(".test.{extension}"))
+            || name.ends_with(&format!(".spec.{extension}"))
+    })
 }
 
 fn shared_verification_job_key(result: &ToolOutput) -> Option<String> {
@@ -1634,6 +1647,34 @@ mod tests {
             observed_verification_kind("echo 'skip && cargo test'"),
             None
         );
+    }
+
+    #[test]
+    fn node_verification_requires_a_test_runner_or_explicit_test_filename() {
+        for command in [
+            "node test.mjs",
+            "node ./test.js && echo done",
+            "env CI=1 /usr/local/bin/node tests/parser.test.cjs",
+            "node tests/parser.spec.mjs",
+            "node --test",
+            "node --test tests/",
+        ] {
+            assert_eq!(
+                observed_verification_kind(command),
+                Some(VerificationKind::Test),
+                "{command}"
+            );
+        }
+        for command in [
+            "node app.mjs",
+            "node -e 'console.log(1)'",
+            "node --input-type=module -",
+            "echo 'node test.mjs'",
+            "node test.mjs.backup",
+            "node contest.js",
+        ] {
+            assert_eq!(observed_verification_kind(command), None, "{command}");
+        }
     }
 
     #[test]

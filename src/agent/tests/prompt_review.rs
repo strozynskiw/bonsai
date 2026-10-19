@@ -1,6 +1,79 @@
 use super::*;
 
 #[tokio::test]
+async fn contract_checkpoint_follows_mutation_without_an_extra_model_turn() {
+    let fixture = TestFixture::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(crate::tool::WriteTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "write",
+                "write",
+                r#"{"path":"answer.txt","content":"updated"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            content: "Done; not independently verified.".into(),
+            ..StreamedResponse::default()
+        }),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.budget.max_iterations = 2;
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    agent
+        .run(
+            "update answer.txt",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !serde_json::to_string(&requests[0])
+            .unwrap()
+            .contains("Behavioral contract checkpoint")
+    );
+    assert!(
+        serde_json::to_string(&requests[1])
+            .unwrap()
+            .contains("Behavioral contract checkpoint")
+    );
+    let checkpoints = requests[1]
+        .iter()
+        .filter(|message| message_content(message).contains("Behavioral contract checkpoint"))
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 1);
+    assert!(matches!(
+        checkpoints[0],
+        ChatCompletionRequestMessage::User(user)
+            if user.name.as_deref() == crate::agent::MessageProvenance::Harness.wire_name()
+    ));
+    let checkpoint_request = serde_json::to_string(&requests[1]).unwrap();
+    assert!(checkpoint_request.contains("derive expectations from the specification"));
+    assert!(checkpoint_request.contains("trace transitions and terminal outcomes"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.project_root.join("answer.txt")).unwrap(),
+        "updated"
+    );
+}
+
+#[tokio::test]
 async fn errors_when_max_iterations_are_exhausted() {
     let fixture = TestFixture::new();
     let responses = (0..2)

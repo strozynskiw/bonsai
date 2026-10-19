@@ -2169,7 +2169,12 @@ async fn self_review_injects_one_critique_turn_then_completes() {
         "a self-review critique turn should be injected into the conversation"
     );
     assert_eq!(
-        user_messages_in(&agent.messages),
+        agent
+            .messages
+            .iter()
+            .filter(|message| crate::agent::messages::is_human_user_message(message))
+            .map(message_content)
+            .collect::<Vec<_>>(),
         vec!["make a change".to_string()],
         "self-review evidence must not create synthetic user authority"
     );

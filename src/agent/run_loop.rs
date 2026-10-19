@@ -4,6 +4,7 @@ use crate::util::tool_args::normalize_tool_call_arguments_json;
 mod context;
 mod coordinator;
 mod deferred_output;
+mod recovery;
 mod tools;
 mod verification;
 
