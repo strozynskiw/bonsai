@@ -55,8 +55,16 @@ class PinnedCliTests(unittest.IsolatedAsyncioTestCase):
             exporter = Path(__file__).with_name("dsh_export.mjs").resolve()
             exported = await asyncio.create_subprocess_exec(
                 node, str(exporter), str(runtime), str(root / "sessions"), session, str(output),
-                env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            _, error = await asyncio.wait_for(exported.communicate(), 30)
+                env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                start_new_session=True)
+            try:
+                _, error = await asyncio.wait_for(exported.communicate(), 30)
+            finally:
+                try:
+                    os.killpg(exported.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await exported.wait()
             self.assertEqual(exported.returncode, 0, error.decode())
             sessions = json.loads(output.read_text(encoding="utf-8"))
             self.assertIn(session, sessions)
