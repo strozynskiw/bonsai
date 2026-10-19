@@ -96,6 +96,7 @@ impl HeadlessRunOutcome {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HeadlessStatus {
     Completed,
+    Unverified,
     Blocked,
     Failed,
     BudgetExhausted,
@@ -108,7 +109,7 @@ impl HeadlessStatus {
     pub(crate) const fn exit_code(self) -> i32 {
         match self {
             Self::Completed => 0,
-            Self::Blocked | Self::Failed | Self::BudgetExhausted => 1,
+            Self::Unverified | Self::Blocked | Self::Failed | Self::BudgetExhausted => 1,
             Self::Interrupted => 130,
             Self::Terminated => 143,
             Self::TimedOut => 124,
@@ -118,6 +119,7 @@ impl HeadlessStatus {
     const fn storage_status(self) -> SessionStatus {
         match self {
             Self::Completed => SessionStatus::Completed,
+            Self::Unverified => SessionStatus::Unverified,
             Self::Blocked | Self::Failed => SessionStatus::Failed,
             Self::BudgetExhausted | Self::Interrupted | Self::Terminated | Self::TimedOut => {
                 SessionStatus::Interrupted
@@ -128,6 +130,7 @@ impl HeadlessStatus {
     const fn completion_status(self) -> crate::completion_report::CompletionStatus {
         match self {
             Self::Completed => crate::completion_report::CompletionStatus::Completed,
+            Self::Unverified => crate::completion_report::CompletionStatus::Unverified,
             Self::Blocked => crate::completion_report::CompletionStatus::Blocked,
             Self::Failed => crate::completion_report::CompletionStatus::Failed,
             Self::BudgetExhausted => crate::completion_report::CompletionStatus::BudgetExhausted,
@@ -182,6 +185,7 @@ fn classify_headless_status(
         verification,
     ) {
         crate::completion_report::CompletionStatus::Blocked => HeadlessStatus::Blocked,
+        crate::completion_report::CompletionStatus::Unverified => HeadlessStatus::Unverified,
         crate::completion_report::CompletionStatus::Failed => HeadlessStatus::Failed,
         _ => run_status,
     }
@@ -258,6 +262,13 @@ async fn finish_headless_task(
 
     let (outcome, reason) = match status {
         HeadlessStatus::Completed => (TaskOutcome::Succeeded, None),
+        HeadlessStatus::Unverified => (
+            TaskOutcome::Blocked,
+            Some(TaskTerminalReason::new(
+                TaskTerminalReasonCode::VerificationFailure,
+                completion_detail,
+            )),
+        ),
         HeadlessStatus::Blocked => (
             TaskOutcome::Blocked,
             Some(TaskTerminalReason::new(
@@ -905,6 +916,7 @@ async fn run_inner_with_provider_runtime(
         Ok(AgentRunResult::Completed(output)) => (HeadlessStatus::Completed, output, None, None),
         Ok(AgentRunResult::Incomplete { output, failure }) => (
             match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Unverified => HeadlessStatus::Unverified,
                 crate::agent::CompletionFailureOutcome::Blocked => HeadlessStatus::Blocked,
                 crate::agent::CompletionFailureOutcome::Failed => HeadlessStatus::Failed,
                 crate::agent::CompletionFailureOutcome::Cancelled => HeadlessStatus::Interrupted,
@@ -2505,6 +2517,22 @@ mod tests {
 
         assert_eq!(err.exit_code(), 3);
         assert!(err.to_string().contains("Invalid BONSAI_AUTONOMY"));
+    }
+
+    #[test]
+    fn unverified_headless_status_preserves_non_success_without_claiming_failure() {
+        let status = HeadlessStatus::Unverified;
+        assert_eq!(status.exit_code(), 1);
+        assert_eq!(status.storage_status(), SessionStatus::Unverified);
+        assert_eq!(
+            status.completion_status(),
+            crate::completion_report::CompletionStatus::Unverified
+        );
+        assert_eq!(serde_json::to_value(status).unwrap(), "unverified");
+        assert_eq!(
+            classify_headless_status(status, &Default::default(), None),
+            HeadlessStatus::Unverified
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ const MAX_RENDERED_FILES: usize = 5;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CompletionStatus {
     Completed,
+    Unverified,
     Blocked,
     Failed,
     Interrupted,
@@ -31,6 +32,7 @@ impl CompletionStatus {
     const fn headline(self) -> &'static str {
         match self {
             Self::Completed => "Completed",
+            Self::Unverified => "Unverified",
             Self::Blocked => "Blocked",
             Self::Failed => "Failed",
             Self::Interrupted => "Interrupted",
@@ -41,6 +43,7 @@ impl CompletionStatus {
     const fn caveat(self) -> Option<&'static str> {
         match self {
             Self::Completed => None,
+            Self::Unverified => Some("Work completed; verification not confirmed."),
             Self::Blocked => Some("Run stopped with structured work still blocked."),
             Self::Failed => Some("Run finished with unresolved tool or verification failures."),
             Self::Interrupted => Some("Run was interrupted; partial work may remain."),
@@ -546,7 +549,10 @@ pub(crate) fn classify_completion_status(
     evidence: &CompletionEvidenceSnapshot,
     verification: Option<&VerificationRunRecord>,
 ) -> CompletionStatus {
-    if status != CompletionStatus::Completed {
+    if !matches!(
+        status,
+        CompletionStatus::Completed | CompletionStatus::Unverified
+    ) {
         return status;
     }
     let verification_failed =
@@ -554,7 +560,7 @@ pub(crate) fn classify_completion_status(
     if evidence.repeated_tool_failure || verification_failed {
         CompletionStatus::Failed
     } else {
-        CompletionStatus::Completed
+        status
     }
 }
 
@@ -839,6 +845,28 @@ fn summarize_authorization<'a>(
 mod tests {
     use super::*;
     use crate::diff::build_file_diff;
+
+    #[test]
+    fn unverified_report_is_distinct_from_failure_but_does_not_hide_failed_checks() {
+        let evidence = CompletionEvidenceSnapshot::default();
+        assert_eq!(
+            classify_completion_status(CompletionStatus::Unverified, &evidence, None),
+            CompletionStatus::Unverified
+        );
+        assert_eq!(CompletionStatus::Unverified.headline(), "Unverified");
+        assert_eq!(
+            CompletionStatus::Unverified.caveat(),
+            Some("Work completed; verification not confirmed.")
+        );
+        let looping = CompletionEvidenceSnapshot {
+            repeated_tool_failure: true,
+            ..evidence
+        };
+        assert_eq!(
+            classify_completion_status(CompletionStatus::Unverified, &looping, None),
+            CompletionStatus::Failed
+        );
+    }
 
     #[test]
     fn collector_merges_repeated_file_changes_and_keeps_latest_intent() {

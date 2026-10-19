@@ -71,6 +71,7 @@ pub(crate) struct HeadlessOutputProjection {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HeadlessStatusProjection {
     Completed,
+    Unverified,
     Failed,
     BudgetExhausted,
     Interrupted,
@@ -269,7 +270,9 @@ fn classify_terminal_state(
     }
     if let Some(output) = output {
         return match output.status {
-            HeadlessStatusProjection::Failed => AdapterTerminalState::AgentFailure,
+            HeadlessStatusProjection::Unverified | HeadlessStatusProjection::Failed => {
+                AdapterTerminalState::AgentFailure
+            }
             HeadlessStatusProjection::BudgetExhausted => AdapterTerminalState::BudgetExhausted,
             HeadlessStatusProjection::Interrupted => AdapterTerminalState::Cancelled,
             HeadlessStatusProjection::Terminated => AdapterTerminalState::Terminated,
@@ -441,6 +444,15 @@ mod tests {
         );
         assert_eq!(
             classify_terminal_state(false, Some(1), None),
+            AdapterTerminalState::AgentFailure
+        );
+        let unverified = HeadlessOutputProjection {
+            status: serde_json::from_str("\"unverified\"").unwrap(),
+            ..output.clone()
+        };
+        assert_eq!(unverified.status, HeadlessStatusProjection::Unverified);
+        assert_eq!(
+            classify_terminal_state(false, Some(1), Some(&unverified)),
             AdapterTerminalState::AgentFailure
         );
         let failed = HeadlessOutputProjection {

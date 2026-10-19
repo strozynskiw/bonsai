@@ -22,13 +22,14 @@ class CompletionServer(ThreadingHTTPServer):
         self.server_name = "127.0.0.1"
         self.server_port = self.server_address[1]
 
-    def __init__(self, address, request_log, truncate_first=False, literal_think=False):
+    def __init__(self, address, request_log, truncate_first=False, literal_think=False, unverified=False):
         super().__init__(address, CompletionHandler)
         self.request_log = request_log
         self.request_count = 0
         self.request_lock = threading.Lock()
         self.truncate_first = truncate_first
         self.literal_think = literal_think
+        self.unverified = unverified
 
     def record_request(self, payload):
         with self.request_lock:
@@ -84,6 +85,16 @@ class CompletionHandler(BaseHTTPRequestHandler):
             },
             {"choices": [{"delta": {}, "finish_reason": "length" if truncated else "stop"}]},
         ]
+        if self.server.unverified and request_id == 1:
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "inspect-project",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": json.dumps({"path": ".", "limit": 1})},
+                }]}}]},
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            ]
         if self.server.literal_think:
             if request_id == 1:
                 deltas = [
@@ -109,11 +120,11 @@ class CompletionHandler(BaseHTTPRequestHandler):
 
 def main():
     if len(sys.argv) not in (3, 4) or (
-        len(sys.argv) == 4 and sys.argv[3] not in ("--truncate-first", "--literal-think")
+        len(sys.argv) == 4 and sys.argv[3] not in ("--truncate-first", "--literal-think", "--unverified")
     ):
         raise SystemExit(
             "usage: mock_completion_provider.py <ready-file> <request-log> "
-            "[--truncate-first|--literal-think]"
+            "[--truncate-first|--literal-think|--unverified]"
         )
     ready_file = Path(sys.argv[1])
     request_log = Path(sys.argv[2])
@@ -123,6 +134,7 @@ def main():
         ("127.0.0.1", 0), request_log,
         truncate_first=mode == "--truncate-first",
         literal_think=mode == "--literal-think",
+        unverified=mode == "--unverified",
     ) as server:
         ready_file.write_text(
             f"http://127.0.0.1:{server.server_port}/v1", encoding="utf-8"

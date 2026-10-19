@@ -222,7 +222,9 @@ pub(super) fn column_width<T>(
 pub(super) fn session_status_style(status: &crate::storage::SessionStatus) -> Style {
     let palette = theme::palette();
     let color = match status {
-        crate::storage::SessionStatus::Active => palette.progress,
+        crate::storage::SessionStatus::Active | crate::storage::SessionStatus::Unverified => {
+            palette.progress
+        }
         crate::storage::SessionStatus::Completed => palette.success,
         crate::storage::SessionStatus::Forgotten => palette.dim,
         _ => palette.muted,

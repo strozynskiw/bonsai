@@ -261,6 +261,7 @@ pub struct SessionSummary {
 pub enum SessionStatus {
     Active,
     Completed,
+    Unverified,
     Forgotten,
     Interrupted,
     Failed,
@@ -270,6 +271,7 @@ pub enum SessionStatus {
 crate::impl_db_enum!(SessionStatus {
     Active => "active",
     Completed => "completed",
+    Unverified => "unverified",
     Forgotten => "forgotten",
     Interrupted => "interrupted",
     Failed => "failed",
@@ -283,7 +285,7 @@ impl SessionStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Forgotten | Self::Interrupted | Self::Failed
+            Self::Completed | Self::Unverified | Self::Forgotten | Self::Interrupted | Self::Failed
         )
     }
 }

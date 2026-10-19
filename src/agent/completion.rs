@@ -517,6 +517,8 @@ pub(crate) struct CompletionResponseSignals {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionFailureOutcome {
+    /// Work has no remaining gaps except missing or stale verification evidence.
+    Unverified,
     Blocked,
     Failed,
     Cancelled,
@@ -531,6 +533,40 @@ pub struct CompletionGuardFailure {
 }
 
 impl CompletionGuardFailure {
+    fn from_gaps(gaps: Vec<CompletionGap>) -> Self {
+        let unverified = !gaps.is_empty()
+            && gaps.iter().all(|gap| {
+                matches!(
+                    gap,
+                    CompletionGap::VerificationMissing | CompletionGap::VerificationStale
+                )
+            });
+        let outcome = if unverified {
+            CompletionFailureOutcome::Unverified
+        } else if gaps.iter().any(CompletionGap::is_external_blocker) {
+            CompletionFailureOutcome::Blocked
+        } else {
+            CompletionFailureOutcome::Failed
+        };
+        let detail = if unverified {
+            "Work completed; verification not confirmed. Run verification before relying on these changes."
+                .to_string()
+        } else {
+            format!(
+                "Completion rejected: {}.",
+                gaps.iter()
+                    .map(CompletionGap::label)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        };
+        Self {
+            outcome,
+            gaps,
+            detail,
+        }
+    }
+
     pub(crate) fn compact_detail(&self) -> &str {
         &self.detail
     }
@@ -564,6 +600,7 @@ pub(crate) struct CompletionGuardAttempt {
 pub(crate) enum CompletionGuardDisposition {
     Accepted,
     Continued,
+    Unverified,
     Blocked,
     Failed,
     Cancelled,
@@ -584,6 +621,7 @@ impl CompletionGuardTrace {
         let disposition = match self.disposition {
             CompletionGuardDisposition::Accepted => "accepted",
             CompletionGuardDisposition::Continued => "continued",
+            CompletionGuardDisposition::Unverified => "unverified",
             CompletionGuardDisposition::Blocked => "blocked",
             CompletionGuardDisposition::Failed => "failed",
             CompletionGuardDisposition::Cancelled => "cancelled",
@@ -862,27 +900,8 @@ impl Agent {
             };
         }
 
-        let outcome = if gaps.iter().any(CompletionGap::is_external_blocker) {
-            CompletionFailureOutcome::Blocked
-        } else {
-            CompletionFailureOutcome::Failed
-        };
-        self.reject_completion(outcome, gaps)
-    }
-
-    fn reject_completion(
-        &mut self,
-        outcome: CompletionFailureOutcome,
-        gaps: Vec<CompletionGap>,
-    ) -> CompletionGuardVerdict {
-        let detail = format!(
-            "Completion rejected: {}.",
-            gaps.iter()
-                .map(CompletionGap::label)
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-        self.reject_reported_completion(outcome, gaps, &detail)
+        let failure = CompletionGuardFailure::from_gaps(gaps);
+        self.reject_reported_completion(failure.outcome, failure.gaps, &failure.detail)
     }
 
     fn reject_reported_completion(
@@ -892,6 +911,7 @@ impl Agent {
         detail: &str,
     ) -> CompletionGuardVerdict {
         self.completion.disposition = Some(match outcome {
+            CompletionFailureOutcome::Unverified => CompletionGuardDisposition::Unverified,
             CompletionFailureOutcome::Blocked => CompletionGuardDisposition::Blocked,
             CompletionFailureOutcome::Failed => CompletionGuardDisposition::Failed,
             CompletionFailureOutcome::Cancelled => CompletionGuardDisposition::Cancelled,
@@ -1280,6 +1300,51 @@ mod tests {
             verification: CompletionCheckEvidence::NotRequired,
             review: CompletionCheckEvidence::NotRequired,
             pending: CompletionPendingEvidence::default(),
+        }
+    }
+
+    #[test]
+    fn missing_or_stale_verification_alone_is_unverified_not_failed() {
+        for gap in [
+            CompletionGap::VerificationMissing,
+            CompletionGap::VerificationStale,
+        ] {
+            let failure = CompletionGuardFailure::from_gaps(vec![gap]);
+            assert_eq!(failure.outcome, CompletionFailureOutcome::Unverified);
+            assert!(
+                failure
+                    .detail
+                    .starts_with("Work completed; verification not confirmed.")
+            );
+            assert!(!failure.detail.contains("rejected"));
+            assert_eq!(serde_json::to_value(failure.outcome).unwrap(), "unverified");
+        }
+    }
+
+    #[test]
+    fn unfinished_work_and_failed_checks_are_never_only_unverified() {
+        for (gap, outcome) in [
+            (
+                CompletionGap::PendingTodos(1),
+                CompletionFailureOutcome::Failed,
+            ),
+            (
+                CompletionGap::WorkspaceMutationMissing,
+                CompletionFailureOutcome::Failed,
+            ),
+            (
+                CompletionGap::ReviewMissing,
+                CompletionFailureOutcome::Failed,
+            ),
+            (
+                CompletionGap::VerificationBlocked("failed".into()),
+                CompletionFailureOutcome::Blocked,
+            ),
+        ] {
+            let failure =
+                CompletionGuardFailure::from_gaps(vec![CompletionGap::VerificationMissing, gap]);
+            assert_eq!(failure.outcome, outcome);
+            assert!(failure.detail.starts_with("Completion rejected:"));
         }
     }
 

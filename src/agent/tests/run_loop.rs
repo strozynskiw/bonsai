@@ -1727,6 +1727,48 @@ fn messages_contain_self_review(messages: &[ChatCompletionRequestMessage]) -> bo
 }
 
 #[tokio::test]
+async fn completion_guard_unverified_keeps_the_retry_and_non_success_contract() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![])),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.begin_completion_task(
+        super::super::completion::TaskCompletionContract::verification_action(),
+    );
+    agent.note_completion_action();
+    assert!(matches!(
+        agent.completion_guard_verdict("Work completed.").await,
+        super::super::completion::CompletionGuardVerdict::Continue { .. }
+    ));
+    let super::super::completion::CompletionGuardVerdict::Reject(failure) =
+        agent.completion_guard_verdict("Work completed.").await
+    else {
+        panic!("missing verification must remain non-success after retry");
+    };
+    assert_eq!(
+        failure.outcome,
+        crate::agent::CompletionFailureOutcome::Unverified
+    );
+    assert_eq!(
+        failure.gaps,
+        vec![crate::agent::CompletionGap::VerificationMissing]
+    );
+    assert!(
+        agent
+            .completion_guard_trace()
+            .unwrap()
+            .render_compact()
+            .starts_with("unverified")
+    );
+}
+
+#[tokio::test]
 async fn completion_guard_retries_once_then_rejects_open_todos() {
     let fixture = TestFixture::new();
     let provider = MockProvider::new(vec![

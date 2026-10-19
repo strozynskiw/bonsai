@@ -112,6 +112,11 @@ pub(super) fn render_transcript_item(
                     theme::palette().error,
                     theme::palette().error_block,
                 ),
+                crate::completion_report::CompletionStatus::Unverified => (
+                    "! completion unverified",
+                    theme::palette().progress,
+                    theme::palette().assistant_block,
+                ),
                 crate::completion_report::CompletionStatus::Blocked => (
                     "! completion blocked",
                     theme::palette().progress,
@@ -233,6 +238,7 @@ fn render_linear_transcript_item(
         TranscriptItem::CompletionReport(report) => {
             let label = match report.status {
                 crate::completion_report::CompletionStatus::Completed => "Completion: completed",
+                crate::completion_report::CompletionStatus::Unverified => "Completion: unverified",
                 crate::completion_report::CompletionStatus::Blocked => "Completion: blocked",
                 crate::completion_report::CompletionStatus::Failed => "Completion: failed",
                 crate::completion_report::CompletionStatus::Interrupted => {

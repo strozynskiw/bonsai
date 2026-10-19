@@ -1253,6 +1253,11 @@ impl AppState {
                         Ok(AgentRunOutcome::Incomplete(failure))
                             if failure.outcome != crate::agent::CompletionFailureOutcome::Cancelled
                     );
+                let unverified = matches!(
+                    &result,
+                    Ok(AgentRunOutcome::Incomplete(failure))
+                        if failure.outcome == crate::agent::CompletionFailureOutcome::Unverified
+                );
                 // BudgetExhausted is treated as success for phase advancement —
                 // the agent completed its work but hit the turn/time limit.
                 // Only a real interrupt (Ctrl+C) or actual failure halts phases.
@@ -1274,6 +1279,8 @@ impl AppState {
                     SessionStatus::Active
                 } else if interrupted {
                     SessionStatus::Interrupted
+                } else if unverified {
+                    SessionStatus::Unverified
                 } else if run_failed {
                     SessionStatus::Failed
                 } else {
@@ -1682,6 +1689,34 @@ mod tests {
 
         assert_eq!(app.current_session_status, SessionStatus::Interrupted);
         assert!(!app.pending_safe_plan_start_confirmation);
+    }
+
+    #[test]
+    fn missing_verification_is_visible_as_unverified_not_failed() {
+        let mut app = app();
+        let detail = "Work completed; verification not confirmed.";
+        app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
+            AgentRunOutcome::Incomplete(crate::agent::CompletionGuardFailure {
+                outcome: crate::agent::CompletionFailureOutcome::Unverified,
+                gaps: vec![crate::agent::CompletionGap::VerificationMissing],
+                detail: detail.to_string(),
+            }),
+        ))));
+
+        assert_eq!(app.current_session_status, SessionStatus::Unverified);
+        assert!(app.current_session_status.is_terminal());
+        assert_eq!(
+            SessionStatus::from_db_str("unverified"),
+            SessionStatus::Unverified
+        );
+        assert!(!app.pending_safe_plan_start_confirmation);
+        assert!(matches!(
+            app.transcript.as_slice(),
+            [TranscriptItem::CommandOutput {
+                kind: CommandOutputKind::Status,
+                text,
+            }] if text == detail
+        ));
     }
 
     #[test]

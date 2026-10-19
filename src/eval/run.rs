@@ -1403,7 +1403,8 @@ async fn run_task(
         Ok(AgentRunResult::Completed(output)) => (TaskStatus::Completed, output, None),
         Ok(AgentRunResult::Incomplete { output, failure }) => (
             match failure.outcome {
-                crate::agent::CompletionFailureOutcome::Blocked => TaskStatus::Blocked,
+                crate::agent::CompletionFailureOutcome::Unverified
+                | crate::agent::CompletionFailureOutcome::Blocked => TaskStatus::Blocked,
                 crate::agent::CompletionFailureOutcome::Failed => TaskStatus::Failed,
                 crate::agent::CompletionFailureOutcome::Cancelled => TaskStatus::Interrupted,
             },

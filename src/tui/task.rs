@@ -591,11 +591,7 @@ impl TaskController {
                 )
                 .await
             {
-                if report.status == CompletionStatus::Failed
-                    && matches!(outcome, crate::tui::event::AgentRunOutcome::Completed)
-                {
-                    outcome = crate::tui::event::AgentRunOutcome::Failed;
-                }
+                apply_completion_report_status(&mut outcome, report.status);
                 completion_report = Some(report);
             }
             if let (Some(goal), Some(context)) = (explicit_goal.as_ref(), completion.as_ref()) {
@@ -1545,6 +1541,20 @@ async fn finish_task_after_persistence_failure(
     }
 }
 
+fn apply_completion_report_status(
+    outcome: &mut crate::tui::event::AgentRunOutcome,
+    status: CompletionStatus,
+) {
+    use crate::tui::event::AgentRunOutcome;
+    if status == CompletionStatus::Failed
+        && (matches!(outcome, AgentRunOutcome::Completed)
+            || matches!(outcome, AgentRunOutcome::Incomplete(failure)
+                if failure.outcome == crate::agent::CompletionFailureOutcome::Unverified))
+    {
+        *outcome = AgentRunOutcome::Failed;
+    }
+}
+
 async fn finish_task_for_outcome(
     runtime: Option<&SessionRuntimeBudget>,
     task_run_id: Option<TaskRunId>,
@@ -1555,6 +1565,10 @@ async fn finish_task_for_outcome(
         crate::tui::event::AgentRunOutcome::Completed => (TaskOutcome::Succeeded, None),
         crate::tui::event::AgentRunOutcome::Incomplete(failure) => {
             let (outcome, code) = match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Unverified => (
+                    TaskOutcome::Blocked,
+                    TaskTerminalReasonCode::VerificationFailure,
+                ),
                 crate::agent::CompletionFailureOutcome::Blocked => (
                     TaskOutcome::Blocked,
                     if failure.gaps.iter().any(|gap| {
@@ -1682,6 +1696,7 @@ async fn build_completion_report(
         crate::tui::event::AgentRunOutcome::Completed => (CompletionStatus::Completed, None),
         crate::tui::event::AgentRunOutcome::Incomplete(failure) => (
             match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Unverified => CompletionStatus::Unverified,
                 crate::agent::CompletionFailureOutcome::Blocked => CompletionStatus::Blocked,
                 crate::agent::CompletionFailureOutcome::Failed => CompletionStatus::Failed,
                 crate::agent::CompletionFailureOutcome::Cancelled => CompletionStatus::Interrupted,
@@ -1880,6 +1895,40 @@ fn perf_report_title(input: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_failures_override_unverified_outcomes_before_persistence() {
+        use crate::tui::event::AgentRunOutcome;
+        let mut outcome = AgentRunOutcome::Incomplete(crate::agent::CompletionGuardFailure {
+            outcome: crate::agent::CompletionFailureOutcome::Unverified,
+            gaps: vec![crate::agent::CompletionGap::VerificationMissing],
+            detail: "Work completed; verification not confirmed.".into(),
+        });
+        let evidence = crate::completion_report::CompletionEvidenceSnapshot {
+            repeated_tool_failure: true,
+            ..Default::default()
+        };
+        let status = crate::completion_report::classify_completion_status(
+            CompletionStatus::Unverified,
+            &evidence,
+            None,
+        );
+        apply_completion_report_status(&mut outcome, status);
+        assert!(matches!(outcome, AgentRunOutcome::Failed));
+    }
+
+    #[test]
+    fn unverified_report_does_not_promote_or_erase_incomplete_outcome() {
+        use crate::tui::event::AgentRunOutcome;
+        let mut outcome = AgentRunOutcome::Incomplete(crate::agent::CompletionGuardFailure {
+            outcome: crate::agent::CompletionFailureOutcome::Unverified,
+            gaps: vec![crate::agent::CompletionGap::VerificationStale],
+            detail: "Work completed; verification not confirmed.".into(),
+        });
+        apply_completion_report_status(&mut outcome, CompletionStatus::Unverified);
+        assert!(matches!(outcome, AgentRunOutcome::Incomplete(failure)
+            if failure.outcome == crate::agent::CompletionFailureOutcome::Unverified));
+    }
 
     struct NoopProvider;
 
