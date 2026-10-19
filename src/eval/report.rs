@@ -141,6 +141,8 @@ fn redact_report_value(value: &mut serde_json::Value) {
 /// `summary.md`).
 #[derive(Debug, Serialize)]
 pub(crate) struct EvalReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_streams: Option<serde_json::Value>,
     pub(crate) run_id: String,
     pub(crate) suite: SuiteReport,
     pub(crate) mode: EvalMode,
@@ -558,6 +560,7 @@ mod tests {
         task.cost_micros = None;
         task.tokens_per_dollar = None;
         let report = EvalReport {
+            provider_streams: None,
             run_id: "run-1".to_string(),
             suite: SuiteReport {
                 id: "suite".to_string(),

@@ -106,6 +106,7 @@ mod outcome_tests {
 /// Returns an error if the suite fails to load/validate, the provider cannot be
 /// set up, output directories cannot be created, or report files fail to write.
 pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
+    config.validate_stream_mode()?;
     let mut suite = EvalSuite::load(&config.suite)?;
     let mut tool_versions = std::collections::BTreeMap::new();
     if config.qualification {
@@ -124,9 +125,23 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
         tool_versions = qualification_preflight(config.mode).await?;
     }
     let selected_tasks = select_tasks(&suite, config.task.as_deref())?;
+    let stream_mode = config.record_provider_streams.is_some() || config.mode == EvalMode::Replay;
+    if stream_mode {
+        anyhow::ensure!(
+            !config.qualification,
+            "stream replay/capture excludes qualification reviewer providers"
+        );
+        for task in &selected_tasks {
+            anyhow::ensure!(
+                task.shared_workspace_peer.is_none()
+                    && task.lsp_condition == EvalLspCondition::Inherited,
+                "stream replay/capture requires single-agent tasks without reviewer providers"
+            );
+        }
+    }
     let seed = config.seed.unwrap_or(suite.seed);
     let run_id = run_id(config.mode, seed);
-    let run_dir = config.out_dir.join(&run_id);
+    let run_dir = std::path::absolute(config.out_dir.join(&run_id))?;
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("Failed to create eval output directory {:?}", run_dir))?;
 
@@ -162,7 +177,7 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
                     seed.saturating_add(repetition_offset),
                     &run_dir,
                     &storage,
-                    &provider_setup,
+                    (&provider_setup, config.record_provider_streams.as_deref()),
                 )
                 .await?,
             );
@@ -178,6 +193,11 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
         .map(|task| task.repair_turns)
         .sum::<u64>();
     let mut report = EvalReport {
+        provider_streams: stream_mode.then(|| serde_json::json!({
+            "version": super::stream_fixture::STREAM_FIXTURE_VERSION,
+            "mode": if config.mode == EvalMode::Replay { "replay" } else { "capture" },
+            "directory": config.replay_dir.as_ref().or(config.record_provider_streams.as_ref()).map(|path| path.display().to_string()),
+        })),
         run_id,
         suite: SuiteReport {
             id: suite.id.clone(),
@@ -361,6 +381,14 @@ fn repeated_task_id(task_id: &str, repetition: usize, repetitions: usize) -> Str
 #[derive(Debug)]
 enum ProviderSetup {
     Mock,
+    #[cfg(test)]
+    CaptureTest {
+        header: Box<super::stream_fixture::StreamHeader>,
+    },
+    Replay {
+        directory: PathBuf,
+        header: Box<super::stream_fixture::StreamHeader>,
+    },
     Live {
         registry: Arc<ProviderRegistry>,
         session_store: Box<SessionStore>,
@@ -377,6 +405,9 @@ impl ProviderSetup {
         seed: u64,
     ) -> Result<crate::tool::SubagentProviderFactory> {
         let factory: crate::tool::SubagentProviderFactory = match self {
+            #[cfg(test)]
+            Self::CaptureTest { .. } => anyhow::bail!("capture test does not support reviewers"),
+            Self::Replay { .. } => anyhow::bail!("replay does not support reviewer providers"),
             Self::Mock => {
                 let script: MockScript = toml::from_str("final_response = 'No findings.'")?;
                 Arc::new(move |_, _| {
@@ -418,6 +449,22 @@ impl ProviderSetup {
     async fn new(config: &EvalCliConfig) -> Result<Self> {
         match config.mode {
             EvalMode::Mock => Ok(Self::Mock),
+            EvalMode::Replay => {
+                let directory = config
+                    .replay_dir
+                    .clone()
+                    .context("missing replay directory")?;
+                let suite = EvalSuite::load(&config.suite)?;
+                let tasks = select_tasks(&suite, config.task.as_deref())?;
+                let task = tasks.first().context("empty replay selection")?;
+                let id = repeated_task_id(&task.id, 1, suite.repetitions);
+                let (header, _) =
+                    super::stream_replay::load(&stream_path(&directory, &suite.id, &id)).await?;
+                Ok(Self::Replay {
+                    directory,
+                    header: Box::new(header),
+                })
+            }
             EvalMode::Live => {
                 let user_storage = Storage::open().await?;
                 let model_catalog = match crate::model_catalog::load_catalog_from_home_with_refresh(
@@ -488,6 +535,9 @@ impl ProviderSetup {
     fn provider_id(&self) -> &str {
         match self {
             Self::Mock => MOCK_PROVIDER_ID,
+            #[cfg(test)]
+            Self::CaptureTest { header } => &header.provider,
+            Self::Replay { header, .. } => &header.provider,
             Self::Live { selection, .. } => &selection.provider,
         }
     }
@@ -495,6 +545,9 @@ impl ProviderSetup {
     fn model(&self) -> &str {
         match self {
             Self::Mock => MOCK_MODEL,
+            #[cfg(test)]
+            Self::CaptureTest { header } => &header.model,
+            Self::Replay { header, .. } => &header.model,
             Self::Live { selection, .. } => &selection.model,
         }
     }
@@ -502,6 +555,9 @@ impl ProviderSetup {
     fn reasoning(&self) -> ReasoningSelection {
         match self {
             Self::Mock => ReasoningSelection::default(),
+            #[cfg(test)]
+            Self::CaptureTest { .. } => ReasoningSelection::Off,
+            Self::Replay { .. } => ReasoningSelection::Off,
             Self::Live {
                 session_store,
                 selection,
@@ -518,6 +574,13 @@ impl ProviderSetup {
     fn project_info_provider_state(&self) -> ProjectInfoProviderState {
         match self {
             Self::Mock => ProjectInfoProviderState::new(MOCK_PROVIDER_ID, "Mock Eval", MOCK_MODEL),
+            #[cfg(test)]
+            Self::CaptureTest { header } => {
+                ProjectInfoProviderState::new(&header.provider, &header.provider, &header.model)
+            }
+            Self::Replay { header, .. } => {
+                ProjectInfoProviderState::new(&header.provider, &header.provider, &header.model)
+            }
             Self::Live {
                 registry,
                 session_store,
@@ -534,8 +597,27 @@ impl ProviderSetup {
         mock_script: Option<MockScript>,
         seed: u64,
         max_provider_attempts: Option<usize>,
+        stream: Option<&StreamSession>,
     ) -> Result<(Box<dyn Provider>, Arc<EvalProviderStats>)> {
-        let provider: Box<dyn Provider> = match self {
+        let mut provider: Box<dyn Provider> = match self {
+            #[cfg(test)]
+            Self::CaptureTest { header } => Box::new(stream_tests::DeterministicProvider::new(
+                header.preparation.clone(),
+                mock_script.context("missing script")?,
+                seed,
+            )),
+            Self::Replay { .. } => match stream {
+                Some(StreamSession::Replay {
+                    header,
+                    state,
+                    normalizer,
+                }) => Box::new(super::stream_replay::ReplayProvider::with_state(
+                    header,
+                    normalizer.clone(),
+                    state.clone(),
+                )),
+                _ => anyhow::bail!("missing replay task artifact"),
+            },
             Self::Mock => {
                 let script = mock_script.context("Eval agent is missing a mock script")?;
                 Box::new(MockEvalProvider::new(script, seed))
@@ -556,6 +638,12 @@ impl ProviderSetup {
                 )
             }
         };
+        if let Some(StreamSession::Capture { handle, .. }) = stream {
+            provider = Box::new(super::stream_record::RecordingProvider::new(
+                provider,
+                handle.clone(),
+            ));
+        }
         let stats = Arc::new(EvalProviderStats::default());
         Ok((
             Box::new(CountingProvider::new(
@@ -571,8 +659,17 @@ impl ProviderSetup {
         &self,
         agent: &mut crate::agent::Agent,
         mock_context_window_tokens: Option<usize>,
+        stream: Option<&StreamSession>,
     ) -> Result<()> {
+        if let Some(stream) = stream {
+            agent.set_context_budget_tokens(stream.header().context_tokens);
+            agent.set_prompt_estimator(PromptEstimator::heuristic());
+            return Ok(());
+        }
         match self {
+            #[cfg(test)]
+            Self::CaptureTest { .. } => anyhow::bail!("missing capture test configuration"),
+            Self::Replay { .. } => anyhow::bail!("missing replay task configuration"),
             Self::Mock => {
                 agent.set_context_budget_tokens(
                     mock_context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS as usize),
@@ -649,7 +746,140 @@ fn apply_eval_reasoning_override(
     applied
 }
 
+enum StreamSession {
+    Capture {
+        header: super::stream_fixture::StreamHeader,
+        handle: super::stream_record::CaptureHandle,
+    },
+    Replay {
+        header: super::stream_fixture::StreamHeader,
+        state: Arc<std::sync::Mutex<super::stream_replay::ReplayState>>,
+        normalizer: super::stream_fixture::Normalizer,
+    },
+}
+
+fn stream_path(directory: &Path, suite: &str, task: &str) -> PathBuf {
+    directory.join(format!(
+        "{}-{}.jsonl",
+        blake3::hash(suite.as_bytes()).to_hex(),
+        blake3::hash(task.as_bytes()).to_hex()
+    ))
+}
+
+impl StreamSession {
+    fn header(&self) -> &super::stream_fixture::StreamHeader {
+        match self {
+            Self::Capture { header, .. } | Self::Replay { header, .. } => header,
+        }
+    }
+    async fn finish(&self) -> Result<()> {
+        match self {
+            Self::Capture { handle, .. } => super::stream_record::finish_capture(handle).await,
+            Self::Replay { state, .. } => state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("replay lock poisoned"))?
+                .finish(),
+        }
+    }
+    async fn for_task(
+        setup: &ProviderSetup,
+        record_dir: Option<&Path>,
+        suite: &EvalSuite,
+        task: &str,
+        seed: u64,
+        workspace: &Path,
+        output: &Path,
+    ) -> Result<Option<Self>> {
+        use super::stream_fixture::*;
+        let normalizer = Normalizer::new(workspace, output)?;
+        if let ProviderSetup::Replay {
+            directory,
+            header: target,
+        } = setup
+        {
+            let (header, attempts) =
+                super::stream_replay::load(&stream_path(directory, &suite.id, task)).await?;
+            anyhow::ensure!(
+                header.suite == suite.id && header.task == task && header.seed == seed,
+                "replay task identity mismatch"
+            );
+            anyhow::ensure!(
+                header.provider == target.provider && header.model == target.model,
+                "replay route/model mismatch"
+            );
+            return Ok(Some(Self::Replay {
+                header,
+                state: super::stream_replay::ReplayState::new(attempts),
+                normalizer,
+            }));
+        }
+        let Some(directory) = record_dir else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        if let ProviderSetup::CaptureTest { header } = setup {
+            let mut header = header.as_ref().clone();
+            header.suite = suite.id.clone();
+            header.task = task.into();
+            header.seed = seed;
+            let handle = super::stream_record::create_capture(
+                &stream_path(directory, &suite.id, task),
+                header.clone(),
+                normalizer,
+            )
+            .await?;
+            return Ok(Some(Self::Capture { header, handle }));
+        }
+        let (provider, _) = setup.build_provider(None, seed, None, None)?;
+        let preparation = provider
+            .eval_stream_preparation()?
+            .context("capture requires portable openai-chat provider")?;
+        let mut agent_tokens = configured_eval_context_window_tokens()?;
+        if let ProviderSetup::Live {
+            registry,
+            session_store,
+            model_catalog,
+            ..
+        } = setup
+        {
+            let catalog = crate::model_resolution::context_window_for_current_model_with_catalog(
+                registry,
+                session_store,
+                Some(model_catalog),
+            ) as usize;
+            anyhow::ensure!(
+                agent_tokens.is_none_or(|tokens| tokens <= catalog),
+                "capture context exceeds catalog window"
+            );
+            agent_tokens = Some(agent_tokens.unwrap_or(catalog));
+        }
+        let header = StreamHeader {
+            version: STREAM_FIXTURE_VERSION,
+            suite: suite.id.clone(),
+            task: task.into(),
+            seed,
+            provider: setup.provider_id().into(),
+            model: setup.model().into(),
+            context_tokens: agent_tokens.context("missing capture context window")?,
+            platform: format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH),
+            preparation,
+        };
+        let handle = super::stream_record::create_capture(
+            &stream_path(directory, &suite.id, task),
+            header.clone(),
+            normalizer,
+        )
+        .await?;
+        Ok(Some(Self::Capture { header, handle }))
+    }
+}
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod stream_tests;
+
 struct EvalAgentBuild<'a> {
+    stream: Option<&'a StreamSession>,
     worktree_path: &'a Path,
     storage: &'a Storage,
     provider_setup: &'a ProviderSetup,
@@ -714,7 +944,13 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
             config.worktree_path.to_path_buf(),
         ))
     });
-    let project_context = context::isolated_project_context_snapshot(config.worktree_path);
+    let project_context = match config.stream {
+        Some(stream) => context::portable_project_context_snapshot(
+            config.worktree_path,
+            &stream.header().platform,
+        ),
+        None => context::isolated_project_context_snapshot(config.worktree_path),
+    };
     let path_evidence = crate::tool::PathEvidence::new(config.worktree_path)?;
     let project_info_runtime = Arc::new(crate::tool::ProjectInfoRuntime::new(Some(
         config.provider_setup.project_info_provider_state(),
@@ -750,6 +986,7 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         config.mock_script,
         config.seed,
         config.max_provider_attempts,
+        config.stream,
     )?;
     let review_factory = if config.lsp_condition != EvalLspCondition::Inherited {
         Some(config.provider_setup.review_factory(
@@ -804,6 +1041,15 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
             episode_store: episode_store.clone(),
         });
 
+    let (tool_registry, planning_registry, smol_registry) = if config.stream.is_some() {
+        (
+            tool_registry.without("agent").without("peers"),
+            planning_registry.without("agent").without("peers"),
+            smol_registry.without("agent").without("peers"),
+        )
+    } else {
+        (tool_registry, planning_registry, smol_registry)
+    };
     let mut agent_builder = crate::agent::Agent::builder(
         provider,
         tool_registry,
@@ -818,11 +1064,13 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
     .lsp_hub(lsp_hub.clone())
     .yolo_mode(yolo_mode)
     .subagent_runner(subagent_runner)
-    .self_review_mode(if config.lsp_condition == EvalLspCondition::Inherited {
-        crate::self_review::SelfReviewMode::Off
-    } else {
-        crate::self_review::SelfReviewMode::On
-    })
+    .self_review_mode(
+        if config.stream.is_some() || config.lsp_condition == EvalLspCondition::Inherited {
+            crate::self_review::SelfReviewMode::Off
+        } else {
+            crate::self_review::SelfReviewMode::On
+        },
+    )
     // Scripted mock turns cannot wait on a dynamic background-task id, so
     // keep known-slow verification bash calls foreground and deterministic.
     .auto_background_verification(false);
@@ -858,10 +1106,12 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
     if let Some(peer_bus) = peer_bus {
         agent.set_peer_bus(peer_bus);
     }
-    config
-        .provider_setup
-        .configure_agent(&mut agent, config.mock_context_window_tokens)?;
-    if matches!(config.provider_setup, ProviderSetup::Mock) {
+    config.provider_setup.configure_agent(
+        &mut agent,
+        config.mock_context_window_tokens,
+        config.stream,
+    )?;
+    if config.stream.is_some() || matches!(config.provider_setup, ProviderSetup::Mock) {
         agent.set_retry_backoff(crate::agent::RetryBackoff::Immediate);
     }
 
@@ -894,6 +1144,7 @@ async fn run_shared_workspace_peer(
     }
     let session_title = format!("eval peer: {task_id}");
     let mut harness = build_eval_agent(EvalAgentBuild {
+        stream: None,
         worktree_path,
         storage,
         provider_setup,
@@ -952,8 +1203,9 @@ async fn run_task(
     seed: u64,
     run_dir: &Path,
     storage: &Storage,
-    provider_setup: &ProviderSetup,
+    provider: (&ProviderSetup, Option<&Path>),
 ) -> Result<TaskReport> {
+    let (provider_setup, record_dir) = provider;
     let started = Instant::now();
     let budgets = suite.budgets.overlay(task.budgets);
     let worktree_path = run_dir.join("worktrees").join(task_run_id);
@@ -973,8 +1225,19 @@ async fn run_task(
         }
     }
 
+    let stream = StreamSession::for_task(
+        provider_setup,
+        record_dir,
+        suite,
+        task_run_id,
+        seed,
+        &worktree_path,
+        run_dir,
+    )
+    .await?;
     let session_title = format!("eval primary: {task_run_id}");
     let mut harness = build_eval_agent(EvalAgentBuild {
+        stream: stream.as_ref(),
         worktree_path: &worktree_path,
         storage,
         provider_setup,
@@ -1128,6 +1391,14 @@ async fn run_task(
         .stop_all_running(BACKGROUND_TASK_SHUTDOWN_TIMEOUT)
         .await;
 
+    let artifact_error = match &stream {
+        Some(stream) => stream.finish().await.err(),
+        None => None,
+    };
+    let artifact_valid = artifact_error.is_none();
+    if let Some(error) = artifact_error {
+        run_result = Err(error);
+    }
     let (status, output, run_error) = match run_result {
         Ok(AgentRunResult::Completed(output)) => (TaskStatus::Completed, output, None),
         Ok(AgentRunResult::Incomplete { output, failure }) => (
@@ -1277,7 +1548,8 @@ async fn run_task(
             .as_deref()
             .is_some_and(|error| error.contains(needle))
     });
-    let passed = status_matches
+    let passed = artifact_valid
+        && status_matches
         && error_matches
         && task
             .min_compactions
@@ -2053,6 +2325,11 @@ impl EvalProviderStats {
 
 #[async_trait]
 impl Provider for CountingProvider {
+    fn eval_stream_preparation(
+        &self,
+    ) -> Result<Option<crate::provider::opencode::PortableChatPreparation>> {
+        self.inner.eval_stream_preparation()
+    }
     fn prepare_request_for_estimation(
         &self,
         messages: &[ChatCompletionRequestMessage],
@@ -2922,7 +3199,7 @@ mod tests {
             suite.seed,
             &run_dir,
             &storage,
-            &ProviderSetup::Mock,
+            (&ProviderSetup::Mock, None),
         )
         .await
         .unwrap();

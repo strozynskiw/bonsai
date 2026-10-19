@@ -603,6 +603,7 @@ mod tests {
 
     fn report(score_percent: f64) -> EvalReport {
         EvalReport {
+            provider_streams: None,
             run_id: "run".to_string(),
             suite: super::super::SuiteReport {
                 id: "suite".to_string(),

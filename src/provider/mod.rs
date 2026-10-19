@@ -938,6 +938,10 @@ pub(crate) fn serialize_request_body(
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Credential-free preparation metadata for opt-in portable eval streams.
+    fn eval_stream_preparation(&self) -> anyhow::Result<Option<opencode::PortableChatPreparation>> {
+        Ok(None)
+    }
     /// Build protocol data without authorization, IO, diagnostic capture, or
     /// mutation. Counting and transmission share this pure boundary.
     ///

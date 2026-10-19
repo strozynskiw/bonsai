@@ -14,6 +14,8 @@ pub(crate) enum EvalMode {
     Mock,
     /// A real, configured provider selected from the user's catalog.
     Live,
+    /// Keyless playback of reviewed normalized provider streams.
+    Replay,
 }
 
 impl EvalMode {
@@ -22,6 +24,7 @@ impl EvalMode {
         match value {
             "mock" => Some(Self::Mock),
             "live" => Some(Self::Live),
+            "replay" => Some(Self::Replay),
             _ => None,
         }
     }
@@ -32,6 +35,7 @@ impl fmt::Display for EvalMode {
         f.write_str(match self {
             Self::Mock => "mock",
             Self::Live => "live",
+            Self::Replay => "replay",
         })
     }
 }
@@ -43,6 +47,10 @@ pub(crate) struct EvalCliConfig {
     pub suite: PathBuf,
     /// Provider backend (mock or live).
     pub mode: EvalMode,
+    /// Private output directory for opt-in live capture.
+    pub record_provider_streams: Option<PathBuf>,
+    /// Reviewed fixture directory used only in replay mode.
+    pub replay_dir: Option<PathBuf>,
     /// Require the complete multi-language/LSP acceptance matrix.
     pub qualification: bool,
     /// Optional live-provider override (only valid in live mode).
@@ -65,11 +73,32 @@ pub(crate) struct EvalCliConfig {
     pub fail_on_task_failure: bool,
 }
 
+impl EvalCliConfig {
+    pub(crate) fn validate_stream_mode(&self) -> anyhow::Result<()> {
+        if self.record_provider_streams.is_some() && self.mode != EvalMode::Live {
+            anyhow::bail!("--record-provider-streams requires --mode live");
+        }
+        if (self.mode == EvalMode::Replay) != self.replay_dir.is_some() {
+            anyhow::bail!("--mode replay requires --replay-dir (and vice versa)");
+        }
+        if self.mode != EvalMode::Live
+            && (self.provider.is_some() || self.model.is_some() || self.effort.is_some())
+        {
+            anyhow::bail!(
+                "--provider, --model, and --effort are only valid with bonsai eval --mode live."
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Default for EvalCliConfig {
     fn default() -> Self {
         Self {
             suite: PathBuf::from(DEFAULT_SUITE_PATH),
             mode: EvalMode::Mock,
+            record_provider_streams: None,
+            replay_dir: None,
             qualification: false,
             provider: None,
             model: None,

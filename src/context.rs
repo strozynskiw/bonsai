@@ -755,7 +755,33 @@ fn normalize_local_reference(path: &Path) -> Option<PathBuf> {
 /// Collect project context for an isolated fixture root without walking into a
 /// parent repository or parent steering files.
 pub fn isolated_project_context_snapshot(root: &Path) -> ProjectContextSnapshot {
-    let env = project_environment_lines(root);
+    isolated_project_context_with_environment(root, project_environment_lines(root))
+}
+
+/// Build an isolated eval context using the fixture's platform and no user data path.
+/// Recorded platform semantics remain stable when replay runs on another host.
+pub(crate) fn portable_project_context_snapshot(
+    root: &Path,
+    platform: &str,
+) -> ProjectContextSnapshot {
+    let environment = project_environment_lines(root)
+        .into_iter()
+        .filter(|line| !line.starts_with("- local data:"))
+        .map(|line| {
+            if line.starts_with("- platform:") {
+                format!("- platform: {platform}")
+            } else {
+                line
+            }
+        })
+        .collect();
+    isolated_project_context_with_environment(root, environment)
+}
+
+fn isolated_project_context_with_environment(
+    root: &Path,
+    env: Vec<String>,
+) -> ProjectContextSnapshot {
     let volatile = if root.join(".git").exists() {
         git_summary(root, None)
     } else {
@@ -1517,6 +1543,19 @@ mod tests {
             .with_agents_index(String::new())
             .with_memory_index(String::new());
         assert_eq!(base.cacheable_prefix(), with_empty.cacheable_prefix());
+    }
+
+    #[test]
+    fn portable_context_uses_recorded_platform_without_user_database_path() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Cargo.toml"), "").unwrap();
+        let context =
+            portable_project_context_snapshot(root.path(), "fixture-os (fixture-arch)").render();
+        assert!(context.contains("- platform: fixture-os (fixture-arch)"));
+        assert!(context.contains(&format!("- cwd: {}", root.path().display())));
+        assert!(context.contains("- project: Rust"));
+        assert!(!context.contains("- local data:"));
+        assert!(!context.contains("bonsai.db"));
     }
 
     #[test]

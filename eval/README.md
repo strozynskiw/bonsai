@@ -3,6 +3,94 @@
 `bonsai eval` runs source-controlled fixture tasks through the normal agent and
 tool loop, grades the resulting worktree, and writes a JSON report.
 
+## Local Bonsai vs DeepSeek Harness suite
+
+The reproducible [10-task JavaScript comparison](comparison/local-js/README.md)
+includes frozen tasks, an offline preflight, a paid runner, a raw-run verifier,
+and sanitized metrics for every baseline attempt. It is a custom local suite,
+not TB4 or a security sandbox. Start with its offline checks; paid execution
+requires explicit authorization. [Failure diagnosis](comparison/local-js/FAILURES.md)
+records the baseline limitations without changing task answers.
+
+## Provider stream capture and keyless replay
+
+Capture is opt-in and eval-only. Normal TUI, headless, and ordinary live/mock
+runs are unchanged. This records normalized provider callbacks and outcomes,
+not HTTP/SSE traffic; transport parsing is not tested by replay.
+
+```sh
+# Controlled live smoke: opt in only when spending provider quota is intended.
+cargo run --locked -- eval --suite eval/suites/provider_stream_tools.toml \
+  --mode live --provider openai --effort off \
+  --record-provider-streams eval/recordings/smoke --fail-on-task-failure
+# Use the same suite, seed and build; credentials are not needed for replay.
+cargo run --locked -- eval --suite eval/suites/provider_stream_tools.toml \
+  --mode replay --replay-dir eval/recordings/smoke --fail-on-task-failure
+```
+
+Only portable `openai-chat`, reasoning-off, text-only single-agent tasks are
+supported. Native replay history, images, peer tasks, qualification/reviewer
+providers and delegation are excluded. Capture and replay use the same local
+heuristic estimator, with transport-prepared inputs and declared roots normalized
+for counting. Replay does not open user credential/session storage, refresh the
+catalog, construct a live provider, or call a remote tokenizer. Tools still run
+normally: arbitrary shell/network tools are neither deterministic nor made safe
+by provider replay. Use controlled local fixture tools and normal permissions.
+
+Each suite/task/repetition owns a hash-named JSONL file with a versioned header,
+ordered attempts (including errors before any callback), and a completeness
+marker. Files are exclusive-created with private permissions; generated captures
+belong in ignored `eval/recordings/`, outside workspace fixtures. Limits are
+32 MiB per artifact and 4 MiB per attempt. Writes run off the async runtime;
+cancelled/dropped attempts cannot acquire a false completeness marker.
+Mismatches, extra calls, incomplete/malformed/version-unknown artifacts, write
+failures and unused attempts fail the task even when its expected status is
+error or cancellation. There is no fallback to a live provider.
+
+Matching includes ordered messages/tools, request options, response provenance,
+canonical/wire tool identity relationships, and normalized prepared local-count
+inputs. Only declared workspace/output roots and allocated identities are
+normalized; semantic prompt/tool changes fail before callbacks are emitted.
+Replayed tool arguments are rebased into the new workspace.
+The fixture header records the capture platform; replay uses that platform in
+its isolated project context. User database paths are omitted from stream-mode
+context, so fixtures do not depend on the caller's home directory. A platform
+record does not make arbitrary shell commands portable across operating systems.
+
+For controlled failures during capture, set `BONSAI_EVAL_STREAM_FAULT` to
+`error-after-prefix:N` or `wait-for-cancellation:N`, where `N` is a positive,
+one-based attempt number. The former emits a fixed prefix then a retryable 503;
+the latter emits the prefix and waits for the task's existing
+`cancel_after_provider_attempts`/`cancel_after_ms` control and timeout. Replay
+uses the recorded outcome, no timing sleeps, and immediate retry backoff. These
+are injected faults, not evidence that a real provider outage was reproduced.
+
+Artifacts contain only allowlisted DTO fields: no authorization/count credentials,
+raw payloads, signatures, encrypted/native reasoning or arbitrary diagnostics.
+Recursive credential-field and shared secret-pattern checks run before disk
+writes. If redaction would alter executable tool semantics or relationships,
+capture fails rather than recording a different action. **Prompts and source can
+still be confidential.** Review every header, request, callback, error, tool
+argument/result, path and identity relationship manually before copying a capture
+into `eval/fixtures/`; redaction is not a safe-to-share guarantee. Never promote
+user databases or live sessions.
+
+The checked-in fixtures are synthetic, reviewed local read/write, retry and
+cancellation cases (not live-provider captures). Run them without keys:
+
+```sh
+cargo test --locked stream_
+cargo run --locked -- eval --suite eval/suites/provider_stream_tools.toml \
+  --mode replay --replay-dir eval/fixtures/provider_streams/tools --fail-on-task-failure
+```
+
+The `provider_stream_retry.toml` and `provider_stream_cancellation.toml` suites
+use the corresponding `retry` and `cancellation` fixture directories. Offline CI
+runs all three through `stream_checked_in_replay_suites_are_keyless`. To regenerate
+synthetic fixtures deliberately, run
+`BONSAI_GENERATE_TEST_STREAMS=1 cargo test --locked stream_round_trip`, then review
+the full JSONL diffs; ordinary tests never rewrite checked-in artifacts.
+
 ## Experimental qualification matrix (#13)
 
 ```sh

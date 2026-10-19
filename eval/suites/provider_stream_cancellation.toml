@@ -1,0 +1,16 @@
+id = "roundtrip"
+seed = 7
+
+[[tasks]]
+id = "case"
+fixture = "fixtures/provider_stream"
+prompt = "Update README.md to new and finish."
+expected_status = "interrupted"
+cancel_after_provider_attempts = 1
+
+[tasks.budgets]
+max_duration_ms = 10000
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["prefix"]

@@ -25,6 +25,9 @@ mod grader;
 mod mock;
 mod report;
 mod run;
+mod stream_fixture;
+mod stream_record;
+mod stream_replay;
 
 pub(crate) use adapters::*;
 pub(crate) use baseline::*;

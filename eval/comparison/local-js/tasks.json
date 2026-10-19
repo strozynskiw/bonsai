@@ -1,0 +1,133 @@
+[
+  {
+    "id": "interval-union",
+    "specification": "Export mergeRanges(ranges). Each range is a pair of finite numbers [start,end] with start<=end. Return a new sorted union, merging overlapping OR touching ranges. Reject invalid outer input, malformed pairs, NaN/Infinity or reversed endpoints with TypeError. Never mutate input. Empty input returns [].",
+    "files": {
+      "solution.mjs": "export const mergeRanges = ranges => ranges.sort((a,b)=>a[0]-b[0]);"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export function mergeRanges(ranges) { if (!Array.isArray(ranges) || ranges.some(r=>!Array.isArray(r)||r.length!==2||!r.every(Number.isFinite)||r[0]>r[1])) throw new TypeError(); const sorted=ranges.map(r=>[...r]).sort((a,b)=>a[0]-b[0]); const out=[]; for(const r of sorted){const last=out.at(-1); if(last&&r[0]<=last[1])last[1]=Math.max(last[1],r[1]);else out.push(r);}return out; }",
+    "checks": "const {mergeRanges:f}=mod; check(()=>assert.deepEqual(f([[4,5],[1,3],[3,4]]),[[1,5]])); check(()=>assert.deepEqual(f([]),[])); check(()=>assert.deepEqual(f([[0,0],[0,2],[5,6]]),[[0,2],[5,6]])); check(()=>assert.deepEqual(f([[-5,-2],[-3,0],[2,3]]),[[-5,0],[2,3]])); const input=Object.freeze([Object.freeze([2,4]),Object.freeze([1,3])]); check(()=>assert.deepEqual(f(input),[[1,4]])); for(const x of [null,{},[1],[[1]],[[2,1]],[[NaN,2]],[[0,Infinity]],[['1',2]]])check(()=>assert.throws(()=>f(x),TypeError));",
+    "visible": "assert.deepEqual(mod.mergeRanges([[1,3],[2,4]]),[[1,4]]);"
+  },
+  {
+    "id": "csv-state-machine",
+    "specification": "Export parseCsvLine(text). Parse one CSV record into strings: comma delimiter, empty fields preserved, quoted fields may contain commas and LF, doubled quotes decode to one quote. Quotes only at start of field; after closing quote only comma/end is valid. Reject nonstring, unclosed quotes, stray quotes, CR/LF outside quoted fields with SyntaxError. Empty string is one empty field. No whitespace trimming.",
+    "files": {
+      "solution.mjs": "export const parseCsvLine = text => text.split(\",\");"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export function parseCsvLine(s){if(typeof s!=='string')throw new SyntaxError();const out=[];let field='',state='start';for(let i=0;i<s.length;i++){const c=s[i];if(state==='quoted'){if(c==='\"'){if(s[i+1]==='\"'){field+='\"';i++;}else state='closed';}else field+=c;}else if(c===','){out.push(field);field='';state='start';}else if(state==='closed'||c==='\\r'||c==='\\n'||(c==='\"'&&state!=='start'))throw new SyntaxError();else if(c==='\"')state='quoted';else{field+=c;state='plain';}}if(state==='quoted')throw new SyntaxError();out.push(field);return out;}",
+    "checks": "const f=mod.parseCsvLine;for(const [s,w] of [['',['']],['a,b',['a','b']],[',a,',['','a','']],['\"a,b\",c',['a,b','c']],['\"a\"\"b\"',['a\"b']],['\"x\\ny\", z',['x\\ny',' z']],['\"\"',['']],[' a , b ',[' a ',' b ']]])check(()=>assert.deepEqual(f(s),w));for(const s of [null,1,'\"abc','a\"b','\"a\"x','a\\nb','a\\rb','\"a\" ','\"\"\"'])check(()=>assert.throws(()=>f(s),SyntaxError));",
+    "visible": "assert.deepEqual(mod.parseCsvLine('\"a,b\",c'),['a,b','c']);"
+  },
+  {
+    "id": "json-pointer",
+    "specification": "Export getPointer(document,pointer). RFC6901 plain pointer: empty pointer returns document, otherwise starts with /. Decode ~1 to slash and ~0 to tilde, reject other ~ escapes. Walk OWN properties only, never prototypes; reject __proto__, prototype and constructor tokens. Arrays require canonical decimal indices (0 or nonzero digits), within length and an own slot; reject -, leading zeros. Return undefined for missing/invalid pointer, including nonstrings. Do not mutate.",
+    "files": {
+      "solution.mjs": "export const getPointer = (doc,pointer) => pointer.split(\"/\").slice(1).reduce((v,k)=>v?.[k],doc);"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export function getPointer(doc,p){if(typeof p!=='string')return undefined;if(p==='')return doc;if(!p.startsWith('/'))return undefined;let v=doc;for(const raw of p.slice(1).split('/')){if(/~(?![01])/.test(raw))return undefined;const k=raw.replace(/~1/g,'/').replace(/~0/g,'~');if(['__proto__','prototype','constructor'].includes(k)||v===null||typeof v!=='object')return undefined;if(Array.isArray(v)&&(!/^(0|[1-9][0-9]*)$/.test(k)||Number(k)>=v.length))return undefined;if(!Object.hasOwn(v,k))return undefined;v=v[k];}return v;}",
+    "checks": "const f=mod.getPointer;const d={'a/b':{'~x':[7,null]},'':3};check(()=>assert.equal(f(d,'/a~1b/~0x/0'),7));check(()=>assert.equal(f(d,''),d));check(()=>assert.equal(f(d,'/'),3));check(()=>assert.equal(f(d,'/a~1b/~0x/1'),null));for(const p of ['/a~2b','x',null,1,'/__proto__','/constructor','/toString','/a~1b/~0x/01','/a~1b/~0x/-','/a~1b/~0x/9'])check(()=>assert.equal(f(d,p),undefined));check(()=>assert.equal(f(Object.create({x:2}),'/x'),undefined));check(()=>assert.equal(f([,],'/0'),undefined));check(()=>assert.equal(f({'~1':9},'/~01'),9));",
+    "visible": "assert.equal(mod.getPointer({'a/b':4},'/a~1b'),4);"
+  },
+  {
+    "id": "stable-toposort",
+    "specification": "Export orderJobs(jobs). jobs is array of {id:string,deps:string[]}; IDs unique nonempty, every dependency exists. Return IDs with dependencies before dependents. At EACH selection choose earliest eligible job in original input order. Repeated deps count once. Reject malformed input, missing deps, duplicate IDs or cycles with Error. No input mutation.",
+    "files": {
+      "solution.mjs": "export const orderJobs = jobs => jobs.map(j=>j.id);"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export function orderJobs(jobs){if(!Array.isArray(jobs))throw new Error();const ids=new Set();for(const j of jobs){if(!j||typeof j.id!=='string'||!j.id||ids.has(j.id)||!Array.isArray(j.deps)||j.deps.some(d=>typeof d!=='string'))throw new Error();ids.add(j.id);}if(jobs.some(j=>j.deps.some(d=>!ids.has(d))))throw new Error();const done=new Set(),out=[];while(out.length<jobs.length){const j=jobs.find(j=>!done.has(j.id)&&j.deps.every(d=>done.has(d)));if(!j)throw new Error();done.add(j.id);out.push(j.id);}return out;}",
+    "checks": "const f=mod.orderJobs;check(()=>assert.deepEqual(f([{id:'a',deps:['b']},{id:'b',deps:[]},{id:'c',deps:[]}]),['b','a','c']));check(()=>assert.deepEqual(f([]),[]));check(()=>assert.deepEqual(f([{id:'x',deps:['y','y']},{id:'y',deps:[]}]),['y','x']));for(const x of [null,[{id:'',deps:[]}],[{id:'a',deps:['x']}],[{id:'a',deps:['a']}],[{id:'a',deps:['b']},{id:'b',deps:['a']}],[{id:'a',deps:[]},{id:'a',deps:[]}],[{id:'a',deps:'x'}]])check(()=>assert.throws(()=>f(x)));const frozen=Object.freeze([Object.freeze({id:'b',deps:Object.freeze(['a'])}),Object.freeze({id:'a',deps:Object.freeze([])})]);check(()=>assert.deepEqual(f(frozen),['a','b']));",
+    "visible": "assert.deepEqual(mod.orderJobs([{id:'b',deps:['a']},{id:'a',deps:[]}]),['a','b']);"
+  },
+  {
+    "id": "async-worker-pool",
+    "specification": "Export async mapLimit(items,limit,worker). items is array, limit positive integer, worker function(value,index). Reject invalid arguments. Preserve result order, never run more than limit workers. Empty resolves []. Accept sync values or promises. On first rejection stop scheduling new items, await ALREADY STARTED work, then reject with that first error (no unhandled rejections). Do not mutate items.",
+    "files": {
+      "solution.mjs": "export async function mapLimit(items,limit,worker){return Promise.all(items.map(worker));}"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export async function mapLimit(items,limit,worker){if(!Array.isArray(items)||!Number.isInteger(limit)||limit<1||typeof worker!=='function')throw new TypeError();const out=new Array(items.length);let next=0,failed=false,error;async function run(){while(!failed&&next<items.length){const i=next++;try{out[i]=await worker(items[i],i);}catch(e){if(!failed){failed=true;error=e;}}}}await Promise.all(Array.from({length:Math.min(limit,items.length)},run));if(failed)throw error;return out;}",
+    "checks": "const f=mod.mapLimit;let active=0,max=0;const result=await f([4,3,2,1],2,async(v,i)=>{active++;max=Math.max(max,active);await new Promise(r=>setTimeout(r,v*2));active--;return v+i;});check(()=>assert.deepEqual(result,[4,4,4,4]));check(()=>assert.equal(max,2));check(()=>assert.equal(active,0));check(()=>assert.deepEqual(result.length,4)); const empty=await f([],3,()=>{throw new Error();});check(()=>assert.deepEqual(empty,[]));const sync=await f([1,2],1,(v,i)=>v+i);check(()=>assert.deepEqual(sync,[1,3]));for(const args of [[null,1,()=>1],[[],0,()=>1],[[],1.5,()=>1],[[],1,null]]){await assert.rejects(()=>f(...args));count++;}let started=[],settled=false;const first=new Error('first');await assert.rejects(()=>f([0,1,2,3],2,async v=>{started.push(v);if(v===0){await new Promise(r=>setTimeout(r,2));throw first;}await new Promise(r=>setTimeout(r,12));settled=true;return v;}),e=>e===first);count++;check(()=>assert.deepEqual(started,[0,1]));check(()=>assert.equal(settled,true));",
+    "visible": "assert.deepEqual(await mod.mapLimit([1,2],1,x=>x*2),[2,4]);"
+  },
+  {
+    "id": "lru-cache",
+    "specification": "Export class LruCache(capacity), positive integer else RangeError. Methods get(key) returns value or undefined and promotes existing key; has(key) boolean WITHOUT promotion; set(key,value) inserts/promotes, evicts least recent when over capacity, returns this; delete(key) returns boolean; getter size. Support any Map key and undefined values correctly. Updating existing key must not evict another key.",
+    "files": {
+      "solution.mjs": "export class LruCache {constructor(capacity){this.capacity=capacity;this.map=new Map();}get(k){return this.map.get(k);}has(k){return this.map.has(k);}set(k,v){this.map.set(k,v);return this;}delete(k){return this.map.delete(k);}get size(){return this.map.size;}}"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export class LruCache{constructor(capacity){if(!Number.isInteger(capacity)||capacity<1)throw new RangeError();this.capacity=capacity;this.map=new Map();}get(k){if(!this.map.has(k))return undefined;const v=this.map.get(k);this.map.delete(k);this.map.set(k,v);return v;}has(k){return this.map.has(k);}set(k,v){this.map.delete(k);this.map.set(k,v);if(this.map.size>this.capacity)this.map.delete(this.map.keys().next().value);return this;}delete(k){return this.map.delete(k);}get size(){return this.map.size;}}",
+    "checks": "const C=mod.LruCache;for(const n of [0,-1,1.5,'2',NaN])check(()=>assert.throws(()=>new C(n),RangeError));const c=new C(2);check(()=>assert.equal(c.set('a',1),c));c.set('b',2);c.get('a');c.set('c',3);check(()=>assert.equal(c.has('b'),false));check(()=>assert.equal(c.size,2));c.set('a',4);check(()=>assert.equal(c.get('c'),3));c.has('a');c.set('d',5);check(()=>assert.equal(c.has('a'),false));const key={};c.set(key,undefined);check(()=>assert.equal(c.has(key),true));check(()=>assert.equal(c.get(key),undefined));c.set(NaN,7);check(()=>assert.equal(c.get(NaN),7));check(()=>assert.equal(c.delete(key),true));check(()=>assert.equal(c.delete(key),false));const one=new C(1);one.set('x',1).set('x',2);check(()=>assert.equal(one.size,1));",
+    "visible": "const c=new mod.LruCache(1);c.set('a',1).set('b',2);assert.equal(c.has('a'),false);"
+  },
+  {
+    "id": "decimal-money",
+    "specification": "Export toCents(value). Accept string matching optional minus then one or more ASCII digits, optionally dot followed by one or more digits. No spaces, plus, exponent or other coercion. Return BigInt cents, rounding half AWAY from zero to 2 decimals; arbitrary precision, normalize negative zero to 0n. Invalid input throws TypeError.",
+    "files": {
+      "solution.mjs": "export const toCents = value => BigInt(Math.round(Number(value)*100));"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export function toCents(v){if(typeof v!=='string'||!/^[-]?[0-9]+(?:\\.[0-9]+)?$/.test(v))throw new TypeError();const neg=v.startsWith('-');const [whole,frac='']=(neg?v.slice(1):v).split('.');let n=BigInt(whole)*100n+BigInt((frac+'00').slice(0,2));if(frac.length>2&&frac[2]>='5')n++;return neg?-n:n;}",
+    "checks": "const f=mod.toCents;for(const [s,n]of [['0',0n],['-0.000',0n],['1.005',101n],['-1.005',-101n],['001.2',120n],['9.999',1000n],['0.0049',0n],['900719925474099312345.67',90071992547409931234567n]])check(()=>assert.equal(f(s),n));for(const x of [1,null,'',' 1','1.','.5','+1','1e2','--1','１２'])check(()=>assert.throws(()=>f(x),TypeError));",
+    "visible": "assert.equal(mod.toCents('1.005'),101n);"
+  },
+  {
+    "id": "layered-config",
+    "specification": "Two modules: defaults.mjs supplies DEFAULTS; solution.mjs exports loadConfig(overrides). Recursively merge plain objects (prototype Object.prototype or null) onto DEFAULTS. Own enumerable keys only; undefined inherits default; arrays REPLACE and are deep-cloned; null and scalars replace. Clone all returned nested objects/arrays including defaults; never mutate inputs. Ignore __proto__, constructor, prototype at all levels. Do not edit defaults.mjs.",
+    "files": {
+      "solution.mjs": "import {DEFAULTS} from './defaults.mjs';export const loadConfig = overrides => Object.assign(DEFAULTS,overrides);",
+      "defaults.mjs": "export const DEFAULTS={server:{host:'localhost',port:8080},tags:['default'],enabled:true};"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "import {DEFAULTS} from './defaults.mjs';const safe=k=>!['__proto__','constructor','prototype'].includes(k);const plain=x=>x!==null&&typeof x==='object'&&(Object.getPrototypeOf(x)===Object.prototype||Object.getPrototypeOf(x)===null);function copy(x){if(Array.isArray(x))return x.map(copy);if(plain(x)){const out={};for(const k of Object.keys(x))if(safe(k))out[k]=copy(x[k]);return out;}return x;}function merge(a,b){if(b===undefined)return copy(a);if(plain(a)&&plain(b)){const out=copy(a);for(const k of Object.keys(b))if(safe(k))out[k]=merge(a[k],b[k]);return out;}return copy(b);}export const loadConfig=o=>merge(DEFAULTS,o);",
+    "checks": "const f=mod.loadConfig;const x=f({server:{port:9000},tags:['x']});check(()=>assert.deepEqual(x,{server:{host:'localhost',port:9000},tags:['x'],enabled:true}));const y=f({server:{port:undefined},enabled:null});check(()=>assert.equal(y.server.port,8080));check(()=>assert.equal(y.enabled,null));x.server.host='changed';x.tags.push('y');check(()=>assert.equal(f().server.host,'localhost'));check(()=>assert.deepEqual(f().tags,['default']));const arr=[{x:1}];const z=f({tags:arr});z.tags[0].x=2;check(()=>assert.equal(arr[0].x,1));const bad=f(JSON.parse('{\"__proto__\":{\"p\":1},\"server\":{\"constructor\":2,\"host\":\"ok\"}}'));check(()=>assert.equal(Object.hasOwn(bad,'__proto__'),false));check(()=>assert.equal(Object.hasOwn(bad.server,'constructor'),false));check(()=>assert.equal(bad.server.host,'ok'));",
+    "visible": "assert.equal(mod.loadConfig({server:{port:9000}}).server.host,'localhost');"
+  },
+  {
+    "id": "semantic-version",
+    "specification": "Export compareVersions(a,b). Accept strict SemVer strings major.minor.patch, optional -prerelease and +build. Core components digits no leading zeros except 0. Prerelease dot-separated nonempty ASCII alphanumeric/hyphen, numeric IDs no leading zeros. Build IDs same alphabet, numeric leading zeros allowed. Arbitrary-size numeric components, no Number precision loss. Return -1/0/1 by SemVer precedence, ignore build metadata. Invalid inputs throw TypeError.",
+    "files": {
+      "solution.mjs": "export const compareVersions=(a,b)=>a.localeCompare(b);"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "function parse(s){if(typeof s!=='string')throw new TypeError();const m=/^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$/.exec(s);if(!m)throw new TypeError();const pre=m[4]?.split('.');if(pre?.some(x=>/^[0-9]+$/.test(x)&&x.length>1&&x[0]==='0'))throw new TypeError();return {core:m.slice(1,4).map(BigInt),pre};}export function compareVersions(a,b){const x=parse(a),y=parse(b);for(let i=0;i<3;i++)if(x.core[i]!==y.core[i])return x.core[i]<y.core[i]?-1:1;if(!x.pre||!y.pre)return x.pre? -1:y.pre?1:0;for(let i=0;i<Math.max(x.pre.length,y.pre.length);i++){const p=x.pre[i],q=y.pre[i];if(p===q)continue;if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^[0-9]+$/.test(p),qn=/^[0-9]+$/.test(q);if(pn&&qn)return BigInt(p)<BigInt(q)?-1:1;if(pn!==qn)return pn?-1:1;return p<q?-1:1;}return 0;}",
+    "checks": "const f=mod.compareVersions;for(const [a,b,w]of [['1.2.0','1.10.0',-1],['1.0.0-alpha','1.0.0',-1],['1.0.0+abc','1.0.0+xyz',0],['1.0.0-alpha.2','1.0.0-alpha.10',-1],['1.0.0-1','1.0.0-a',-1],['1.0.0-a','1.0.0-a.1',-1],['9007199254740993.0.0','9007199254740992.0.0',1],['1.0.0-Z','1.0.0-a',-1],['1.0.0+001','1.0.0',0]]){check(()=>assert.equal(f(a,b),w));check(()=>assert.equal(f(b,a),w===0?0:-w));}for(const x of ['1.2','01.2.3','1.2.3-01','1.2.3-','1.2.3+a..b',' 1.2.3',null,1])check(()=>assert.throws(()=>f(x,'1.0.0'),TypeError));",
+    "visible": "assert.equal(mod.compareVersions('1.2.0','1.10.0'),-1);"
+  },
+  {
+    "id": "chunked-lines",
+    "specification": "Export class LineDecoder. push(chunk) accepts strings only (TypeError otherwise) and returns COMPLETE lines since last push. Split LF and CRLF (even across chunks); strip the one CR directly before LF, preserve all other CR chars. Empty lines preserved. finish() emits one remaining nonempty partial line (including trailing CR); then closes. Repeated finish returns []; push after finish throws Error. No duplicate lines across calls.",
+    "files": {
+      "solution.mjs": "export class LineDecoder{push(s){return s.split('\\n');}finish(){return [];}}"
+    },
+    "allowed": [
+      "solution.mjs"
+    ],
+    "reference": "export class LineDecoder{constructor(){this.buffer='';this.closed=false;}push(s){if(this.closed)throw new Error();if(typeof s!=='string')throw new TypeError();this.buffer+=s;const out=[];let i;while((i=this.buffer.indexOf('\\n'))!==-1){let line=this.buffer.slice(0,i);if(line.endsWith('\\r'))line=line.slice(0,-1);out.push(line);this.buffer=this.buffer.slice(i+1);}return out;}finish(){if(this.closed)return [];this.closed=true;const out=this.buffer===''?[]:[this.buffer];this.buffer='';return out;}}",
+    "checks": "const C=mod.LineDecoder;const d=new C();check(()=>assert.deepEqual(d.push('a\\r'),[]));check(()=>assert.deepEqual(d.push('\\nb\\n\\nc'),['a','b','']));check(()=>assert.deepEqual(d.push('d\\rX\\r\\n'),['cd\\rX']));check(()=>assert.deepEqual(d.push('tail\\r'),[]));check(()=>assert.deepEqual(d.finish(),['tail\\r']));check(()=>assert.deepEqual(d.finish(),[]));check(()=>assert.throws(()=>d.push('x')));const e=new C();check(()=>assert.deepEqual(e.push(''),[]));check(()=>assert.deepEqual(e.push('\\n'),['']));check(()=>assert.deepEqual(e.finish(),[]));check(()=>assert.throws(()=>new C().push(null),TypeError));",
+    "visible": "const d=new mod.LineDecoder();assert.deepEqual(d.push('a'),[]);assert.deepEqual(d.push('\\n'),['a']);"
+  }
+]

@@ -331,7 +331,140 @@ impl OpenAiCompatibleProvider {
         )
     }
 
+    pub(crate) fn eval_preparation(&self) -> Result<PortableChatPreparation> {
+        if self.reasoning != crate::provider::ReasoningSelection::Off
+            || self.echoes_reasoning_content
+        {
+            anyhow::bail!("stream capture requires reasoning off and no native history");
+        }
+        Ok(PortableChatPreparation {
+            model: self.model.clone(),
+            output_limit: self.output_limit,
+            reasoning_codec: self.reasoning_codec,
+            prompt_cache_policy: self.prompt_cache_policy,
+            supports_prompt_cache: self.supports_prompt_cache,
+            supports_vision: self.supports_vision,
+            echoes_reasoning_content: false,
+            prompt_cache_header: self.prompt_cache_header.clone(),
+            prompt_cache_key: String::new(),
+            tool_call_scope: self.tool_call_scope.clone(),
+            native_replay_scope: self.native_replay_scope.clone(),
+            tool_call_identities: Default::default(),
+            native_replay: Default::default(),
+        })
+    }
+
     fn request_body_with_context(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        reasoning: crate::provider::ReasoningSelection,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> Result<Value> {
+        self.preparation().body(messages, tools, reasoning, context)
+    }
+
+    fn preparation(&self) -> PortableChatPreparation {
+        PortableChatPreparation {
+            model: self.model.clone(),
+            output_limit: self.output_limit,
+            reasoning_codec: self.reasoning_codec,
+            prompt_cache_policy: self.prompt_cache_policy,
+            supports_prompt_cache: self.supports_prompt_cache,
+            supports_vision: self.supports_vision,
+            echoes_reasoning_content: self.echoes_reasoning_content,
+            prompt_cache_header: self.prompt_cache_header.clone(),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            tool_call_scope: self.tool_call_scope.clone(),
+            native_replay_scope: self.native_replay_scope.clone(),
+            tool_call_identities: self.tool_call_identities.clone(),
+            native_replay: self.native_replay.clone(),
+        }
+    }
+}
+
+/// Credential-free, pure Chat Completions request preparation used by eval replay.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PortableChatPreparation {
+    model: String,
+    output_limit: Option<u32>,
+    reasoning_codec: ReasoningCodec,
+    prompt_cache_policy: crate::model_catalog::PromptCachePolicy,
+    supports_prompt_cache: bool,
+    supports_vision: bool,
+    echoes_reasoning_content: bool,
+    prompt_cache_header: Option<Box<str>>,
+    #[serde(skip)]
+    pub(crate) prompt_cache_key: String,
+    pub(crate) tool_call_scope: String,
+    native_replay_scope: String,
+    #[serde(skip)]
+    pub(crate) tool_call_identities: crate::provider::ToolCallIdentityStore,
+    #[serde(skip)]
+    native_replay: crate::provider::NativeReplayStore,
+}
+
+impl PortableChatPreparation {
+    pub(crate) fn validate_portable(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.echoes_reasoning_content,
+            "native replay history is unsupported"
+        );
+        anyhow::ensure!(!self.model.is_empty(), "missing fixture model");
+        Ok(())
+    }
+    pub(crate) fn cache_strategy(&self) -> crate::provider::ProjectStateCacheStrategy {
+        if self.prompt_cache_policy.uses_append_only_project_state() {
+            crate::provider::ProjectStateCacheStrategy::AppendOnlyHistory
+        } else {
+            crate::provider::ProjectStateCacheStrategy::MutableSystemTail
+        }
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        messages: &[ChatCompletionRequestMessage],
+        tools: &[ChatCompletionTool],
+        options: crate::provider::ProviderRequestOptions,
+        context: &crate::provider::ProviderRequestContext,
+    ) -> crate::provider::ProviderResult<crate::provider::PreparedProviderRequest> {
+        if options
+            .reasoning
+            .is_some_and(|value| value != crate::provider::ReasoningSelection::Off)
+        {
+            return Err(crate::provider::ProviderFailure::configuration(
+                "portable stream fixtures require reasoning off",
+            ));
+        }
+        context.validate_assistant_count(
+            messages
+                .iter()
+                .filter(|message| matches!(message, ChatCompletionRequestMessage::Assistant(_)))
+                .count(),
+        )?;
+        Ok(crate::provider::PreparedProviderRequest {
+            protocol: Some(Protocol::OpenAiChat),
+            body: self
+                .body(
+                    messages,
+                    tools,
+                    crate::provider::ReasoningSelection::Off,
+                    context,
+                )
+                .map_err(|_| {
+                    crate::provider::ProviderFailure::configuration(
+                        "portable request preparation failed",
+                    )
+                })?,
+            reasoning: crate::provider::ReasoningSelection::Off,
+            native_budget: Vec::new(),
+            count_endpoint: None,
+            count_auth_header: None,
+        })
+    }
+
+    pub(crate) fn body(
         &self,
         messages: &[ChatCompletionRequestMessage],
         tools: &[ChatCompletionTool],
@@ -455,7 +588,9 @@ impl OpenAiCompatibleProvider {
         }
         Ok(body)
     }
+}
 
+impl OpenAiCompatibleProvider {
     fn request_preview_from_body(&self, body: Value) -> ProviderRequestPreview {
         let mut sections = wire_sections_from_body(
             &body,
@@ -778,6 +913,9 @@ fn is_official_openai_api_base_url(base_url: &str) -> bool {
 
 #[async_trait]
 impl Provider for OpenAiCompatibleProvider {
+    fn eval_stream_preparation(&self) -> Result<Option<PortableChatPreparation>> {
+        self.eval_preparation().map(Some)
+    }
     fn prepare_request_for_estimation(
         &self,
         messages: &[ChatCompletionRequestMessage],

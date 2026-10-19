@@ -1,0 +1,19 @@
+id = "roundtrip"
+seed = 7
+
+[[tasks]]
+id = "case"
+fixture = "fixtures/provider_stream"
+prompt = "Update README.md to new and finish."
+
+[tasks.budgets]
+max_duration_ms = 10000
+
+[[tasks.graders]]
+type = "assertion"
+contains = ["Done."]
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["new\n"]

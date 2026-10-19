@@ -502,6 +502,18 @@ fn parse_eval_args(args: &[String]) -> anyhow::Result<crate::eval::EvalCliConfig
     while let Some(arg) = args.get(index) {
         match arg.as_str() {
             "--qualification" => config.qualification = true,
+            "--record-provider-streams" | "--replay-dir" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("{arg} requires a directory"))?;
+                if arg == "--replay-dir" {
+                    config.replay_dir = Some(value.into());
+                } else {
+                    config.record_provider_streams = Some(value.into());
+                }
+            }
             "--suite" => {
                 index += 1;
                 let value = args
@@ -511,9 +523,9 @@ fn parse_eval_args(args: &[String]) -> anyhow::Result<crate::eval::EvalCliConfig
             }
             "--mode" => {
                 index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| anyhow::anyhow!("--mode requires one of: mock, live."))?;
+                let value = args.get(index).ok_or_else(|| {
+                    anyhow::anyhow!("--mode requires one of: mock, live, replay.")
+                })?;
                 config.mode = parse_eval_mode(value)?;
             }
             "--provider" => {
@@ -578,7 +590,16 @@ fn parse_eval_args(args: &[String]) -> anyhow::Result<crate::eval::EvalCliConfig
                 ));
             }
             _ => {
-                if let Some(value) = arg.strip_prefix("--suite=") {
+                if let Some(value) = arg.strip_prefix("--record-provider-streams=") {
+                    anyhow::ensure!(
+                        !value.is_empty(),
+                        "--record-provider-streams requires a directory"
+                    );
+                    config.record_provider_streams = Some(value.into());
+                } else if let Some(value) = arg.strip_prefix("--replay-dir=") {
+                    anyhow::ensure!(!value.is_empty(), "--replay-dir requires a directory");
+                    config.replay_dir = Some(value.into());
+                } else if let Some(value) = arg.strip_prefix("--suite=") {
                     config.suite = std::path::PathBuf::from(value);
                 } else if let Some(value) = arg.strip_prefix("--mode=") {
                     config.mode = parse_eval_mode(value)?;
@@ -618,6 +639,7 @@ fn parse_eval_args(args: &[String]) -> anyhow::Result<crate::eval::EvalCliConfig
         );
     }
 
+    config.validate_stream_mode()?;
     Ok(config)
 }
 
@@ -768,8 +790,12 @@ fn parse_adapter_flags(
 }
 
 fn parse_eval_mode(value: &str) -> anyhow::Result<crate::eval::EvalMode> {
-    crate::eval::EvalMode::parse(value)
-        .ok_or_else(|| anyhow::anyhow!("Invalid --mode '{}'. Expected one of: mock, live.", value))
+    crate::eval::EvalMode::parse(value).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid --mode '{}'. Expected one of: mock, live, replay.",
+            value
+        )
+    })
 }
 
 fn parse_eval_seed(value: &str) -> anyhow::Result<u64> {
@@ -908,7 +934,7 @@ Usage:
   bonsai [--help | --version | --continue [id] | -c [id]] [--isolation auto|worktree|off] [--reduced-motion] [--screen-reader]
   bonsai [-c [id]] -p [\"<prompt>\"|-] [headless options]
   bonsai [-c [id]] --print \"<prompt>\" [headless options]
-  bonsai eval [--suite <path>] [--mode mock|live] [--provider <id>] [--model <id>] [--effort <level>] [--task <id>] [--seed <u64>] [--out <dir>] [--baseline <path>] [--json] [--fail-on-task-failure]
+  bonsai eval [--suite <path>] [--mode mock|live|replay] [--record-provider-streams <dir>] [--replay-dir <dir>] [--provider <id>] [--model <id>] [--effort <level>] [--task <id>] [--seed <u64>] [--out <dir>] [--baseline <path>] [--json] [--fail-on-task-failure]
   bonsai eval adapter run --request <path> [--out <dir>] [--force] [--json]
   bonsai eval adapter import-harbor --result <path> --out <path> [--json]
   bonsai model-catalog check <models-dev.json>
@@ -1292,6 +1318,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_args_eval_stream_modes() {
+        for flags in [
+            vec!["--mode=replay", "--replay-dir=fixtures"],
+            vec!["--mode", "replay", "--replay-dir", "fixtures"],
+            vec!["--mode=live", "--record-provider-streams=private"],
+            vec!["--mode", "live", "--record-provider-streams", "private"],
+        ] {
+            let args = [vec!["bonsai", "eval"], flags]
+                .concat()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                parse_cli_args(&args).unwrap(),
+                CliMode::Eval { .. }
+            ));
+        }
+        for flags in [
+            vec!["--mode=replay"],
+            vec!["--replay-dir=fixtures"],
+            vec!["--record-provider-streams=private"],
+            vec![
+                "--mode=replay",
+                "--replay-dir=fixtures",
+                "--provider=openai",
+            ],
+            vec![
+                "--mode=replay",
+                "--replay-dir=fixtures",
+                "--record-provider-streams=private",
+            ],
+        ] {
+            let args = [vec!["bonsai", "eval"], flags]
+                .concat()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert!(parse_cli_args(&args).is_err());
+        }
+    }
+
+    #[test]
     fn parse_cli_args_accepts_eval_options() {
         let args = vec![
             "bonsai".to_string(),
@@ -1319,6 +1387,8 @@ mod tests {
                 config: crate::eval::EvalCliConfig {
                     suite: std::path::PathBuf::from("custom.toml"),
                     mode: crate::eval::EvalMode::Live,
+                    record_provider_streams: None,
+                    replay_dir: None,
                     qualification: false,
                     provider: Some("anthropic".to_string()),
                     model: Some("claude-sonnet-4-5".to_string()),
@@ -1775,7 +1845,7 @@ mod tests {
         assert!(help.contains("-p [\"<prompt>\"|-]") && help.contains("--output-format"));
         assert!(help.contains("--autonomy") && help.contains("BONSAI_AUTONOMY"));
         assert!(help.contains("124 timeout") && help.contains("143 SIGTERM"));
-        assert!(help.contains("bonsai eval") && help.contains("--mode mock|live"));
+        assert!(help.contains("bonsai eval") && help.contains("--mode mock|live|replay"));
         assert!(help.contains("BONSAI_PROVIDER") && help.contains("*_API_KEY"));
         assert!(help.contains("/authorize") && help.contains("Optional env bootstrap"));
         assert!(help.contains("bonsai completions bash|zsh|fish"));

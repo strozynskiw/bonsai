@@ -1,0 +1,1559 @@
+{
+  "manifest": {
+    "tasksDigest": "c137863c5186e8c8ec5cc7d5fe33342d3c1b67768fcc3d7fdd15d699c50b6e75",
+    "taskIds": [
+      "interval-union",
+      "csv-state-machine",
+      "json-pointer",
+      "stable-toposort",
+      "async-worker-pool",
+      "lru-cache",
+      "decimal-money",
+      "layered-config",
+      "semantic-version",
+      "chunked-lines"
+    ],
+    "attempts": 3,
+    "harnesses": [
+      "bonsai",
+      "dsh"
+    ],
+    "model": "deepseek-flash",
+    "thinking": "off",
+    "timeoutSeconds": 120,
+    "kind": "custom-local-js-not-TB4",
+    "bonsaiSha256": "e8b0a4ec4cd8d160e7bd2b8203261a625f74c53af32c230a74423abff9d60ca8",
+    "dshCommit": "687f282e8625c6b8d11ff58211a90524be2e4317",
+    "node": "v24.6.0"
+  },
+  "aggregates": {
+    "bonsai": {
+      "runs": 30,
+      "strict_successes": 26,
+      "code_correct": 27,
+      "median_ms": 8891.5,
+      "mean_ms": 11209.366666666667,
+      "p95_ms_nearest_rank": 25327,
+      "total_ms": 336281,
+      "model_requests": 168,
+      "usage": {
+        "input": 2214144,
+        "output": 41299,
+        "cache_read": 1813248,
+        "total": 2255443
+      },
+      "local_estimated_usd": 0.180784,
+      "actual_billed_usd": null
+    },
+    "dsh": {
+      "runs": 30,
+      "strict_successes": 30,
+      "code_correct": 30,
+      "median_ms": 13774.0,
+      "mean_ms": 16422.766666666666,
+      "p95_ms_nearest_rank": 30762,
+      "total_ms": 492683,
+      "model_requests": 244,
+      "usage": {
+        "input": 3147705,
+        "output": 58320,
+        "cache_read": 3062784,
+        "total": 3206025
+      },
+      "local_estimated_usd": null,
+      "actual_billed_usd": null
+    }
+  },
+  "tasks": [
+    {
+      "task": "interval-union",
+      "bonsai": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 6841
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 11695
+      }
+    },
+    {
+      "task": "csv-state-machine",
+      "bonsai": {
+        "successes": 2,
+        "correct": 2,
+        "median_ms": 8307
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 19944
+      }
+    },
+    {
+      "task": "json-pointer",
+      "bonsai": {
+        "successes": 1,
+        "correct": 2,
+        "median_ms": 21882
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 13207
+      }
+    },
+    {
+      "task": "stable-toposort",
+      "bonsai": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 7559
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 12732
+      }
+    },
+    {
+      "task": "async-worker-pool",
+      "bonsai": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 13598
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 13563
+      }
+    },
+    {
+      "task": "lru-cache",
+      "bonsai": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 6104
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 9527
+      }
+    },
+    {
+      "task": "decimal-money",
+      "bonsai": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 9282
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 12496
+      }
+    },
+    {
+      "task": "layered-config",
+      "bonsai": {
+        "successes": 2,
+        "correct": 2,
+        "median_ms": 8812
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 17359
+      }
+    },
+    {
+      "task": "semantic-version",
+      "bonsai": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 9935
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 20132
+      }
+    },
+    {
+      "task": "chunked-lines",
+      "bonsai": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 7558
+      },
+      "dsh": {
+        "successes": 3,
+        "correct": 3,
+        "median_ms": 13985
+      }
+    }
+  ],
+  "failures": [
+    {
+      "task": "csv-state-machine",
+      "attempt": 3,
+      "harness": "bonsai",
+      "code": 0,
+      "terminal": "completed",
+      "checksPass": false,
+      "scopePass": true
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 1,
+      "harness": "bonsai",
+      "code": 1,
+      "terminal": "budget_exhausted",
+      "checksPass": false,
+      "scopePass": true
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 2,
+      "harness": "bonsai",
+      "code": 1,
+      "terminal": "budget_exhausted",
+      "checksPass": true,
+      "scopePass": true
+    },
+    {
+      "task": "layered-config",
+      "attempt": 1,
+      "harness": "bonsai",
+      "code": 1,
+      "terminal": "budget_exhausted",
+      "checksPass": false,
+      "scopePass": true
+    }
+  ],
+  "records": [
+    {
+      "task": "interval-union",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 6841,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47884,
+        "output": 789,
+        "cache_read": 35584,
+        "total": 48673
+      },
+      "local_estimated_usd": 0.004851,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "interval-union",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 14844,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 81244,
+        "output": 1308,
+        "cache_read": 74624,
+        "total": 82552
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "interval-union",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 7152,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47711,
+        "output": 704,
+        "cache_read": 35456,
+        "total": 48415
+      },
+      "local_estimated_usd": 0.004736,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "interval-union",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 11695,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 70002,
+        "output": 1268,
+        "cache_read": 67968,
+        "total": 71270
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "interval-union",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 5936,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47525,
+        "output": 554,
+        "cache_read": 35328,
+        "total": 48079
+      },
+      "local_estimated_usd": 0.004538,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "interval-union",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 11396,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 70815,
+        "output": 1302,
+        "cache_read": 68352,
+        "total": 72117
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "csv-state-machine",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 7500,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47981,
+        "output": 837,
+        "cache_read": 35712,
+        "total": 48818
+      },
+      "local_estimated_usd": 0.0049,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "csv-state-machine",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 17799,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 9,
+      "normalized_usage": {
+        "input": 108821,
+        "output": 1990,
+        "cache_read": 106112,
+        "total": 110811
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "csv-state-machine",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 8307,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47992,
+        "output": 920,
+        "cache_read": 35456,
+        "total": 48912
+      },
+      "local_estimated_usd": 0.005079,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "csv-state-machine",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 30762,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 16,
+      "normalized_usage": {
+        "input": 227880,
+        "output": 3821,
+        "cache_read": 222336,
+        "total": 231701
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "csv-state-machine",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 16069,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": false,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 98382,
+        "output": 2011,
+        "cache_read": 82560,
+        "total": 100393
+      },
+      "local_estimated_usd": 0.007659,
+      "code_correct": false,
+      "strict_success": false,
+      "independent_check_count": null
+    },
+    {
+      "task": "csv-state-machine",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 19944,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 11,
+      "normalized_usage": {
+        "input": 136919,
+        "output": 2560,
+        "cache_read": 133888,
+        "total": 139479
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 28331,
+      "code": 1,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": false,
+      "terminal": "budget_exhausted",
+      "requests": 12,
+      "normalized_usage": {
+        "input": 204342,
+        "output": 3596,
+        "cache_read": 184064,
+        "total": 207938
+      },
+      "local_estimated_usd": 0.011509,
+      "code_correct": false,
+      "strict_success": false,
+      "independent_check_count": null
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 22976,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 12,
+      "normalized_usage": {
+        "input": 149360,
+        "output": 2280,
+        "cache_read": 146176,
+        "total": 151640
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 21882,
+      "code": 1,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "budget_exhausted",
+      "requests": 12,
+      "normalized_usage": {
+        "input": 173728,
+        "output": 2839,
+        "cache_read": 157440,
+        "total": 176567
+      },
+      "local_estimated_usd": 0.009244,
+      "code_correct": true,
+      "strict_success": false,
+      "independent_check_count": 17
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 13207,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 70619,
+        "output": 1450,
+        "cache_read": 68608,
+        "total": 72069
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 14726,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 93760,
+        "output": 1912,
+        "cache_read": 79488,
+        "total": 95672
+      },
+      "local_estimated_usd": 0.007056,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "json-pointer",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 9886,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 57790,
+        "output": 1031,
+        "cache_read": 55936,
+        "total": 58821
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 17
+    },
+    {
+      "task": "stable-toposort",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 7559,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47822,
+        "output": 691,
+        "cache_read": 35584,
+        "total": 48513
+      },
+      "local_estimated_usd": 0.004716,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "stable-toposort",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 10171,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 58128,
+        "output": 1182,
+        "cache_read": 56320,
+        "total": 59310
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "stable-toposort",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 9973,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 61694,
+        "output": 1182,
+        "cache_read": 48896,
+        "total": 62876
+      },
+      "local_estimated_usd": 0.005554,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "stable-toposort",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 13473,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 82959,
+        "output": 1646,
+        "cache_read": 80512,
+        "total": 84605
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "stable-toposort",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 7321,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 48496,
+        "output": 1075,
+        "cache_read": 36096,
+        "total": 49571
+      },
+      "local_estimated_usd": 0.005228,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "stable-toposort",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 12732,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 70602,
+        "output": 1448,
+        "cache_read": 68736,
+        "total": 72050
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "async-worker-pool",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 21749,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 10,
+      "normalized_usage": {
+        "input": 142999,
+        "output": 2952,
+        "cache_read": 127232,
+        "total": 145951
+      },
+      "local_estimated_usd": 0.009042,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "async-worker-pool",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 15528,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 82648,
+        "output": 1804,
+        "cache_read": 80512,
+        "total": 84452
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "async-worker-pool",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 13598,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 89906,
+        "output": 1636,
+        "cache_read": 75904,
+        "total": 91542
+      },
+      "local_estimated_usd": 0.006622,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "async-worker-pool",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 13563,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 81793,
+        "output": 1530,
+        "cache_read": 79744,
+        "total": 83323
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "async-worker-pool",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 11758,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 74212,
+        "output": 1373,
+        "cache_read": 61568,
+        "total": 75585
+      },
+      "local_estimated_usd": 0.005813,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "async-worker-pool",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 11117,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 57515,
+        "output": 1232,
+        "cache_read": 55552,
+        "total": 58747
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 13
+    },
+    {
+      "task": "lru-cache",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 6425,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47659,
+        "output": 508,
+        "cache_read": 35328,
+        "total": 48167
+      },
+      "local_estimated_usd": 0.004523,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 16
+    },
+    {
+      "task": "lru-cache",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 11689,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 57848,
+        "output": 1234,
+        "cache_read": 55936,
+        "total": 59082
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 16
+    },
+    {
+      "task": "lru-cache",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 6104,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47659,
+        "output": 503,
+        "cache_read": 35328,
+        "total": 48162
+      },
+      "local_estimated_usd": 0.004517,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 16
+    },
+    {
+      "task": "lru-cache",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 9527,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 58046,
+        "output": 1201,
+        "cache_read": 56192,
+        "total": 59247
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 16
+    },
+    {
+      "task": "lru-cache",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 6030,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47659,
+        "output": 518,
+        "cache_read": 35328,
+        "total": 48177
+      },
+      "local_estimated_usd": 0.004535,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 16
+    },
+    {
+      "task": "lru-cache",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 9243,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 57768,
+        "output": 1006,
+        "cache_read": 55936,
+        "total": 58774
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 16
+    },
+    {
+      "task": "decimal-money",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 10686,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 62095,
+        "output": 1217,
+        "cache_read": 48768,
+        "total": 63312
+      },
+      "local_estimated_usd": 0.005753,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 18
+    },
+    {
+      "task": "decimal-money",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 12496,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 72185,
+        "output": 1649,
+        "cache_read": 69888,
+        "total": 73834
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 18
+    },
+    {
+      "task": "decimal-money",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 6620,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47271,
+        "output": 505,
+        "cache_read": 35072,
+        "total": 47776
+      },
+      "local_estimated_usd": 0.004478,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 18
+    },
+    {
+      "task": "decimal-money",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 14347,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 83366,
+        "output": 1656,
+        "cache_read": 80896,
+        "total": 85022
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 18
+    },
+    {
+      "task": "decimal-money",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 9282,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 62149,
+        "output": 1075,
+        "cache_read": 48768,
+        "total": 63224
+      },
+      "local_estimated_usd": 0.005599,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 18
+    },
+    {
+      "task": "decimal-money",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 9421,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 57005,
+        "output": 846,
+        "cache_read": 55168,
+        "total": 57851
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 18
+    },
+    {
+      "task": "layered-config",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 25327,
+      "code": 1,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": false,
+      "terminal": "budget_exhausted",
+      "requests": 12,
+      "normalized_usage": {
+        "input": 181150,
+        "output": 3255,
+        "cache_read": 164608,
+        "total": 184405
+      },
+      "local_estimated_usd": 0.009862,
+      "code_correct": false,
+      "strict_success": false,
+      "independent_check_count": null
+    },
+    {
+      "task": "layered-config",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 62833,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 34,
+      "normalized_usage": {
+        "input": 587726,
+        "output": 7057,
+        "cache_read": 578432,
+        "total": 594783
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 9
+    },
+    {
+      "task": "layered-config",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 8812,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 60770,
+        "output": 885,
+        "cache_read": 48000,
+        "total": 61655
+      },
+      "local_estimated_usd": 0.005184,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 9
+    },
+    {
+      "task": "layered-config",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 17359,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 9,
+      "normalized_usage": {
+        "input": 110370,
+        "output": 2363,
+        "cache_read": 107392,
+        "total": 112733
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 9
+    },
+    {
+      "task": "layered-config",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 8219,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 48392,
+        "output": 1003,
+        "cache_read": 36096,
+        "total": 49395
+      },
+      "local_estimated_usd": 0.00511,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 9
+    },
+    {
+      "task": "layered-config",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 15206,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 8,
+      "normalized_usage": {
+        "input": 96229,
+        "output": 1867,
+        "cache_read": 93824,
+        "total": 98096
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 9
+    },
+    {
+      "task": "semantic-version",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 9935,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 49039,
+        "output": 1513,
+        "cache_read": 36736,
+        "total": 50552
+      },
+      "local_estimated_usd": 0.005729,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 26
+    },
+    {
+      "task": "semantic-version",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 20132,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 91150,
+        "output": 2986,
+        "cache_read": 88064,
+        "total": 94136
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 26
+    },
+    {
+      "task": "semantic-version",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 18285,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 81554,
+        "output": 3805,
+        "cache_read": 67968,
+        "total": 85359
+      },
+      "local_estimated_usd": 0.009053,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 26
+    },
+    {
+      "task": "semantic-version",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 14060,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 72713,
+        "output": 2037,
+        "cache_read": 70400,
+        "total": 74750
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 26
+    },
+    {
+      "task": "semantic-version",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 8971,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 48867,
+        "output": 1392,
+        "cache_read": 36480,
+        "total": 50259
+      },
+      "local_estimated_usd": 0.005608,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 26
+    },
+    {
+      "task": "semantic-version",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 21370,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 10,
+      "normalized_usage": {
+        "input": 130039,
+        "output": 3450,
+        "cache_read": 126592,
+        "total": 133489
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 26
+    },
+    {
+      "task": "chunked-lines",
+      "attempt": 1,
+      "harness": "bonsai",
+      "elapsedMs": 6334,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47475,
+        "output": 488,
+        "cache_read": 35200,
+        "total": 47963
+      },
+      "local_estimated_usd": 0.00448,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "chunked-lines",
+      "attempt": 1,
+      "harness": "dsh",
+      "elapsedMs": 13390,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 6,
+      "normalized_usage": {
+        "input": 70391,
+        "output": 1344,
+        "cache_read": 68352,
+        "total": 71735
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "chunked-lines",
+      "attempt": 2,
+      "harness": "bonsai",
+      "elapsedMs": 8991,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 5,
+      "normalized_usage": {
+        "input": 60251,
+        "output": 886,
+        "cache_read": 47744,
+        "total": 61137
+      },
+      "local_estimated_usd": 0.005103,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "chunked-lines",
+      "attempt": 2,
+      "harness": "dsh",
+      "elapsedMs": 18532,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 9,
+      "normalized_usage": {
+        "input": 113034,
+        "output": 2312,
+        "cache_read": 109824,
+        "total": 115346
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "chunked-lines",
+      "attempt": 3,
+      "harness": "bonsai",
+      "elapsedMs": 7558,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 4,
+      "normalized_usage": {
+        "input": 47720,
+        "output": 675,
+        "cache_read": 35456,
+        "total": 48395
+      },
+      "local_estimated_usd": 0.004703,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    },
+    {
+      "task": "chunked-lines",
+      "attempt": 3,
+      "harness": "dsh",
+      "elapsedMs": 13985,
+      "code": 0,
+      "timedOut": false,
+      "scopePass": true,
+      "checksPass": true,
+      "terminal": "completed",
+      "requests": 7,
+      "normalized_usage": {
+        "input": 82740,
+        "output": 1460,
+        "cache_read": 80512,
+        "total": 84200
+      },
+      "local_estimated_usd": null,
+      "code_correct": true,
+      "strict_success": true,
+      "independent_check_count": 11
+    }
+  ]
+}
