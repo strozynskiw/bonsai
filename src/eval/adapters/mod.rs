@@ -1,5 +1,6 @@
 //! Offline benchmark contracts and thin launch/export adapters.
 
+mod comparison;
 mod contract;
 mod harbor;
 mod launcher;

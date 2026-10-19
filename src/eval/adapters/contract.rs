@@ -10,6 +10,8 @@ pub(crate) const SWE_BENCH_HARNESS_COMMIT: &str = "f7bbbb2ccdf479001d6467c9e34af
 pub(crate) const SWE_BENCH_PREDICTION_SCHEMA_COMMIT: &str =
     "b679692b8b7e274a6c89fd0842f25b02da4b9256";
 pub(crate) const HARBOR_HARNESS_COMMIT: &str = "2d3f78d55a703df2f76c005d7df44a5ce2d8adf5";
+pub(crate) const HARBOR_TB4_HARNESS_COMMIT: &str = "7331d8a3e23cb72e8277522059ff7c9ab9435d90";
+pub(crate) const TERMINAL_BENCH_4_DATASET: &str = "terminal-bench/terminal-bench";
 pub(crate) const TERMINAL_BENCH_2_DATASET_COMMIT: &str = "2fd12b88aafdd04a52c298e3940bcb189f9766d6";
 
 const MAX_INSTRUCTION_BYTES: usize = 1_000_000;
@@ -136,6 +138,24 @@ impl BenchmarkPin {
                     SWE_BENCH_PREDICTION_SCHEMA_COMMIT,
                 )?;
             }
+            BenchmarkKind::TerminalBench4 => {
+                require_pin(
+                    "TB4 Harbor harness",
+                    &self.harness_commit,
+                    HARBOR_TB4_HARNESS_COMMIT,
+                )?;
+                // The contract is Harbor's task/result schema; dataset bytes are
+                // independently bound by the frozen comparison manifest.
+                require_pin(
+                    "TB4 contract",
+                    &self.contract_commit,
+                    HARBOR_TB4_HARNESS_COMMIT,
+                )?;
+                anyhow::ensure!(
+                    self.dataset == TERMINAL_BENCH_4_DATASET && self.dataset_version == "4.0.0",
+                    "TB4 requires terminal-bench/terminal-bench@4.0.0"
+                );
+            }
             BenchmarkKind::TerminalBench2 => {
                 require_pin(
                     "Harbor harness",
@@ -159,6 +179,7 @@ impl BenchmarkPin {
 pub(crate) enum BenchmarkKind {
     SweBenchVerified,
     TerminalBench2,
+    TerminalBench4,
 }
 
 /// Prepared task workspace and instruction supplied by the official harness.
@@ -195,10 +216,10 @@ impl BenchmarkTask {
             (BenchmarkKind::SweBenchVerified, _) => {
                 anyhow::bail!("SWE-bench tasks require task.base_commit")
             }
-            (BenchmarkKind::TerminalBench2, Some(_)) => {
-                anyhow::bail!("Terminal-Bench 2 tasks must not set task.base_commit")
+            (BenchmarkKind::TerminalBench2 | BenchmarkKind::TerminalBench4, Some(_)) => {
+                anyhow::bail!("Terminal-Bench tasks must not set task.base_commit")
             }
-            (BenchmarkKind::TerminalBench2, None) => {}
+            (BenchmarkKind::TerminalBench2 | BenchmarkKind::TerminalBench4, None) => {}
         }
         Ok(())
     }
@@ -405,6 +426,13 @@ mod tests {
                 SWE_BENCH_PREDICTION_SCHEMA_COMMIT,
                 Some("0123456789abcdef".to_string()),
             ),
+            BenchmarkKind::TerminalBench4 => (
+                TERMINAL_BENCH_4_DATASET,
+                "4.0.0",
+                HARBOR_TB4_HARNESS_COMMIT,
+                HARBOR_TB4_HARNESS_COMMIT,
+                None,
+            ),
             BenchmarkKind::TerminalBench2 => (
                 "terminal-bench",
                 "2.0",
@@ -460,6 +488,20 @@ mod tests {
                 .to_string()
                 .contains("schema version")
         );
+    }
+
+    #[test]
+    fn tb4_is_distinct_from_historical_tb2() {
+        let mut current = request(BenchmarkKind::TerminalBench4);
+        current.validate().unwrap();
+        assert_ne!(
+            current.request_key().unwrap(),
+            request(BenchmarkKind::TerminalBench2)
+                .request_key()
+                .unwrap()
+        );
+        current.benchmark.dataset_version = "2.0".into();
+        assert!(current.validate().is_err());
     }
 
     #[test]

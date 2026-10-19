@@ -1,7 +1,7 @@
 """Pinned Harbor installed-agent adapter for the Bonsai CLI.
 
 Compatibility target:
-harbor-framework/harbor@2d3f78d55a703df2f76c005d7df44a5ce2d8adf5
+harbor-framework/harbor@7331d8a3e23cb72e8277522059ff7c9ab9435d90
 
 The Bonsai binary must already exist in the task environment. This adapter
 never downloads a binary, runtime, dataset, package, or container image.
@@ -21,6 +21,8 @@ from harbor.agents.installed.base import (
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
+
+from .installed_common import isolated_command, private_home, required_environment, require_https_endpoint
 
 
 class Bonsai(BaseInstalledAgent):
@@ -75,11 +77,18 @@ class Bonsai(BaseInstalledAgent):
         return "bonsai"
 
     def _binary(self) -> str:
-        return self._get_env("BONSAI_BIN") or "bonsai"
+        return self.extra_env.get("BONSAI_BIN") or "bonsai"
 
     @override
     def get_version_command(self) -> str | None:
         return f"{shlex.quote(self._binary())} --version"
+
+    @override
+    async def setup(self, environment: BaseEnvironment) -> None:
+        guard = getattr(self, "qualification_setup_guard", None)
+        if guard is not None:
+            await guard(environment)
+        await super().setup(environment)
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
@@ -133,15 +142,23 @@ class Bonsai(BaseInstalledAgent):
         stderr_path = EnvironmentPaths.agent_dir / "bonsai.stderr"
         flags = self.build_cli_flags()
         binary = shlex.quote(self._binary())
+        home = private_home("bonsai")
+        # Explicitly forward only this provider's key and endpoint. A fresh
+        # BONSAI_HOME alone does not remove image/host environment credentials.
+        prefix = provider.upper().replace("-", "_")
+        provider_env = required_environment(self.extra_env, (f"{prefix}_API_KEY", f"{prefix}_BASE_URL"))
+        require_https_endpoint(provider_env[f"{prefix}_BASE_URL"])
         env = {
             **self._resolved_env_vars,
+            **provider_env,
             "BONSAI_PROVIDER": provider,
             "BONSAI_DOTENV": "off",
-            "BONSAI_HOME": f"/tmp/bonsai-home-{uuid.uuid4().hex}",
+            "BONSAI_HOME": home,
+            "BONSAI_DISABLE_MODELS_FETCH": "1",
             instruction_env: instruction,
         }
         command = (
-            f"mkdir -p {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}; "
+            f"umask 077; mkdir -p {shlex.quote(home)} {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}; "
             f'printf "%s" "${instruction_env}" | '
             f"{binary} -p - --output-format json --model {shlex.quote(model)} "
             f"{flags} --isolation off "
@@ -153,15 +170,25 @@ class Bonsai(BaseInstalledAgent):
             f"cat {shlex.quote(stderr_path.as_posix())} >&2; "
             "fi; exit $bonsai_status"
         )
-        result = await environment.exec(command=f"set -o pipefail; {command}", env=env)
+        command, env = isolated_command(f"set -o pipefail; {command}", env, home)
+        result = await environment.exec(command=command, env=env,
+                                        timeout_sec=self._resolved_flags["timeout_seconds"])
+        # Do not include raw provider/tool output in Harbor's shared exception.
+        if result.return_code != 0:
+            context.metadata = {"bonsai_terminal_state": "agent_failure"}
+            raise RuntimeError(f"Bonsai exited with status {result.return_code}; see private logs")
         payload = self._parse_payload(result.stdout or "")
         if payload is not None:
+            if payload.get("provider") != provider or payload.get("model") != model:
+                raise RuntimeError("Bonsai selected provider/model mismatch; stop batch")
+            if payload.get("status") not in {"completed", "success"}:
+                raise RuntimeError("Bonsai turn failed; see private logs")
             self._populate_context(context, payload)
             digest_result = await environment.exec(command=f'b3sum "$(command -v {binary})"')
             if digest_result.return_code != 0:
                 raise RuntimeError("Qualification requires preinstalled b3sum")
             profile = {
-                "declared_revision": self._get_env("BONSAI_REVISION"),
+                "declared_revision": self.extra_env.get("BONSAI_REVISION"),
                 "binary_version": None,
                 "provider": payload.get("provider"),
                 "model": payload.get("model"),
@@ -176,12 +203,12 @@ class Bonsai(BaseInstalledAgent):
             context.metadata.update({
                 "bonsai_profile": profile,
                 "bonsai_binary_digest": digest_result.stdout.split()[0],
-                "bonsai_trial_id": self._get_env("BONSAI_TRIAL_ID"),
+                "bonsai_trial_id": self.extra_env.get("BONSAI_TRIAL_ID"),
             })
         else:
             context.metadata = {"bonsai_terminal_state": "agent_failure"}
-        if result.return_code != 0:
-            raise self._classify_exec_error(command, result)
+        if payload is None:
+            raise RuntimeError("Bonsai output missing or malformed; see private logs")
 
     @staticmethod
     def _parse_payload(stdout: str) -> dict | None:
@@ -207,4 +234,5 @@ class Bonsai(BaseInstalledAgent):
             "bonsai_terminal_state": payload.get("status", "internal_error"),
             "bonsai_session_id": payload.get("session_id"),
             "bonsai_repair_turns": verification.get("repair_attempts", 0),
+            "cost_source": "catalog_estimate" if cost_micros is not None else "unavailable",
         }

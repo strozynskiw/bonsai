@@ -74,8 +74,10 @@ impl SuiteScore {
                 expected.contains(&trial.id) && seen.insert(&trial.id),
                 "Foreign or duplicate trial"
             );
-            if self.pin.kind == BenchmarkKind::TerminalBench2
-                && trial.outcome != TrialOutcome::Error
+            if matches!(
+                self.pin.kind,
+                BenchmarkKind::TerminalBench2 | BenchmarkKind::TerminalBench4
+            ) && trial.outcome != TrialOutcome::Error
             {
                 anyhow::ensure!(
                     trial.reward
@@ -225,7 +227,12 @@ pub(crate) fn import_scorecard(input: &Path, output: &Path) -> Result<()> {
             let suite = card
                 .suites
                 .iter_mut()
-                .find(|s| s.pin.kind == BenchmarkKind::TerminalBench2)
+                .find(|s| {
+                    matches!(
+                        s.pin.kind,
+                        BenchmarkKind::TerminalBench2 | BenchmarkKind::TerminalBench4
+                    )
+                })
                 .context("Missing Terminal-Bench suite")?;
             anyhow::ensure!(
                 suite.trials.is_empty(),
@@ -277,6 +284,10 @@ pub(crate) fn import_scorecard(input: &Path, output: &Path) -> Result<()> {
                     );
                 }
                 let imported = super::import_harbor_result(&serde_json::to_string(&trial.result)?)?;
+                anyhow::ensure!(
+                    imported.benchmark == suite.pin.kind,
+                    "Harbor benchmark mismatch"
+                );
                 suite.trials.push(TrialScore {
                     id: trial.id,
                     outcome: match imported.verifier_passed {

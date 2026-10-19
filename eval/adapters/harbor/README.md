@@ -1,9 +1,13 @@
 # Bonsai Harbor adapter
 
-This adapter targets
-`harbor-framework/harbor@2d3f78d55a703df2f76c005d7df44a5ce2d8adf5`
-and Terminal-Bench 2.0 at
-`harbor-framework/terminal-bench-2@2fd12b88aafdd04a52c298e3940bcb189f9766d6`.
+The current adapter targets TB4 Harbor
+`harbor-framework/harbor@7331d8a3e23cb72e8277522059ff7c9ab9435d90`.
+See [the CPU comparison workflow and readiness limits](TB4.md).
+
+Historical TB2 imports remain pinned separately to Harbor
+`2d3f78d55a703df2f76c005d7df44a5ce2d8adf5` and dataset
+`harbor-framework/terminal-bench-2@2fd12b88aafdd04a52c298e3940bcb189f9766d6`;
+use that revision's adapter for historical execution. Do not relabel TB2 artifacts.
 
 The Bonsai binary must already be present in the Harbor task image, or
 `BONSAI_BIN` must name it. The adapter deliberately contains no installer and

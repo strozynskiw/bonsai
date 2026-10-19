@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+# Synthetic exporter: argument positions match the real adapter's exporter call.
+printf '%s\n' "{\"$4\":\"{\\\"type\\\":\\\"turn/end\\\",\\\"data\\\":{\\\"reason\\\":{\\\"kind\\\":\\\"completed\\\"}}}\\n\"}" >"$5"

@@ -1,0 +1,21 @@
+#!/bin/bash
+set -euo pipefail
+if [ "$1" = --version ]; then
+  test -z "${DEEPSEEK_API_KEY:-}"
+  echo synthetic-dsh
+  exit
+fi
+test "${DEEPSEEK_API_KEY:-}" = synthetic-not-a-credential
+for argument in "$@"; do
+  if [ "$argument" = --session-id ]; then
+    echo 'fresh CLI launch must not supply --session-id' >&2
+    exit 2
+  fi
+done
+echo '{"type":"session","sessionId":"session-synthetic"}'
+cat >/workspace/answer
+case "$(cat /workspace/answer)" in
+  fail) exit 7;;
+  hang) sleep 600 & wait;;
+esac
+echo '{"type":"final","status":"completed"}'

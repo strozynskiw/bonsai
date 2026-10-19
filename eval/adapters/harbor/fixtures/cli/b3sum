@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+# This is a fake digest command for lifecycle fixtures only, never provenance.
+printf '%064d  synthetic\n' 0

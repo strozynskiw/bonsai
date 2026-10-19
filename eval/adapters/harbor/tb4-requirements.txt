@@ -1,0 +1,5 @@
+# Explicit operator setup only; offline tests do not install this file.
+# Keep the historical TB2 runner-requirements.txt unchanged.
+harbor @ git+https://github.com/harbor-framework/harbor.git@7331d8a3e23cb72e8277522059ff7c9ab9435d90
+# Operator must produce a reviewed hash-locked transitive wheelhouse for Linux,
+# record its sha256 as dependencies_digest, and install with --no-index.
