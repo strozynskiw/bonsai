@@ -71,7 +71,14 @@ SUITE_ROUND=2 node eval/comparison/local-js/run.mjs execute target/comparison/ne
 SUITE_ROUND=3 node eval/comparison/local-js/run.mjs execute target/comparison/new-preflight
 ```
 
-Each round schedules one attempt per task per harness; order alternates. A durable
+For an explicitly authorized Bonsai-only validation, set `SUITE_HARNESSES=bonsai`
+for both preflight and every execution round. Selection is frozen in the manifest;
+the verifier requires exactly those identities (30 instead of 60). This changes
+only harness selection, never task/check bytes or per-attempt budgets. The default
+remains both harnesses. Run `node --test eval/comparison/local-js/harnesses.test.mjs`
+to verify selection validation.
+
+Each round schedules one attempt per task per selected harness; order alternates. A durable
 reservation prevents identity reuse: interrupted/failed identities remain occupied.
 No resume/retry logic is provided. Preserve partial runs and do not relabel retries
 as original attempts. Provider-internal retry behavior remains native.

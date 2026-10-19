@@ -28,11 +28,14 @@ manifest = load(root / 'manifest.json')
 digest_script = "import{readFileSync}from'node:fs';import{createHash}from'node:crypto';const p=JSON.parse(readFileSync(process.argv[1]));console.log(createHash('sha256').update(JSON.stringify(p)).digest('hex'));"
 digest = subprocess.run([node, '--input-type=module', '-e', digest_script, str(root / 'tasks.json')], capture_output=True, text=True, check=True)
 assert digest.stdout.strip() == manifest['tasksDigest']
-expected = {(task['id'], attempt, harness) for task in tasks for attempt in (1, 2, 3) for harness in ('bonsai', 'dsh')}
+harnesses = manifest['harnesses']
+assert harnesses and len(harnesses) == len(set(harnesses))
+assert all(harness in ('bonsai', 'dsh') for harness in harnesses)
+expected = {(task['id'], attempt, harness) for task in tasks for attempt in (1, 2, 3) for harness in harnesses}
 records = []
 for task in tasks:
     for attempt in (1, 2, 3):
-        for harness in ('bonsai', 'dsh'):
+        for harness in harnesses:
             base = root / 'runs' / f"{task['id']}-{attempt}-{harness}"
             record = load(base / 'result.json')
             execution = load(base / 'execution.json')
@@ -86,10 +89,10 @@ for task in tasks:
             record['code_correct'] = checks_pass and scope_pass
             record['strict_success'] = record['code_correct'] and record['terminal'] == 'completed' and record['code'] == 0 and not record['timedOut'] and not record['outputLimited']
             records.append(record)
-assert len(records) == 60 and len({(r['task'], r['attempt'], r['harness']) for r in records}) == 60
-assert len(list((root / 'runs').glob('*/reservation.json'))) == 60
+assert len(records) == len(expected) and {(r['task'], r['attempt'], r['harness']) for r in records} == expected
+assert len(list((root / 'runs').glob('*/reservation.json'))) == len(expected)
 aggregates = {}
-for harness in ('bonsai', 'dsh'):
+for harness in harnesses:
     selected = [r for r in records if r['harness'] == harness]
     timings = sorted(r['elapsedMs'] for r in selected)
     aggregates[harness] = {'runs': len(selected), 'strict_successes': sum(r['strict_success'] for r in selected),
@@ -102,7 +105,7 @@ for harness in ('bonsai', 'dsh'):
 task_summary = []
 for task in tasks:
     row = {'task': task['id']}
-    for harness in ('bonsai', 'dsh'):
+    for harness in harnesses:
         selected = [r for r in records if r['task'] == task['id'] and r['harness'] == harness]
         row[harness] = {'successes': sum(r['strict_success'] for r in selected), 'correct': sum(r['code_correct'] for r in selected),
                         'median_ms': statistics.median(r['elapsedMs'] for r in selected)}
