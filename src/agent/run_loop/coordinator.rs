@@ -287,6 +287,15 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             .next_note(self.state.turns_started, self.agent.budget.max_iterations)
         {
             self.agent.push_harness_note(&note);
+        } else if self.agent.mode == AgentMode::Coding
+            && self.agent.execution_lane.kind == ExecutionLaneKind::Parent
+            && let Some(note) = self.state.policies.recovery.delivery_note(
+                self.state.turns_started,
+                self.agent.budget.max_iterations,
+                self.agent.self_review.workspace_mutated(),
+            )
+        {
+            self.agent.push_harness_note(&note);
         }
         if !self.state.policies.contract_checkpoint_sent
             && self.agent.mode == AgentMode::Coding

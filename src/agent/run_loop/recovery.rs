@@ -26,9 +26,47 @@ pub(super) struct RecoveryAdvisory {
     recovery_sent: bool,
     budget_warning_sent: bool,
     final_warning_sent: bool,
+    delivery_checkpoints_sent: u8,
 }
 
 impl RecoveryAdvisory {
+    /// Reserve time for delivery without extending limits or authorizing effects.
+    /// The coordinator calls this only for the parent coding lane.
+    pub(super) fn delivery_note(
+        &mut self,
+        turn: usize,
+        limit: usize,
+        workspace_mutated: bool,
+    ) -> Option<String> {
+        // Short runs already receive the final budget warnings. Long runs need
+        // feedback while there is still time to implement and verify a slice.
+        if limit < 32 {
+            return None;
+        }
+        let stage = if turn > limit - limit / 4 {
+            3
+        } else if turn > limit / 2 {
+            2
+        } else if turn > (limit / 4).min(20) {
+            1
+        } else {
+            return None;
+        };
+        if stage <= self.delivery_checkpoints_sent {
+            return None;
+        }
+        self.delivery_checkpoints_sent = stage;
+        let remaining = limit.saturating_sub(turn).saturating_add(1);
+        let progress = if workspace_mutated {
+            "Workspace changes were observed, but that does not prove the requested deliverable is complete. Compare the current artifact with the required outcomes and verify the highest-risk missing behavior next."
+        } else {
+            "No workspace changes have been observed. If the user requested an implementation, turn the evidence already gathered into the smallest runnable end-to-end slice now; expand it with focused checks instead of fully reverse-engineering every edge case first. If an edit is not yet safe, name the exact blocking uncertainty and run only the experiment that decides it."
+        };
+        Some(format!(
+            "Delivery checkpoint {stage}/3: {remaining} model turns remain, including this one. {progress} Novel probe output is information, not a finished artifact. Reserve time for implementation, verification, and final delivery; do not spend the whole budget on exploration or raise the limit. For research, review, explanation, or monitoring requests, preserve read-only intent: synthesize sufficient evidence rather than making edits. This advisory grants no permissions, does not require success, and never justifies weakening tests or claiming unverified work."
+        ))
+    }
+
     pub(super) fn observe(&mut self, observations: &[ToolCallObservation]) {
         for observation in observations {
             if observation.tool_name != "bash" {
@@ -202,6 +240,40 @@ mod tests {
         );
         assert!(advisory.next_note(12, 12).is_none());
         assert!(RecoveryAdvisory::default().next_note(1, 1).is_none());
+    }
+
+    #[test]
+    fn delivery_checkpoints_reserve_budget_and_preserve_task_authority() {
+        let mut advisory = RecoveryAdvisory::default();
+        assert!(advisory.delivery_note(20, 200, false).is_none());
+        let early = advisory.delivery_note(21, 200, false).unwrap();
+        assert!(early.contains("180 model turns remain"));
+        assert!(early.contains("smallest runnable end-to-end slice"));
+        assert!(early.contains("preserve read-only intent"));
+        assert!(early.contains("grants no permissions"));
+        for turn in 22..=100 {
+            assert!(advisory.delivery_note(turn, 200, false).is_none());
+        }
+        let middle = advisory.delivery_note(101, 200, true).unwrap();
+        assert!(middle.contains("100 model turns remain"));
+        assert!(middle.contains("does not prove"));
+        assert!(!middle.contains("No workspace changes"));
+        assert!(advisory.delivery_note(150, 200, true).is_none());
+        assert!(
+            advisory
+                .delivery_note(151, 200, true)
+                .unwrap()
+                .contains("50 model turns remain")
+        );
+        assert!(advisory.delivery_note(199, 200, false).is_none());
+        assert!(
+            RecoveryAdvisory::default()
+                .delivery_note(12, 12, false)
+                .is_none()
+        );
+        // Resetting for new user steering re-arms the advisory, not permissions.
+        advisory = RecoveryAdvisory::default();
+        assert!(advisory.delivery_note(30, 200, false).is_some());
     }
 
     #[test]

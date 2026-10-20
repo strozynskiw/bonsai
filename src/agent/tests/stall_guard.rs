@@ -112,8 +112,10 @@ async fn stall_guard_allows_long_black_box_investigation_with_novel_results() {
         })
         .chain([final_text_turn("format understood")])
         .collect();
+    let provider = MockProvider::new(responses);
+    let requests = provider.requests();
     let mut agent = Agent::new(
-        Box::new(MockProvider::new(responses)),
+        Box::new(provider),
         Arc::new(registry),
         empty_registry(),
         fixture.read_tracker.clone(),
@@ -135,6 +137,66 @@ async fn stall_guard_allows_long_black_box_investigation_with_novel_results() {
         AgentRunResult::Completed("format understood".to_string())
     );
     assert!(stall_notes_in(&agent).is_empty());
+    let requests = requests.lock().await;
+    let early = serde_json::to_string(&requests[20]).unwrap();
+    assert!(early.contains("Delivery checkpoint 1/3"));
+    assert!(early.contains("preserve read-only intent"));
+    assert!(early.contains("145 model turns remain"));
+    let final_request = serde_json::to_string(requests.last().unwrap()).unwrap();
+    assert!(final_request.contains("Delivery checkpoint 3/3"));
+}
+
+#[tokio::test]
+async fn delivery_checkpoints_do_not_extend_budget_or_steer_subagents() {
+    for subagent in [false, true] {
+        let fixture = TestFixture::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ArchiveProbeTool));
+        let responses = (0..32)
+            .map(|index| {
+                Ok(StreamedResponse {
+                    tool_calls: vec![test_tool_call(
+                        &format!("probe-{index}"),
+                        "bash",
+                        &serde_json::json!({"command": format!("probe {index}")}).to_string(),
+                    )],
+                    ..StreamedResponse::default()
+                })
+            })
+            .collect();
+        let provider = MockProvider::new(responses);
+        let requests = provider.requests();
+        let mut agent = Agent::new(
+            Box::new(provider),
+            Arc::new(registry),
+            empty_registry(),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        if subagent {
+            agent.set_execution_lane(ExecutionLane::subagent("sub-1"));
+        }
+        agent.budget.max_iterations = 32;
+        let error = agent
+            .run(
+                "implement the requested tool",
+                CancellationToken::new(),
+                Arc::new(StdoutSink),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::run_budget::RunBudgetExhaustion>(),
+            Some(&crate::run_budget::RunBudgetExhaustion::MaxTurns { limit: 32 })
+        );
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 32);
+        let last = serde_json::to_string(requests.last().unwrap()).unwrap();
+        assert_eq!(last.contains("Delivery checkpoint"), !subagent);
+        assert!(last.contains("Final model turn"));
+    }
 }
 
 struct FailedBashTool {
