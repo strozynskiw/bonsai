@@ -64,6 +64,79 @@ impl Tool for OkBashTool {
     }
 }
 
+struct ArchiveProbeTool;
+
+#[async_trait]
+impl Tool for ArchiveProbeTool {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn description(&self) -> &str {
+        "mock black-box archive experiment"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        OkBashTool.parameters_schema()
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::Command {
+            rendered: String::new(),
+            stdout: format!("archive experiment result: {}\n", args["command"]),
+            stderr: String::new(),
+            exit_code: Some(0),
+            timed_out: false,
+            truncation: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn stall_guard_allows_long_black_box_investigation_with_novel_results() {
+    let fixture = TestFixture::new();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ArchiveProbeTool));
+    let experiments = 160;
+    let responses = (0..experiments)
+        .map(|index| {
+            Ok(StreamedResponse {
+                tool_calls: vec![test_tool_call(
+                    &format!("probe-{index}"),
+                    "bash",
+                    &serde_json::json!({"command": format!("probe header offset {index}")})
+                        .to_string(),
+                )],
+                ..StreamedResponse::default()
+            })
+        })
+        .chain([final_text_turn("format understood")])
+        .collect();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.budget.max_iterations = experiments + 5;
+    let result = agent
+        .run(
+            "research the archive format",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        AgentRunResult::Completed("format understood".to_string())
+    );
+    assert!(stall_notes_in(&agent).is_empty());
+}
+
 struct FailedBashTool {
     calls: std::sync::atomic::AtomicUsize,
 }

@@ -54,11 +54,15 @@ pub(in crate::agent) const IMPLEMENTATION_STALL_RECOVERY_TURNS: usize = 14;
 pub(in crate::agent) const IMPLEMENTATION_STALL_TERMINAL_TURNS: usize = 18;
 /// Evidence fingerprints are retained across evidence-only resets so an A/B
 /// polling loop cannot alternate forever. Durable progress or user steering
-/// starts a fresh evidence epoch. The cap keeps adversarial tool batches from
-/// growing the guard without bound; once full, unseen frames are conservatively
-/// treated as non-progress until a durable transition occurs.
+/// starts a fresh evidence epoch. Retain a bounded window of recent distinct
+/// fingerprints rather than a lifetime quota: filling the cache must not turn
+/// genuinely new diagnostics or experiments into stalled turns.
 const IMPLEMENTATION_STALL_EVIDENCE_LIMIT: usize = 128;
 const IMPLEMENTATION_STALL_EVIDENCE_HISTORY: usize = 4;
+// Fixed-size, conservative history of normalized evidence sets. Unlike the
+// exact recent cache this never evicts within an epoch, so long cycles and
+// oversized batches cannot manufacture novelty through cache rollover.
+const IMPLEMENTATION_STALL_TURN_HISTORY_WORDS: usize = 4096;
 
 /// Result of [`Agent::call_model`]: either the provider responded, or
 /// compaction was cancelled mid-preflight and the turn should end as
@@ -2716,7 +2720,7 @@ impl ToolCallObservation {
             return if seen_evidence.contains(&evidence.fingerprint) {
                 format!("equivalent {}", evidence.label())
             } else {
-                format!("uncredited {} (evidence epoch full)", evidence.label())
+                format!("uncredited {}", evidence.label())
             };
         }
         format!("{} {} call", self.status.label(), self.tool_name)
@@ -3526,6 +3530,8 @@ fn empty_response_nudge_message() -> String {
 struct ImplementationStallGuard {
     turns_without_progress: usize,
     seen_evidence: HashSet<blake3::Hash>,
+    evidence_order: VecDeque<blake3::Hash>,
+    turn_history: Vec<u64>,
     recent_stall_evidence: VecDeque<String>,
 }
 
@@ -3585,18 +3591,23 @@ impl ImplementationStallGuard {
             };
         }
 
+        let repeated_turn = self.remember_evidence_turn(observations);
         let mut novel_evidence = BTreeSet::new();
         for evidence in observations
             .iter()
             .filter_map(|observation| observation.semantic_evidence.as_ref())
+            .filter(|_| !repeated_turn)
         {
             if self.seen_evidence.contains(&evidence.fingerprint) {
                 continue;
             }
-            if self.seen_evidence.len() >= IMPLEMENTATION_STALL_EVIDENCE_LIMIT {
-                break;
+            if self.seen_evidence.len() >= IMPLEMENTATION_STALL_EVIDENCE_LIMIT
+                && let Some(oldest) = self.evidence_order.pop_front()
+            {
+                self.seen_evidence.remove(&oldest);
             }
             self.seen_evidence.insert(evidence.fingerprint);
+            self.evidence_order.push_back(evidence.fingerprint);
             novel_evidence.insert(evidence.label());
         }
         if !novel_evidence.is_empty() {
@@ -3659,9 +3670,44 @@ impl ImplementationStallGuard {
         }
     }
 
+    /// Remember the unordered evidence set in a fixed-size Bloom filter.
+    /// False positives conservatively deny progress, but there are no false
+    /// negatives for repeated turns before reset. Four probes over 262144 bits
+    /// avoid the old deterministic 128-result cliff without unbounded storage.
+    fn remember_evidence_turn(&mut self, observations: &[ToolCallObservation]) -> bool {
+        let fingerprints = observations
+            .iter()
+            .filter_map(|observation| observation.semantic_evidence.as_ref())
+            .map(|evidence| *evidence.fingerprint.as_bytes())
+            .collect::<BTreeSet<_>>();
+        if fingerprints.is_empty() {
+            return false;
+        }
+        let mut hasher = blake3::Hasher::new();
+        for fingerprint in fingerprints {
+            hasher.update(&fingerprint);
+        }
+        let hash = hasher.finalize();
+        self.turn_history
+            .resize(IMPLEMENTATION_STALL_TURN_HISTORY_WORDS, 0);
+        let mut repeated = true;
+        for chunk in hash.as_bytes().as_chunks::<8>().0 {
+            let position = chunk.iter().fold(0_usize, |value, byte| {
+                (value * 256 + usize::from(*byte)) % (IMPLEMENTATION_STALL_TURN_HISTORY_WORDS * 64)
+            });
+            let word = &mut self.turn_history[position / 64];
+            let mask = 1_u64 << (position % 64);
+            repeated &= *word & mask != 0;
+            *word |= mask;
+        }
+        repeated
+    }
+
     fn reset(&mut self) {
         self.turns_without_progress = 0;
         self.seen_evidence.clear();
+        self.evidence_order.clear();
+        self.turn_history.clear();
         self.recent_stall_evidence.clear();
     }
 
@@ -4685,6 +4731,130 @@ mod tests {
         assert_eq!(guard.turns_without_progress, 1);
         assert!(guard.observe_turn(&[diagnostic("error E2")]).made_progress);
         assert_eq!(guard.turns_without_progress, 0);
+    }
+
+    #[test]
+    fn implementation_stall_credits_new_experiments_after_evidence_cache_fills() {
+        let experiment = |index| {
+            let mut observation = stall_observation(
+                "bash",
+                r#"{"command":"probe archive format"}"#,
+                crate::output::ToolExecutionStatus::Succeeded,
+            );
+            observation.observe_result(
+                &ToolOutput::Command {
+                    rendered: String::new(),
+                    stdout: format!("archive probe {index}: decoded header offset {index}\n"),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    timed_out: false,
+                    truncation: None,
+                },
+                Some(crate::tool::ToolEffectPolicy::SelfAuthorized),
+            );
+            observation
+        };
+        let mut guard = ImplementationStallGuard::default();
+        let experiments = IMPLEMENTATION_STALL_EVIDENCE_LIMIT * 3;
+        for index in 0..experiments {
+            let decision = guard.observe_turn(&[experiment(index)]);
+            assert!(
+                decision.made_progress,
+                "novel experiment {index} was discarded"
+            );
+            assert!(decision.transition.is_none());
+            assert_eq!(guard.turns_without_progress, 0);
+            assert!(guard.seen_evidence.len() <= IMPLEMENTATION_STALL_EVIDENCE_LIMIT);
+            assert_eq!(guard.seen_evidence.len(), guard.evidence_order.len());
+        }
+        // Cache rollover must not disable repeated-result/A-B loop protection.
+        for turn in 1..=IMPLEMENTATION_STALL_TERMINAL_TURNS {
+            let decision = guard.observe_turn(&[experiment(experiments - 1 - turn % 2)]);
+            assert!(!decision.made_progress);
+            assert_eq!(guard.turns_without_progress, turn);
+            if turn == IMPLEMENTATION_STALL_TERMINAL_TURNS {
+                assert_eq!(
+                    decision.transition.unwrap().phase,
+                    ImplementationStallPhase::Stop
+                );
+            }
+        }
+        guard.reset();
+        assert!(guard.seen_evidence.is_empty());
+        assert!(guard.evidence_order.is_empty());
+        assert!(
+            guard
+                .observe_turn(&[experiment(experiments - 1)])
+                .made_progress
+        );
+    }
+
+    #[test]
+    fn implementation_stall_terminates_cycle_larger_than_recent_cache() {
+        let diagnostic = |index| {
+            let mut observation = stall_observation(
+                "bash",
+                r#"{"command":"probe"}"#,
+                crate::output::ToolExecutionStatus::Succeeded,
+            );
+            observation.observe_result(
+                &ToolOutput::Command {
+                    rendered: String::new(),
+                    stdout: format!("probe {index}"),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    timed_out: false,
+                    truncation: None,
+                },
+                Some(crate::tool::ToolEffectPolicy::SelfAuthorized),
+            );
+            observation
+        };
+        let mut guard = ImplementationStallGuard::default();
+        let cycle = (0..IMPLEMENTATION_STALL_EVIDENCE_LIMIT + 1)
+            .map(diagnostic)
+            .collect::<Vec<_>>();
+        for observation in &cycle {
+            assert!(
+                guard
+                    .observe_turn(std::slice::from_ref(observation))
+                    .made_progress
+            );
+        }
+        for (index, observation) in cycle
+            .iter()
+            .cycle()
+            .take(IMPLEMENTATION_STALL_TERMINAL_TURNS)
+            .enumerate()
+        {
+            let decision = guard.observe_turn(std::slice::from_ref(observation));
+            assert!(!decision.made_progress);
+            if index + 1 == IMPLEMENTATION_STALL_TERMINAL_TURNS {
+                assert_eq!(
+                    decision.transition.unwrap().phase,
+                    ImplementationStallPhase::Stop
+                );
+            }
+        }
+        guard.reset();
+        assert!(guard.turn_history.is_empty());
+        assert!(guard.observe_turn(&cycle[..1]).made_progress);
+
+        // A repeated oversized batch must not churn the exact cache either.
+        guard.reset();
+        assert!(guard.observe_turn(&cycle).made_progress);
+        let reversed = cycle.into_iter().rev().collect::<Vec<_>>();
+        for _ in 0..IMPLEMENTATION_STALL_TERMINAL_TURNS {
+            assert!(!guard.observe_turn(&reversed).made_progress);
+        }
+        assert_eq!(
+            guard.turns_without_progress,
+            IMPLEMENTATION_STALL_TERMINAL_TURNS
+        );
+        assert_eq!(
+            guard.turn_history.len(),
+            IMPLEMENTATION_STALL_TURN_HISTORY_WORDS
+        );
     }
 
     #[test]
