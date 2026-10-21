@@ -67,7 +67,10 @@ mounted trial workspace. No image was mounted or deleted during inspection.
 Rust check, checkpoint tests, formatting, strict all-target/all-feature Clippy,
 locked full tests (4475 unit tests plus 19 integration tests), and warning-free
 release build passed for the capture repair. Real-binary guest staging passed.
-After the lock repair, local Harbor discovery passes 93 tests (11 skips).
+After review, receipt validation rejects zero checkpoint ordinals and malformed
+stage/fingerprint types with bounded `ValueError` failures. Local Harbor
+discovery passes 94 tests (11 skips); affected lifecycle/diagnostic suites pass
+15 tests both locally and on the guest, and all seven Rust checkpoint tests pass.
 After the lock repair, affected guest suites pass 29 tests (one skip),
 including the entry-point lock regression.
 Broad guest discovery is not green: unrelated baseline comparison imports use

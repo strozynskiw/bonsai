@@ -86,6 +86,24 @@ class DiagnosticTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_receipts(raw, expected_model="different")
 
+    def test_receipt_rejects_zero_ordinal_and_malformed_types(self):
+        rows = [{"type": "identity", "schema": 1, "boundary": "agent_to_provider", "model": "fixture",
+                 "request_ordinal": 1, "request_sha256": "a" * 64},
+                {"type": "checkpoint", "stage": 1, "request_ordinal": 1,
+                 "text": "Harness note: Delivery checkpoint 1/3: fixture",
+                 "message_sha256": "b" * 64, "request_sha256": "a" * 64},
+                {"type": "summary", "requests": 1, "stages": [True, False, False], "capture_valid": True}]
+        self.assertEqual(validate_receipts("\n".join(map(json.dumps, rows)), expected_model="fixture")["stages"], [1])
+        for index, field, value in ((1, "request_ordinal", 0), (2, "stages", None),
+                                    (2, "stages", 3), (2, "stages", "abc"),
+                                    (0, "request_sha256", 42), (1, "request_sha256", None),
+                                    (1, "message_sha256", 42)):
+            with self.subTest(field=field, value=value):
+                broken = copy.deepcopy(rows)
+                broken[index][field] = value
+                with self.assertRaises(ValueError):
+                    validate_receipts("\n".join(map(json.dumps, broken)), expected_model="fixture")
+
 
 class DiagnosticEntrypointTests(unittest.TestCase):
     def test_executor_can_acquire_its_trial_lock(self):

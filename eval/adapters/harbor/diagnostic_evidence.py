@@ -18,23 +18,26 @@ def validate_receipts(raw: str, *, expected_model: str) -> dict:
             or first.get("boundary") != "agent_to_provider" or first.get("request_ordinal") != 1
             or first.get("model") != expected_model or last.get("type") != "summary"
             or last.get("capture_valid") is not True or type(last.get("requests")) is not int
-            or not 1 <= last["requests"] <= 200 or len(last.get("stages", [])) != 3
+            or not 1 <= last["requests"] <= 200
+            or not isinstance(last.get("stages"), list) or len(last["stages"]) != 3
             or not all(type(stage) is bool for stage in last["stages"])):
         raise ValueError("diagnostic identity/summary mismatch")
     seen = set()
-    previous = 0
+    previous = 1
     for row in rows[1:-1]:
         stage, ordinal = row.get("stage"), row.get("request_ordinal")
         if (row.get("type") != "checkpoint" or type(stage) is not int or stage not in (1, 2, 3)
                 or stage in seen or type(ordinal) is not int or not previous <= ordinal <= last["requests"]
                 or not isinstance(row.get("text"), str) or len(row["text"]) > 2048
                 or not row["text"].startswith(f"Harness note: Delivery checkpoint {stage}/3: ")
-                or not re.fullmatch(r"[0-9a-f]{64}", row.get("message_sha256", ""))):
+                or not isinstance(row.get("message_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", row["message_sha256"])):
             raise ValueError("invalid diagnostic checkpoint receipt")
         seen.add(stage)
         previous = ordinal
     for row in rows[:-1]:
-        if not re.fullmatch(r"[0-9a-f]{64}", row.get("request_sha256", "")):
+        if (not isinstance(row.get("request_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", row["request_sha256"])):
             raise ValueError("missing diagnostic request fingerprint")
     if last["stages"] != [stage in seen for stage in (1, 2, 3)]:
         raise ValueError("diagnostic checkpoint summary mismatch")
