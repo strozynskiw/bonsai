@@ -87,6 +87,30 @@ class DiagnosticTests(unittest.TestCase):
             validate_receipts(raw, expected_model="different")
 
 
+class DiagnosticEntrypointTests(unittest.TestCase):
+    def test_executor_can_acquire_its_trial_lock(self):
+        import fcntl
+        from pathlib import Path
+        import tempfile
+        from unittest.mock import patch
+        from .lima_diagnostic import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "trial.lock"
+            acquired = []
+
+            async def executor_owns_lock(args):
+                with lock_path.open("a", encoding="utf-8") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired.append(True)
+
+            with patch("argparse.ArgumentParser.parse_args", return_value=object()), patch(
+                    "eval.adapters.harbor.lima_diagnostic.Path", return_value=lock_path), patch(
+                    "eval.adapters.harbor.lima_diagnostic.execute", side_effect=executor_owns_lock):
+                main()
+            self.assertEqual(acquired, [True])
+
+
 class DiagnosticDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_continuation_stop_and_resume(self):
         from pathlib import Path

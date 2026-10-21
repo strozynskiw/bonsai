@@ -3,7 +3,6 @@
 import argparse
 import asyncio
 import hashlib
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -124,9 +123,9 @@ def main():
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--prerequisite", required=True)
     args = parser.parse_args()
-    with Path("/var/lib/tb4-docker/tb4-trial.lock").open("a", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        asyncio.run(execute(args))
+    # LimaExecutor owns the trial lock until verified teardown. Acquiring it
+    # here too deadlocks the executor against this process's other descriptor.
+    asyncio.run(execute(args))
 
 
 if __name__ == "__main__":
