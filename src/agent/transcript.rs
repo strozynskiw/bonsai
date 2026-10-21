@@ -74,17 +74,30 @@ impl CheckpointLogger {
             )?;
         }
         for (index, message) in messages.iter().enumerate() {
-            let ChatCompletionRequestMessage::User(message) = message else {
-                continue;
+            let (name, text) = match message {
+                ChatCompletionRequestMessage::System(note) => {
+                    let async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                        text,
+                    ) = &note.content
+                    else {
+                        continue;
+                    };
+                    (note.name.as_deref(), text)
+                }
+                ChatCompletionRequestMessage::User(note) => {
+                    let async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
+                        text,
+                    ) = &note.content
+                    else {
+                        continue;
+                    };
+                    (note.name.as_deref(), text)
+                }
+                _ => continue,
             };
-            if message.name.as_deref() != MessageProvenance::Harness.wire_name() {
+            if name != MessageProvenance::Harness.wire_name() {
                 continue;
             }
-            let async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(text) =
-                &message.content
-            else {
-                continue;
-            };
             let Some(stage) = super::run_loop::recovery::RecoveryAdvisory::checkpoint_stage(text)
             else {
                 continue;
@@ -184,11 +197,14 @@ mod checkpoint_tests {
     use super::*;
 
     fn message(text: &str, trusted: bool) -> ChatCompletionRequestMessage {
-        async_openai::types::chat::ChatCompletionRequestUserMessage {
-            name: trusted.then(|| "bonsai_harness".into()),
-            content: text.into(),
-        }
-        .into()
+        super::super::messages::provenance_message(
+            if trusted {
+                MessageProvenance::Harness
+            } else {
+                MessageProvenance::Human
+            },
+            text,
+        )
     }
 
     #[test]
