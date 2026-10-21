@@ -241,6 +241,9 @@ impl Agent {
             context_gc_trigger_percent: builder.context_gc_trigger_percent,
             cached_models: Vec::new(),
             transcript_logger: TranscriptLogger::from_env().map(Arc::new),
+            checkpoint_logger: (builder.execution_lane.kind == ExecutionLaneKind::Parent)
+                .then(CheckpointLogger::from_env)
+                .flatten(),
             system_context: builder.system_context,
             system_prompt_suffix: builder.system_prompt_suffix,
             project_context: builder.project_context,

@@ -512,6 +512,7 @@ pub struct Agent {
     context_gc_trigger_percent: usize,
     cached_models: Vec<String>,
     transcript_logger: Option<Arc<TranscriptLogger>>,
+    checkpoint_logger: Option<CheckpointLogger>,
     /// Project-context block (cwd, git, steering files) appended to the persona
     /// prompt. Empty in tests so the system message stays deterministic.
     system_context: String,

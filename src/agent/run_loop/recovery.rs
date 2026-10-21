@@ -20,7 +20,7 @@ fn recovery_identity(signature: &str) -> Option<String> {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct RecoveryAdvisory {
+pub(in crate::agent) struct RecoveryAdvisory {
     pending_failures: HashSet<String>,
     unresolved_turns: usize,
     recovery_sent: bool,
@@ -32,7 +32,7 @@ pub(super) struct RecoveryAdvisory {
 impl RecoveryAdvisory {
     /// Reserve time for delivery without extending limits or authorizing effects.
     /// The coordinator calls this only for the parent coding lane.
-    pub(super) fn delivery_note(
+    pub(in crate::agent) fn delivery_note(
         &mut self,
         turn: usize,
         limit: usize,
@@ -57,14 +57,31 @@ impl RecoveryAdvisory {
         }
         self.delivery_checkpoints_sent = stage;
         let remaining = limit.saturating_sub(turn).saturating_add(1);
-        let progress = if workspace_mutated {
-            "Workspace changes were observed, but that does not prove the requested deliverable is complete. Compare the current artifact with the required outcomes and verify the highest-risk missing behavior next."
-        } else {
-            "No workspace changes have been observed. If the user requested an implementation, turn the evidence already gathered into the smallest runnable end-to-end slice now; expand it with focused checks instead of fully reverse-engineering every edge case first. If an edit is not yet safe, name the exact blocking uncertainty and run only the experiment that decides it."
-        };
-        Some(format!(
-            "Delivery checkpoint {stage}/3: {remaining} model turns remain, including this one. {progress} Novel probe output is information, not a finished artifact. Reserve time for implementation, verification, and final delivery; do not spend the whole budget on exploration or raise the limit. For research, review, explanation, or monitoring requests, preserve read-only intent: synthesize sufficient evidence rather than making edits. This advisory grants no permissions, does not require success, and never justifies weakening tests or claiming unverified work."
+        Some(delivery_checkpoint_text(
+            stage,
+            remaining,
+            workspace_mutated,
         ))
+    }
+
+    pub(in crate::agent) fn checkpoint_stage(text: &str) -> Option<u8> {
+        let suffix = text.strip_prefix("Harness note: Delivery checkpoint ")?;
+        let (stage, suffix) = suffix.split_once("/3: ")?;
+        let stage: u8 = stage.parse().ok()?;
+        if !(1..=3).contains(&stage) {
+            return None;
+        }
+        let (remaining, _) = suffix.split_once(" model turns remain,")?;
+        let remaining: usize = remaining.parse().ok()?;
+        [false, true]
+            .into_iter()
+            .any(|mutated| {
+                text == format!(
+                    "Harness note: {}",
+                    delivery_checkpoint_text(stage, remaining, mutated)
+                )
+            })
+            .then_some(stage)
     }
 
     pub(super) fn observe(&mut self, observations: &[ToolCallObservation]) {
@@ -115,6 +132,17 @@ impl RecoveryAdvisory {
         }
         None
     }
+}
+
+fn delivery_checkpoint_text(stage: u8, remaining: usize, workspace_mutated: bool) -> String {
+    let progress = if workspace_mutated {
+        "Workspace changes were observed, but that does not prove the requested deliverable is complete. Compare the current artifact with the required outcomes and verify the highest-risk missing behavior next."
+    } else {
+        "No workspace changes have been observed. If the user requested an implementation, turn the evidence already gathered into the smallest runnable end-to-end slice now; expand it with focused checks instead of fully reverse-engineering every edge case first. If an edit is not yet safe, name the exact blocking uncertainty and run only the experiment that decides it."
+    };
+    format!(
+        "Delivery checkpoint {stage}/3: {remaining} model turns remain, including this one. {progress} Novel probe output is information, not a finished artifact. Reserve time for implementation, verification, and final delivery; do not spend the whole budget on exploration or raise the limit. For research, review, explanation, or monitoring requests, preserve read-only intent: synthesize sufficient evidence rather than making edits. This advisory grants no permissions, does not require success, and never justifies weakening tests or claiming unverified work."
+    )
 }
 
 #[cfg(test)]

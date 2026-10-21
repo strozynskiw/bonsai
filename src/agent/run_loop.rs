@@ -4,7 +4,7 @@ use crate::util::tool_args::normalize_tool_call_arguments_json;
 mod context;
 mod coordinator;
 mod deferred_output;
-mod recovery;
+pub(super) mod recovery;
 mod tools;
 mod verification;
 
@@ -1349,10 +1349,22 @@ impl Agent {
     /// aid, not a correctness dependency, so an I/O failure (disk full,
     /// permissions) logs a warning instead of aborting the live turn.
     pub(super) fn log_request(
-        &self,
+        &mut self,
         messages: &[ChatCompletionRequestMessage],
         tools: &[async_openai::types::chat::ChatCompletionTool],
     ) {
+        if let Some(logger) = &mut self.checkpoint_logger
+            && let Err(err) = logger.record(
+                messages,
+                tools,
+                self.active_model_identity
+                    .as_ref()
+                    .map(|identity| identity.model.as_str()),
+            )
+        {
+            eprintln!("checkpoint capture invalid: {err:#}");
+            tracing::error!(%err, "checkpoint capture invalid");
+        }
         let Some(logger) = &self.transcript_logger else {
             return;
         };
