@@ -157,6 +157,12 @@ class Bonsai(BaseInstalledAgent):
             "BONSAI_DISABLE_MODELS_FETCH": "1",
             instruction_env: instruction,
         }
+        checkpoint_path = self.extra_env.get("BONSAI_CHECKPOINT_LOG")
+        if checkpoint_path is not None:
+            expected = (EnvironmentPaths.agent_dir / "checkpoints.jsonl").as_posix()
+            if checkpoint_path != expected:
+                raise ValueError("diagnostic checkpoint path must be the private agent log path")
+            env["BONSAI_CHECKPOINT_LOG"] = checkpoint_path
         command = (
             f"umask 077; mkdir -p {shlex.quote(home)} {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}; "
             f'printf "%s" "${instruction_env}" | '
@@ -173,13 +179,33 @@ class Bonsai(BaseInstalledAgent):
         command, env = isolated_command(f"set -o pipefail; {command}", env, home)
         result = await environment.exec(command=command, env=env,
                                         timeout_sec=self._resolved_flags["timeout_seconds"])
+        if checkpoint_path is not None:
+            from .diagnostic_evidence import validate_receipts
+            captured = await environment.exec(command=f"cat {shlex.quote(checkpoint_path)}", timeout_sec=10)
+            if captured.return_code:
+                raise RuntimeError("diagnostic checkpoint evidence missing; stop batch")
+            try:
+                validate_receipts(captured.stdout or "", expected_model=self.model_name)
+            except ValueError as error:
+                context.metadata = {"bonsai_terminal_state": "infrastructure_invalid"}
+                raise RuntimeError("diagnostic checkpoint evidence invalid; stop batch") from error
+            diagnostic_payload = self._parse_payload(result.stdout or "")
+            if diagnostic_payload is None:
+                context.metadata = {"bonsai_terminal_state": "infrastructure_invalid"}
+                raise RuntimeError("diagnostic terminal evidence missing; stop batch")
+            if (diagnostic_payload.get("provider") != provider
+                    or diagnostic_payload.get("model") != self.model_name):
+                context.metadata = {"bonsai_terminal_state": "infrastructure_invalid"}
+                raise RuntimeError("diagnostic provider/model mismatch; stop batch")
+            self._populate_context(context, diagnostic_payload)
         # Do not include raw provider/tool output in Harbor's shared exception.
         if result.return_code != 0:
             context.metadata = {"bonsai_terminal_state": "agent_failure"}
             raise RuntimeError(f"Bonsai exited with status {result.return_code}; see private logs")
         payload = self._parse_payload(result.stdout or "")
         if payload is not None:
-            if payload.get("provider") != provider or payload.get("model") != model:
+            expected_model = self.model_name if checkpoint_path is not None else model
+            if payload.get("provider") != provider or payload.get("model") != expected_model:
                 raise RuntimeError("Bonsai selected provider/model mismatch; stop batch")
             if payload.get("status") not in {"completed", "success"}:
                 raise RuntimeError("Bonsai turn failed; see private logs")

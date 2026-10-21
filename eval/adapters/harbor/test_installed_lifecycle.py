@@ -59,6 +59,53 @@ class InstalledLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(context.n_input_tokens)
             self.assertIsNone(context.cost_usd)
 
+    async def test_diagnostic_forwards_only_explicit_private_checkpoint_path(self):
+        from .bonsai import Bonsai
+        from harbor.models.agent.context import AgentContext
+        from harbor.models.trial.paths import EnvironmentPaths
+        path = (EnvironmentPaths.agent_dir / "checkpoints.jsonl").as_posix()
+        rows = [{"type": "identity", "schema": 1, "boundary": "agent_to_provider", "model": "anthropic-compatible/fixture-model",
+                 "request_ordinal": 1, "request_sha256": "a" * 64},
+                {"type": "summary", "requests": 1, "stages": [False] * 3, "capture_valid": True}]
+        class DiagnosticEnvironment(FakeEnvironment):
+            async def exec(self, **kwargs):
+                if kwargs["command"] == "cat " + path:
+                    return SimpleNamespace(return_code=0, stdout="\n".join(map(json.dumps, rows)), stderr="")
+                return await super().exec(**kwargs)
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {
+                "BONSAI_TRANSCRIPT_LOG": "/tmp/ambient-full-log", "BONSAI_CHECKPOINT_LOG": "/tmp/ambient"}):
+            for explicit in (None, path, "/tmp/forbidden"):
+                extra = {"ANTHROPIC_COMPATIBLE_API_KEY": "fixture-secret",
+                         "ANTHROPIC_COMPATIBLE_BASE_URL": "https://provider.invalid"}
+                if explicit is not None:
+                    extra["BONSAI_CHECKPOINT_LOG"] = explicit
+                agent = Bonsai(logs_dir=Path(directory), model_name="anthropic-compatible/fixture-model",
+                               autonomy="yolo", reasoning_effort="off", max_turns=200,
+                               max_generation_seconds=20, max_output_chars=2000, max_tool_seconds=10,
+                               timeout_seconds=30, network="allow", extra_env=extra)
+                environment = DiagnosticEnvironment({"status": "completed", "provider": "anthropic-compatible",
+                                                     "model": "anthropic-compatible/fixture-model" if explicit else "fixture-model"})
+                if explicit == "/tmp/forbidden":
+                    with self.assertRaises(ValueError):
+                        await agent.run("prompt", environment, AgentContext())
+                    continue
+                await agent.run("prompt", environment, AgentContext())
+                execution = next(call for call in environment.calls if "-p -" in call["command"])
+                self.assertEqual(execution["env"].get("BONSAI_CHECKPOINT_LOG"), explicit)
+                self.assertNotIn("BONSAI_TRANSCRIPT_LOG", execution["env"])
+                if explicit == path:
+                    for payload in ({}, {"provider": "wrong", "model": agent.model_name}):
+                        context = AgentContext()
+                        with self.assertRaisesRegex(RuntimeError, "diagnostic.*stop batch"):
+                            await agent.run("prompt", DiagnosticEnvironment(payload), context)
+                        self.assertEqual(context.metadata["bonsai_terminal_state"], "infrastructure_invalid")
+                    rows[-1]["capture_valid"] = False
+                    context = AgentContext()
+                    with self.assertRaisesRegex(RuntimeError, "checkpoint evidence invalid"):
+                        await agent.run("prompt", environment, context)
+                    self.assertEqual(context.metadata["bonsai_terminal_state"], "infrastructure_invalid")
+                    rows[-1]["capture_valid"] = True
+
     async def test_ambient_credentials_cannot_fill_missing_trial_overlay(self):
         from .bonsai import Bonsai
         from .dsh import Dsh
