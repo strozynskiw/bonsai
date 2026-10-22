@@ -62,6 +62,10 @@ pub(crate) struct HeadlessConfig {
     pub model: Option<String>,
     pub reasoning: Option<crate::provider::ReasoningSelection>,
     pub max_turns: Option<usize>,
+    /// Explicitly disable the per-run turn ceiling; other limits still apply.
+    pub unlimited_turns: bool,
+    /// Disable the per-run wall clock only; session and per-call budgets remain.
+    pub unlimited_time: bool,
     /// Optional wall-time ceiling for each provider generation attempt.
     pub max_generation_duration: Option<Duration>,
     /// Optional combined reasoning + assistant output cap per provider attempt.
@@ -469,7 +473,12 @@ async fn run_inner_with_provider_runtime(
 ) -> Result<HeadlessRunOutcome, HeadlessError> {
     let prompt = resolve_prompt(&config.prompt).await?;
     let mut run_budget = storage.run_budget().await?;
-    if let Some(max_turns) = config.max_turns {
+    if config.unlimited_time {
+        run_budget.max_run_seconds = None;
+    }
+    if config.unlimited_turns {
+        run_budget.max_turns = None;
+    } else if let Some(max_turns) = config.max_turns {
         run_budget.max_turns = Some(max_turns);
     }
     if let Some(max_duration) = config.max_generation_duration {
@@ -706,6 +715,9 @@ async fn run_inner_with_provider_runtime(
         ..
     } = runtime;
     agent.set_retry_backoff(retry_backoff);
+    if config.unlimited_turns {
+        agent.disable_run_turn_limit();
+    }
     if let Some(snapshot) = resume_snapshot.as_ref() {
         todo_store.lock().await.set_todos(snapshot.todos.clone());
         *plan_store.lock().await = snapshot.plan.clone();
@@ -1860,6 +1872,7 @@ mod tests {
         DisconnectAfterOutput,
         RemovedTarget,
         Success,
+        DelayedSuccess,
     }
 
     struct ScenarioFactory {
@@ -1878,7 +1891,7 @@ mod tests {
             &self,
             _messages: &[async_openai::types::chat::ChatCompletionRequestMessage],
             _tools: &[async_openai::types::chat::ChatCompletionTool],
-            _cancellation_token: CancellationToken,
+            cancellation_token: CancellationToken,
             sink: SharedSink,
         ) -> crate::provider::ProviderResult<StreamedResponse> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
@@ -1898,7 +1911,15 @@ mod tests {
                 ProviderScenario::RemovedTarget => {
                     Err(ProviderFailure::http(404, "selected model not found", None))
                 }
-                ProviderScenario::Success => {
+                ProviderScenario::Success | ProviderScenario::DelayedSuccess => {
+                    if scenario == ProviderScenario::DelayedSuccess {
+                        tokio::select! {
+                            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+                            () = cancellation_token.cancelled() => {
+                                return Ok(StreamedResponse::interrupted());
+                            }
+                        }
+                    }
                     sink.assistant_delta("recovered response");
                     sink.assistant_done();
                     Ok(StreamedResponse {
@@ -2072,6 +2093,8 @@ mod tests {
             model: None,
             reasoning: None,
             max_turns: None,
+            unlimited_turns: false,
+            unlimited_time: false,
             max_generation_duration: None,
             max_streamed_chars: None,
             max_tool_duration: None,
@@ -2658,6 +2681,38 @@ mod tests {
         let records = vec!["historical verification"];
 
         assert_eq!(run_local_last(&records, records.len()), None);
+    }
+
+    #[tokio::test]
+    async fn unlimited_time_preserves_session_limits_and_saved_policy() {
+        let fixture = TestStorage::new().await;
+        let budget = crate::run_budget::RunBudget {
+            max_run_seconds: Some(1),
+            max_session_active_seconds: Some(60),
+            ..Default::default()
+        };
+        fixture.storage.set_run_budget(budget).await.unwrap();
+        let (factory, _, attempts) = scenario_factory(ProviderScenario::DelayedSuccess);
+        let config = headless_test_config("hello", None);
+        let limited =
+            run_headless_scenario(&fixture, config.clone(), scenario_runtime(factory.clone()))
+                .await
+                .unwrap();
+        assert_eq!(
+            limited.exit_code(),
+            HeadlessStatus::BudgetExhausted.exit_code()
+        );
+        let limited_attempts = attempts.load(Ordering::SeqCst);
+        assert_eq!(fixture.storage.run_budget().await.unwrap(), budget);
+
+        let mut config = config;
+        config.unlimited_time = true;
+        let outcome = run_headless_scenario(&fixture, config, scenario_runtime(factory))
+            .await
+            .unwrap();
+        assert_eq!(outcome.exit_code(), 0);
+        assert!(attempts.load(Ordering::SeqCst) > limited_attempts);
+        assert_eq!(fixture.storage.run_budget().await.unwrap(), budget);
     }
 
     #[test]

@@ -27,11 +27,13 @@ Flags (both `--flag value` and `--flag=value` forms):
 | `--model <id>`, `--effort <level>` | one-run model/effort override, saved defaults untouched |
 | `--autonomy <level>` / `--yolo` | raise autonomy (default `ask`; `BONSAI_AUTONOMY` also works) |
 | `--max-turns <n>` | cap agent tool-call iterations |
+| `--unlimited-turns` | disable the per-run iteration ceiling; conflicts with `--max-turns` |
 | `--max-generation-seconds <s>` | cap each provider attempt (overrides `BONSAI_MAX_GENERATION_SECONDS`) |
 | `--max-output-chars <n>` | cap streamed reasoning+output per attempt (overrides `BONSAI_MAX_STREAMED_CHARS`) |
 | `--max-tool-seconds <s>` | cap each tool execution; a stalled call is cancelled without killing the run |
 | `--append-system-prompt <text>` | trusted operator instructions appended before generated project context |
 | `--timeout <s>` | cancel the whole run with exit 124 |
+| `--unlimited-time` | disable the saved per-run wall-clock ceiling for this invocation; conflicts with `--timeout`. Explicit session budgets, per-call limits and cancellation remain active |
 | `--isolation auto\|worktree\|off` | Git [recovery boundary](recovery.md); `auto` (default) isolates mutating runs at `balanced`+ |
 
 Other subcommands share the binary: `bonsai eval` ([Eval](eval.md)),

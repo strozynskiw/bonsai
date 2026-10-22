@@ -355,6 +355,7 @@ struct ToolRegistrySet {
 #[derive(Debug, Clone)]
 pub(crate) struct SessionBudget {
     pub(crate) max_iterations: usize,
+    pub(crate) unlimited_turns: bool,
     pub(crate) max_generation_duration: Option<Duration>,
     pub(crate) max_streamed_chars: Option<usize>,
     pub(crate) max_tool_duration: Option<Duration>,
@@ -714,6 +715,7 @@ impl Agent {
     /// model can synthesize already-collected evidence without extending the
     /// tool loop.
     pub(crate) fn restrict_to_conclusion_turn(&mut self) {
+        self.budget.unlimited_turns = false;
         self.budget.max_iterations = 1;
         self.tool_registry = Arc::new(ToolRegistry::new());
         self.refresh_project_info_runtime();
@@ -723,6 +725,7 @@ impl Agent {
     /// Replace every user-facing run limit. Unset fields restore the normal
     /// agent defaults rather than inventing an implicit budget.
     pub(crate) fn set_run_budget(&mut self, budget: crate::run_budget::RunBudget) {
+        self.budget.unlimited_turns = false;
         self.budget.max_iterations = budget.max_turns.unwrap_or(DEFAULT_MAX_ITERATIONS);
         self.budget.max_generation_duration = budget.max_generation_duration();
         self.budget.max_streamed_chars = budget.max_output_chars;
@@ -741,7 +744,13 @@ impl Agent {
     /// Override only the per-run turn limit while preserving cumulative
     /// session limits and alerts.
     pub(crate) fn set_run_max_turns(&mut self, max_turns: usize) {
+        self.budget.unlimited_turns = false;
         self.budget.max_iterations = max_turns;
+    }
+
+    /// Disable only the per-run turn ceiling, preserving all other budgets.
+    pub(crate) fn disable_run_turn_limit(&mut self) {
+        self.budget.unlimited_turns = true;
     }
 
     /// Set the timing policy used between retryable provider attempts.

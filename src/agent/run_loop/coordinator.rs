@@ -189,7 +189,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         );
         let max_iterations = self.agent.budget.max_iterations;
 
-        for _ in 0..max_iterations {
+        while self.agent.budget.unlimited_turns || self.state.turns_started < max_iterations {
             self.state.begin_turn();
             match self.advance_turn().await? {
                 TurnOutcome::Continue => {}
@@ -280,14 +280,16 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             self.refresh_tool_registry();
         }
 
-        if let Some(note) = self
-            .state
-            .policies
-            .recovery
-            .next_note(self.state.turns_started, self.agent.budget.max_iterations)
+        if !self.agent.budget.unlimited_turns
+            && let Some(note) = self
+                .state
+                .policies
+                .recovery
+                .next_note(self.state.turns_started, self.agent.budget.max_iterations)
         {
             self.agent.push_harness_note(&note);
-        } else if self.agent.mode == AgentMode::Coding
+        } else if !self.agent.budget.unlimited_turns
+            && self.agent.mode == AgentMode::Coding
             && self.agent.execution_lane.kind == ExecutionLaneKind::Parent
             && let Some(note) = self.state.policies.recovery.delivery_note(
                 self.state.turns_started,

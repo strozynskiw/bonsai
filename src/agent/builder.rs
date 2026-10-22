@@ -224,6 +224,7 @@ impl Agent {
             messages: vec![system_message],
             budget: SessionBudget {
                 max_iterations: builder.max_iterations,
+                unlimited_turns: false,
                 max_generation_duration: builder.max_generation_duration,
                 max_streamed_chars: builder.max_streamed_chars,
                 max_tool_duration: builder.max_tool_duration,

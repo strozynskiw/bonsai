@@ -121,6 +121,55 @@ async fn errors_when_max_iterations_are_exhausted() {
 }
 
 #[tokio::test]
+async fn unlimited_turns_preserves_session_budget() {
+    let fixture = TestFixture::new();
+    let responses = (0..3)
+        .map(|_| {
+            Ok(StreamedResponse {
+                tool_calls: vec![crate::provider::ToolCall {
+                    id: "call-1".into(),
+                    name: "unknown".into(),
+                    arguments: "{}".into(),
+                }],
+                terminal: crate::provider::StreamTerminal::Completed(
+                    crate::provider::FinishReason::Stop,
+                ),
+                ..StreamedResponse::default()
+            })
+        })
+        .collect();
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(responses)),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_run_budget(crate::run_budget::RunBudget {
+        max_turns: Some(1),
+        max_session_turns: Some(3),
+        ..Default::default()
+    });
+    agent.disable_run_turn_limit();
+    let err = agent
+        .run("hello", CancellationToken::new(), Arc::new(StdoutSink))
+        .await
+        .unwrap_err();
+    assert!(
+        err.downcast_ref::<crate::run_budget::RunBudgetExhaustion>()
+            .is_some()
+    );
+    assert!(!matches!(
+        err.downcast_ref::<crate::run_budget::RunBudgetExhaustion>(),
+        Some(crate::run_budget::RunBudgetExhaustion::MaxTurns { .. })
+    ));
+    agent.restrict_to_conclusion_turn();
+    assert!(!agent.budget.unlimited_turns);
+}
+
+#[tokio::test]
 async fn restored_session_turn_budget_stops_before_another_provider_call() {
     let fixture = TestFixture::new();
     let provider = Box::new(MockProvider::new(vec![Ok(StreamedResponse {

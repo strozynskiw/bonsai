@@ -204,6 +204,8 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
     let mut model: Option<String> = None;
     let mut reasoning: Option<crate::provider::ReasoningSelection> = None;
     let mut max_turns: Option<usize> = None;
+    let mut unlimited_turns = false;
+    let mut unlimited_time = false;
     let mut max_generation_duration: Option<Duration> = None;
     let mut max_streamed_chars: Option<usize> = None;
     let mut max_tool_duration: Option<Duration> = None;
@@ -285,6 +287,20 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
                     .ok_or_else(|| anyhow::anyhow!("--effort requires a reasoning level."))?;
                 set_reasoning(&mut reasoning, value)?;
                 remember_headless_flag(&mut headless_only_seen, "--effort");
+            }
+            "--unlimited-turns" => {
+                if unlimited_turns {
+                    anyhow::bail!("--unlimited-turns can only be provided once.");
+                }
+                unlimited_turns = true;
+                remember_headless_flag(&mut headless_only_seen, "--unlimited-turns");
+            }
+            "--unlimited-time" => {
+                if unlimited_time {
+                    anyhow::bail!("--unlimited-time can only be provided once.");
+                }
+                unlimited_time = true;
+                remember_headless_flag(&mut headless_only_seen, "--unlimited-time");
             }
             "--max-turns" => {
                 index += 1;
@@ -438,6 +454,12 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
         if let Some(flag) = tui_only_seen {
             anyhow::bail!("{flag} is only valid in interactive TUI mode.");
         }
+        if unlimited_turns && max_turns.is_some() {
+            anyhow::bail!("--unlimited-turns conflicts with --max-turns.");
+        }
+        if unlimited_time && timeout.is_some() {
+            anyhow::bail!("--unlimited-time conflicts with --timeout.");
+        }
         return Ok(CliMode::Print {
             config: HeadlessConfig {
                 prompt,
@@ -447,6 +469,8 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
                 model,
                 reasoning,
                 max_turns,
+                unlimited_turns,
+                unlimited_time,
                 max_generation_duration,
                 max_streamed_chars,
                 max_tool_duration,
@@ -1005,6 +1029,8 @@ Headless print mode:
     --model <id>
     --effort <level>
     --max-turns <n>
+    --unlimited-turns
+    --unlimited-time
     --max-generation-seconds <secs>
     --max-output-chars <n>
     --max-tool-seconds <secs>
@@ -1079,12 +1105,75 @@ mod tests {
             model: None,
             reasoning: None,
             max_turns: None,
+            unlimited_turns: false,
+            unlimited_time: false,
             max_generation_duration: None,
             max_streamed_chars: None,
             max_tool_duration: None,
             append_system_prompt: None,
             timeout: None,
             isolation: RecoveryMode::Auto,
+        }
+    }
+
+    #[test]
+    fn parse_cli_args_unlimited_turns_is_explicit_and_exclusive() {
+        let args = ["bonsai", "-p", "hello", "--unlimited-turns"].map(str::to_string);
+        let CliMode::Print { config } = parse_cli_args(&args).unwrap() else {
+            panic!("expected print")
+        };
+        assert!(config.unlimited_turns);
+        assert_eq!(config.max_turns, None);
+        let args = [
+            "bonsai",
+            "-p",
+            "hello",
+            "--unlimited-turns",
+            "--max-turns",
+            "2",
+        ]
+        .map(str::to_string);
+        assert!(parse_cli_args(&args).is_err());
+        let args = ["bonsai", "--unlimited-turns"].map(str::to_string);
+        assert!(parse_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_cli_args_unlimited_time_is_explicit_and_exclusive() {
+        let args = ["bonsai", "-p", "hello", "--unlimited-time"].map(str::to_string);
+        let CliMode::Print { config } = parse_cli_args(&args).unwrap() else {
+            panic!("expected print")
+        };
+        assert!(config.unlimited_time);
+        assert_eq!(config.timeout, None);
+        for invalid in [
+            vec!["bonsai", "--unlimited-time"],
+            vec![
+                "bonsai",
+                "-p",
+                "hello",
+                "--unlimited-time",
+                "--timeout",
+                "30",
+            ],
+            vec![
+                "bonsai",
+                "-p",
+                "hello",
+                "--timeout",
+                "30",
+                "--unlimited-time",
+            ],
+            vec![
+                "bonsai",
+                "-p",
+                "hello",
+                "--unlimited-time",
+                "--unlimited-time",
+            ],
+        ] {
+            let args = invalid.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(parse_cli_args(&args).is_err());
         }
     }
 
