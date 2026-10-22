@@ -78,7 +78,10 @@ class Dsh(BaseInstalledAgent):
         reasoning = selected["TB4_REASONING"]
         key = selected["DEEPSEEK_API_KEY"]
         timeout = selected["TB4_TIMEOUT_SECONDS"]
-        if not model or not endpoint or not key or not timeout or int(timeout) <= 0:
+        if timeout is None:
+            raise ValueError("DSH requires explicit finite timeout or unlimited")
+        duration = None if timeout == "unlimited" else int(timeout)
+        if not model or not endpoint or not key or (duration is not None and duration <= 0):
             raise ValueError("explicit model, endpoint, credential and timeout required")
         home = private_home("dsh")
         remote = EnvironmentPaths.agent_dir.as_posix()
@@ -99,7 +102,7 @@ class Dsh(BaseInstalledAgent):
         )
         command, env = isolated_command(command, {"DSH_HOME": home, "DSH_PERMISSION_MODE": "danger-full-access",
             "DEEPSEEK_API_KEY": key, "DEEPSEEK_BASE_URL": endpoint, "TB4_INSTRUCTION": instruction}, home)
-        result = await environment.exec(command=command, env=env, timeout_sec=int(timeout))
+        result = await environment.exec(command=command, env=env, timeout_sec=duration)
         with tempfile.TemporaryDirectory() as directory:
             local = Path(directory) / "stdout.jsonl"
             await environment.download_file(remote + "/dsh.jsonl", local)

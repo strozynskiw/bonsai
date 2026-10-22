@@ -4,7 +4,9 @@ import json
 import re
 
 
-def validate_receipts(raw: str, *, expected_model: str) -> dict:
+def validate_receipts(raw: str, *, expected_model: str, max_turns: int | None = 200) -> dict:
+    if max_turns is not None and (type(max_turns) is not int or max_turns <= 0):
+        raise ValueError("positive diagnostic turn limit required")
     if len(raw.encode()) > 16384:
         raise ValueError("diagnostic receipt bound exceeded")
     try:
@@ -18,7 +20,8 @@ def validate_receipts(raw: str, *, expected_model: str) -> dict:
             or first.get("boundary") != "agent_to_provider" or first.get("request_ordinal") != 1
             or first.get("model") != expected_model or last.get("type") != "summary"
             or last.get("capture_valid") is not True or type(last.get("requests")) is not int
-            or not 1 <= last["requests"] <= 200
+            or last["requests"] < 1
+            or (max_turns is not None and last["requests"] > max_turns)
             or not isinstance(last.get("stages"), list) or len(last["stages"]) != 3
             or not all(type(stage) is bool for stage in last["stages"])):
         raise ValueError("diagnostic identity/summary mismatch")
@@ -41,6 +44,6 @@ def validate_receipts(raw: str, *, expected_model: str) -> dict:
             raise ValueError("missing diagnostic request fingerprint")
     if last["stages"] != [stage in seen for stage in (1, 2, 3)]:
         raise ValueError("diagnostic checkpoint summary mismatch")
-    if last["requests"] == 200 and seen != {1, 2, 3}:
+    if max_turns is not None and last["requests"] == max_turns and max_turns >= 20 and seen != {1, 2, 3}:
         raise ValueError("expected checkpoints missing at diagnostic hard limit")
     return {"requests": last["requests"], "stages": sorted(seen), "boundary": "agent_to_provider"}

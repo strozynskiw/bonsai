@@ -41,12 +41,12 @@ class InstalledLifecycleTests(unittest.IsolatedAsyncioTestCase):
         from .bonsai import Bonsai
         from harbor.models.agent.context import AgentContext
         with tempfile.TemporaryDirectory() as directory:
-            agent = Bonsai(logs_dir=Path(directory), model_name="deepseek/fixture-model",
+            agent = Bonsai(logs_dir=Path(directory), model_name="anthropic-compatible/fixture-model",
                            autonomy="yolo", reasoning_effort="high", max_turns=10,
                            max_generation_seconds=20, max_output_chars=2000, max_tool_seconds=10,
-                           timeout_seconds=30, network="allow", extra_env={"DEEPSEEK_API_KEY": "fixture-secret",
-                           "DEEPSEEK_BASE_URL": "https://provider.invalid"})
-            environment = FakeEnvironment({"status": "completed", "provider": "deepseek", "model": "fixture-model"})
+                           timeout_seconds=30, network="allow", extra_env={"ANTHROPIC_COMPATIBLE_API_KEY": "fixture-secret",
+                           "ANTHROPIC_COMPATIBLE_BASE_URL": "https://provider.invalid"})
+            environment = FakeEnvironment({"status": "completed", "provider": "anthropic-compatible", "model": "fixture-model"})
             context = AgentContext()
             instruction = "quote ' \" $HOME\n雪"
             await agent.install(environment)
@@ -55,9 +55,37 @@ class InstalledLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(instruction, execution["env"].values())
             self.assertNotIn(instruction, execution["command"])
             self.assertNotIn("fixture-secret", execution["command"])
-            self.assertEqual(execution["env"]["DEEPSEEK_API_KEY"], "fixture-secret")
+            self.assertEqual(execution["env"]["ANTHROPIC_COMPATIBLE_API_KEY"], "fixture-secret")
+            self.assertEqual(execution["env"]["ANTHROPIC_COMPATIBLE_MODEL"], "fixture-model")
             self.assertIsNone(context.n_input_tokens)
             self.assertIsNone(context.cost_usd)
+
+    async def test_unlimited_profile_disables_wall_and_turn_limits(self):
+        from .bonsai import Bonsai
+        # Keep the generic adapter fixture independent of retired VM tooling.
+        from harbor.models.agent.context import AgentContext
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Bonsai(logs_dir=Path(directory), model_name="anthropic-compatible/fixture-model",
+                           autonomy="yolo", reasoning_effort="off", unlimited_turns=True,
+                           unlimited_time=True, max_generation_seconds=600,
+                           max_output_chars=200000, max_tool_seconds=600, network="allow",
+                           extra_env={"ANTHROPIC_COMPATIBLE_API_KEY": "fixture-secret",
+                           "ANTHROPIC_COMPATIBLE_BASE_URL": "https://provider.invalid"})
+            environment = FakeEnvironment({"status": "completed", "provider": "anthropic-compatible",
+                                           "model": "fixture-model"})
+            context = AgentContext()
+            await agent.run("fixture", environment, context)
+            execution = next(call for call in environment.calls if "-p -" in call["command"])
+            self.assertIn("--unlimited-turns", execution["command"])
+            self.assertNotIn("--max-turns", execution["command"])
+            self.assertIn("--unlimited-time", execution["command"])
+            self.assertNotIn("--timeout ", execution["command"])
+            self.assertIsNone(execution["timeout_sec"])
+            self.assertTrue(context.metadata["bonsai_profile"]["budgets"]["unlimited_time"])
+            self.assertIsNone(context.metadata["bonsai_profile"]["budgets"]["timeout_seconds"])
+            self.assertIn("--max-generation-seconds 600", execution["command"])
+            self.assertIn("--max-tool-seconds 600", execution["command"])
+            self.assertIsNone(context.metadata["bonsai_profile"]["budgets"]["max_turns"])
 
     async def test_diagnostic_forwards_only_explicit_private_checkpoint_path(self):
         from .bonsai import Bonsai
@@ -106,6 +134,46 @@ class InstalledLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(context.metadata["bonsai_terminal_state"], "infrastructure_invalid")
                     rows[-1]["capture_valid"] = True
 
+    async def test_bonsai_nonzero_exit_reads_private_json_and_preserves_usage(self):
+        from .bonsai import Bonsai
+        from harbor.models.agent.context import AgentContext
+
+        class MergedOutputEnvironment(FakeEnvironment):
+            async def exec(self, **kwargs):
+                if "-p -" in kwargs["command"]:
+                    self.calls.append(kwargs)
+                    return SimpleNamespace(return_code=1,
+                        stdout=json.dumps(self.payload) + "\nprivate tool stderr", stderr="")
+                return await super().exec(**kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Bonsai(logs_dir=Path(directory), model_name="anthropic-compatible/fixture-model",
+                           autonomy="yolo", reasoning_effort="off", max_turns=200,
+                           max_generation_seconds=20, max_output_chars=2000, max_tool_seconds=10,
+                           timeout_seconds=30, network="allow", extra_env={
+                               "ANTHROPIC_COMPATIBLE_API_KEY": "fixture-secret",
+                               "ANTHROPIC_COMPATIBLE_BASE_URL": "https://provider.invalid"})
+            environment = MergedOutputEnvironment({"status": "budget_exhausted",
+                "provider": "anthropic-compatible", "model": "fixture-model",
+                "usage": {"prompt_tokens": 123, "completion_tokens": 45}})
+            context = AgentContext()
+            with self.assertRaisesRegex(RuntimeError, "exited with status 1"):
+                await agent.run("prompt", environment, context)
+            self.assertEqual(context.metadata["bonsai_terminal_state"], "budget_exhausted")
+            self.assertEqual(context.n_input_tokens, 123)
+            self.assertEqual(context.n_output_tokens, 45)
+            self.assertTrue(any(call["command"].startswith("cat ") for call in environment.calls))
+            from harbor.agents.installed.base import NonZeroAgentExitCodeError
+            for field in ("provider", "model"):
+                with self.subTest(mismatched_field=field):
+                    mismatched = dict(environment.payload, **{field: "wrong-identity"})
+                    context = AgentContext()
+                    with self.assertRaisesRegex(RuntimeError, "provider/model mismatch") as raised:
+                        await agent.run("prompt", MergedOutputEnvironment(mismatched), context)
+                    self.assertNotIsInstance(raised.exception, NonZeroAgentExitCodeError)
+                    self.assertEqual(context.metadata["bonsai_terminal_state"], "infrastructure_invalid")
+                    self.assertIsNone(context.n_input_tokens)
+
     async def test_ambient_credentials_cannot_fill_missing_trial_overlay(self):
         from .bonsai import Bonsai
         from .dsh import Dsh
@@ -113,7 +181,7 @@ class InstalledLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {
                 "DEEPSEEK_API_KEY": "ambient-secret", "DEEPSEEK_BASE_URL": "https://ambient.invalid",
                 "TB4_REASONING": "high", "TB4_TIMEOUT_SECONDS": "30"}):
-            bonsai = Bonsai(logs_dir=Path(directory), model_name="deepseek/fixture-model",
+            bonsai = Bonsai(logs_dir=Path(directory), model_name="anthropic-compatible/fixture-model",
                             autonomy="yolo", reasoning_effort="high", max_turns=10,
                             max_generation_seconds=20, max_output_chars=2000, max_tool_seconds=10,
                             timeout_seconds=30, network="allow", extra_env={})
@@ -158,6 +226,20 @@ class InstalledLifecycleTests(unittest.IsolatedAsyncioTestCase):
             export = next(call for call in environment.calls if "dsh_export.mjs" in call["command"])
             self.assertIn("session-fresh", export["command"])
             self.assertNotIn("fixture-secret", export.get("env", {}).values())
+
+    async def test_dsh_explicit_unlimited_wall_time(self):
+        from .dsh import Dsh
+        from harbor.models.agent.context import AgentContext
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Dsh(logs_dir=Path(directory), model_name="fixture-model", extra_env={
+                "DEEPSEEK_API_KEY": "fixture-secret", "DEEPSEEK_BASE_URL": "https://provider.invalid",
+                "TB4_REASONING": "off", "TB4_TIMEOUT_SECONDS": "unlimited"})
+            environment = FakeEnvironment({"type": "session", "sessionId": "session-fresh"})
+            environment.sessions = {"session-fresh": json.dumps({"type": "turn/end",
+                "data": {"reason": {"kind": "completed"}}})}
+            await agent.run("prompt", environment, AgentContext())
+            execution = next(call for call in environment.calls if "--profile headless" in call["command"])
+            self.assertIsNone(execution["timeout_sec"])
 
     async def test_dsh_missing_or_ambiguous_session_stops_before_export(self):
         from .dsh import fresh_session_id

@@ -53,6 +53,7 @@ class Bonsai(BaseInstalledAgent):
             ],
         ),
         CliFlag("max_turns", cli="--max-turns", type="int"),
+        CliFlag("unlimited_turns", cli="--unlimited-turns", type="bool"),
         CliFlag(
             "max_generation_seconds",
             cli="--max-generation-seconds",
@@ -61,6 +62,7 @@ class Bonsai(BaseInstalledAgent):
         CliFlag("max_output_chars", cli="--max-output-chars", type="int"),
         CliFlag("max_tool_seconds", cli="--max-tool-seconds", type="int"),
         CliFlag("timeout_seconds", cli="--timeout", type="int"),
+        CliFlag("unlimited_time", cli="--unlimited-time", type="bool"),
     ]
     ENV_VARS = [
         EnvVar(
@@ -105,12 +107,20 @@ class Bonsai(BaseInstalledAgent):
         required_flags = {
             "autonomy",
             "reasoning_effort",
-            "max_turns",
             "max_generation_seconds",
             "max_output_chars",
             "max_tool_seconds",
-            "timeout_seconds",
         }
+        unlimited = self._resolved_flags.get("unlimited_turns") is True
+        if unlimited and "max_turns" in self._resolved_flags:
+            raise ValueError("unlimited_turns conflicts with max_turns")
+        if not unlimited:
+            required_flags.add("max_turns")
+        if self._resolved_flags.get("unlimited_time") is True:
+            if "timeout_seconds" in self._resolved_flags:
+                raise ValueError("unlimited_time conflicts with timeout_seconds")
+        else:
+            required_flags.add("timeout_seconds")
         missing = sorted(required_flags.difference(self._resolved_flags))
         if "BONSAI_SANDBOX_NETWORK" not in self._resolved_env_vars:
             missing.append("network")
@@ -143,6 +153,12 @@ class Bonsai(BaseInstalledAgent):
         flags = self.build_cli_flags()
         binary = shlex.quote(self._binary())
         home = private_home("bonsai")
+        catalog = self.extra_env.get("BONSAI_MODEL_CATALOG")
+        if catalog:
+            prepared = await environment.exec(command=f"umask 077; mkdir -p {shlex.quote(home + '/models')}")
+            if prepared.return_code:
+                raise RuntimeError("private benchmark model directory creation failed")
+            await environment.upload_file(catalog, home + "/models/benchmark.toml")
         # Explicitly forward only this provider's key and endpoint. A fresh
         # BONSAI_HOME alone does not remove image/host environment credentials.
         prefix = provider.upper().replace("-", "_")
@@ -151,6 +167,7 @@ class Bonsai(BaseInstalledAgent):
         env = {
             **self._resolved_env_vars,
             **provider_env,
+            f"{prefix}_MODEL": model,
             "BONSAI_PROVIDER": provider,
             "BONSAI_DOTENV": "off",
             "BONSAI_HOME": home,
@@ -178,18 +195,24 @@ class Bonsai(BaseInstalledAgent):
         )
         command, env = isolated_command(f"set -o pipefail; {command}", env, home)
         result = await environment.exec(command=command, env=env,
-                                        timeout_sec=self._resolved_flags["timeout_seconds"])
+                                        timeout_sec=self._resolved_flags.get("timeout_seconds"))
+        # Harbor merges process stderr into stdout. Read the private JSON file
+        # separately so nonzero exits cannot contaminate terminal evidence.
+        terminal = await environment.exec(
+            command=f"cat {shlex.quote(output_path.as_posix())}", timeout_sec=10)
+        payload = self._parse_payload(terminal.stdout or "") if terminal.return_code == 0 else None
         if checkpoint_path is not None:
             from .diagnostic_evidence import validate_receipts
             captured = await environment.exec(command=f"cat {shlex.quote(checkpoint_path)}", timeout_sec=10)
             if captured.return_code:
                 raise RuntimeError("diagnostic checkpoint evidence missing; stop batch")
             try:
-                validate_receipts(captured.stdout or "", expected_model=self.model_name)
+                validate_receipts(captured.stdout or "", expected_model=self.model_name,
+                                  max_turns=self._resolved_flags.get("max_turns"))
             except ValueError as error:
                 context.metadata = {"bonsai_terminal_state": "infrastructure_invalid"}
                 raise RuntimeError("diagnostic checkpoint evidence invalid; stop batch") from error
-            diagnostic_payload = self._parse_payload(result.stdout or "")
+            diagnostic_payload = payload
             if diagnostic_payload is None:
                 context.metadata = {"bonsai_terminal_state": "infrastructure_invalid"}
                 raise RuntimeError("diagnostic terminal evidence missing; stop batch")
@@ -198,15 +221,22 @@ class Bonsai(BaseInstalledAgent):
                 context.metadata = {"bonsai_terminal_state": "infrastructure_invalid"}
                 raise RuntimeError("diagnostic provider/model mismatch; stop batch")
             self._populate_context(context, diagnostic_payload)
+        # Validate identity before admitting any outcome to Harbor's verifier.
+        expected_model = self.model_name if checkpoint_path is not None else model
+        if payload is not None and (
+                payload.get("provider") != provider or payload.get("model") != expected_model):
+            context.metadata = {"bonsai_terminal_state": "infrastructure_invalid"}
+            raise RuntimeError("Bonsai selected provider/model mismatch; stop batch")
         # Do not include raw provider/tool output in Harbor's shared exception.
         if result.return_code != 0:
-            context.metadata = {"bonsai_terminal_state": "agent_failure"}
-            raise RuntimeError(f"Bonsai exited with status {result.return_code}; see private logs")
-        payload = self._parse_payload(result.stdout or "")
+            if payload is not None:
+                self._populate_context(context, payload)
+            else:
+                context.metadata = {"bonsai_terminal_state": "agent_failure"}
+            from harbor.agents.installed.base import NonZeroAgentExitCodeError
+            raise NonZeroAgentExitCodeError(
+                f"Bonsai exited with status {result.return_code}; see private logs")
         if payload is not None:
-            expected_model = self.model_name if checkpoint_path is not None else model
-            if payload.get("provider") != provider or payload.get("model") != expected_model:
-                raise RuntimeError("Bonsai selected provider/model mismatch; stop batch")
             if payload.get("status") not in {"completed", "success"}:
                 raise RuntimeError("Bonsai turn failed; see private logs")
             self._populate_context(context, payload)
@@ -221,10 +251,12 @@ class Bonsai(BaseInstalledAgent):
                 "reasoning_effort": self._resolved_flags["reasoning_effort"],
                 "autonomy": self._resolved_flags["autonomy"],
                 "network": self._resolved_env_vars["BONSAI_SANDBOX_NETWORK"],
-                "budgets": {key: self._resolved_flags[key] for key in (
+                "budgets": {key: self._resolved_flags.get(key) for key in (
                     "max_turns", "max_generation_seconds", "max_output_chars",
                     "max_tool_seconds", "timeout_seconds")},
             }
+            profile["budgets"]["unlimited_turns"] = self._resolved_flags.get("unlimited_turns", False)
+            profile["budgets"]["unlimited_time"] = self._resolved_flags.get("unlimited_time", False)
             profile["budgets"]["max_patch_bytes"] = 1_000_000
             context.metadata.update({
                 "bonsai_profile": profile,
