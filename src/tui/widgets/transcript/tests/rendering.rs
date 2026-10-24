@@ -178,6 +178,7 @@ fn tool_card_summarizes_todowrite_in_progress_item() {
             arguments: r#"{"todos":[{"content":"Inspect uncommitted changes","status":"in_progress"},{"content":"Run tests","status":"pending"}]}"#
                 .to_string(),
             delegated_model: None,
+            tool_result: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -206,6 +207,7 @@ fn tool_card_summarizes_todowrite_count_when_no_in_progress() {
             arguments: r#"{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"completed"}]}"#
                 .to_string(),
             delegated_model: None,
+            tool_result: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -243,6 +245,7 @@ fn tool_card_summarizes_question_options_without_raw_json() {
         })
         .to_string(),
         delegated_model: None,
+        tool_result: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
@@ -541,6 +544,7 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
                     name: "read".to_string(),
                     arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
                     delegated_model: None,
+                    tool_result: None,
                     status: ToolStatus::Succeeded,
                     result: Some("file contents".to_string()),
                     diff: None,
@@ -553,6 +557,7 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
                     name: "bash".to_string(),
                     arguments: r#"{"command":"cargo test"}"#.to_string(),
                     delegated_model: None,
+                    tool_result: None,
                     status: ToolStatus::Running,
                     result: None,
                     diff: None,

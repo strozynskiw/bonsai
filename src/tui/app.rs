@@ -1075,6 +1075,54 @@ impl AppState {
                 self.current_phase = Some(self.active_phase_text());
                 self.maybe_scroll_to_bottom_current();
             }
+            UiEvent::ToolResult {
+                id,
+                mut result,
+                observed_at,
+                observed_at_ms,
+            } => {
+                if result.status == crate::output::ToolExecutionStatus::Started
+                    && let Some(activity) = self.tool_activity_mut(&id)
+                    && activity.status != ToolStatus::Running
+                {
+                    if let Some(terminal) = &mut activity.tool_result {
+                        terminal.inherit_identifiers(Some(&result));
+                    }
+                    return;
+                }
+                result.inherit_identifiers(
+                    self.tool_activity(&id)
+                        .and_then(|activity| activity.tool_result.as_deref()),
+                );
+                let event = if result.status == crate::output::ToolExecutionStatus::Started {
+                    UiEvent::ToolOutput {
+                        id: id.clone(),
+                        output: result.preview.clone(),
+                        updated_at: observed_at,
+                    }
+                } else if let Some(diff) = result.diff() {
+                    UiEvent::ToolFinishedWithDiff {
+                        id: id.clone(),
+                        result: result.preview.clone(),
+                        status: result.status,
+                        diff: Box::new(diff.clone()),
+                        finished_at: observed_at,
+                        finished_at_ms: Some(observed_at_ms),
+                    }
+                } else {
+                    UiEvent::ToolFinished {
+                        id: id.clone(),
+                        result: result.preview.clone(),
+                        status: result.status,
+                        finished_at: observed_at,
+                        finished_at_ms: Some(observed_at_ms),
+                    }
+                };
+                self.reduce(AppAction::Agent(event));
+                if let Some(activity) = self.tool_activity_mut(&id) {
+                    activity.tool_result = Some(result);
+                }
+            }
             UiEvent::ToolFinished {
                 id,
                 result,
@@ -2134,6 +2182,7 @@ mod tests {
             name: name.to_string(),
             arguments: "{}".to_string(),
             delegated_model: None,
+            tool_result: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
@@ -4356,6 +4405,7 @@ mod tests {
                 name: "bash".to_string(),
                 arguments: "{\"command\":\"date\"}".to_string(),
                 delegated_model: None,
+                tool_result: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,
@@ -4382,6 +4432,7 @@ mod tests {
                 name: "read".to_string(),
                 arguments: "{}".to_string(),
                 delegated_model: None,
+                tool_result: None,
                 status: ToolStatus::Succeeded,
                 result: Some("ok".to_string()),
                 diff: None,

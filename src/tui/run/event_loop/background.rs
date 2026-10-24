@@ -1,5 +1,19 @@
 use super::*;
 
+fn deferred_tool_result(
+    id: String,
+    preview: String,
+    status: crate::output::ToolExecutionStatus,
+    finished_at_ms: Option<i64>,
+) -> UiEvent {
+    UiEvent::ToolResult {
+        id,
+        result: Box::new(crate::protocol::ToolResult::legacy(preview, status)),
+        observed_at: Instant::now(),
+        observed_at_ms: finished_at_ms.unwrap_or_else(crate::util::time::now_ms),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct BackgroundTaskUiEffect {
     pub(super) refresh_task_list: bool,
@@ -34,19 +48,18 @@ pub(super) fn apply_background_task_event(
             ..
         } => {
             effect.wake_candidate = !matches!(status, BackgroundTaskStatus::Stopped);
-            app.reduce(AppAction::Agent(UiEvent::ToolFinished {
+            app.reduce(AppAction::Agent(deferred_tool_result(
                 id,
-                result: summary,
-                status: if matches!(status, BackgroundTaskStatus::Stopped) {
+                summary,
+                if matches!(status, BackgroundTaskStatus::Stopped) {
                     crate::output::ToolExecutionStatus::Interrupted
                 } else if success {
                     crate::output::ToolExecutionStatus::Succeeded
                 } else {
                     crate::output::ToolExecutionStatus::Failed
                 },
-                finished_at: Instant::now(),
                 finished_at_ms,
-            }));
+            )));
         }
         BackgroundTaskEvent::Output { .. }
         | BackgroundTaskEvent::Finished { .. }
@@ -78,23 +91,21 @@ pub(super) fn apply_background_task_snapshot(
 
     if task.status.is_finished() {
         effect.wake_candidate = !matches!(task.status, BackgroundTaskStatus::Stopped);
-        app.reduce(AppAction::Agent(UiEvent::ToolFinished {
-            id: tool_call_id.clone(),
-            result: task.detail(),
-            status: if matches!(task.status, BackgroundTaskStatus::Stopped) {
+        app.reduce(AppAction::Agent(deferred_tool_result(
+            tool_call_id.clone(),
+            task.detail(),
+            if matches!(task.status, BackgroundTaskStatus::Stopped) {
                 crate::output::ToolExecutionStatus::Interrupted
             } else if task.status.is_success() {
                 crate::output::ToolExecutionStatus::Succeeded
             } else {
                 crate::output::ToolExecutionStatus::Failed
             },
-            finished_at: Instant::now(),
             // The snapshot's completion clock is authoritative — not the time
             // this UI pass observed it (#166).
-            finished_at_ms: task
-                .finished_at
+            task.finished_at
                 .and_then(crate::util::time::system_time_to_ms),
-        }));
+        )));
     }
 
     effect
@@ -142,19 +153,18 @@ pub(super) fn apply_terminal_event(
             ..
         } => {
             effect.wake_candidate = !matches!(status, TerminalStatus::Stopped);
-            app.reduce(AppAction::Agent(UiEvent::ToolFinished {
+            app.reduce(AppAction::Agent(deferred_tool_result(
                 id,
-                result: summary,
-                status: if matches!(status, TerminalStatus::Stopped) {
+                summary,
+                if matches!(status, TerminalStatus::Stopped) {
                     crate::output::ToolExecutionStatus::Interrupted
                 } else if success {
                     crate::output::ToolExecutionStatus::Succeeded
                 } else {
                     crate::output::ToolExecutionStatus::Failed
                 },
-                finished_at: Instant::now(),
                 finished_at_ms,
-            }));
+            )));
         }
         TerminalEvent::Output { .. }
         | TerminalEvent::WaitingForInput { .. }
@@ -278,23 +288,22 @@ pub(super) fn apply_terminal_snapshot(
     }
     if terminal.status.is_finished() {
         effect.wake_candidate = !matches!(terminal.status, TerminalStatus::Stopped);
-        app.reduce(AppAction::Agent(UiEvent::ToolFinished {
-            id: tool_call_id.clone(),
-            result: terminal.detail(),
-            status: if matches!(terminal.status, TerminalStatus::Stopped) {
+        app.reduce(AppAction::Agent(deferred_tool_result(
+            tool_call_id.clone(),
+            terminal.detail(),
+            if matches!(terminal.status, TerminalStatus::Stopped) {
                 crate::output::ToolExecutionStatus::Interrupted
             } else if terminal.status.is_success() {
                 crate::output::ToolExecutionStatus::Succeeded
             } else {
                 crate::output::ToolExecutionStatus::Failed
             },
-            finished_at: Instant::now(),
             // The snapshot's completion clock is authoritative — not the time
             // this UI pass observed it (#166).
-            finished_at_ms: terminal
+            terminal
                 .finished_at
                 .and_then(crate::util::time::system_time_to_ms),
-        }));
+        )));
     }
     effect
 }
@@ -381,10 +390,10 @@ pub(super) fn apply_completed_subagent_tool_calls(
             continue;
         }
 
-        app.reduce(AppAction::Agent(UiEvent::ToolFinished {
-            id: completion.tool_call_id,
-            result: completed_subagent_tool_result(&completion.snapshot),
-            status: match completion.snapshot.status {
+        app.reduce(AppAction::Agent(deferred_tool_result(
+            completion.tool_call_id,
+            completed_subagent_tool_result(&completion.snapshot),
+            match completion.snapshot.status {
                 crate::subagent::SubagentStatus::Succeeded => {
                     crate::output::ToolExecutionStatus::Succeeded
                 }
@@ -397,12 +406,11 @@ pub(super) fn apply_completed_subagent_tool_calls(
                     crate::output::ToolExecutionStatus::Failed
                 }
             },
-            finished_at: Instant::now(),
-            finished_at_ms: completion
+            completion
                 .snapshot
                 .finished_at
                 .and_then(crate::util::time::system_time_to_ms),
-        }));
+        )));
         changed = true;
     }
     changed

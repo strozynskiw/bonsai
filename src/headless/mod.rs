@@ -1294,7 +1294,7 @@ async fn persist_headless_snapshots(
     sink: &HeadlessSink,
     todo_store: &Arc<Mutex<TodoStore>>,
     plan_store: &Arc<Mutex<PlanDoc>>,
-    transcript_prefix: &[crate::tui::app::TranscriptItem],
+    transcript_prefix: &[crate::protocol::TranscriptItem],
 ) -> Result<()> {
     let agent_snapshot = crate::session_persist::AgentStateSnapshot::capture(agent);
     let mut transcript = transcript_prefix.to_vec();
@@ -2377,7 +2377,7 @@ mod tests {
             .expect("failed session should remain resumable");
         assert!(failed_snapshot.transcript.iter().any(|item| matches!(
             item,
-            crate::tui::app::TranscriptItem::UserMessage { text } if text == "first prompt"
+            crate::protocol::TranscriptItem::UserMessage { text } if text == "first prompt"
         )));
 
         *scenario
@@ -2406,7 +2406,7 @@ mod tests {
         assert_eq!(resumed_snapshot.summary.status, SessionStatus::Completed);
         assert!(resumed_snapshot.transcript.iter().any(|item| matches!(
             item,
-            crate::tui::app::TranscriptItem::AssistantMessage { text }
+            crate::protocol::TranscriptItem::AssistantMessage { text }
                 if text == "recovered response"
         )));
     }
@@ -2479,12 +2479,12 @@ mod tests {
                 .expect("failed session should remain persisted");
             assert!(snapshot.transcript.iter().any(|item| matches!(
                 item,
-                crate::tui::app::TranscriptItem::UserMessage { text }
+                crate::protocol::TranscriptItem::UserMessage { text }
                     if text == "preserve this prompt"
             )));
             assert!(!snapshot.transcript.iter().any(|item| matches!(
                 item,
-                crate::tui::app::TranscriptItem::AssistantMessage { text }
+                crate::protocol::TranscriptItem::AssistantMessage { text }
                     if text.contains("discarded partial response")
             )));
 

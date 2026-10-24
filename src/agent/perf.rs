@@ -185,6 +185,10 @@ impl OutputSink for PerfSink {
         self.inner.tool_output(id, output);
     }
 
+    fn tool_result(&self, id: &str, result: crate::protocol::ToolResult) {
+        self.inner.tool_result(id, result);
+    }
+
     fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
         self.inner.tool_finished(id, result, status);
     }

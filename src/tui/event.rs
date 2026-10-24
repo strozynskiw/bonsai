@@ -761,6 +761,12 @@ pub enum UiEvent {
         output: String,
         updated_at: Instant,
     },
+    ToolResult {
+        id: String,
+        result: Box<crate::protocol::ToolResult>,
+        observed_at: Instant,
+        observed_at_ms: i64,
+    },
     ToolFinished {
         id: String,
         result: String,

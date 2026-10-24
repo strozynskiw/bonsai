@@ -402,6 +402,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             finished_at: None,
             timing: Default::default(),
+            tool_result: None,
         };
         let item = TranscriptItem::ToolActivity(activity);
         let text = clean_transcript_item(&item);
@@ -427,6 +428,7 @@ mod tests {
                     started_at: std::time::Instant::now(),
                     finished_at: Some(std::time::Instant::now()),
                     timing: Default::default(),
+                    tool_result: None,
                 },
                 ToolActivity {
                     id: "call-2".to_string(),
@@ -439,6 +441,7 @@ mod tests {
                     started_at: std::time::Instant::now(),
                     finished_at: None,
                     timing: Default::default(),
+                    tool_result: None,
                 },
             ],
         });
@@ -465,6 +468,7 @@ mod tests {
                 started_at: std::time::Instant::now(),
                 finished_at: None,
                 timing: Default::default(),
+                tool_result: None,
             }],
         });
         let body = body_text_for(&group);

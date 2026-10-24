@@ -753,6 +753,7 @@ mod tests {
                 name: "read".to_string(),
                 arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
                 delegated_model: None,
+                tool_result: None,
                 status: ToolStatus::Succeeded,
                 result: Some("120 lines read".to_string()),
                 diff: None,
@@ -765,6 +766,7 @@ mod tests {
                 name: "edit".to_string(),
                 arguments: r#"{"file_path":"src/lib.rs"}"#.to_string(),
                 delegated_model: None,
+                tool_result: None,
                 status: ToolStatus::Succeeded,
                 result: Some("Edited src/lib.rs (+2 / -1)".to_string()),
                 diff: Some(Box::new(FileDiff {
@@ -810,6 +812,7 @@ mod tests {
                 name: "bash".to_string(),
                 arguments: r#"{"command":"cargo test"}"#.to_string(),
                 delegated_model: None,
+                tool_result: None,
                 status: ToolStatus::Running,
                 result: None,
                 diff: None,

@@ -979,42 +979,24 @@ pub(super) fn report_tool_completion(
     result: &ToolOutput,
     status: crate::output::ToolExecutionStatus,
 ) {
-    match result {
+    let preview = match result {
         ToolOutput::BackgroundTaskStarted { message, .. }
         | ToolOutput::SubagentStarted { message, .. } => {
-            sink.thinking(&format!("Started {}", tool_call.name));
-            sink.tool_output(&tool_call.id, &truncate(message, TOOL_RESULT_PREVIEW_CHARS));
+            truncate(message, TOOL_RESULT_PREVIEW_CHARS)
         }
-        ToolOutput::Edit { summary, diff } => {
-            sink.thinking(&format!("Finished {}", tool_call.name));
-            sink.tool_finished_with_diff(
-                &tool_call.id,
-                &truncate(summary, TOOL_RESULT_PREVIEW_CHARS),
-                status,
-                diff.clone(),
-            );
-        }
-        ToolOutput::Image { description, .. } => {
-            sink.thinking(&format!("Finished {}", tool_call.name));
-            sink.tool_finished(&tool_call.id, description, status);
-        }
+        ToolOutput::Image { description, .. } => description.clone(),
         ToolOutput::Command { rendered, .. } => {
-            sink.thinking(&format!("Finished {}", tool_call.name));
-            sink.tool_finished(
-                &tool_call.id,
-                &truncate_command_result(rendered, TOOL_RESULT_PREVIEW_CHARS),
-                status,
-            );
+            truncate_command_result(rendered, TOOL_RESULT_PREVIEW_CHARS)
         }
-        _ => {
-            sink.thinking(&format!("Finished {}", tool_call.name));
-            sink.tool_finished(
-                &tool_call.id,
-                &truncate(result.rendered_summary(), TOOL_RESULT_PREVIEW_CHARS),
-                status,
-            );
-        }
-    }
+        _ => truncate(result.rendered_summary(), TOOL_RESULT_PREVIEW_CHARS),
+    };
+    let phase = if status == crate::output::ToolExecutionStatus::Started {
+        "Started"
+    } else {
+        "Finished"
+    };
+    sink.thinking(&format!("{phase} {}", tool_call.name));
+    sink.tool_result(&tool_call.id, result.transcript_result(preview, status));
 }
 
 fn truncate_command_result(rendered: &str, max_chars: usize) -> String {

@@ -16,14 +16,13 @@ use crate::agent::{
     UsageTurnStatus,
 };
 use crate::plan::PlanDoc;
+use crate::protocol::{
+    CommandOutputKind, ExecutionGroup, ToolActivity, ToolStatus, TranscriptItem,
+};
 use crate::provider::{EstimateConfidence, InputCacheUsage, ReasoningSelection, TokenCounterKind};
 use crate::session::{ProviderSession, SaveAuthPolicy, SessionStore};
 use crate::todo::{TodoItem, TodoStatus};
 use crate::tool::read_evidence::{InspectionEventRecord, ReadEvidenceRecord};
-use crate::tui::event::CommandOutputKind;
-use crate::tui::transcript::{
-    ExecutionGroup, ToolActivity, ToolStatus, TranscriptItem, is_noisy_context_fallback_status,
-};
 use crate::util::time::{now_ms, system_time_from_ms, system_time_to_ms};
 
 /// Execute a SQLite mutation inside a transaction and preserve its error context.

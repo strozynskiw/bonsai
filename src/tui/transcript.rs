@@ -1,3 +1,5 @@
+mod protocol;
+
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -334,6 +336,7 @@ pub struct ToolActivity {
     pub delegated_model: Option<String>,
     pub status: ToolStatus,
     pub result: Option<String>,
+    pub tool_result: Option<Box<crate::protocol::ToolResult>>,
     pub diff: Option<Box<crate::diff::FileDiff>>,
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
@@ -350,6 +353,7 @@ impl ToolActivity {
             delegated_model: None,
             status: ToolStatus::Running,
             result: None,
+            tool_result: None,
             diff: None,
             started_at,
             finished_at: None,

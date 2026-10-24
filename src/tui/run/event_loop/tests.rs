@@ -927,7 +927,7 @@ async fn clear_rotation_flushes_dirty_edit_made_since_the_last_periodic_flush() 
     assert!(
         matches!(
             outgoing.transcript.as_slice(),
-            [TranscriptItem::UserMessage { text }] if text == "unflushed edit before switch"
+            [crate::protocol::TranscriptItem::UserMessage { text }] if text == "unflushed edit before switch"
         ),
         "dirty transcript edit must be flushed to the outgoing session before rotation, \
          got {:?}",
@@ -1785,7 +1785,7 @@ async fn ui_peer_delivery_persists_transcript_and_ack_in_one_boundary() {
         .unwrap();
     assert!(matches!(
         snapshot.transcript.as_slice(),
-        [TranscriptItem::PeerMessage {
+        [crate::protocol::TranscriptItem::PeerMessage {
             source_message_id: Some(id),
             text,
             ..
@@ -1834,7 +1834,7 @@ async fn periodic_snapshot_flush_runs_in_background_and_applies_signatures() {
         .unwrap();
     assert!(matches!(
         snapshot.transcript.as_slice(),
-        [TranscriptItem::UserMessage { text }] if text == "background persistence"
+        [crate::protocol::TranscriptItem::UserMessage { text }] if text == "background persistence"
     ));
     assert_ne!(signatures.transcript, 0);
 }
@@ -1897,8 +1897,8 @@ async fn superseded_background_flush_cannot_overwrite_newer_snapshot() {
     assert!(matches!(
         snapshot.transcript.as_slice(),
         [
-            TranscriptItem::UserMessage { text: older },
-            TranscriptItem::UserMessage { text: newer },
+            crate::protocol::TranscriptItem::UserMessage { text: older },
+            crate::protocol::TranscriptItem::UserMessage { text: newer },
         ] if older == "older snapshot" && newer == "newer snapshot"
     ));
     assert_eq!(
@@ -4977,6 +4977,7 @@ fn resume_marks_process_local_interactive_terminal_as_lost() {
         name: "bash".to_string(),
         arguments: r#"{"command":"repl","interactive":true}"#.to_string(),
         delegated_model: None,
+        tool_result: None,
         status: ToolStatus::Running,
         result: Some("Started interactive terminal pty-1".to_string()),
         diff: None,
@@ -7037,7 +7038,7 @@ async fn resume_without_argument_restores_latest_prior_project_session() {
     storage
         .replace_transcript_snapshot(
             prior_id,
-            &[TranscriptItem::UserMessage {
+            &[crate::protocol::TranscriptItem::UserMessage {
                 text: "restore me".to_string(),
             }],
         )
@@ -7951,7 +7952,7 @@ async fn saved_plan_source_resume_restores_source_session_and_tracks_plan() {
     storage
         .replace_transcript_snapshot(
             source_id,
-            &[TranscriptItem::UserMessage {
+            &[crate::protocol::TranscriptItem::UserMessage {
                 text: "source context".to_string(),
             }],
         )
@@ -8313,6 +8314,7 @@ fn tool_detail_modal_scroll_is_clamped_to_rendered_content() {
             name: "read".to_string(),
             arguments: r#"{"path":"src/main.rs"}"#.to_string(),
             delegated_model: None,
+            tool_result: None,
             status: ToolStatus::Succeeded,
             result: Some(result),
             diff: None,

@@ -217,6 +217,100 @@ pub enum ToolOutput {
 }
 
 impl ToolOutput {
+    /// Capture durable content before execution-only evidence is consumed.
+    pub(crate) fn transcript_result(
+        &self,
+        preview: String,
+        status: ToolExecutionStatus,
+    ) -> crate::protocol::ToolResult {
+        use crate::protocol::{
+            ContentPart, ContextProvenance, OutputTruncation, ToolResult, ToolResultContent as C,
+        };
+        let content = match self {
+            Self::Command {
+                rendered,
+                stdout,
+                stderr,
+                exit_code,
+                timed_out,
+                truncation,
+            } => C::Command {
+                rendered: rendered.clone(),
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+                exit_code: *exit_code,
+                timed_out: *timed_out,
+                truncation: truncation.as_ref().map(|t| OutputTruncation {
+                    path: t.path.clone(),
+                    total_chars: t.total_chars,
+                    preview_chars: t.preview_chars,
+                }),
+            },
+            Self::Edit { summary, diff } => C::Edit {
+                summary: summary.clone(),
+                diff: Box::new(diff.clone()),
+            },
+            Self::Image {
+                mime_type,
+                base64_data,
+                description,
+            } => C::Content {
+                parts: vec![ContentPart::Image {
+                    mime_type: mime_type.clone(),
+                    base64_data: base64_data.clone(),
+                    description: description.clone(),
+                }],
+            },
+            Self::TrustedContext { content, .. } => C::Context {
+                provenance: ContextProvenance::Trusted,
+                content: content.clone(),
+            },
+            Self::UntrustedContext {
+                source, content, ..
+            } => C::Context {
+                provenance: ContextProvenance::Untrusted {
+                    source: source.clone(),
+                },
+                content: content.clone(),
+            },
+            Self::BackgroundTaskStarted { task_id, message } => C::BackgroundTask {
+                task_id: task_id.clone(),
+                message: message.clone(),
+            },
+            Self::SubagentStarted {
+                subtask_id,
+                message,
+            } => C::Subagent {
+                subtask_id: subtask_id.clone(),
+                message: message.clone(),
+            },
+            Self::WaitStarted { message, .. } => C::Wait {
+                message: message.clone(),
+            },
+            Self::Text(text)
+            | Self::Read { text, .. }
+            | Self::ReadReuse { text, .. }
+            | Self::ReadDelta { text, .. }
+            | Self::MissingPathReuse { text }
+            | Self::TextWithUsage { text, .. } => C::Content {
+                parts: vec![ContentPart::Text { text: text.clone() }],
+            },
+        };
+        ToolResult {
+            status,
+            preview,
+            content,
+            background_task_id: match self {
+                Self::BackgroundTaskStarted { task_id, .. } => Some(task_id.clone()),
+                _ => None,
+            },
+            subagent_id: match self {
+                Self::SubagentStarted { subtask_id, .. } => Some(subtask_id.clone()),
+                _ => None,
+            },
+        }
+    }
+
     pub(crate) const fn context_provenance(&self) -> Option<crate::agent::MessageProvenance> {
         match self {
             Self::TrustedContext { .. } => Some(crate::agent::MessageProvenance::Harness),

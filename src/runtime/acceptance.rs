@@ -113,7 +113,7 @@ async fn persist_surface_snapshot(surface: SurfaceKind) -> String {
     let session_id = fixture
         .start_session_with("openai-compatible", "acceptance-model")
         .await;
-    let transcript = vec![crate::tui::app::TranscriptItem::UserMessage {
+    let transcript = vec![crate::protocol::TranscriptItem::UserMessage {
         text: format!("{} acceptance", surface.label()),
     }];
     let plan = crate::plan::PlanDoc::default();
@@ -140,7 +140,7 @@ async fn persist_surface_snapshot(surface: SurfaceKind) -> String {
         .expect("surface acceptance snapshot should load")
         .expect("persisted acceptance session should exist");
     match snapshot.transcript.as_slice() {
-        [crate::tui::app::TranscriptItem::UserMessage { text }] => text
+        [crate::protocol::TranscriptItem::UserMessage { text }] => text
             .split_whitespace()
             .last()
             .unwrap_or_default()

@@ -8,7 +8,7 @@ impl AppState {
     /// `get_mut`, so the transcript layout cache invalidates exactly the one
     /// item hosting this tool (an `iter_mut` search would pessimistically
     /// re-render the whole transcript on every tool status/output update).
-    fn tool_activity_mut(&mut self, tool_id: &str) -> Option<&mut ToolActivity> {
+    pub(super) fn tool_activity_mut(&mut self, tool_id: &str) -> Option<&mut ToolActivity> {
         let index = self.transcript.iter().position(|item| match item {
             TranscriptItem::ToolActivity(activity) => activity.id == tool_id,
             TranscriptItem::ExecutionGroup(group) => {
@@ -121,7 +121,7 @@ impl AppState {
                 } else {
                     ToolStatus::Failed
                 };
-                activity.finished_at = Some(finished_at);
+                activity.finished_at.get_or_insert(finished_at);
                 activity.timing.finish(wall_finished_at_ms);
             }
         }
@@ -251,7 +251,10 @@ impl AppState {
                 activity.result.as_deref(),
                 &result,
             ));
-            activity.finished_at = Some(finished_at);
+            let mut typed = crate::protocol::ToolResult::legacy(result.clone(), status);
+            typed.inherit_identifiers(activity.tool_result.as_deref());
+            activity.tool_result = Some(Box::new(typed));
+            activity.finished_at.get_or_insert(finished_at);
             activity
                 .timing
                 .finish(finished_at_ms.unwrap_or_else(crate::util::time::now_ms));
@@ -296,8 +299,15 @@ impl AppState {
                 activity.result.as_deref(),
                 &result,
             ));
+            let mut typed = crate::protocol::ToolResult::legacy(result.clone(), status);
+            typed.content = crate::protocol::ToolResultContent::Edit {
+                summary: result,
+                diff: Box::new(diff.clone()),
+            };
+            typed.inherit_identifiers(activity.tool_result.as_deref());
+            activity.tool_result = Some(Box::new(typed));
             activity.diff = Some(Box::new(diff));
-            activity.finished_at = Some(finished_at);
+            activity.finished_at.get_or_insert(finished_at);
             activity
                 .timing
                 .finish(finished_at_ms.unwrap_or_else(crate::util::time::now_ms));
@@ -318,6 +328,7 @@ impl AppState {
 fn reset_tool_clock(activity: &mut ToolActivity, started_at: Instant) {
     activity.started_at = started_at;
     activity.finished_at = None;
+    activity.tool_result = None;
     activity.timing = crate::tui::transcript::ToolCallTiming {
         started_at_ms: Some(crate::util::time::now_ms()),
         ..crate::tui::transcript::ToolCallTiming::default()

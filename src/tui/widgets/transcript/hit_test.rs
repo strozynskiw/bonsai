@@ -185,6 +185,7 @@ mod tests {
             name: "read".to_string(),
             arguments: "{}".to_string(),
             delegated_model: None,
+            tool_result: None,
             status: ToolStatus::Running,
             result: None,
             diff: None,
@@ -200,6 +201,7 @@ mod tests {
             name: "read".to_string(),
             arguments: format!(r#"{{"file_path":"{path}"}}"#),
             delegated_model: None,
+            tool_result: None,
             status,
             result: Some(
                 if matches!(status, ToolStatus::Failed) {

@@ -7,38 +7,7 @@ use tokio::sync::watch;
 use crate::agent::ContextReport;
 use crate::diff::FileDiff;
 
-/// Domain outcome of a tool call, separate from whether its Rust future
-/// returned `Ok`. Commands and delegated agents may execute successfully at the
-/// transport layer while still failing their task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolExecutionStatus {
-    Succeeded,
-    Failed,
-    Started,
-    Skipped,
-    Interrupted,
-}
-
-impl ToolExecutionStatus {
-    pub const fn is_success(self) -> bool {
-        matches!(self, Self::Succeeded)
-    }
-
-    pub const fn is_failure(self) -> bool {
-        matches!(self, Self::Failed | Self::Interrupted)
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Succeeded => "ok",
-            Self::Failed => "failed",
-            Self::Started => "started",
-            Self::Skipped => "skipped",
-            Self::Interrupted => "interrupted",
-        }
-    }
-}
+pub use crate::protocol::ToolExecutionStatus;
 
 /// One tool call as it begins, batched into [`OutputSink::tool_calls_started`]
 /// so all calls in a turn surface to the UI in a single frame.
@@ -163,6 +132,16 @@ pub trait OutputSink: Send + Sync {
     }
     fn tool_started(&self, _id: &str, _name: &str, _arguments: &str) {}
     fn tool_output(&self, _id: &str, _output: &str) {}
+    /// Deliver a complete structured payload; legacy sinks retain their display callbacks.
+    fn tool_result(&self, id: &str, result: crate::protocol::ToolResult) {
+        if result.status == ToolExecutionStatus::Started {
+            self.tool_output(id, &result.preview);
+        } else if let Some(diff) = result.diff() {
+            self.tool_finished_with_diff(id, &result.preview, result.status, diff.clone());
+        } else {
+            self.tool_finished(id, &result.preview, result.status);
+        }
+    }
     fn tool_finished(&self, _id: &str, _result: &str, _status: ToolExecutionStatus) {}
     fn tool_finished_with_diff(
         &self,

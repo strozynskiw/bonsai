@@ -246,6 +246,7 @@ mod tests {
             name: name.to_string(),
             arguments: "{}".to_string(),
             delegated_model: None,
+            tool_result: None,
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,

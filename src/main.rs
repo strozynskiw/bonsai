@@ -34,6 +34,7 @@ mod peer;
 mod permissions;
 mod plan;
 mod process_group;
+mod protocol;
 mod provider;
 mod recovery;
 mod redact;

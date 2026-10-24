@@ -627,6 +627,7 @@ fn tool_detail_caps_rendered_diff_rows() {
         })
         .to_string(),
         delegated_model: None,
+        tool_result: None,
         status: ToolStatus::Succeeded,
         result: Some("done".to_string()),
         diff: Some(Box::new(crate::diff::build_file_diff(
@@ -708,6 +709,7 @@ fn tool_detail_extracts_authorization_into_its_own_section() {
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
             delegated_model: None,
+            tool_result: None,
         status: ToolStatus::Succeeded,
         result: Some(
             "[authorization] allow · high · network,code-execution · built-in-default · \
@@ -768,6 +770,7 @@ fn agent_tool_detail_sections_subagent_report() {
         name: "agent".to_string(),
         arguments: r#"{"agent":"review","background":true}"#.to_string(),
         delegated_model: None,
+        tool_result: None,
         status: ToolStatus::Succeeded,
         result: Some(result.to_string()),
         diff: None,
@@ -837,6 +840,7 @@ fn agent_tool_detail_shows_adopted_subagent_model_while_running() {
         name: "agent".to_string(),
         arguments: r#"{"agent":"research"}"#.to_string(),
         delegated_model: None,
+        tool_result: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
@@ -867,6 +871,7 @@ fn tool_detail_has_no_model_row_without_a_subagent_run() {
         name: "bash".to_string(),
         arguments: r#"{"command":"cargo test"}"#.to_string(),
         delegated_model: None,
+        tool_result: None,
         status: ToolStatus::Running,
         result: None,
         diff: None,
@@ -891,6 +896,7 @@ fn agent_tool_detail_shows_placeholder_while_subagent_runs() {
         name: "agent".to_string(),
         arguments: r#"{"agent":"review"}"#.to_string(),
         delegated_model: None,
+        tool_result: None,
         status: ToolStatus::Running,
         result: Some("[authorization] allow · high · network · built-in-default".to_string()),
         diff: None,

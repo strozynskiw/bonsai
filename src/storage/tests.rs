@@ -1,5 +1,6 @@
 use super::*;
 use crate::permissions::Permission;
+use crate::protocol::ToolCallTiming;
 use crate::provider::{EstimateConfidence, ReasoningEffort, TokenCounterKind};
 use crate::session::{CredentialSource, CredentialStore};
 use crate::storage::test_utils::TestStorage;
@@ -8,10 +9,188 @@ use crate::tool::read_evidence::{
     ReadEvidenceRecord, ReadProvenance,
 };
 use crate::tool::{ReadCoverage, ReadEvidence, ReadWindow, digest_content};
-use crate::tui::transcript::ToolCallTiming;
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
 };
+
+#[tokio::test]
+async fn typed_tool_payloads_round_trip_in_legacy_block_metadata() {
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let entries = crate::protocol::tests::results()
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            let mut activity =
+                ToolActivity::new(format!("typed-{index}"), "tool".into(), "{}".into());
+            activity.status = ToolStatus::from_execution_status(result.status);
+            activity.result = Some(result.preview.clone());
+            activity.diff = result.diff().cloned().map(Box::new);
+            activity.tool_result = Some(Box::new(result));
+            activity.timing = ToolCallTiming {
+                started_at_ms: Some(200),
+                finished_at_ms: Some(100),
+                legacy_duration_ms: Some(5),
+            };
+            TranscriptItem::ToolActivity(activity)
+        })
+        .collect::<Vec<_>>();
+    let mut transcript = entries.clone();
+    transcript.push(TranscriptItem::ExecutionGroup(ExecutionGroup {
+        id: 91,
+        finished: true,
+        tools: entries
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptItem::ToolActivity(tool) => Some(tool.clone()),
+                _ => None,
+            })
+            .collect(),
+    }));
+    fixture
+        .storage
+        .replace_transcript_snapshot(session_id, &transcript)
+        .await
+        .unwrap();
+    let snapshot = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&snapshot.transcript).unwrap(),
+        serde_json::to_value(&transcript).unwrap()
+    );
+    let rows = sqlx::query(
+        "SELECT kind, body, metadata_json FROM transcript_blocks WHERE session_id = ? ORDER BY seq",
+    )
+    .bind(session_id.as_i64())
+    .fetch_all(&fixture.storage.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), entries.len() + 1);
+    assert_eq!(rows[0].get::<String, _>("kind"), "tool");
+    assert_eq!(rows[0].get::<String, _>("body"), "preview");
+    let metadata: Value = serde_json::from_str(&rows[0].get::<String, _>("metadata_json")).unwrap();
+    assert!(metadata.get("tool_result").is_some());
+    sqlx::query("UPDATE transcript_blocks SET metadata_json = json_remove(metadata_json, '$.tool_result', '$.tool_results') WHERE session_id = ?").bind(session_id.as_i64()).execute(&fixture.storage.pool).await.unwrap();
+    let legacy = fixture
+        .storage
+        .load_session_snapshot(session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    for entry in legacy.transcript {
+        let tools = match entry {
+            TranscriptItem::ToolActivity(tool) => vec![tool],
+            TranscriptItem::ExecutionGroup(group) => group.tools,
+            _ => panic!("unexpected legacy category"),
+        };
+        for tool in tools {
+            assert!(
+                matches!(tool.tool_result.unwrap().content, crate::protocol::ToolResultContent::Content { parts } if parts == vec![crate::protocol::ContentPart::Text { text: "preview".into() }])
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn duplicate_call_ids_restore_one_canonical_typed_result() {
+    use crate::protocol::{ToolExecutionStatus, ToolResult, ToolResultContent};
+
+    let fixture = TestStorage::new().await;
+    let session_id = fixture.start_session().await;
+    let mut original = ToolActivity::new("duplicate-typed".into(), "tool".into(), "{}".into());
+    let mut original_result = crate::protocol::tests::results().remove(1);
+    original_result.preview = "earlier command failure".into();
+    original.status = ToolStatus::Failed;
+    original.result = Some(original_result.preview.clone());
+    original.tool_result = Some(Box::new(original_result));
+    original.timing = ToolCallTiming {
+        started_at_ms: Some(100),
+        finished_at_ms: Some(150),
+        legacy_duration_ms: Some(50),
+    };
+
+    for grouped_winner in [false, true] {
+        for legacy_winner in [false, true] {
+            let mut latest = original.clone();
+            let mut latest_result = crate::protocol::tests::results().remove(2);
+            latest_result.preview = "latest edit success".into();
+            latest.status = ToolStatus::Succeeded;
+            latest.result = Some(latest_result.preview.clone());
+            latest.diff = latest_result.diff().cloned().map(Box::new);
+            latest.tool_result = (!legacy_winner).then(|| Box::new(latest_result.clone()));
+            latest.timing = ToolCallTiming {
+                started_at_ms: Some(200),
+                finished_at_ms: Some(250),
+                legacy_duration_ms: Some(50),
+            };
+            let group = |tool| {
+                TranscriptItem::ExecutionGroup(ExecutionGroup {
+                    id: 42,
+                    finished: true,
+                    tools: vec![tool],
+                })
+            };
+            let transcript = if grouped_winner {
+                vec![
+                    TranscriptItem::ToolActivity(original.clone()),
+                    group(latest.clone()),
+                ]
+            } else {
+                vec![
+                    group(original.clone()),
+                    TranscriptItem::ToolActivity(latest.clone()),
+                ]
+            };
+            fixture
+                .storage
+                .replace_transcript_snapshot(session_id, &transcript)
+                .await
+                .unwrap();
+            let snapshot = fixture
+                .storage
+                .load_session_snapshot(session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = if legacy_winner {
+                ToolResult::legacy(latest_result.preview, ToolExecutionStatus::Succeeded)
+            } else {
+                latest_result
+            };
+            for entry in snapshot.transcript {
+                let tools = match entry {
+                    TranscriptItem::ToolActivity(tool) => vec![tool],
+                    TranscriptItem::ExecutionGroup(group) => group.tools,
+                    _ => panic!("expected tool appearance"),
+                };
+                for tool in tools {
+                    assert_eq!(tool.status, latest.status);
+                    assert_eq!(tool.result, latest.result);
+                    assert_eq!(
+                        serde_json::to_value(&tool.diff).unwrap(),
+                        serde_json::to_value(&latest.diff).unwrap()
+                    );
+                    assert_eq!(
+                        serde_json::to_value(tool.tool_result).unwrap(),
+                        serde_json::to_value(&expected).unwrap()
+                    );
+                    assert_eq!(tool.timing.started_at_ms, original.timing.started_at_ms);
+                    assert_eq!(tool.timing.finished_at_ms, original.timing.finished_at_ms);
+                    if legacy_winner {
+                        assert!(matches!(
+                            expected.content,
+                            ToolResultContent::Content { .. }
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
 
 fn make_store() -> SessionStore {
     let mut store = SessionStore::default();
@@ -1674,7 +1853,7 @@ async fn queued_user_blocks_are_dropped_on_restore() {
                 TranscriptItem::QueuedUserMessage {
                     id: 7,
                     text: "still pending".to_string(),
-                    delivery: crate::tui::app::FollowUpDelivery::Queue,
+                    delivery: crate::protocol::FollowUpDelivery::Queue,
                 },
             ],
         )
@@ -1698,14 +1877,12 @@ async fn queued_user_blocks_are_dropped_on_restore() {
 
 #[tokio::test]
 async fn duplicate_tool_call_id_does_not_abort_transcript_snapshot() {
-    use crate::tui::transcript::{ToolActivity, ToolStatus};
-    use std::time::Instant;
+    use crate::protocol::{ToolActivity, ToolStatus};
 
     let fixture = TestStorage::new().await;
     let storage = &fixture.storage;
     let session_id = fixture.start_session().await;
 
-    let now = Instant::now();
     let activity = |result: &str| ToolActivity {
         id: "dup-call".to_string(),
         name: "read".to_string(),
@@ -1714,8 +1891,7 @@ async fn duplicate_tool_call_id_does_not_abort_transcript_snapshot() {
         status: ToolStatus::Succeeded,
         result: Some(result.to_string()),
         diff: None,
-        started_at: now,
-        finished_at: Some(now),
+        tool_result: None,
         timing: Default::default(),
     };
 
@@ -3248,7 +3424,6 @@ async fn usage_dashboard_aggregates_across_sessions() {
     }
 
     // Tool calls on s1: three bash (one failed, one interrupted), one read.
-    let started_at = Instant::now();
     let tool = |id: &str, name: &str, status: ToolStatus| ToolActivity {
         id: id.to_string(),
         name: name.to_string(),
@@ -3257,8 +3432,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
         status,
         result: Some("done".to_string()),
         diff: None,
-        started_at,
-        finished_at: Some(started_at + Duration::from_millis(10)),
+        tool_result: None,
         timing: Default::default(),
     };
     storage
@@ -3266,7 +3440,7 @@ async fn usage_dashboard_aggregates_across_sessions() {
             s1,
             &[TranscriptItem::ExecutionGroup(ExecutionGroup {
                 id: 1,
-                finished_at: Some(started_at + Duration::from_millis(10)),
+                finished: true,
                 tools: vec![
                     tool("call-1", "bash", ToolStatus::Succeeded),
                     tool("call-2", "bash", ToolStatus::Failed),
@@ -6143,10 +6317,9 @@ async fn transcript_snapshot_rehydrates_execution_group_tools() {
         )
         .await
         .unwrap();
-    let started_at = Instant::now();
     let transcript = vec![TranscriptItem::ExecutionGroup(ExecutionGroup {
         id: 7,
-        finished_at: Some(started_at + Duration::from_millis(5)),
+        finished: true,
         tools: vec![ToolActivity {
             id: "call-1".to_string(),
             name: "bash".to_string(),
@@ -6155,8 +6328,7 @@ async fn transcript_snapshot_rehydrates_execution_group_tools() {
             status: ToolStatus::Succeeded,
             result: Some("ok".to_string()),
             diff: None,
-            started_at,
-            finished_at: Some(started_at + Duration::from_millis(5)),
+            tool_result: None,
             timing: Default::default(),
         }],
     })];
@@ -6188,7 +6360,6 @@ async fn transcript_snapshot_rehydrates_execution_group_tools() {
 async fn transcript_snapshot_round_trips_delegated_agent_model() {
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;
-    let started_at = Instant::now();
     let activity = ToolActivity {
         id: "agent-1".to_string(),
         name: "agent".to_string(),
@@ -6197,8 +6368,7 @@ async fn transcript_snapshot_round_trips_delegated_agent_model() {
         status: ToolStatus::Succeeded,
         result: Some("done".to_string()),
         diff: None,
-        started_at,
-        finished_at: Some(started_at),
+        tool_result: None,
         timing: Default::default(),
     };
     let transcript = vec![
@@ -6206,7 +6376,7 @@ async fn transcript_snapshot_round_trips_delegated_agent_model() {
         TranscriptItem::ExecutionGroup(ExecutionGroup {
             id: 1,
             tools: vec![activity],
-            finished_at: Some(started_at),
+            finished: true,
         }),
     ];
 
@@ -6235,7 +6405,6 @@ async fn transcript_snapshot_round_trips_delegated_agent_model() {
 async fn self_review_tool_block_metadata_contains_structured_findings() {
     let fixture = TestStorage::new().await;
     let session_id = fixture.start_session().await;
-    let started_at = Instant::now();
     let transcript = vec![TranscriptItem::ToolActivity(ToolActivity {
         id: "self-review-1".to_string(),
         name: "agent".to_string(),
@@ -6244,8 +6413,7 @@ async fn self_review_tool_block_metadata_contains_structured_findings() {
         status: ToolStatus::Succeeded,
         result: Some("Major: src/lib.rs:1 is wrong.\nNit: rename it.".to_string()),
         diff: None,
-        started_at,
-        finished_at: Some(started_at + Duration::from_millis(5)),
+        tool_result: None,
         timing: Default::default(),
     })];
 
@@ -6282,7 +6450,6 @@ async fn tool_call_snapshot_records_real_start_and_finish_timestamps() {
         )
         .await
         .unwrap();
-    let started_at = Instant::now();
     // Wall-clock endpoints are captured at lifecycle entry/finish, not at
     // flush time: pick fixed values so persistence can be asserted exactly.
     let wall_started_at_ms = 1_700_000_000_000;
@@ -6290,16 +6457,15 @@ async fn tool_call_snapshot_records_real_start_and_finish_timestamps() {
         "call-1".to_string(),
         "bash".to_string(),
         r#"{"cmd":"cargo test"}"#.to_string(),
-        started_at,
     );
     activity.status = ToolStatus::Succeeded;
     activity.result = Some("ok".to_string());
-    activity.finished_at = Some(started_at + Duration::from_millis(250));
+    activity.timing.legacy_duration_ms = Some(250);
     activity.timing.started_at_ms = Some(wall_started_at_ms);
     activity.timing.finish(wall_started_at_ms + 250);
     let transcript = vec![TranscriptItem::ExecutionGroup(ExecutionGroup {
         id: 1,
-        finished_at: Some(started_at + Duration::from_millis(250)),
+        finished: true,
         tools: vec![activity],
     })];
 
@@ -6364,7 +6530,7 @@ async fn tool_call_timing_row(
     storage: &Storage,
     session_id: SessionId,
     call_id: &str,
-) -> crate::tui::transcript::ToolCallTiming {
+) -> crate::protocol::ToolCallTiming {
     let (started, finished, duration): (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT started_at_ms, finished_at_ms, duration_ms FROM tool_calls \
          WHERE session_id = ? AND call_id = ?",
@@ -6374,7 +6540,7 @@ async fn tool_call_timing_row(
     .fetch_one(&storage.pool)
     .await
     .unwrap();
-    crate::tui::transcript::ToolCallTiming {
+    crate::protocol::ToolCallTiming {
         started_at_ms: started,
         finished_at_ms: finished,
         legacy_duration_ms: duration,
@@ -6382,7 +6548,6 @@ async fn tool_call_timing_row(
 }
 
 fn timing_activity(id: &str, status: ToolStatus, timing: ToolCallTiming) -> ToolActivity {
-    let started_at = Instant::now();
     ToolActivity {
         id: id.to_string(),
         name: "read".to_string(),
@@ -6391,11 +6556,7 @@ fn timing_activity(id: &str, status: ToolStatus, timing: ToolCallTiming) -> Tool
         status,
         result: None,
         diff: None,
-        started_at,
-        finished_at: timing.finished_at_ms.map(|_| {
-            let elapsed_ms = timing.legacy_duration_ms.unwrap_or_default().max(0) as u64;
-            started_at + Duration::from_millis(elapsed_ms)
-        }),
+        tool_result: None,
         timing,
     }
 }
@@ -6459,7 +6620,7 @@ async fn duplicate_call_id_preserves_first_non_null_timing_and_latest_payload() 
                 )),
                 TranscriptItem::ExecutionGroup(ExecutionGroup {
                     id: 9,
-                    finished_at: Some(Instant::now()),
+                    finished: true,
                     tools: vec![timing_activity(
                         "dup-1",
                         ToolStatus::Failed,
@@ -6496,15 +6657,11 @@ async fn reversed_wall_clock_preserves_negative_chronology_and_nonnegative_durat
 
     // The wall clock moved backward 100ms between the endpoints: preserve that
     // chronology while keeping monotonic elapsed-time telemetry non-negative.
-    let mut activity = ToolActivity::new(
-        "call-neg".to_string(),
-        "bash".to_string(),
-        "{}".to_string(),
-        Instant::now(),
-    );
+    let mut activity =
+        ToolActivity::new("call-neg".to_string(), "bash".to_string(), "{}".to_string());
     activity.status = ToolStatus::Succeeded;
     activity.result = Some("ok".to_string());
-    activity.finished_at = Some(activity.started_at + Duration::from_millis(12));
+    activity.timing.legacy_duration_ms = Some(12);
     activity.timing.started_at_ms = Some(1_700_000_000_100);
     activity.timing.finish(1_700_000_000_000);
     let transcript = vec![TranscriptItem::ToolActivity(activity)];
@@ -6530,7 +6687,8 @@ async fn reversed_wall_clock_preserves_negative_chronology_and_nonnegative_durat
         panic!("expected tool activity");
     };
     assert_eq!(reloaded.timing.signed_duration_ms(), Some(-100));
-    assert_eq!(reloaded.duration(), Duration::from_millis(12));
+    let display = crate::tui::transcript::ToolActivity::from(reloaded.clone());
+    assert_eq!(display.duration(), Duration::from_millis(12));
 
     // Re-flushing the reloaded snapshot is byte-identical.
     storage
@@ -6550,12 +6708,8 @@ async fn legacy_tool_call_without_endpoints_round_trips_unchanged() {
     let storage = &fixture.storage;
     let session_id = fixture.start_session().await;
 
-    let mut activity = ToolActivity::new(
-        "legacy-1".to_string(),
-        "read".to_string(),
-        "{}".to_string(),
-        Instant::now(),
-    );
+    let mut activity =
+        ToolActivity::new("legacy-1".to_string(), "read".to_string(), "{}".to_string());
     activity.status = ToolStatus::Succeeded;
     activity.result = Some("ok".to_string());
     storage

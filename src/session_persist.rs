@@ -7,10 +7,10 @@ use async_openai::types::chat::ChatCompletionRequestMessage;
 
 use crate::agent::{Agent, ContextControlState, ContextMessageSnapshot, UsageTotals, UsageTurn};
 use crate::context_view::CompactionEvent;
+use crate::protocol::{ToolActivity, TranscriptItem};
 use crate::storage::{SessionId, SessionSnapshot, Storage};
 use crate::todo::TodoItem;
 use crate::tool::read_evidence::{InspectionEventRecord, ReadEvidenceRecord};
-use crate::tui::app::{ToolActivity, TranscriptItem};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AgentStateSignatures {
@@ -275,7 +275,7 @@ impl<'a> SessionSnapshotWriter<'a> {
                 .rev()
                 .find_map(|item| match item {
                     TranscriptItem::CommandOutput {
-                        kind: crate::tui::event::CommandOutputKind::Error,
+                        kind: crate::protocol::CommandOutputKind::Error,
                         text,
                     } => Some(text.as_str()),
                     TranscriptItem::Error { error } => Some(error.detail.as_str()),
@@ -725,15 +725,33 @@ pub(crate) fn derive_session_title(input: &str) -> Option<String> {
     Some(format!("{}…", head.trim_end()))
 }
 
+fn suppressed_transcript_item(item: &TranscriptItem) -> bool {
+    match item {
+        TranscriptItem::AssistantMessage { text }
+        | TranscriptItem::ReasoningSummary { text }
+        | TranscriptItem::WorkLog { text }
+        | TranscriptItem::PeerMessage { text, .. } => text.trim().is_empty(),
+        TranscriptItem::CommandOutput {
+            kind: crate::protocol::CommandOutputKind::Status,
+            text,
+        } => {
+            text.starts_with("[context] prompt estimate ")
+                && text.contains("continuing with heuristic fallback")
+        }
+        TranscriptItem::ExecutionGroup(group) => group.tools.is_empty(),
+        _ => false,
+    }
+}
+
 pub(crate) fn transcript_signature(transcript: &[TranscriptItem]) -> u64 {
     let mut hasher = DefaultHasher::new();
     transcript
         .iter()
-        .filter(|item| !item.is_suppressed())
+        .filter(|item| !suppressed_transcript_item(item))
         .count()
         .hash(&mut hasher);
     for item in transcript {
-        if item.is_suppressed() {
+        if suppressed_transcript_item(item) {
             continue;
         }
         match item {
@@ -773,7 +791,7 @@ pub(crate) fn transcript_signature(transcript: &[TranscriptItem]) -> u64 {
             TranscriptItem::ExecutionGroup(group) => {
                 "group".hash(&mut hasher);
                 group.id.hash(&mut hasher);
-                group.finished_at.is_some().hash(&mut hasher);
+                group.finished.hash(&mut hasher);
                 group.tools.len().hash(&mut hasher);
                 for activity in &group.tools {
                     hash_tool_activity(activity, &mut hasher);
@@ -980,7 +998,10 @@ fn hash_tool_activity(activity: &ToolActivity, hasher: &mut DefaultHasher) {
     activity.arguments.hash(hasher);
     activity.status.as_db_str().hash(hasher);
     activity.result.hash(hasher);
-    activity.finished_at.is_some().hash(hasher);
+    activity.timing.finished_at_ms.is_some().hash(hasher);
+    if let Ok(payload) = serde_json::to_string(&activity.tool_result) {
+        payload.hash(hasher);
+    }
     activity.timing.started_at_ms.hash(hasher);
     activity.timing.finished_at_ms.hash(hasher);
     activity.timing.legacy_duration_ms.hash(hasher);
@@ -997,7 +1018,6 @@ fn hash_tool_activity(activity: &ToolActivity, hasher: &mut DefaultHasher) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     fn agent_snapshot() -> AgentStateSnapshot {
         AgentStateSnapshot {
@@ -1165,7 +1185,7 @@ mod tests {
         let fixture = crate::storage::test_utils::TestStorage::new().await;
         let session_id = fixture.start_session().await;
         let transcript = vec![TranscriptItem::CommandOutput {
-            kind: crate::tui::event::CommandOutputKind::Status,
+            kind: crate::protocol::CommandOutputKind::Status,
             text: "Durable action required.".to_string(),
         }];
         let plan = crate::plan::PlanDoc::default();
@@ -1198,7 +1218,7 @@ mod tests {
         assert!(matches!(
             stored.transcript.as_slice(),
             [TranscriptItem::CommandOutput {
-                kind: crate::tui::event::CommandOutputKind::Status,
+                kind: crate::protocol::CommandOutputKind::Status,
                 text,
             }] if text == "Durable action required."
         ));
@@ -1206,12 +1226,8 @@ mod tests {
 
     #[test]
     fn timing_only_tool_change_updates_transcript_signature() {
-        let mut activity = ToolActivity::new(
-            "call-1".to_string(),
-            "read".to_string(),
-            "{}".to_string(),
-            Instant::now(),
-        );
+        let mut activity =
+            ToolActivity::new("call-1".to_string(), "read".to_string(), "{}".to_string());
         activity.timing.started_at_ms = None;
         let before = vec![TranscriptItem::ToolActivity(activity.clone())];
         activity.timing.started_at_ms = Some(1_700_000_000_000);

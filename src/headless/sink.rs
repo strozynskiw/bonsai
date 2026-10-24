@@ -59,7 +59,7 @@ impl HeadlessSink {
         self.recorder.user_message(text);
     }
 
-    pub(crate) fn take_transcript(&self) -> Vec<crate::tui::app::TranscriptItem> {
+    pub(crate) fn take_transcript(&self) -> Vec<crate::protocol::TranscriptItem> {
         self.recorder.take()
     }
 
@@ -375,9 +375,20 @@ impl OutputSink for HeadlessSink {
         });
     }
 
+    fn tool_result(&self, id: &str, result: crate::protocol::ToolResult) {
+        if result.status == crate::output::ToolExecutionStatus::Started {
+            self.tool_output(id, &result.preview);
+        } else {
+            self.record_tool_finished_output(id, &result.preview, result.status, result.diff());
+        }
+        self.recorder.tool_result(id, result);
+    }
+
     fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
-        self.recorder.tool_finished(id, result, status, None);
-        self.record_tool_finished_output(id, result, status, None);
+        self.tool_result(
+            id,
+            crate::protocol::ToolResult::legacy(result.to_string(), status),
+        );
     }
 
     fn tool_finished_with_diff(
@@ -387,9 +398,12 @@ impl OutputSink for HeadlessSink {
         status: crate::output::ToolExecutionStatus,
         diff: crate::diff::FileDiff,
     ) {
-        self.recorder
-            .tool_finished(id, result, status, Some(diff.clone()));
-        self.record_tool_finished_output(id, result, status, Some(&diff));
+        let mut typed = crate::protocol::ToolResult::legacy(result.to_string(), status);
+        typed.content = crate::protocol::ToolResultContent::Edit {
+            summary: result.to_string(),
+            diff: Box::new(diff),
+        };
+        self.tool_result(id, typed);
     }
 
     fn workspace_changed(&self, paths: &[String], intent: &str) {

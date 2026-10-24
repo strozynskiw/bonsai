@@ -178,8 +178,13 @@ pub(in crate::tui::run) async fn persist_changed_app_snapshots(
         return;
     }
     let writer = crate::session_persist::SessionSnapshotWriter::new(storage, session_id);
+    let transcript = app
+        .transcript
+        .iter()
+        .map(crate::protocol::TranscriptItem::from)
+        .collect::<Vec<_>>();
     let snapshot = crate::session_persist::SessionSnapshotData {
-        transcript: app.transcript.as_slice(),
+        transcript: &transcript,
         plan: &app.plan,
         todos: &app.todo,
         agent: None,
@@ -400,8 +405,13 @@ async fn persist_captured_snapshot(
         };
     }
     let writer = crate::session_persist::SessionSnapshotWriter::new(&storage, session_id);
+    let transcript = capture
+        .transcript
+        .iter()
+        .map(crate::protocol::TranscriptItem::from)
+        .collect::<Vec<_>>();
     let data = crate::session_persist::SessionSnapshotData {
-        transcript: capture.transcript.as_slice(),
+        transcript: &transcript,
         plan: &capture.plan,
         todos: &capture.todos,
         agent: agent_snapshot.as_ref(),
@@ -1351,8 +1361,9 @@ pub(in crate::tui) async fn resume_session(
     let mut transcript_items = snapshot
         .transcript
         .iter()
-        .filter(|item| !item.is_suppressed())
         .cloned()
+        .map(TranscriptItem::from)
+        .filter(|item| !item.is_suppressed())
         .collect::<Vec<_>>();
     reconcile_self_review_tool_calls(&mut transcript_items, &snapshot.self_review_runs);
     let lost_terminal_ids = normalize_lost_interactive_terminals(&mut transcript_items);
@@ -1821,7 +1832,12 @@ pub(in crate::tui::run) fn cached_model_signature(
 }
 
 pub(in crate::tui::run) fn transcript_signature(transcript: &[TranscriptItem]) -> u64 {
-    crate::session_persist::transcript_signature(transcript)
+    crate::session_persist::transcript_signature(
+        &transcript
+            .iter()
+            .map(crate::protocol::TranscriptItem::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(in crate::tui::run) fn plan_signature(plan: &crate::plan::PlanDoc) -> u64 {

@@ -1848,6 +1848,7 @@ mod tests {
                         name: "bash".to_string(),
                         arguments: "{\"command\":\"echo hi\"}".to_string(),
                         delegated_model: None,
+                        tool_result: None,
                         status: ToolStatus::Failed,
                         result: Some("ok".to_string()),
                         diff: None,
@@ -1860,6 +1861,7 @@ mod tests {
                         name: "read".to_string(),
                         arguments: "{\"file_path\":\"a\"}".to_string(),
                         delegated_model: None,
+                        tool_result: None,
                         status: ToolStatus::Succeeded,
                         result: Some("ok".to_string()),
                         diff: None,
@@ -1907,6 +1909,7 @@ mod tests {
                     name: "write".to_string(),
                     arguments: "{\"file_path\":\"a\"}".to_string(),
                     delegated_model: None,
+                    tool_result: None,
                     status: ToolStatus::Running,
                     result: None,
                     diff: Some(Box::new(FileDiff {

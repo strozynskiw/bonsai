@@ -143,6 +143,50 @@ impl Storage {
         .await
         .with_context(|| format!("Failed to load transcript for session {session_id}"))?;
 
+        // The tool row uses the last appearance of each call ID. Resolve typed
+        // metadata with the same order, including absent/malformed payloads:
+        // an older structured result must not survive a newer legacy result.
+        let mut tool_results = HashMap::new();
+        for row in &rows {
+            let kind: String = row.try_get("kind")?;
+            let metadata_json: String = row.try_get("metadata_json")?;
+            let Ok(metadata) = serde_json::from_str::<Value>(&metadata_json) else {
+                continue;
+            };
+            match kind.as_str() {
+                "tool" => {
+                    if let Some(id) = metadata.get("id").and_then(Value::as_str) {
+                        tool_results.insert(
+                            id.to_string(),
+                            metadata.get("tool_result").cloned().and_then(|value| {
+                                serde_json::from_value::<Box<crate::protocol::ToolResult>>(value)
+                                    .ok()
+                            }),
+                        );
+                    }
+                }
+                "execution_group" => {
+                    if let Some(ids) = metadata.get("tool_ids").and_then(Value::as_array) {
+                        for id in ids.iter().filter_map(Value::as_str) {
+                            tool_results.insert(
+                                id.to_string(),
+                                metadata
+                                    .get("tool_results")
+                                    .and_then(|results| results.get(id))
+                                    .cloned()
+                                    .and_then(|value| {
+                                        serde_json::from_value::<Box<crate::protocol::ToolResult>>(
+                                            value,
+                                        )
+                                        .ok()
+                                    }),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
             let kind: String = row.try_get("kind")?;
@@ -175,7 +219,7 @@ impl Storage {
                         text: body,
                     }),
                 "error" => TranscriptItem::Error {
-                    error: crate::tui::event::UiError {
+                    error: crate::protocol::TranscriptError {
                         title,
                         detail: body,
                     },
@@ -201,17 +245,21 @@ impl Storage {
                         text: body,
                     }
                 }
-                "tool" => load_tool_block(&metadata_json, &tools).unwrap_or_else(|| {
-                    TranscriptItem::CommandOutput {
-                        kind: CommandOutputKind::Status,
-                        text: titled_body(title, body),
-                    }
-                }),
-                "execution_group" => load_execution_group_block(&metadata_json, &tools)
-                    .unwrap_or_else(|| TranscriptItem::CommandOutput {
-                        kind: CommandOutputKind::Status,
-                        text: titled_body(title, body),
-                    }),
+                "tool" => {
+                    load_tool_block(&metadata_json, &tools, &tool_results).unwrap_or_else(|| {
+                        TranscriptItem::CommandOutput {
+                            kind: CommandOutputKind::Status,
+                            text: titled_body(title, body),
+                        }
+                    })
+                }
+                "execution_group" => {
+                    load_execution_group_block(&metadata_json, &tools, &tool_results)
+                        .unwrap_or_else(|| TranscriptItem::CommandOutput {
+                            kind: CommandOutputKind::Status,
+                            text: titled_body(title, body),
+                        })
+                }
                 _ => TranscriptItem::CommandOutput {
                     kind: CommandOutputKind::Status,
                     text: body,
@@ -328,24 +376,39 @@ fn is_suppressed_transcript_block(kind: &str, body: &str) -> bool {
 }
 
 fn is_suppressed_transcript_item(item: &TranscriptItem) -> bool {
-    item.is_suppressed()
+    match item {
+        TranscriptItem::AssistantMessage { text }
+        | TranscriptItem::ReasoningSummary { text }
+        | TranscriptItem::WorkLog { text }
+        | TranscriptItem::PeerMessage { text, .. } => text.trim().is_empty(),
+        TranscriptItem::CommandOutput {
+            kind: CommandOutputKind::Status,
+            text,
+        } => is_noisy_context_fallback_status(text),
+        TranscriptItem::ExecutionGroup(group) => group.tools.is_empty(),
+        _ => false,
+    }
 }
 
 fn load_tool_block(
     metadata_json: &str,
     tools: &HashMap<String, ToolCallRecord>,
+    tool_results: &HashMap<String, Option<Box<crate::protocol::ToolResult>>>,
 ) -> Option<TranscriptItem> {
     let metadata = serde_json::from_str::<Value>(metadata_json).ok()?;
     let id = metadata.get("id")?.as_str()?;
     let record = tools.get(id)?;
-    Some(TranscriptItem::ToolActivity(tool_activity_from_record(
-        record,
-    )))
+    let mut activity = tool_activity_from_record(record);
+    if let Some(Some(result)) = tool_results.get(id) {
+        activity.tool_result = Some(result.clone());
+    }
+    Some(TranscriptItem::ToolActivity(activity))
 }
 
 fn load_execution_group_block(
     metadata_json: &str,
     tools: &HashMap<String, ToolCallRecord>,
+    tool_results: &HashMap<String, Option<Box<crate::protocol::ToolResult>>>,
 ) -> Option<TranscriptItem> {
     let metadata = serde_json::from_str::<Value>(metadata_json).ok()?;
     let group_id = metadata.get("id")?.as_u64()?;
@@ -358,28 +421,25 @@ fn load_execution_group_block(
         .iter()
         .filter_map(Value::as_str)
         .filter_map(|id| tools.get(id))
-        .map(tool_activity_from_record)
+        .map(|record| {
+            let mut activity = tool_activity_from_record(record);
+            if let Some(Some(result)) = tool_results.get(&record.call_id) {
+                activity.tool_result = Some(result.clone());
+            }
+            activity
+        })
         .collect::<Vec<_>>();
     if group_tools.is_empty() {
         return None;
     }
     Some(TranscriptItem::ExecutionGroup(ExecutionGroup {
         id: group_id,
-        finished_at: finished.then(Instant::now),
+        finished,
         tools: group_tools,
     }))
 }
 
 fn tool_activity_from_record(record: &ToolCallRecord) -> ToolActivity {
-    let now = Instant::now();
-    // Monotonic fields stay process-local display evidence; a negative
-    // persisted duration (clock rollback) clamps here and is never re-derived.
-    let duration = record
-        .duration_ms
-        .and_then(|ms| u64::try_from(ms).ok())
-        .map(Duration::from_millis)
-        .unwrap_or_default();
-    let finished_at = (!matches!(record.status, ToolStatus::Running)).then_some(now);
     ToolActivity {
         id: record.call_id.clone(),
         name: record.name.clone(),
@@ -388,11 +448,21 @@ fn tool_activity_from_record(record: &ToolCallRecord) -> ToolActivity {
         status: record.status,
         result: record.result.clone(),
         diff: record.diff.clone().map(Box::new),
-        started_at: now.checked_sub(duration).unwrap_or(now),
-        finished_at,
+        tool_result: record.result.as_ref().map(|text| {
+            crate::protocol::ToolResult::legacy(
+                text.clone(),
+                match record.status {
+                    ToolStatus::Running => crate::output::ToolExecutionStatus::Started,
+                    ToolStatus::Succeeded => crate::output::ToolExecutionStatus::Succeeded,
+                    ToolStatus::Failed => crate::output::ToolExecutionStatus::Failed,
+                    ToolStatus::Interrupted => crate::output::ToolExecutionStatus::Interrupted,
+                },
+            )
+            .into()
+        }),
         // Canonical chronology travels verbatim with the snapshot model, so
         // every appearance of this call id hydrates from the same timing.
-        timing: crate::tui::transcript::ToolCallTiming {
+        timing: crate::protocol::ToolCallTiming {
             started_at_ms: record.started_at_ms,
             finished_at_ms: record.finished_at_ms,
             legacy_duration_ms: record.duration_ms,
@@ -439,10 +509,7 @@ async fn insert_tool_call(
     // columns instead of corrupting duration aggregates. A legacy row without
     // live monotonic evidence retains its prior duration verbatim.
     let timing = &activity.timing;
-    let duration_ms = activity
-        .finished_at
-        .map(|_| duration_to_i64_ms(activity.duration()))
-        .or(timing.legacy_duration_ms);
+    let duration_ms = timing.legacy_duration_ms;
 
     sqlx::query(
         r#"
@@ -512,6 +579,7 @@ fn transcript_block_record(item: &TranscriptItem) -> Result<TranscriptBlockRecor
             let mut metadata = json!({
                 "id": activity.id,
                 "status": activity.status.as_db_str(),
+                "tool_result": activity.tool_result,
             });
             if let Some(review) = self_review_tool_metadata(activity) {
                 metadata["self_review"] = review;
@@ -616,8 +684,9 @@ fn execution_group_block(group: &ExecutionGroup) -> TranscriptBlockRecord {
         .collect::<serde_json::Map<_, _>>();
     let mut metadata = json!({
         "id": group.id,
-        "finished": group.finished_at.is_some(),
+        "finished": group.finished,
         "tool_ids": group.tools.iter().map(|activity| activity.id.as_str()).collect::<Vec<_>>(),
+        "tool_results": group.tools.iter().filter_map(|activity| activity.tool_result.as_ref().map(|result| (activity.id.clone(), json!(result)))).collect::<serde_json::Map<_, _>>(),
     });
     if !self_reviews.is_empty() {
         metadata["self_reviews"] = Value::Object(self_reviews);
@@ -665,6 +734,7 @@ fn json_text_or_wrapped(text: &str) -> String {
     }
 }
 
-fn duration_to_i64_ms(duration: Duration) -> i64 {
-    duration.as_millis().min(i64::MAX as u128) as i64
+fn is_noisy_context_fallback_status(text: &str) -> bool {
+    text.starts_with("[context] prompt estimate ")
+        && text.contains("continuing with heuristic fallback")
 }

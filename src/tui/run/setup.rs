@@ -496,17 +496,28 @@ impl OutputSink for TuiSink {
         });
     }
 
-    fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
-        self.completion_evidence
-            .record_tool_result(id, result, status, None);
-        let _ = self.sender.send(UiEvent::ToolFinished {
+    fn tool_result(&self, id: &str, result: crate::protocol::ToolResult) {
+        if result.status != crate::output::ToolExecutionStatus::Started {
+            self.completion_evidence.record_tool_result(
+                id,
+                &result.preview,
+                result.status,
+                result.diff(),
+            );
+        }
+        let _ = self.sender.send(UiEvent::ToolResult {
             id: id.to_string(),
-            result: result.to_string(),
-            status,
-            finished_at: Instant::now(),
-            // Captured beside the lifecycle event, not at flush/reduce time.
-            finished_at_ms: Some(crate::util::time::now_ms()),
+            result: Box::new(result),
+            observed_at: Instant::now(),
+            observed_at_ms: crate::util::time::now_ms(),
         });
+    }
+
+    fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
+        self.tool_result(
+            id,
+            crate::protocol::ToolResult::legacy(result.to_string(), status),
+        );
     }
 
     fn tool_finished_with_diff(
@@ -516,16 +527,12 @@ impl OutputSink for TuiSink {
         status: crate::output::ToolExecutionStatus,
         diff: FileDiff,
     ) {
-        self.completion_evidence
-            .record_tool_result(id, result, status, Some(&diff));
-        let _ = self.sender.send(UiEvent::ToolFinishedWithDiff {
-            id: id.to_string(),
-            result: result.to_string(),
-            status,
+        let mut typed = crate::protocol::ToolResult::legacy(result.to_string(), status);
+        typed.content = crate::protocol::ToolResultContent::Edit {
+            summary: result.to_string(),
             diff: Box::new(diff),
-            finished_at: Instant::now(),
-            finished_at_ms: Some(crate::util::time::now_ms()),
-        });
+        };
+        self.tool_result(id, typed);
     }
 
     fn delivery_barrier(&self) -> Option<crate::output::OutputDeliveryBarrier> {
@@ -603,6 +610,116 @@ mod tests {
     };
     use crate::headless::{HeadlessSink, OutputFormat};
     use crate::output::{OutputSink, ToolExecutionStatus};
+
+    #[test]
+    fn typed_results_reach_both_transcripts_once_without_structure_loss() {
+        let headless = HeadlessSink::new(
+            OutputFormat::Json,
+            Box::new(Vec::<u8>::new()),
+            Box::new(Vec::<u8>::new()),
+        );
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let tui = TuiSink {
+            sender,
+            completion_evidence: Default::default(),
+        };
+        let mut app = crate::tui::app::AppState::new("codex", "test".into(), "/tmp".into(), None);
+        for (index, result) in crate::protocol::tests::results().into_iter().enumerate() {
+            let id = format!("typed-{index}");
+            headless.tool_started(&id, "tool", "{}");
+            tui.tool_started(&id, "tool", "{}");
+            headless.tool_result(&id, result.clone());
+            tui.tool_result(&id, result.clone());
+            let mut completions = 0;
+            while let Ok(event) = receiver.try_recv() {
+                if matches!(event, UiEvent::ToolResult { .. }) {
+                    completions += 1;
+                }
+                app.reduce(crate::tui::event::AppAction::Agent(event));
+            }
+            assert_eq!(completions, 1);
+            let activity = app.tool_activity(&id).unwrap();
+            assert_eq!(
+                serde_json::to_value(activity.tool_result.as_ref().unwrap()).unwrap(),
+                serde_json::to_value(&result).unwrap()
+            );
+            if result.status != ToolExecutionStatus::Started {
+                let entries = headless.take_transcript();
+                let activity = entries
+                    .iter()
+                    .find_map(|entry| match entry {
+                        crate::protocol::TranscriptItem::ToolActivity(tool) if tool.id == id => {
+                            Some(tool)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(activity.tool_result.as_ref().unwrap()).unwrap(),
+                    serde_json::to_value(&result).unwrap()
+                );
+                assert!(activity.timing.finished_at_ms.is_some());
+            }
+        }
+        assert_eq!(report_for(&headless), report_for(&tui));
+    }
+
+    #[test]
+    fn typed_deferred_completion_survives_late_start_and_duplicate_finish() {
+        let headless = HeadlessSink::new(
+            OutputFormat::Json,
+            Box::new(Vec::<u8>::new()),
+            Box::new(Vec::<u8>::new()),
+        );
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let tui = TuiSink {
+            sender,
+            completion_evidence: Default::default(),
+        };
+        let mut app = crate::tui::app::AppState::new("codex", "test".into(), "/tmp".into(), None);
+        for (index, started) in crate::protocol::tests::results()
+            .into_iter()
+            .filter(|result| result.status == ToolExecutionStatus::Started)
+            .enumerate()
+        {
+            let id = format!("deferred-{index}");
+            headless.tool_started(&id, "tool", "{}");
+            tui.tool_started(&id, "tool", "{}");
+            // The detached worker can finish before its launch callback is delivered.
+            let terminal =
+                crate::protocol::ToolResult::legacy("finished".into(), ToolExecutionStatus::Failed);
+            headless.tool_result(&id, terminal.clone());
+            tui.tool_result(&id, terminal.clone());
+            headless.tool_result(&id, started.clone());
+            tui.tool_result(&id, started.clone());
+            while let Ok(event) = receiver.try_recv() {
+                app.reduce(crate::tui::event::AppAction::Agent(event));
+            }
+            let first_finish = app.tool_activity(&id).unwrap().timing.finished_at_ms;
+            headless.tool_result(&id, terminal.clone());
+            tui.tool_result(&id, terminal);
+            while let Ok(event) = receiver.try_recv() {
+                app.reduce(crate::tui::event::AppAction::Agent(event));
+            }
+            let displayed = app.tool_activity(&id).unwrap();
+            assert_eq!(displayed.status, crate::tui::app::ToolStatus::Failed);
+            assert_eq!(displayed.timing.finished_at_ms, first_finish);
+            let result = displayed.tool_result.as_ref().unwrap();
+            assert_eq!(result.status, ToolExecutionStatus::Failed);
+            assert_eq!(result.background_task_id, started.background_task_id);
+            assert_eq!(result.subagent_id, started.subagent_id);
+            let entries = headless.take_transcript();
+            assert_eq!(entries.len(), 1);
+            let crate::protocol::TranscriptItem::ToolActivity(recorded) = &entries[0] else {
+                panic!("tool missing")
+            };
+            assert_eq!(
+                serde_json::to_value(&recorded.tool_result).unwrap(),
+                serde_json::to_value(&displayed.tool_result).unwrap()
+            );
+        }
+        assert_eq!(report_for(&headless), report_for(&tui));
+    }
 
     #[test]
     fn screen_reader_uses_inline_terminal_viewport() {
@@ -735,10 +852,7 @@ mod tests {
         ));
         assert!(matches!(
             receiver.try_recv(),
-            Ok(UiEvent::ToolFinished {
-                status: ToolExecutionStatus::Failed,
-                ..
-            })
+            Ok(UiEvent::ToolResult { result, .. }) if result.status == ToolExecutionStatus::Failed
         ));
         assert!(tui.completion_evidence().unwrap().unresolved_tool_failure);
     }

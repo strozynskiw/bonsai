@@ -2219,7 +2219,14 @@ async fn rotate_persisted_session_on_clear(
                 app.clear_session_identity();
             }
             refresh_session_completion_choices(app, storage, project_root, next_id).await;
-            persisted_signatures.reset_to(app.transcript.as_slice(), &app.plan, &app.todo);
+            persisted_signatures.reset_to(
+                &app.transcript
+                    .iter()
+                    .map(crate::protocol::TranscriptItem::from)
+                    .collect::<Vec<_>>(),
+                &app.plan,
+                &app.todo,
+            );
         }
         Err(err) => app.reduce(AppAction::Agent(UiEvent::Error(UiError::new(
             "Persistence failed",
@@ -4315,6 +4322,13 @@ fn apply_ui_events_for_frame(
             diff,
             ..
         } => changed_files.extend(diff.files().map(|file| file.path.clone())),
+        UiEvent::ToolResult { result, .. }
+            if result.status == crate::output::ToolExecutionStatus::Succeeded =>
+        {
+            if let Some(diff) = result.diff() {
+                changed_files.extend(diff.files().map(|file| file.path.clone()));
+            }
+        }
         UiEvent::WorkspaceChanged { paths } => {
             changed_files.extend(paths.iter().cloned());
         }
