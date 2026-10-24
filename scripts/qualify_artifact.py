@@ -107,21 +107,31 @@ def extract_binary(archive: Path, directory: Path) -> Path:
 def record_test_count(result: dict, log: Path, required_tests: tuple[str, ...] = ()) -> None:
     """Only fixed test counters escape private logs; zero tests is not success."""
     passed_tests = 0
+    failed_tests = 0
+    failed_names = set()
     skipped = False
     named = set()
     with log.open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
-            match = re.search(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored", line)
+            match = re.search(r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored", line)
             if match:
                 passed_tests += int(match[1])
+                failed_tests += int(match[2])
             skipped |= any(marker in line for marker in SKIP_MARKERS)
-            ok = re.match(r"test ([\w:]+) \.\.\.", line.strip())
-            if ok and "ignored" not in line:
-                named.add(ok[1].rsplit("::", 1)[-1])
+            outcome = re.fullmatch(r"test ([A-Za-z_][A-Za-z_0-9:]*) \.\.\. (ok|FAILED)", line.strip())
+            if outcome and len(outcome[1]) <= 256:
+                if outcome[2] == "ok":
+                    named.add(outcome[1].rsplit("::", 1)[-1])
+                elif len(failed_names) < 50:
+                    failed_names.add(outcome[1])
     result["passed_tests"] = passed_tests
+    result["failed_tests"] = failed_tests
+    result["failed_test_names"] = sorted(failed_names)
     missing = sorted(name for name in required_tests if name not in named)
     result["missing_required_tests"] = missing
-    if passed_tests == 0 or skipped or missing:
+    if failed_tests or failed_names:
+        result.update(status="failed", reason="tests failed")
+    elif result["status"] == "passed" and (passed_tests == 0 or skipped or missing):
         result.update(status="failed", reason="required probes absent or skipped")
 
 

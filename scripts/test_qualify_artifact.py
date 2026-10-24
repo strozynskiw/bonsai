@@ -71,6 +71,30 @@ class QualificationTests(unittest.TestCase):
             self.assertIn(probe, linux)
         self.assertIn("artifact_confines_native_writes_and_network", gate.required_tests("Linux")["artifact-surface"])
 
+    def test_failed_summary_preserves_counts_and_safe_test_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "private.log"
+            log.write_text("test module::probe ... FAILED\nsecret raw error\n"
+                           "test result: FAILED. 42 passed; 1 failed; 0 ignored\n")
+            result = {"status": "failed", "reason": "nonzero exit"}
+            gate.record_test_count(result, log, ("probe",))
+            self.assertEqual(result["passed_tests"], 42)
+            self.assertEqual(result["failed_tests"], 1)
+            self.assertEqual(result["failed_test_names"], ["module::probe"])
+            self.assertEqual(result["missing_required_tests"], ["probe"])
+            self.assertEqual(result["reason"], "tests failed")
+            self.assertNotIn("secret", json.dumps(result))
+
+    def test_process_failures_keep_original_reason_without_test_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "private.log"
+            log.write_text("private compiler or transport error")
+            for reason in ("timeout", "nonzero exit"):
+                result = {"status": "failed", "reason": reason}
+                gate.record_test_count(result, log)
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual(result["status"], "failed")
+
     def test_archive_rejects_links_and_traversal(self):
         for name, kind in [
             ("../bonsai", tarfile.REGTYPE),
