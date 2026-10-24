@@ -279,6 +279,11 @@ fn segment_tier(command: &str) -> RiskTier {
 /// The risk tier of a segment's base program alone — the structural
 /// redirect/pipe-to-shell risk is handled by [`segment_tier`] and combined in.
 fn program_tier(words: &[&str], lower: &str) -> RiskTier {
+    // Quoted whitespace can become an empty token list after normalization.
+    if words.is_empty() {
+        return RiskTier::Destructive;
+    }
+
     // Resolve the program the shell will actually exec, seeing through command
     // wrappers (`env rm …`, `time rm …`, `xargs rm …`, `timeout 5 rm …`).
     // Without this the wrapper becomes the "program" and the dangerous command
@@ -1683,6 +1688,37 @@ mod tests {
 
     fn tier(command: &str) -> RiskTier {
         classify_bash(&analyze_command(command))
+    }
+
+    #[test]
+    fn empty_program_segments_fail_closed() {
+        assert_eq!(program_tier(&[], ""), RiskTier::Destructive);
+        for command in [
+            "",
+            " \t\n",
+            "' '",
+            "\" \t\"",
+            "echo ok; ' '",
+            "printf '%s' \"$( ' ' )\"",
+        ] {
+            assert_eq!(tier(command), RiskTier::Destructive, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_command_shapes_do_not_panic() {
+        let fragments = [
+            "", " ", "''", "' '", "\"\"", "\" \"", "'", "\"", "\\", "$()", "$(", "`", "env",
+            "timeout", "xargs", "é", "🦀", "\u{2003}",
+        ];
+        for left in fragments {
+            for right in fragments {
+                for separator in [" ", ";", "&&", "||", "|", "&", "\n"] {
+                    let command = format!("{left}{separator}{right}");
+                    let _ = tier(&command);
+                }
+            }
+        }
     }
 
     #[test]
