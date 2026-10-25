@@ -745,7 +745,7 @@ async fn planning_research_budget_rejects_repeated_read_only_calls() {
     )
     .unwrap();
     agent.set_mode(AgentMode::Planning);
-    agent.budget.max_iterations = PLANNING_RESEARCH_TURN_LIMIT + 3;
+    agent.set_run_max_turns(PLANNING_RESEARCH_TURN_LIMIT + 3);
 
     let result = agent
         .run(
@@ -796,7 +796,7 @@ async fn planning_research_budget_stops_when_model_ignores_rejection() {
     )
     .unwrap();
     agent.set_mode(AgentMode::Planning);
-    agent.budget.max_iterations = PLANNING_RESEARCH_TURN_LIMIT + 2;
+    agent.set_run_max_turns(PLANNING_RESEARCH_TURN_LIMIT + 2);
 
     let error = agent
         .run(
@@ -848,7 +848,7 @@ async fn identical_failed_tool_call_retries_once_then_rejects_and_stops() {
     )
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
-    agent.budget.max_iterations = 4;
+    agent.set_run_max_turns(4);
 
     let error = agent
         .run(
@@ -930,7 +930,7 @@ async fn planning_research_budget_warns_before_rejecting() {
     .build()
     .unwrap();
     agent.set_mode(AgentMode::Planning);
-    agent.budget.max_iterations = PLANNING_RESEARCH_TURN_LIMIT + 3;
+    agent.set_run_max_turns(PLANNING_RESEARCH_TURN_LIMIT + 3);
 
     let result = agent
         .run(
@@ -1023,7 +1023,7 @@ async fn planning_question_at_research_limit_executes_and_refreshes_budget() {
     )
     .unwrap();
     agent.set_mode(AgentMode::Planning);
-    agent.budget.max_iterations = PLANNING_RESEARCH_TURN_LIMIT + 4;
+    agent.set_run_max_turns(PLANNING_RESEARCH_TURN_LIMIT + 4);
 
     let result = agent
         .run(

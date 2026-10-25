@@ -167,11 +167,8 @@ impl Storage {
         self.set_preference("smol", preference.as_str()).await
     }
 
-    /// User-selected limits for foreground runs. A missing row resolves to the
-    /// conservative soft-alert defaults (`RunBudget::soft_alert_defaults`) so a
-    /// session cannot silently pass a warning threshold; once the user saves a
-    /// budget — including explicit `off` choices — that exact configuration is
-    /// authoritative.
+    /// User-selected limits for foreground runs. Missing preferences leave
+    /// alerts and hard limits disabled; saved budgets remain authoritative.
     pub(crate) async fn run_budget(&self) -> Result<crate::run_budget::RunBudget> {
         let Some(value) = self.preference("run_budget_json").await? else {
             return Ok(crate::run_budget::RunBudget::soft_alert_defaults());

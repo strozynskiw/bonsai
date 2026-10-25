@@ -437,6 +437,12 @@ impl Agent {
         result
     }
 
+    pub(crate) fn has_active_subagent_runs(&self) -> bool {
+        self.subagent_runner
+            .as_ref()
+            .is_some_and(|runner| runner.has_active_runs())
+    }
+
     pub(crate) fn cancel_running_subagents(&self) {
         if let Some(runner) = &self.subagent_runner {
             runner.cancel_all_running();

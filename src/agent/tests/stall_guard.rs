@@ -123,7 +123,7 @@ async fn stall_guard_allows_long_black_box_investigation_with_novel_results() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = experiments + 5;
+    agent.set_run_max_turns(experiments + 5);
     let result = agent
         .run(
             "research the archive format",
@@ -178,7 +178,7 @@ async fn delivery_checkpoints_do_not_extend_budget_or_steer_subagents() {
         if subagent {
             agent.set_execution_lane(ExecutionLane::subagent("sub-1"));
         }
-        agent.budget.max_iterations = 32;
+        agent.set_run_max_turns(32);
         let error = agent
             .run(
                 "implement the requested tool",
@@ -345,7 +345,7 @@ async fn recovery_advisory_reaches_model_without_extending_turn_limit() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = 6;
+    agent.set_run_max_turns(6);
     let error = agent
         .run(
             "repair the implementation",
@@ -388,7 +388,7 @@ async fn stall_guard_terminates_unchanged_reads_with_typed_failure() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = exploration_turns + 1;
+    agent.set_run_max_turns(exploration_turns + 1);
     let sink = Arc::new(CaptureSink::default());
 
     let result = agent
@@ -464,7 +464,7 @@ async fn stall_guard_terminates_syntactically_varied_failed_calls() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = IMPLEMENTATION_STALL_TERMINAL_TURNS + 1;
+    agent.set_run_max_turns(IMPLEMENTATION_STALL_TERMINAL_TURNS + 1);
 
     let result = agent
         .run(
@@ -523,7 +523,7 @@ async fn stall_guard_terminates_equivalent_terminal_and_status_polls() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = poll_turns + 1;
+    agent.set_run_max_turns(poll_turns + 1);
 
     let result = agent
         .run(
@@ -579,7 +579,7 @@ async fn stall_guard_resets_on_progress_making_bash_turn() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS * 2;
+    agent.set_run_max_turns(IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS * 2);
 
     let result = agent
         .run(
@@ -623,7 +623,7 @@ async fn stall_guard_inactive_for_planning_persona() {
     )
     .unwrap();
     agent.set_mode(AgentMode::Planning);
-    agent.budget.max_iterations = research_turns + 2;
+    agent.set_run_max_turns(research_turns + 2);
 
     let result = agent
         .run(
@@ -663,7 +663,7 @@ async fn stall_guard_inactive_for_subagent_lane() {
     )
     .unwrap();
     agent.set_execution_lane(ExecutionLane::subagent("sub-1"));
-    agent.budget.max_iterations = research_turns + 2;
+    agent.set_run_max_turns(research_turns + 2);
 
     let result = agent
         .run(

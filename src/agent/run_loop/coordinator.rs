@@ -308,7 +308,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             self.agent.push_message(ChatCompletionRequestMessage::User(
                 async_openai::types::chat::ChatCompletionRequestUserMessage {
                     name: MessageProvenance::Harness.wire_name().map(str::to_string),
-                    content: "Behavioral contract checkpoint: before final delivery, compare the changed implementation with the user's requirements and existing interfaces, not only the passing examples. Identify required outcomes not exercised by your checks. Use focused behavioral tests or direct code reasoning to close those gaps; derive expectations from the specification, never from the current implementation. For stateful or concurrent code, trace transitions and terminal outcomes. Reuse current passing evidence; do not repeat checks without a reason. If coverage is already sufficient, deliver the result. This checkpoint runs once, does not authorize new effects, and does not extend the hard turn limit.".into(),
+                    content: "Behavioral contract checkpoint: before final delivery, compare the changed implementation with the user's requirements and existing interfaces, not only the passing examples. Identify required outcomes not exercised by your checks. Use focused behavioral tests or direct code reasoning to close those gaps; derive expectations from the specification, never from the current implementation. For stateful or concurrent code, trace transitions and terminal outcomes. Reuse current passing evidence; do not repeat checks without a reason. If coverage is already sufficient, deliver the result. This checkpoint runs once and does not authorize new effects.".into(),
                 },
             ));
         }

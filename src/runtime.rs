@@ -19,6 +19,9 @@ use crate::storage::{SessionId, Storage};
 use crate::todo::{SharedTodoStore, TodoStore};
 use crate::tool::{ProjectInfoRuntime, ReadTracker, SharedActiveSessionId};
 
+pub(crate) mod session;
+pub(crate) mod transcript;
+
 #[cfg(test)]
 mod acceptance;
 
@@ -27,6 +30,7 @@ mod acceptance;
 pub(crate) enum SurfaceKind {
     Tui,
     Headless,
+    Server,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +99,15 @@ impl SurfaceKind {
                 sandbox_preferences: SandboxPreferenceMode::PersistedInteractive,
                 session_binding: SessionBindingMode::Deferred,
             },
+            Self::Server => RuntimeCapabilities {
+                interaction: InteractionMode::Interactive,
+                repo_map: RepoMapMode::Eager,
+                subagent_wake: SubagentWakeMode::Background,
+                peer_wait: PeerWaitMode::Parkable,
+                volatile_context: VolatileContextMode::RefreshEachTurn,
+                sandbox_preferences: SandboxPreferenceMode::PersistedInteractive,
+                session_binding: SessionBindingMode::Required,
+            },
             Self::Headless => RuntimeCapabilities {
                 interaction: InteractionMode::NonInteractive,
                 repo_map: RepoMapMode::Eager,
@@ -111,6 +124,7 @@ impl SurfaceKind {
         match self {
             Self::Tui => "TUI",
             Self::Headless => "headless",
+            Self::Server => "server",
         }
     }
 }
@@ -477,7 +491,7 @@ impl RuntimeBuilder {
         }
         let mut agent = agent_builder.build()?;
         agent.set_timing_ledger(timing.clone());
-        if surface == SurfaceKind::Headless {
+        if matches!(surface, SurfaceKind::Headless | SurfaceKind::Server) {
             agent.set_mode(AgentMode::Coding);
         }
         agent.set_prompt_estimator(prompt_estimator);

@@ -20,6 +20,9 @@ pub(crate) enum ResumeTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CliMode {
+    Serve {
+        command: crate::server::config::Command,
+    },
     Run {
         resume: Option<ResumeTarget>,
         isolation: RecoveryMode,
@@ -61,6 +64,11 @@ pub(crate) enum CliMode {
 }
 
 pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
+    if args.get(1).is_some_and(|arg| arg == "serve") {
+        return Ok(CliMode::Serve {
+            command: crate::server::config::parse(&args[2..])?,
+        });
+    }
     if args.len() == 1 {
         return Ok(CliMode::Run {
             resume: None,

@@ -408,6 +408,9 @@ impl Storage {
         current_status: SessionStatus,
         next_selection: Option<&SessionRunSelection>,
     ) -> Result<ResumeSessionOutcome> {
+        let Some(_owner) = self.try_session_owner(next_session_id)? else {
+            return Ok(ResumeSessionOutcome::Live);
+        };
         let project_path = canonical_project_path(project_path);
         let reasoning_json = next_selection
             .map(|selection| serde_json::to_string(&selection.reasoning))
@@ -534,6 +537,21 @@ impl Storage {
         session_id: SessionId,
         selection: Option<&SessionRunSelection>,
     ) -> Result<ResumeSessionOutcome> {
+        let Some(owner) = self.try_session_owner(session_id)? else {
+            return Ok(ResumeSessionOutcome::Live);
+        };
+        self.claim_session_with_owner(project_path, session_id, selection, &owner)
+            .await
+    }
+
+    pub(crate) async fn claim_session_with_owner(
+        &self,
+        project_path: &Path,
+        session_id: SessionId,
+        selection: Option<&SessionRunSelection>,
+        owner: &super::SessionOwnerGuard,
+    ) -> Result<ResumeSessionOutcome> {
+        anyhow::ensure!(owner.session_id == session_id, "Wrong session owner");
         let project_path = canonical_project_path(project_path);
         let reasoning_json = selection
             .map(|selection| serde_json::to_string(&selection.reasoning))
@@ -888,6 +906,12 @@ impl Storage {
     ) -> Result<ForgetSessionOutcome> {
         let project_path = canonical_project_path(project_path);
         let live_floor = now_ms().saturating_sub(super::peers::PEER_LIVENESS_THRESHOLD_MS);
+        let mut tx = self.begin_write().await?;
+        let artifact_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM server_artifacts WHERE session_id = ?")
+                .bind(session_id.as_i64())
+                .fetch_all(&mut *tx)
+                .await?;
         let deleted: Option<i64> = sqlx::query_scalar(
             r#"
             DELETE FROM sessions
@@ -905,10 +929,20 @@ impl Storage {
         .bind(&project_path)
         .bind(SessionStatus::Active.as_db_str())
         .bind(live_floor)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .with_context(|| format!("Failed to forget session {session_id}"))?;
+        tx.commit().await?;
         if deleted.is_some() {
+            // Metadata deletion is authoritative. File cleanup is best effort:
+            // a crash or filesystem error leaves only inaccessible private bytes.
+            if !artifact_ids.is_empty() {
+                let cleanup = crate::server::artifacts::Artifacts::new(self.home_dir())
+                    .and_then(|artifacts| artifacts.remove(&artifact_ids));
+                if let Err(error) = cleanup {
+                    tracing::warn!(%error, %session_id, "failed to remove forgotten session artifacts");
+                }
+            }
             return Ok(ForgetSessionOutcome::Forgotten);
         }
         Ok(

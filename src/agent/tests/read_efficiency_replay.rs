@@ -707,7 +707,7 @@ async fn run_read_storm_replay(fixture: &ReplayFixture) {
     )
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
-    agent.budget.max_iterations = 12;
+    agent.set_run_max_turns(12);
 
     let result = agent
         .run(
@@ -838,7 +838,7 @@ async fn run_delegated_reread_replay(fixture: &ReplayFixture) {
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
     agent.import_delegated_read_evidence(&[delegated_evidence(&project)]);
-    agent.budget.max_iterations = 12;
+    agent.set_run_max_turns(12);
 
     let result = agent
         .run(
@@ -1066,7 +1066,7 @@ async fn persistent_read_storm_returns_typed_blocker_after_one_recovery_budget()
     )
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
-    agent.budget.max_iterations = 10;
+    agent.set_run_max_turns(10);
 
     let error = agent
         .run(

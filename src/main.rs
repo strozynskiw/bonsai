@@ -45,6 +45,9 @@ mod run_budget;
 mod runtime;
 mod sandbox;
 mod self_review;
+// The transport-independent server core is exercised before the HTTP adapter lands.
+#[allow(dead_code)]
+mod server;
 mod session;
 mod session_activity;
 mod session_persist;
@@ -85,6 +88,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     match cli_mode {
+        CliMode::Serve { command } => {
+            logging::init_headless_tracing();
+            block_on_with_shutdown(server::run(command))?
+        }
         CliMode::Run {
             resume,
             isolation,

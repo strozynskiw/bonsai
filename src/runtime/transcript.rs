@@ -48,24 +48,33 @@ impl TranscriptRecorder {
         });
     }
 
-    /// A provider attempt is about to stream: remember how much buffered
-    /// text is already committed so a later retraction removes exactly this
-    /// attempt's contribution (a prior call's reasoning can still sit in the
-    /// buffer waiting for its flush boundary).
+    /// Commit earlier buffers and remember the current attempt's item boundary.
     pub(crate) fn attempt_started(&self) {
         self.with_state(|state| {
-            state.assistant_floor = state.assistant.len();
-            state.reasoning_floor = state.reasoning.len();
+            state.flush_text_buffers();
+            state.attempt_floor = Some(state.items.len());
         });
     }
 
-    /// The attempt was abandoned; drop what it streamed into the buffers.
-    /// `truncate` is a no-op when a flush already consumed the buffer, so a
-    /// stale floor cannot resurrect or damage committed items.
+    /// Retract this attempt's text, including text already flushed by a delta
+    /// of another kind. Preserve earlier attempts and non-text evidence.
     pub(crate) fn attempt_discarded(&self) {
         self.with_state(|state| {
-            state.assistant.truncate(state.assistant_floor);
-            state.reasoning.truncate(state.reasoning_floor);
+            if let Some(floor) = state.attempt_floor.take() {
+                state.assistant.clear();
+                state.reasoning.clear();
+                let mut index = 0;
+                state.items.retain(|item| {
+                    let keep = index < floor
+                        || !matches!(
+                            item,
+                            TranscriptItem::AssistantMessage { .. }
+                                | TranscriptItem::ReasoningSummary { .. }
+                        );
+                    index += 1;
+                    keep
+                });
+            }
         });
     }
 
@@ -136,6 +145,36 @@ impl TranscriptRecorder {
                 }
             }
         });
+    }
+
+    pub(crate) fn push(&self, item: TranscriptItem) {
+        self.with_state(|state| {
+            state.flush_text_buffers();
+            state.items.push(item);
+        });
+    }
+
+    /// Non-destructive view, including in-flight text and tools, for reconnects.
+    pub(crate) fn snapshot(&self) -> Vec<TranscriptItem> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut items = state.items.clone();
+        if !state.assistant.is_empty() {
+            items.push(TranscriptItem::AssistantMessage {
+                text: state.assistant.clone(),
+            });
+        }
+        if !state.reasoning.is_empty() {
+            items.push(TranscriptItem::ReasoningSummary {
+                text: state.reasoning.clone(),
+            });
+        }
+        let mut tools = state.tools.values().cloned().collect::<Vec<_>>();
+        tools.sort_by(|a, b| a.id.cmp(&b.id));
+        items.extend(tools.into_iter().map(TranscriptItem::ToolActivity));
+        items
     }
 
     pub(crate) fn take(&self) -> Vec<TranscriptItem> {
@@ -220,10 +259,8 @@ struct TranscriptRecorderState {
     items: Vec<TranscriptItem>,
     assistant: String,
     reasoning: String,
-    /// Buffer lengths at the last `attempt_started`; text beyond them belongs
-    /// to the in-flight attempt and is what `attempt_discarded` truncates.
-    assistant_floor: usize,
-    reasoning_floor: usize,
+    /// Items before this floor belong to previous, committed attempts.
+    attempt_floor: Option<usize>,
     tools: HashMap<String, ToolActivity>,
     // Runtime clocks stay in the recorder, never in durable entries.
     starts: HashMap<String, Instant>,

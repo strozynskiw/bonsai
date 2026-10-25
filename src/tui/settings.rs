@@ -525,11 +525,11 @@ mod tests {
 
         assert_eq!(
             choice_current(&rows, SettingId::AlertSessionBilledTokens),
-            Some(6)
+            Some(0)
         );
-        assert_eq!(choice_current(&rows, SettingId::AlertSessionTurns), Some(2));
-        assert_eq!(choice_current(&rows, SettingId::AlertSessionTime), Some(3));
-        assert_eq!(choice_current(&rows, SettingId::AlertSessionCost), Some(2));
+        assert_eq!(choice_current(&rows, SettingId::AlertSessionTurns), Some(0));
+        assert_eq!(choice_current(&rows, SettingId::AlertSessionTime), Some(0));
+        assert_eq!(choice_current(&rows, SettingId::AlertSessionCost), Some(0));
     }
 
     #[test]

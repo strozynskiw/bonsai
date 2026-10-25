@@ -223,8 +223,8 @@ impl Agent {
             finalization: FinalizationState::default(),
             messages: vec![system_message],
             budget: SessionBudget {
-                max_iterations: builder.max_iterations,
-                unlimited_turns: false,
+                max_iterations: builder.max_iterations.unwrap_or(DEFAULT_MAX_ITERATIONS),
+                unlimited_turns: builder.max_iterations.is_none(),
                 max_generation_duration: builder.max_generation_duration,
                 max_streamed_chars: builder.max_streamed_chars,
                 max_tool_duration: builder.max_tool_duration,
@@ -379,7 +379,7 @@ pub(crate) struct AgentBuilder {
     pub(super) builtin_subagent_settings: crate::subagent::SharedBuiltinSubagentSettings,
     pub(super) subagent_runner: Option<SubagentRunner>,
     pub(super) tool_origin: Option<String>,
-    pub(super) max_iterations: usize,
+    pub(super) max_iterations: Option<usize>,
     pub(super) config: Arc<crate::config::Config>,
     /// `None` in evals/tests, which never connect to real MCP servers.
     pub(super) mcp_hub: Option<Arc<crate::mcp::McpHub>>,
@@ -441,7 +441,7 @@ impl AgentBuilder {
             builtin_subagent_settings: crate::subagent::SharedBuiltinSubagentSettings::default(),
             subagent_runner: None,
             tool_origin: None,
-            max_iterations: DEFAULT_MAX_ITERATIONS,
+            max_iterations: None,
             config: Arc::new(crate::config::Config::empty()),
             mcp_hub: None,
             extensions: Arc::new(crate::extension::status::ExtensionRegistry::new()),
@@ -514,7 +514,7 @@ impl AgentBuilder {
     }
 
     pub(crate) fn run_budget(mut self, budget: crate::run_budget::RunBudget) -> Self {
-        self.max_iterations = budget.max_turns.unwrap_or(DEFAULT_MAX_ITERATIONS);
+        self.max_iterations = budget.max_turns;
         self.max_generation_duration = budget.max_generation_duration();
         self.max_streamed_chars = budget.max_output_chars;
         self.max_tool_duration = budget.max_tool_duration();
@@ -668,7 +668,7 @@ impl AgentBuilder {
     /// Cap the agent's tool-call iterations. Subagents set this low to
     /// bound a runaway nested run.
     pub(crate) fn max_iterations(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations.max(1);
+        self.max_iterations = Some(max_iterations.max(1));
         self
     }
 

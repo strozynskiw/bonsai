@@ -1,0 +1,26 @@
+{
+  "version": "experimental-v0",
+  "prefix": "/api/experimental/v0",
+  "requests": {
+    "mutation": {"request_id": "request-1"},
+    "message": {"request_id": "request-2", "text": "Hello"},
+    "answer": {"request_id": "request-3", "run_id": "run-1", "answer": {"kind": "permission", "decision": "deny"}}
+  },
+  "answers": [
+    {"kind": "permission", "decision": "allow_once"},
+    {"kind": "sandbox", "decision": "deny"},
+    {"kind": "question", "choices": [0]}
+  ],
+  "events": [
+    {"kind": "user_message", "text": "Hello"},
+    {"kind": "assistant_delta", "text": "Hi"},
+    {"kind": "assistant_done"},
+    {"kind": "lifecycle", "run_id": "run-1", "state": "running"},
+    {"kind": "error", "code": "execution_failed", "message": "Execution failed; inspect local diagnostics"},
+    {"kind": "reset", "resync_required": true}
+  ],
+  "permission_prompt": {
+    "kind": "permission", "request_id": 7, "command": "echo fixture", "origin": null,
+    "decisions": ["allow_once", "allow_matching", "allow_for_project", "deny_for_project", "deny"]
+  }
+}

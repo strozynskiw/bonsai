@@ -725,7 +725,7 @@ impl Agent {
     /// Replace every user-facing run limit. Unset fields restore the normal
     /// agent defaults rather than inventing an implicit budget.
     pub(crate) fn set_run_budget(&mut self, budget: crate::run_budget::RunBudget) {
-        self.budget.unlimited_turns = false;
+        self.budget.unlimited_turns = budget.max_turns.is_none();
         self.budget.max_iterations = budget.max_turns.unwrap_or(DEFAULT_MAX_ITERATIONS);
         self.budget.max_generation_duration = budget.max_generation_duration();
         self.budget.max_streamed_chars = budget.max_output_chars;

@@ -65,8 +65,8 @@ impl RunBudgetExhaustion {
 /// ledger across resumes; the other fields reset for each foreground run or
 /// provider/tool call. An empty value preserves Bonsai's normal runtime policy.
 /// Until the user saves a budget of their own, the storage layer substitutes
-/// [`RunBudget::soft_alert_defaults`] so cumulative session alerts warn by
-/// default; hard limits stay unset until explicitly configured.
+/// [`RunBudget::soft_alert_defaults`]; alerts and hard limits remain unset
+/// until explicitly configured.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct RunBudget {
@@ -234,21 +234,10 @@ impl RunBudget {
         Ok(self)
     }
 
-    /// Conservative soft-warning defaults for the cumulative session alerts
-    /// (issue #163): warn — never stop — at $5 of exact priced usage, 10M
-    /// cache-inclusive billed tokens, 250 foreground provider turns, or 2h of
-    /// active run time. Applied until the user saves a budget of their own;
-    /// every threshold can be raised or disabled in `/settings`, and a saved
-    /// budget (including explicit `off` choices) always wins. Hard limits stay
-    /// unset here — they remain opt-in for unattended runs.
+    /// Defaults for unsaved budgets. Alerts and hard limits are opt-in;
+    /// explicitly saved thresholds always win.
     pub(crate) fn soft_alert_defaults() -> Self {
-        Self {
-            alert_session_billed_tokens: Some(10_000_000),
-            alert_session_turns: Some(250),
-            alert_session_active_seconds: Some(7_200),
-            alert_session_cost_micros: Some(5_000_000),
-            ..Self::default()
-        }
+        Self::default()
     }
 
     pub(crate) fn max_run_duration(self) -> Option<Duration> {
@@ -477,12 +466,12 @@ mod tests {
     }
 
     #[test]
-    fn soft_warning_defaults_warn_on_thresholds_but_never_stop_the_run() {
+    fn soft_warning_defaults_are_opt_in() {
         let budget = RunBudget::soft_alert_defaults();
-        assert_eq!(budget.alert_session_billed_tokens, Some(10_000_000));
-        assert_eq!(budget.alert_session_turns, Some(250));
-        assert_eq!(budget.alert_session_active_seconds, Some(7_200));
-        assert_eq!(budget.alert_session_cost_micros, Some(5_000_000));
+        assert_eq!(budget.alert_session_billed_tokens, None);
+        assert_eq!(budget.alert_session_turns, None);
+        assert_eq!(budget.alert_session_active_seconds, None);
+        assert_eq!(budget.alert_session_cost_micros, None);
         // Hard limits stay opt-in for unattended runs.
         assert_eq!(budget.max_session_billed_tokens, None);
         assert_eq!(budget.max_session_turns, None);
@@ -512,7 +501,13 @@ mod tests {
 
     #[test]
     fn unknown_pricing_disables_only_the_cost_alert() {
-        let budget = RunBudget::soft_alert_defaults();
+        let budget = RunBudget {
+            alert_session_billed_tokens: Some(10_000_000),
+            alert_session_turns: Some(250),
+            alert_session_active_seconds: Some(7_200),
+            alert_session_cost_micros: Some(5_000_000),
+            ..RunBudget::default()
+        };
         let usage = SessionBudgetUsage {
             exact_billed_tokens: Some(20_000_000),
             exact_cost_micros: None,

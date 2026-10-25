@@ -22,10 +22,8 @@ use crate::tool::ApprovalLevel;
 use crate::tool::SharedActiveSessionId;
 
 mod sink;
-mod transcript;
-
+use crate::runtime::transcript::TranscriptRecorder;
 pub(crate) use sink::HeadlessSink;
-use transcript::TranscriptRecorder;
 
 const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -571,34 +569,13 @@ async fn run_inner_with_provider_runtime(
             &selection.model,
             installed_reasoning,
         );
-        match storage
-            .claim_session_for_resume_with_selection(
-                &session_project_root,
-                snapshot.summary.id,
-                &durable_selection,
-            )
-            .await?
-        {
-            crate::storage::ResumeSessionOutcome::Resumed => {}
-            crate::storage::ResumeSessionOutcome::Live => {
-                return Err(HeadlessError::Runtime(anyhow::anyhow!(
-                    "Session #{} is live in another bonsai process.",
-                    snapshot.summary.id
-                )));
-            }
-            crate::storage::ResumeSessionOutcome::NotFound => {
-                return Err(HeadlessError::Runtime(anyhow::anyhow!(
-                    "No session #{}.",
-                    snapshot.summary.id
-                )));
-            }
-            crate::storage::ResumeSessionOutcome::DifferentProject => {
-                return Err(HeadlessError::Runtime(anyhow::anyhow!(
-                    "Session #{} belongs to a different project.",
-                    snapshot.summary.id
-                )));
-            }
-        }
+        crate::runtime::session::claim(
+            &storage,
+            &session_project_root,
+            snapshot.summary.id,
+            &durable_selection,
+        )
+        .await?;
         tracing::info!(
             target: "bonsai::session",
             session_id = %snapshot.summary.id,
@@ -718,17 +695,17 @@ async fn run_inner_with_provider_runtime(
     if config.unlimited_turns {
         agent.disable_run_turn_limit();
     }
-    if let Some(snapshot) = resume_snapshot.as_ref() {
-        todo_store.lock().await.set_todos(snapshot.todos.clone());
-        *plan_store.lock().await = snapshot.plan.clone();
-    }
-    let conversation_cache_key = storage.conversation_cache_key(current_session_id).await?;
-    agent.set_conversation_cache_key(&conversation_cache_key);
-    if let Some(snapshot) = resume_snapshot.as_ref() {
-        crate::session_persist::restore_agent_state(&mut agent, snapshot).await;
-        if config.append_system_prompt.is_some() {
-            agent.refresh_system_context_message();
-        }
+    crate::runtime::session::restore(
+        &mut agent,
+        &storage,
+        current_session_id,
+        &todo_store,
+        &plan_store,
+        resume_snapshot.as_ref(),
+    )
+    .await?;
+    if resume_snapshot.is_some() && config.append_system_prompt.is_some() {
+        agent.refresh_system_context_message();
     }
 
     let task_run = if TaskPromptKind::classify(&prompt).is_continuation() {
@@ -1296,29 +1273,18 @@ async fn persist_headless_snapshots(
     plan_store: &Arc<Mutex<PlanDoc>>,
     transcript_prefix: &[crate::protocol::TranscriptItem],
 ) -> Result<()> {
-    let agent_snapshot = crate::session_persist::AgentStateSnapshot::capture(agent);
     let mut transcript = transcript_prefix.to_vec();
     transcript.extend(sink.take_transcript());
-    let todos = todo_store.lock().await.todos().to_vec();
-    let plan = plan_store.lock().await.clone();
-    let agent_peer_delivery_receipts = agent_snapshot.peer_delivery_receipts().to_vec();
-    let snapshot = crate::session_persist::SessionSnapshotData {
-        transcript: &transcript,
-        plan: &plan,
-        todos: &todos,
-        agent: Some(&agent_snapshot),
-        fallback_usage: None,
-        ui_peer_delivery_receipts: &[],
-        agent_peer_delivery_receipts: &agent_peer_delivery_receipts,
-    };
-    crate::session_persist::SessionSnapshotWriter::new(storage, session_id)
-        .persist(
-            snapshot,
-            crate::session_persist::SessionSnapshotSignatures::default(),
-        )
-        .await
-        .context("Failed to persist headless session snapshot")?;
-    Ok(())
+    crate::runtime::session::persist(
+        storage,
+        session_id,
+        agent,
+        todo_store,
+        plan_store,
+        &transcript,
+    )
+    .await
+    .context("Failed to persist headless session snapshot")
 }
 
 /// SessionEnd, capped independently of any hook's own configured

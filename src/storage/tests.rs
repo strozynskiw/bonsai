@@ -2741,6 +2741,50 @@ async fn legacy_native_replay_is_empty_and_corrupt_sidecars_keep_failure_detail(
 }
 
 #[tokio::test]
+async fn server_artifact_migration_preserves_existing_registrations() {
+    use sqlx::Connection;
+    let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql("PRAGMA foreign_keys = ON; CREATE TABLE sessions (id INTEGER PRIMARY KEY); INSERT INTO sessions VALUES (1), (2);")
+        .execute(&mut connection).await.unwrap();
+    sqlx::raw_sql(include_str!("../../migrations/0017_server_api.sql"))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::raw_sql("INSERT INTO server_artifacts VALUES ('first', '/workspace', 1, 12, 'digest-one', 'one.json'), ('second', '/workspace', 2, 34, 'digest-two', 'two.json');")
+        .execute(&mut connection).await.unwrap();
+    let before: Vec<(String, String, i64, i64, String, String)> = sqlx::query_as(
+        "SELECT id, workspace, session_id, size, digest, name FROM server_artifacts ORDER BY id",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/0018_server_artifact_lifecycle.sql"
+    ))
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let after: Vec<(String, String, i64, i64, String, String)> = sqlx::query_as(
+        "SELECT id, workspace, session_id, size, digest, name FROM server_artifacts ORDER BY id",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(before, after);
+    sqlx::query("DELETE FROM sessions WHERE id = 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let remaining: Vec<String> = sqlx::query_scalar("SELECT id FROM server_artifacts")
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(remaining, ["second"]);
+}
+
+#[tokio::test]
 async fn fresh_database_uses_one_current_schema_baseline() {
     let fixture = TestStorage::new().await;
     let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
@@ -2750,7 +2794,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 15);
+    assert_eq!(migration_count, 18);
 
     let identity_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tool_call_identities'",

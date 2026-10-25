@@ -273,6 +273,16 @@ impl SubagentRunner {
         active.len()
     }
 
+    /// True until the run futures have actually dropped, not merely until their
+    /// display records were terminalized by cancellation.
+    pub(crate) fn has_active_runs(&self) -> bool {
+        !self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
+    }
+
     pub(crate) fn subagents(&self) -> &Arc<SubagentRegistry> {
         &self.subagents
     }

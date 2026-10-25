@@ -32,7 +32,7 @@ async fn contract_checkpoint_follows_mutation_without_an_extra_model_turn() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = 2;
+    agent.set_run_max_turns(2);
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
     agent
         .run(
@@ -103,7 +103,7 @@ async fn errors_when_max_iterations_are_exhausted() {
         fixture.project_root.clone(),
     )
     .unwrap();
-    agent.budget.max_iterations = 2;
+    agent.set_run_max_turns(2);
     let result = agent
         .run("hello", CancellationToken::new(), Arc::new(StdoutSink))
         .await;
@@ -118,6 +118,32 @@ async fn errors_when_max_iterations_are_exhausted() {
         err.contains("Agent stopped after 2 model/tool iterations"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn default_turn_budget_is_unlimited_but_explicit_limits_still_apply() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        Box::new(MockProvider::new(vec![])),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+    assert!(agent.budget.unlimited_turns);
+    agent.set_run_max_turns(2);
+    assert!(!agent.budget.unlimited_turns);
+    assert_eq!(agent.budget.max_iterations, 2);
+    agent.set_run_budget(crate::run_budget::RunBudget::default());
+    assert!(agent.budget.unlimited_turns);
+    agent.set_run_budget(crate::run_budget::RunBudget {
+        max_turns: Some(3),
+        ..Default::default()
+    });
+    assert!(!agent.budget.unlimited_turns);
+    assert_eq!(agent.budget.max_iterations, 3);
 }
 
 #[tokio::test]
