@@ -438,6 +438,16 @@ pub(super) async fn maybe_start_background_wake(
     subagents: &Arc<crate::subagent::SubagentRegistry>,
     peer_bus: &Arc<crate::peer::PeerBus>,
 ) -> bool {
+    // Broadcasts are hints, not ownership of a completion. Recover a missed
+    // event from the registries, which retain results until the agent consumes
+    // them. Do not keep postponing an already armed debounce deadline.
+    if pending_background_wake.is_none()
+        && (background_tasks.agent_wake_ready().await
+            || terminals.agent_wake_ready().await
+            || subagents.agent_wake_ready())
+    {
+        *pending_background_wake = Some(Instant::now() + BACKGROUND_AGENT_WAKE_DELAY);
+    }
     let Some(deadline) = *pending_background_wake else {
         return false;
     };
@@ -458,10 +468,10 @@ pub(super) async fn maybe_start_background_wake(
         return false;
     }
 
-    *pending_background_wake = None;
     if !agent.lock().await.goal.automatic_work_allowed().await {
         return false;
     }
+    *pending_background_wake = None;
     // A background-task wake is not a peer hop — reset the anti-loop chain so
     // sends from this turn count as fresh (peers P3).
     peer_bus.begin_turn(crate::peer::TurnOrigin::Human);

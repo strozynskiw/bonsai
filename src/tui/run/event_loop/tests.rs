@@ -5281,6 +5281,116 @@ async fn background_wake_starts_agent_with_completed_task_output() {
 }
 
 #[tokio::test]
+async fn background_wake_recovers_missed_events_and_survives_policy_deferral() {
+    for detached_review in [false, true] {
+        let registry = Arc::new(BackgroundTaskRegistry::new());
+        let subagents = Arc::new(crate::subagent::SubagentRegistry::new());
+        let terminals = Arc::new(crate::terminal::TerminalRegistry::new());
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        if detached_review {
+            let id = subagents.register("review", "Review changes", true);
+            subagents.attach_tool_call(&id, "call-review").unwrap();
+            subagents.finish(
+                &id,
+                crate::subagent::SubagentStatus::Succeeded,
+                Some("review-completion".to_string()),
+            );
+        } else {
+            let task = registry
+                .start(&shell(), "printf task-completion", temp_dir.path(), 5)
+                .await
+                .unwrap();
+            registry
+                .attach_tool_call(&task.id, "call-task")
+                .await
+                .unwrap();
+            registry
+                .wait_for_task(&task.id, Duration::from_secs(2))
+                .await
+                .unwrap();
+        }
+        let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(runtime_tx);
+        let (provider, requests) = CapturingProvider::new();
+        let agent = test_agent(Box::new(provider));
+        agent.lock().await.set_background_tasks(registry.clone());
+        let mut app = app();
+        let peer_bus = Arc::new(crate::peer::PeerBus::new(
+            crate::storage::Storage::open_at(temp_dir.path().join("t.db"))
+                .await
+                .unwrap(),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            temp_dir.path().to_path_buf(),
+        ));
+        // No event receiver existed when the work finished.
+        let mut pending = None;
+        assert!(
+            !maybe_start_background_wake(
+                &mut pending,
+                &mut app,
+                &mut tasks,
+                agent.clone(),
+                Arc::new(NullSink),
+                &registry,
+                &terminals,
+                &subagents,
+                &peer_bus,
+            )
+            .await
+        );
+        assert!(
+            pending.is_some(),
+            "registry must recover the lost completion"
+        );
+        pending = Some(Instant::now() - Duration::from_millis(1));
+        agent.lock().await.goal.request_start();
+        assert!(
+            !maybe_start_background_wake(
+                &mut pending,
+                &mut app,
+                &mut tasks,
+                agent.clone(),
+                Arc::new(NullSink),
+                &registry,
+                &terminals,
+                &subagents,
+                &peer_bus,
+            )
+            .await
+        );
+        assert!(
+            pending.is_some(),
+            "policy deferral must not discard the wake"
+        );
+        assert!(!tasks.is_busy());
+        agent.lock().await.goal.cancel_start();
+        assert!(
+            maybe_start_background_wake(
+                &mut pending,
+                &mut app,
+                &mut tasks,
+                agent.clone(),
+                Arc::new(NullSink),
+                &registry,
+                &terminals,
+                &subagents,
+                &peer_bus,
+            )
+            .await
+        );
+        assert!(pending.is_none());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while tasks.poll_finished().await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(requests.lock().await.len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn background_wake_resumes_under_the_active_persona_mode() {
     // A wake must not flip the session's persona: with the plan view active, a
     // hardcoded Coding resume turned the read-only planner into a mutating
