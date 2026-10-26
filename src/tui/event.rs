@@ -980,6 +980,7 @@ pub enum AgentComposerAction {
 #[derive(Debug, Clone)]
 pub enum LocalModelWizardAction {
     InputChar(char),
+    MoveTextCursor(i16),
     Backspace,
     Paste(String),
     MoveField(i16),

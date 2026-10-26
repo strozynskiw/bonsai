@@ -82,7 +82,10 @@ fn render_setup_step(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
     let api_key_display = if state.api_key.is_empty() {
         String::new()
     } else {
-        "*".repeat(state.api_key.chars().count())
+        "*".repeat(
+            unicode_segmentation::UnicodeSegmentation::graphemes(state.api_key.as_str(), true)
+                .count(),
+        )
     };
     let preset = state.preset.label();
     let credential_storage = state.credential_persistence.label();
@@ -130,7 +133,7 @@ fn render_setup_step(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
             value,
             active: state.setup_field == field,
             caret: if editable {
-                FieldCaret::End
+                state.text_cursor.map_or(FieldCaret::End, FieldCaret::At)
             } else {
                 FieldCaret::None
             },
@@ -341,7 +344,7 @@ fn render_review_step(f: &mut Frame, area: Rect, state: &LocalModelWizardState) 
 
 fn render_wizard_footer(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
     let submit = match state.step {
-        LocalModelWizardStep::Setup => "fetch",
+        LocalModelWizardStep::Setup => "test connection / load models",
         LocalModelWizardStep::SelectModels => "metadata",
         LocalModelWizardStep::Metadata => "review",
         LocalModelWizardStep::Review => "write",
@@ -352,9 +355,11 @@ fn render_wizard_footer(f: &mut Frame, area: Rect, state: &LocalModelWizardState
         ("Left", "back"),
     ])];
     let second = match state.step {
-        LocalModelWizardStep::Setup => {
-            footer_hint_line(&[("Tab/Up/Down", "field"), ("←/→ or Space", "cycle option")])
-        }
+        LocalModelWizardStep::Setup => footer_hint_line(&[
+            ("Tab/Up/Down", "field"),
+            ("←/→", "cursor / option"),
+            ("Home/End", "text start/end"),
+        ]),
         LocalModelWizardStep::SelectModels => footer_hint_line(&[
             ("Up/Down", "move"),
             ("Space", "select"),

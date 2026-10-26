@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::model_catalog::{
     AvailableModel, ConnectionId, ConnectionSpec, DiscoveryKind, LocalCatalogConnectionInput,
@@ -13,6 +14,7 @@ use crate::provider::{DetectedServer, Protocol};
 pub(crate) enum ProviderPreset {
     LmStudio,
     Ollama,
+    Unsloth,
     /// Default: the most general server kind — a fresh wizard should not
     /// presume a specific local app is installed.
     #[default]
@@ -25,6 +27,7 @@ impl ProviderPreset {
         match self {
             Self::LmStudio => "LM Studio",
             Self::Ollama => "Ollama",
+            Self::Unsloth => "Unsloth",
             Self::OpenAiCompatible => "OpenAI compatible",
             Self::AnthropicCompatible => "Anthropic compatible",
         }
@@ -34,13 +37,16 @@ impl ProviderPreset {
         match self {
             Self::LmStudio => "http://localhost:1234/v1",
             Self::Ollama => "http://localhost:11434/v1",
+            Self::Unsloth => "http://localhost:8000/v1",
             Self::OpenAiCompatible | Self::AnthropicCompatible => "",
         }
     }
 
     pub(crate) const fn transport(self) -> TransportProtocol {
         match self {
-            Self::LmStudio | Self::Ollama | Self::OpenAiCompatible => TransportProtocol::OpenAiChat,
+            Self::LmStudio | Self::Ollama | Self::Unsloth | Self::OpenAiCompatible => {
+                TransportProtocol::OpenAiChat
+            }
             Self::AnthropicCompatible => TransportProtocol::AnthropicMessages,
         }
     }
@@ -49,14 +55,17 @@ impl ProviderPreset {
         match self {
             Self::LmStudio => DiscoveryKind::LmStudio,
             Self::Ollama => DiscoveryKind::Ollama,
-            Self::OpenAiCompatible | Self::AnthropicCompatible => DiscoveryKind::Generic,
+            Self::Unsloth | Self::OpenAiCompatible | Self::AnthropicCompatible => {
+                DiscoveryKind::Generic
+            }
         }
     }
 
     pub(crate) const fn toggled(self) -> Self {
         match self {
             Self::LmStudio => Self::Ollama,
-            Self::Ollama => Self::OpenAiCompatible,
+            Self::Ollama => Self::Unsloth,
+            Self::Unsloth => Self::OpenAiCompatible,
             Self::OpenAiCompatible => Self::AnthropicCompatible,
             Self::AnthropicCompatible => Self::LmStudio,
         }
@@ -65,7 +74,8 @@ impl ProviderPreset {
     pub(crate) const fn toggled_back(self) -> Self {
         match self {
             Self::Ollama => Self::LmStudio,
-            Self::OpenAiCompatible => Self::Ollama,
+            Self::Unsloth => Self::Ollama,
+            Self::OpenAiCompatible => Self::Unsloth,
             Self::AnthropicCompatible => Self::OpenAiCompatible,
             Self::LmStudio => Self::AnthropicCompatible,
         }
@@ -245,6 +255,7 @@ pub(crate) struct LocalModelWizardState {
     pub base_url: String,
     pub base_url_edited: bool,
     pub api_key: String,
+    pub text_cursor: Option<usize>,
     pub credential_persistence: crate::session::CredentialPersistence,
     pub models: Vec<LocalModelWizardModel>,
     pub model_cursor: usize,
@@ -273,6 +284,7 @@ impl Default for LocalModelWizardState {
             base_url: preset.base_url_prefill().to_string(),
             base_url_edited: false,
             api_key: String::new(),
+            text_cursor: None,
             credential_persistence: crate::session::CredentialPersistence::default(),
             models: Vec::new(),
             model_cursor: 0,
@@ -388,6 +400,7 @@ impl LocalModelWizardState {
 
     pub(crate) fn move_field(&mut self, delta: i16) {
         self.clear_feedback();
+        self.text_cursor = None;
         match self.step {
             LocalModelWizardStep::Setup => {
                 self.setup_field = self.setup_field.moved(delta);
@@ -648,10 +661,30 @@ impl LocalModelWizardState {
         self.models.get(index)
     }
 
+    pub(crate) fn move_text_cursor(&mut self, delta: i16) {
+        let value = match self.setup_field {
+            LocalModelSetupField::DisplayName => &self.display_name,
+            LocalModelSetupField::ProviderId => &self.provider_id,
+            LocalModelSetupField::BaseUrl => &self.base_url,
+            LocalModelSetupField::ApiKey => &self.api_key,
+            _ => return,
+        };
+        if self.step != LocalModelWizardStep::Setup {
+            return;
+        }
+        let len = value.graphemes(true).count();
+        let current = self.text_cursor.unwrap_or(len).min(len);
+        self.text_cursor = Some(match delta {
+            i16::MIN => 0,
+            i16::MAX => len,
+            _ => current.saturating_add_signed(delta as isize).min(len),
+        });
+    }
+
     fn setup_input_char(&mut self, ch: char) {
         match self.setup_field {
             LocalModelSetupField::DisplayName => {
-                self.display_name.push(ch);
+                insert_at_cursor(&mut self.display_name, &mut self.text_cursor, ch);
                 if !self.provider_id_edited {
                     self.provider_id = slugify_provider_id(&self.display_name);
                 }
@@ -663,14 +696,16 @@ impl LocalModelWizardState {
                     self.status = Some("Provider id is fixed while editing.".to_string());
                     return;
                 }
-                self.provider_id.push(ch);
+                insert_at_cursor(&mut self.provider_id, &mut self.text_cursor, ch);
                 self.provider_id_edited = true;
             }
             LocalModelSetupField::BaseUrl => {
-                self.base_url.push(ch);
+                insert_at_cursor(&mut self.base_url, &mut self.text_cursor, ch);
                 self.base_url_edited = true;
             }
-            LocalModelSetupField::ApiKey => self.api_key.push(ch),
+            LocalModelSetupField::ApiKey => {
+                insert_at_cursor(&mut self.api_key, &mut self.text_cursor, ch)
+            }
             LocalModelSetupField::Preset | LocalModelSetupField::CredentialStorage => {}
         }
     }
@@ -678,7 +713,7 @@ impl LocalModelWizardState {
     fn setup_backspace(&mut self) {
         match self.setup_field {
             LocalModelSetupField::DisplayName => {
-                self.display_name.pop();
+                backspace_at_cursor(&mut self.display_name, &mut self.text_cursor);
                 if !self.provider_id_edited {
                     self.provider_id = slugify_provider_id(&self.display_name);
                 }
@@ -688,15 +723,15 @@ impl LocalModelWizardState {
                     self.status = Some("Provider id is fixed while editing.".to_string());
                     return;
                 }
-                self.provider_id.pop();
+                backspace_at_cursor(&mut self.provider_id, &mut self.text_cursor);
                 self.provider_id_edited = true;
             }
             LocalModelSetupField::BaseUrl => {
-                self.base_url.pop();
+                backspace_at_cursor(&mut self.base_url, &mut self.text_cursor);
                 self.base_url_edited = true;
             }
             LocalModelSetupField::ApiKey => {
-                self.api_key.pop();
+                backspace_at_cursor(&mut self.api_key, &mut self.text_cursor);
             }
             LocalModelSetupField::Preset | LocalModelSetupField::CredentialStorage => {}
         }
@@ -789,6 +824,47 @@ impl LocalModelWizardState {
         self.status = None;
         self.error = None;
     }
+}
+
+#[cfg(test)]
+#[test]
+fn combining_character_cursor_stays_on_grapheme_boundaries() {
+    let mut state = LocalModelWizardState::default();
+    state.move_field(1);
+    state.paste("a\u{301}b");
+    state.move_text_cursor(-1);
+    assert_eq!(state.text_cursor, Some(1));
+    state.input_char('x');
+    assert_eq!(state.display_name, "a\u{301}xb");
+    state.backspace();
+    state.backspace();
+    assert_eq!(state.display_name, "b");
+    assert_eq!(state.text_cursor, Some(0));
+}
+
+fn insert_at_cursor(value: &mut String, cursor: &mut Option<usize>, ch: char) {
+    let index = cursor
+        .unwrap_or(value.graphemes(true).count())
+        .min(value.graphemes(true).count());
+    let byte = value
+        .grapheme_indices(true)
+        .nth(index)
+        .map_or(value.len(), |(byte, _)| byte);
+    value.insert(byte, ch);
+    *cursor = Some(value[..byte + ch.len_utf8()].graphemes(true).count());
+}
+
+fn backspace_at_cursor(value: &mut String, cursor: &mut Option<usize>) {
+    let index = cursor
+        .unwrap_or(value.graphemes(true).count())
+        .min(value.graphemes(true).count());
+    if index > 0
+        && let Some((byte, grapheme)) = value.grapheme_indices(true).nth(index - 1)
+    {
+        let end = byte + grapheme.len();
+        value.replace_range(byte..end, "");
+    }
+    *cursor = Some(index.saturating_sub(1));
 }
 
 fn parse_optional_u32(value: &str) -> Result<Option<u32>, String> {
@@ -1038,6 +1114,13 @@ mod tests {
 
         state.cycle_setup_choice(-1);
 
+        assert_eq!(state.preset, ProviderPreset::Unsloth);
+        assert_eq!(state.base_url, "http://localhost:8000/v1");
+        assert_eq!(state.preset.transport(), TransportProtocol::OpenAiChat);
+        assert_eq!(state.preset.discovery(), DiscoveryKind::Generic);
+        assert!(state.models.is_empty());
+
+        state.cycle_setup_choice(-1);
         assert_eq!(state.preset, ProviderPreset::Ollama);
         assert_eq!(state.base_url, "http://localhost:11434/v1");
 
@@ -1052,6 +1135,33 @@ mod tests {
         state.cycle_setup_choice(1);
         assert_eq!(state.preset, ProviderPreset::Ollama);
         assert!(state.base_url.ends_with('x'));
+    }
+
+    #[test]
+    fn setup_text_cursor_edits_unicode_and_preserves_locked_id() {
+        let mut state = LocalModelWizardState::default();
+        state.move_field(1);
+        state.paste("Zażółć");
+        state.move_text_cursor(-2);
+        state.input_char('!');
+        assert_eq!(state.display_name, "Zażó!łć");
+        state.backspace();
+        assert_eq!(state.display_name, "Zażółć");
+        state.move_text_cursor(i16::MIN);
+        state.backspace();
+        state.input_char('X');
+        assert_eq!(state.display_name, "XZażółć");
+        state.move_text_cursor(i16::MAX);
+        state.input_char(' ');
+        assert_eq!(state.display_name, "XZażółć ");
+        state.move_field(1);
+        assert_eq!(state.text_cursor, None);
+        state.editing_existing = true;
+        let id = state.provider_id.clone();
+        state.move_text_cursor(0);
+        state.input_char('x');
+        state.backspace();
+        assert_eq!(state.provider_id, id);
     }
 
     #[test]

@@ -223,6 +223,28 @@ fn wizard_choice_field_active(app: &AppState) -> bool {
 }
 
 pub(super) fn map_local_model_wizard_key(key: KeyEvent, app: &AppState) -> KeyIntent {
+    let setup_text = matches!(&app.modal,
+        Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state }))
+        if state.step == crate::tui::local_model_wizard::LocalModelWizardStep::Setup && !state.setup_field_is_choice());
+    if setup_text {
+        let delta = match key.code {
+            KeyCode::Left => Some(-1),
+            KeyCode::Right => Some(1),
+            KeyCode::Home => Some(i16::MIN),
+            KeyCode::End => Some(i16::MAX),
+            _ => None,
+        };
+        if let Some(delta) = delta {
+            return KeyIntent::Action(AppAction::LocalModelWizard(
+                crate::tui::event::LocalModelWizardAction::MoveTextCursor(delta),
+            ));
+        }
+        if key.code == KeyCode::Char(' ') {
+            return KeyIntent::Action(AppAction::LocalModelWizard(
+                crate::tui::event::LocalModelWizardAction::InputChar(' '),
+            ));
+        }
+    }
     match key.code {
         KeyCode::Esc => KeyIntent::Action(AppAction::CloseModal),
         KeyCode::Enter => KeyIntent::Action(AppAction::LocalModelWizard(

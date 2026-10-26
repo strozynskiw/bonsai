@@ -144,6 +144,17 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 state.input_char(ch);
             }
         }
+        AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::MoveTextCursor(
+            delta,
+        )) => {
+            if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
+                state,
+            })) = &mut app.modal
+                && !state.loading
+            {
+                state.move_text_cursor(delta);
+            }
+        }
         AppAction::LocalModelWizard(crate::tui::event::LocalModelWizardAction::Backspace) => {
             if let Some(ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard {
                 state,
