@@ -132,6 +132,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_budget(crate::run_budget::RunBudget::default()).await
+    }
+
+    async fn with_budget(budget: crate::run_budget::RunBudget) -> Self {
         let db = crate::storage::test_utils::TestStorage::new().await;
         let mock = Arc::new(Mock::default());
         let catalog = Arc::new(crate::model_catalog::ModelCatalog::load_builtin().unwrap());
@@ -159,7 +163,7 @@ impl Fixture {
                 catalog,
                 registry,
                 session,
-                budget: crate::run_budget::RunBudget::default(),
+                budget,
                 autonomy: crate::yolo::YoloMode::new(),
                 trust,
             },
@@ -922,6 +926,99 @@ async fn usage_is_cumulative_across_turns_and_resume() {
     f.wait_idle().await;
     let (snapshot, _) = f.controller.subscribe().await.unwrap();
     assert_eq!((snapshot.usage.0, snapshot.usage.1), (30, 9));
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn wall_time_budget_cancels_server_work_and_publishes_terminal_evidence() {
+    let f = Fixture::with_budget(crate::run_budget::RunBudget {
+        max_run_seconds: Some(1),
+        ..Default::default()
+    })
+    .await;
+    f.resume().await;
+    let (_, mut events, _) = f.controller.subscribe_stream().await.unwrap();
+    f.controller.message(f.id, "timed", "Hello").await.unwrap();
+    f.wait_calls(1).await;
+    f.wait_idle().await;
+    let (snapshot, _) = f.controller.subscribe().await.unwrap();
+    assert!(snapshot.control.pending.is_empty());
+    let report = snapshot
+        .transcript
+        .iter()
+        .find_map(|item| match item {
+            crate::protocol::TranscriptItem::CompletionReport(report) => Some(report),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        report.status,
+        crate::completion_report::CompletionStatus::BudgetExhausted
+    );
+    assert_eq!(
+        report.usage.budget_exhaustion,
+        Some(crate::run_budget::RunBudgetExhaustion::RunTime { limit_seconds: 1 })
+    );
+    let mut completion_seen = false;
+    while let Ok(event) = events.try_recv() {
+        match event.event {
+            super::sink::SessionEvent::Completion(report) => {
+                assert_eq!(
+                    report.usage.budget_exhaustion,
+                    Some(crate::run_budget::RunBudgetExhaustion::RunTime { limit_seconds: 1 })
+                );
+                completion_seen = true;
+            }
+            super::sink::SessionEvent::Lifecycle { state, .. } if state == "idle" => {
+                assert!(
+                    completion_seen,
+                    "idle must follow committed completion evidence"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(completion_seen);
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn session_turn_budget_survives_server_resume_without_another_provider_call() {
+    let f = Fixture::with_budget(crate::run_budget::RunBudget {
+        max_session_turns: Some(1),
+        ..Default::default()
+    })
+    .await;
+    f.mock.immediate.store(true, Ordering::SeqCst);
+    f.resume().await;
+    f.controller.message(f.id, "first", "Hello").await.unwrap();
+    f.wait_idle().await;
+    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.resume().await;
+    f.controller
+        .message(f.id, "second", "Hello again")
+        .await
+        .unwrap();
+    f.wait_idle().await;
+    assert_eq!(f.mock.calls.load(Ordering::SeqCst), 1);
+    let (snapshot, _) = f.controller.subscribe().await.unwrap();
+    let report = snapshot
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            crate::protocol::TranscriptItem::CompletionReport(report) => Some(report),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        report.status,
+        crate::completion_report::CompletionStatus::BudgetExhausted
+    );
+    assert_eq!(
+        report.usage.budget_exhaustion,
+        Some(crate::run_budget::RunBudgetExhaustion::SessionTurns { limit: 1, used: 1 })
+    );
     f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
 }
 
