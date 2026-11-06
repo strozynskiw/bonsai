@@ -166,12 +166,27 @@ pub(crate) fn requests_current_task_status(prompt: &str) -> bool {
 
 /// Recognize direct, unqualified human requests to avoid running commands.
 pub(crate) fn requests_no_commands(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
+    if prompt.contains("\\`") {
+        return false;
+    }
+    let mut unquoted = String::with_capacity(prompt.len());
+    let mut in_code = false;
+    for part in prompt.split('`') {
+        if !in_code {
+            unquoted.push_str(part);
+        }
+        unquoted.push(' ');
+        in_code = !in_code;
+    }
+    if !in_code {
+        return false;
+    }
+    let lower = unquoted.to_ascii_lowercase();
     let quote_check = lower.replace("don't", "dont");
     if quote_check.contains(['\'', '"', '`']) {
         return false;
     }
-    let normalized = normalized_words(&lower);
+    let normalized = normalized_words(&lower.replace("read-only", "readonly"));
     let words = normalized.split_whitespace().collect::<Vec<_>>();
     if words.iter().any(|word| {
         matches!(
@@ -261,11 +276,17 @@ mod tests {
             "Do not run commands.",
             "Please don't run commands.",
             "Explain the code without running commands.",
+            "Explain `total(&[2, 3, 5])`. Do not run commands.",
+            "Do not run commands; inspect `src/lib.rs`.",
+            "Use read-only inspection to explain `total`. Do not modify files or run commands.",
         ] {
             assert!(requests_no_commands(prompt), "{prompt}");
         }
         for prompt in [
             "Explain the phrase 'do not run commands'.",
+            "Explain the phrase `do not run commands`.",
+            "Explain `unfinished code and do not run commands.",
+            "Explain \\`do not run commands\\`.",
             "Do not run commands unless I ask.",
             "Do not run commands, but run the tests.",
             "Do not run commands. Actually run tests.",
