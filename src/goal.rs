@@ -9,6 +9,8 @@ use tokio::sync::Mutex;
 use crate::storage::{SessionId, Storage};
 
 pub(crate) const FOREGROUND_INTERRUPTED: &str = "Foreground run interrupted by user.";
+pub(crate) const GOAL_STAGNATED: &str =
+    "Stopped after repeated reports without new progress; resume the goal to continue.";
 
 /// Lifecycle of an explicitly authorized session objective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +71,21 @@ pub(crate) fn terminal_from_completion(
         ),
         C::Failed => (GoalState::Blocked, Some("Run failed.".into())),
     }
+}
+
+/// Preserve a resumable objective when bounded recovery stops without an
+/// external blocker. Other failures keep their existing terminal mapping.
+pub(crate) fn terminal_from_completion_guarded(
+    status: crate::completion_report::CompletionStatus,
+    exhaustion: Option<crate::run_budget::RunBudgetExhaustion>,
+    guard: Option<&crate::agent::CompletionGuardTrace>,
+) -> (GoalState, Option<String>) {
+    if status == crate::completion_report::CompletionStatus::Failed
+        && guard.is_some_and(crate::agent::CompletionGuardTrace::stopped_on_unfinished_goal)
+    {
+        return (GoalState::Paused, Some(GOAL_STAGNATED.into()));
+    }
+    terminal_from_completion(status, exhaustion)
 }
 
 /// Durable identity and intent. Usage and execution evidence remain in the

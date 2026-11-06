@@ -1384,7 +1384,11 @@ async fn execute_turn(
         .publish_completion(storage, id.as_i64(), run, &report)
         .await?;
     if let Some(goal) = goal {
-        let (state, reason) = crate::goal::terminal_from_completion(status, exhaustion);
+        let (state, reason) = crate::goal::terminal_from_completion_guarded(
+            status,
+            exhaustion,
+            report.completion_guard.as_ref(),
+        );
         core.agent
             .goal
             .transition_for_run(goal, state, reason.as_deref())

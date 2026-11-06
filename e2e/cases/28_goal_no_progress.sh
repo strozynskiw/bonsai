@@ -22,6 +22,10 @@ tui_keys "/goal Review README.md, lib.sh, run.sh and verifier.sh and report find
 expect "unfinished work is reported" "goal response reports unfinished work"
 expect_meta "stalled run returns to composer" "● Coding"
 forbid "unfinished goal is not completed" "goal complete ·"
+expect "stalled goal is paused" "goal paused ·"
+tui_keys "/goal status" Enter
+expect "stop reason identifies stalled progress" "without new progress; resume"
+expect "stop reason explains how to continue" "the goal to continue"
 
 if python3 - "$requests" "$E2E_BONSAI_HOME/bonsai.db" <<'PY'
 import json, sqlite3, sys
@@ -30,7 +34,9 @@ requests = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitline
 assert 4 <= len(requests) <= 8, len(requests)
 with sqlite3.connect(sys.argv[2]) as db:
     raw = db.execute('SELECT record_json FROM session_goals WHERE is_current = 1').fetchone()[0]
-    assert json.loads(raw)['state'] != 'complete'
+    record = json.loads(raw)
+    assert record['state'] == 'paused', record
+    assert 'without new progress' in record['reason'], record
 PY
 then _pass "duplicate evidence did not produce completion or unlimited retries"
 else _fail "goal stagnation evidence"; fi

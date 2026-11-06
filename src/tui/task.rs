@@ -655,8 +655,11 @@ impl TaskController {
                     crate::tui::event::AgentRunOutcome::BudgetExhausted(reason) => Some(*reason),
                     _ => None,
                 };
-                let (state, reason) =
-                    crate::goal::terminal_from_completion(report.status, exhaustion);
+                let (state, reason) = crate::goal::terminal_from_completion_guarded(
+                    report.status,
+                    exhaustion,
+                    report.completion_guard.as_ref(),
+                );
                 let service = context.agent.lock().await.goal.clone();
                 if let Err(error) = service
                     .transition_for_run(goal, state, reason.as_deref())

@@ -66,10 +66,12 @@ async fn explicit_unfinished_goal_work_triggers_recovery_before_completion() {
 #[tokio::test]
 async fn goal_recovery_continues_with_progress_but_bounds_repeated_status() {
     use crate::agent::completion::CompletionGuardVerdict;
+    use crate::completion_report::CompletionStatus;
 
     let fixture = TestFixture::new();
     let mut agent = goal_agent(&fixture, vec![]);
     let goal = agent.goal.set("Review all four files").await.unwrap();
+    let lease = agent.goal.active_run_lease().await.unwrap();
     agent.goal_run_id = Some(goal.id);
     agent.begin_inferred_completion_task("Review all four files");
     agent.note_completion_action();
@@ -88,10 +90,69 @@ async fn goal_recovery_continues_with_progress_but_bounds_repeated_status() {
             CompletionGuardVerdict::Continue { .. }
         ));
     }
-    assert!(matches!(
-        agent.completion_guard_verdict(partial).await,
-        CompletionGuardVerdict::Reject(_)
-    ));
+    let CompletionGuardVerdict::Reject(failure) = agent.completion_guard_verdict(partial).await
+    else {
+        panic!("stagnant goal must stop after the bounded recovery");
+    };
+    let trace = agent.completion_guard_trace().unwrap();
+    assert_eq!(
+        crate::goal::terminal_from_completion_guarded(CompletionStatus::Failed, None, Some(&trace)),
+        (GoalState::Paused, Some(crate::goal::GOAL_STAGNATED.into()))
+    );
+    assert_eq!(
+        crate::goal::terminal_from_completion_guarded(
+            CompletionStatus::Blocked,
+            None,
+            Some(&trace)
+        )
+        .0,
+        GoalState::Blocked
+    );
+    assert_eq!(
+        crate::goal::terminal_from_completion_guarded(
+            CompletionStatus::BudgetExhausted,
+            Some(crate::run_budget::RunBudgetExhaustion::MaxTurns { limit: 1 }),
+            Some(&trace),
+        )
+        .0,
+        GoalState::BudgetLimited
+    );
+    let mut mixed = trace;
+    mixed
+        .attempts
+        .last_mut()
+        .unwrap()
+        .gaps
+        .push(crate::agent::CompletionGap::VerificationBlocked(
+            "failed".into(),
+        ));
+    assert_eq!(
+        crate::goal::terminal_from_completion_guarded(CompletionStatus::Failed, None, Some(&mixed))
+            .0,
+        GoalState::Blocked
+    );
+    agent
+        .finish_goal_run(
+            &lease,
+            &Ok(AgentRunResult::Incomplete {
+                output: failure.detail.clone(),
+                failure,
+            }),
+        )
+        .await
+        .unwrap();
+    let paused = agent.goal.snapshot().await.unwrap();
+    assert_eq!(paused.state, GoalState::Paused);
+    assert_eq!(paused.reason.as_deref(), Some(crate::goal::GOAL_STAGNATED));
+    agent
+        .goal
+        .transition(&paused.id, GoalState::Active, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.goal.snapshot().await.unwrap().state,
+        GoalState::Active
+    );
 }
 
 #[tokio::test]

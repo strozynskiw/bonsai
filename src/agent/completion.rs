@@ -612,6 +612,13 @@ pub(crate) struct CompletionGuardTrace {
 }
 
 impl CompletionGuardTrace {
+    pub(crate) fn stopped_on_unfinished_goal(&self) -> bool {
+        self.disposition == CompletionGuardDisposition::Failed
+            && self.attempts.last().is_some_and(|attempt| {
+                matches!(attempt.gaps.as_slice(), [CompletionGap::GoalWorkRemaining])
+            })
+    }
+
     pub(crate) fn render_compact(&self) -> String {
         let attempts = self.attempts.len();
         let disposition = match self.disposition {

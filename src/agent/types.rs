@@ -69,7 +69,7 @@ pub enum QueuedUserMessageCommand {
 pub enum AgentRunResult {
     Completed(String),
     /// The model attempted to finish, but structured task evidence still
-    /// showed unresolved work after Bonsai's single bounded continuation.
+    /// showed unresolved work after Bonsai's bounded recovery.
     Incomplete {
         output: String,
         failure: super::CompletionGuardFailure,

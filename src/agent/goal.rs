@@ -54,7 +54,16 @@ impl Agent {
                 Some(crate::goal::FOREGROUND_INTERRUPTED.to_string()),
             ),
             Ok(AgentRunResult::Incomplete { failure, .. }) => {
-                (GoalState::Blocked, Some(format!("{failure:?}")))
+                if failure.outcome == crate::agent::CompletionFailureOutcome::Failed
+                    && matches!(
+                        failure.gaps.as_slice(),
+                        [crate::agent::CompletionGap::GoalWorkRemaining]
+                    )
+                {
+                    (GoalState::Paused, Some(crate::goal::GOAL_STAGNATED.into()))
+                } else {
+                    (GoalState::Blocked, Some(format!("{failure:?}")))
+                }
             }
             Ok(AgentRunResult::Waiting(_)) => (
                 GoalState::Active,
