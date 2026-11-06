@@ -80,6 +80,7 @@ impl Agent {
     ) {
         self.reset_after_edit_verification();
         if !self.persona_self_review()
+            || self.workspace_trust == crate::workspace_trust::WorkspaceTrust::Restricted
             || self.self_review.mode().decision(self.approval_level()) == SelfReviewDecision::Skip
         {
             self.disarm_self_review();

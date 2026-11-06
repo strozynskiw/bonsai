@@ -695,6 +695,9 @@ impl ToolSchemaPayload {
 }
 
 impl Agent {
+    pub(crate) fn workspace_trust(&self) -> crate::workspace_trust::WorkspaceTrust {
+        self.workspace_trust
+    }
     pub fn set_approval_level(&self, level: crate::tool::ApprovalLevel) {
         self.yolo_mode.set_level(level);
     }

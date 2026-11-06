@@ -521,6 +521,9 @@ impl Agent {
         scope: ReviewScope,
         build_prompt: impl FnOnce(ReviewScope, &CapturedDiff) -> String,
     ) -> bool {
+        if self.workspace_trust == crate::workspace_trust::WorkspaceTrust::Restricted {
+            return false;
+        }
         let diff: CapturedDiff = match capture_diff(&self.project_root, scope).await {
             Some(diff) => diff,
             None => return false,

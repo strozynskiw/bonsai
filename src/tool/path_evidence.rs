@@ -21,7 +21,14 @@ pub(crate) struct PathEvidence {
 struct PathEvidenceInner {
     canonical_root: PathBuf,
     root_identity: MetadataFingerprint,
+    git_inspection: GitInspection,
     entries: Mutex<HashMap<PathBuf, MissingEntry>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitInspection {
+    Enabled,
+    Restricted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,15 +99,31 @@ impl PathEvidence {
     /// Returns an error when the project root cannot be canonicalized or
     /// inspected.
     pub(crate) fn new(project_root: &Path) -> std::io::Result<Self> {
+        Self::with_git_inspection(project_root, GitInspection::Enabled)
+    }
+
+    pub(crate) fn restricted(project_root: &Path) -> std::io::Result<Self> {
+        Self::with_git_inspection(project_root, GitInspection::Restricted)
+    }
+
+    fn with_git_inspection(
+        project_root: &Path,
+        git_inspection: GitInspection,
+    ) -> std::io::Result<Self> {
         let canonical_root = project_root.canonicalize()?;
         let root_identity = metadata_fingerprint(&std::fs::symlink_metadata(&canonical_root)?);
         Ok(Self {
             inner: Arc::new(PathEvidenceInner {
                 canonical_root,
                 root_identity,
+                git_inspection,
                 entries: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    pub(crate) fn allows_git_inspection(&self) -> bool {
+        self.inner.git_inspection == GitInspection::Enabled
     }
 
     pub(crate) fn canonical_root(&self) -> &Path {
@@ -152,7 +175,11 @@ impl PathEvidence {
     pub(crate) fn observation(&self) -> PathEvidenceObservation {
         PathEvidenceObservation {
             path_evidence: self.clone(),
-            git_fingerprint: git_fingerprint(&self.inner.canonical_root),
+            git_fingerprint: if self.allows_git_inspection() {
+                git_fingerprint(&self.inner.canonical_root)
+            } else {
+                empty_git_fingerprint(false)
+            },
         }
     }
 
@@ -163,7 +190,7 @@ impl PathEvidence {
         source: &std::io::Error,
         git_fingerprint: GitFingerprint,
     ) -> Option<MissingPathEvidence> {
-        if source.kind() != ErrorKind::NotFound {
+        if !self.allows_git_inspection() || source.kind() != ErrorKind::NotFound {
             return None;
         }
         let (relative, target_path) = self.normalized_target(raw_path)?;
@@ -453,6 +480,22 @@ mod unix_metadata {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn restricted_missing_path_evidence_never_runs_git() {
+        let project = TempDir::new().unwrap();
+        crate::util::git::setup_test_clean_filter(project.path());
+        let cache = PathEvidence::restricted(project.path()).unwrap();
+        let error = std::fs::canonicalize(project.path().join("missing.md")).unwrap_err();
+        assert!(
+            cache
+                .observation()
+                .record_missing("missing.md", String::new(), &error)
+                .is_none()
+        );
+        assert!(cache.reused_missing("missing.md", false).is_none());
+        assert!(!project.path().join("clean-filter-ran").exists());
+    }
 
     fn evidence(root: &Path) -> PathEvidence {
         PathEvidence::new(root).unwrap()

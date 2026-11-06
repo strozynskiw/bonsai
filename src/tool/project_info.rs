@@ -55,6 +55,7 @@ enum ProjectInfoContextScope {
     #[default]
     Inherited,
     Isolated,
+    Restricted,
 }
 
 impl ProjectInfoRuntime {
@@ -73,6 +74,21 @@ impl ProjectInfoRuntime {
         Self {
             context_scope: ProjectInfoContextScope::Isolated,
             ..Self::new(provider)
+        }
+    }
+
+    pub(crate) fn restricted(provider: Option<ProjectInfoProviderState>) -> Self {
+        Self {
+            context_scope: ProjectInfoContextScope::Restricted,
+            ..Self::new(provider)
+        }
+    }
+
+    pub(crate) fn workspace_trust(&self) -> crate::workspace_trust::WorkspaceTrust {
+        if matches!(self.context_scope, ProjectInfoContextScope::Restricted) {
+            crate::workspace_trust::WorkspaceTrust::Restricted
+        } else {
+            crate::workspace_trust::WorkspaceTrust::Trusted
         }
     }
 
@@ -134,7 +150,7 @@ struct ProjectInfoOutput {
     mode: Option<String>,
     provider: Option<ProjectInfoProviderState>,
     ecosystems: Vec<String>,
-    git: GitInfo,
+    git: Option<GitInfo>,
     steering_files: Vec<SteeringFileInfo>,
     known_commands: Vec<KnownCommand>,
     tools: Vec<String>,
@@ -149,7 +165,7 @@ struct ProjectInfoFallbackOutput {
     mode: Option<String>,
     provider: Option<ProjectInfoProviderState>,
     ecosystems: Vec<String>,
-    git: GitInfo,
+    git: Option<GitInfo>,
     steering_files_count: usize,
     known_commands: Vec<KnownCommand>,
     tools_count: usize,
@@ -207,13 +223,23 @@ impl Tool for ProjectInfoTool {
             ProjectInfoContextScope::Isolated => {
                 isolated_project_context_snapshot(&self.project_root)
             }
+            ProjectInfoContextScope::Restricted => {
+                crate::context::restricted_project_context_snapshot(&self.project_root)
+            }
         };
         let runtime = self.runtime.snapshot();
         let ecosystems = detect_project_ecosystems(&self.project_root)
             .into_iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        let git = GitInfo::collect(&self.project_root).await;
+        let git = if matches!(
+            self.runtime.context_scope,
+            ProjectInfoContextScope::Restricted
+        ) {
+            None
+        } else {
+            Some(GitInfo::collect(&self.project_root).await)
+        };
         let output = ProjectInfoOutput {
             cwd: self.project_root.display().to_string(),
             mode: runtime.mode,
@@ -398,6 +424,22 @@ async fn git(root: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restricted_project_info_and_child_do_not_run_git() {
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::util::git::setup_test_clean_filter(dir.path());
+        std::fs::write(dir.path().join("AGENTS.md"), "untrusted instructions").unwrap();
+        let runtime = ProjectInfoRuntime::restricted(None);
+        for runtime in [runtime.fork(None), runtime] {
+            let tool = ProjectInfoTool::new(dir.path().to_path_buf(), Arc::new(runtime));
+            let output = tool.execute(serde_json::json!({})).await.unwrap();
+            let value: serde_json::Value = serde_json::from_str(output.rendered_summary()).unwrap();
+            assert!(value["git"].is_null());
+            assert!(value["steering_files"].as_array().unwrap().is_empty());
+        }
+        assert!(!dir.path().join("clean-filter-ran").exists());
+    }
 
     #[tokio::test]
     async fn project_info_git_summary_does_not_run_fsmonitor() {

@@ -354,6 +354,92 @@ fn feedback(requests: &[Value]) -> Vec<&str> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restricted_startup_and_inspection_do_not_run_git_clean_filters() -> Result<()> {
+    let project = tempfile::tempdir()?;
+    std::fs::write(
+        project.path().join(".gitattributes"),
+        "*.txt filter=probe\n",
+    )?;
+    std::fs::write(project.path().join("tracked.txt"), "before\n")?;
+    std::fs::write(
+        project.path().join("probe.sh"),
+        "ps -o args= -p \"$PPID\" > git-invocation\ntouch clean-filter-ran\ncat\n",
+    )?;
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test"],
+        vec!["add", ".gitattributes", "tracked.txt"],
+        vec!["commit", "-m", "initial"],
+        vec!["config", "filter.probe.clean", "sh probe.sh"],
+    ] {
+        let output = std::process::Command::new("git")
+            .current_dir(project.path())
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let tracked = project.path().join("tracked.txt");
+    std::fs::write(&tracked, "after!\n")?;
+    std::fs::File::options()
+        .write(true)
+        .open(&tracked)?
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(5)),
+        )?;
+    let raw = std::process::Command::new("git")
+        .current_dir(project.path())
+        .args(["status", "--porcelain"])
+        .output()?;
+    assert!(raw.status.success());
+    let marker = project.path().join("clean-filter-ran");
+    assert!(
+        marker.exists(),
+        "the fixture must trigger the helper with raw Git"
+    );
+    std::fs::remove_file(&marker)?;
+    std::fs::remove_file(project.path().join("git-invocation"))?;
+
+    for (name, args, autonomy) in [
+        ("project_info", serde_json::json!({}), "ask"),
+        ("read", serde_json::json!({"path": "missing.txt"}), "ask"),
+        ("git", serde_json::json!({"op": "status"}), "ask"),
+        ("git", serde_json::json!({"op": "status"}), "yolo"),
+    ] {
+        let (_output, requests) =
+            scenario(project.path(), tool_response(name, args), autonomy, "off").await?;
+        assert!(
+            !feedback(&requests).is_empty(),
+            "{name} did not reach tool execution"
+        );
+        if name == "git" {
+            assert!(
+                feedback(&requests)
+                    .iter()
+                    .any(|message| message.contains("untrusted workspace"))
+            );
+        }
+        assert!(
+            !marker.exists(),
+            "{name}/{autonomy} or startup ran the configured clean filter: {}",
+            std::fs::read_to_string(project.path().join("git-invocation")).unwrap_or_default()
+        );
+    }
+    let tui_home = tempfile::tempdir()?;
+    run_tui_smoke(tui_home.path(), project.path())?;
+    assert!(
+        !marker.exists(),
+        "restricted TUI startup ran the configured clean filter"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_denies_noninteractive_mutation_and_project_escapes() -> Result<()> {
     let project = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;

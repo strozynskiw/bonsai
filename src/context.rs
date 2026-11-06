@@ -608,6 +608,27 @@ pub fn project_context_snapshot(root: &Path) -> ProjectContextSnapshot {
     }
 }
 
+/// Build context without invoking Git or loading project steering before the
+/// workspace has been trusted. Git status may execute configured filters.
+pub(crate) fn restricted_project_context_snapshot(root: &Path) -> ProjectContextSnapshot {
+    ProjectContextSnapshot {
+        environment: format!(
+            "## Environment\n{}",
+            project_environment_lines(root).join("\n")
+        ),
+        volatile_state: String::new(),
+        steering_files: Vec::new(),
+        repo_map: String::new(),
+        skills_index: String::new(),
+        smol_skills_index: String::new(),
+        agents_index: String::new(),
+        memory_index: String::new(),
+        stale_read_advisory: String::new(),
+        peer_status: String::new(),
+    }
+    .restrict_untrusted_workspace()
+}
+
 /// Collect project context and preflight explicit local references found in
 /// trusted steering files. Callers must enforce workspace trust before using
 /// this constructor; repository-authored instructions are otherwise data only.
@@ -1041,6 +1062,15 @@ fn truncate_chars(text: &str, max_chars: usize, marker: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restricted_context_does_not_run_repository_clean_filters() {
+        let project = tempfile::TempDir::new().unwrap();
+        crate::util::git::setup_test_clean_filter(project.path());
+        std::fs::write(project.path().join("AGENTS.md"), "untrusted instructions").unwrap();
+        let context = super::restricted_project_context_snapshot(project.path()).render();
+        assert!(!context.contains("untrusted instructions"));
+        assert!(!project.path().join("clean-filter-ran").exists());
+    }
     #[test]
     fn project_context_git_status_does_not_run_fsmonitor() {
         let project = tempfile::TempDir::new().unwrap();

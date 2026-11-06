@@ -569,6 +569,7 @@ impl SubagentRunner {
             ExecutionLaneKind::SelfReview => ExecutionLane::self_review(subtask_id.clone()),
             _ => ExecutionLane::subagent(subtask_id.clone()),
         })
+        .workspace_trust(project_info_runtime.workspace_trust())
         .project_info_runtime(project_info_runtime)
         .tool_origin(format!("subagent {} ({subtask_id})", spec.label))
         // A scoped delegation never self-reviews.

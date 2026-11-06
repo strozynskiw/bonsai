@@ -10,6 +10,6 @@
       "clean_filter": "git diff --no-ext-diff --no-textconv, and git status when rechecking a same-sized modified tracked file, executed filter.probe.clean."
     }
   },
-  "mitigation": "The Git tool, project context, project info, and missing-path evidence disable fsmonitor and signature display, avoid optional locks and lazy fetching, and terminate async Git processes on cancellation. The Git tool also disables external diff and textconv for diff/show. Regression tests cover these helper types and automatic Git status callers.",
-  "remaining_limitations": "A configured clean or process filter can still execute during working-tree inspection, including through .git/info/attributes and automatic status calls. The mitigation is not a general no-command or untrusted-repository sandbox. Natural-language restrictions are not enforced by this change."
+  "mitigation": "The Git tool, project context, project info, and missing-path evidence disable fsmonitor and signature display, avoid optional locks and lazy fetching, and terminate async Git processes on cancellation. The Git tool also disables external diff and textconv for diff/show. Restricted workspaces skip automatic Git status and self-review baselines, disable Git-backed missing-path caching, and reject Git inspection and Git-based review. Real headless and TUI tests use a clean-filter fixture, including ask and yolo modes.",
+  "remaining_limitations": "In trusted workspaces a configured clean or process filter can still execute during working-tree inspection, including through .git/info/attributes and automatic status calls. This mitigation is not a general no-command or untrusted-repository sandbox. Natural-language restrictions are not enforced by this change."
 }

@@ -981,6 +981,12 @@ impl TaskController {
         }
 
         let mut guard = agent.lock().await;
+        if guard.workspace_trust() == crate::workspace_trust::WorkspaceTrust::Restricted {
+            return Err(UiError::new(
+                "Review unavailable",
+                "Git-based review may execute repository-configured filters. Trust the workspace and restart Bonsai to enable it.",
+            ));
+        }
         let has_changes = match workflow {
             ReviewWorkflow::General => guard.review_pending_changes(scope).await,
             ReviewWorkflow::Security => guard.security_review_pending_changes(scope).await,

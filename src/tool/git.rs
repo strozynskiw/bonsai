@@ -20,11 +20,28 @@ const OPS: &[&str] = &["status", "diff", "log", "blame", "show"];
 
 pub struct GitTool {
     project_root: PathBuf,
+    access: GitAccess,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GitAccess {
+    Enabled,
+    Restricted,
 }
 
 impl GitTool {
     pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root }
+        Self {
+            project_root,
+            access: GitAccess::Enabled,
+        }
+    }
+
+    pub(crate) fn restricted(project_root: PathBuf) -> Self {
+        Self {
+            project_root,
+            access: GitAccess::Restricted,
+        }
     }
 }
 
@@ -231,6 +248,11 @@ impl Tool for GitTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        if matches!(self.access, GitAccess::Restricted) {
+            anyhow::bail!(
+                "Git inspection is unavailable in an untrusted workspace because Git may execute repository-configured filters. Trust the workspace and restart Bonsai to enable it."
+            );
+        }
         let args: GitArgs = parse_args("git", args)?;
 
         // A ref or range never begins with `-`; a leading dash means the model
@@ -416,6 +438,18 @@ mod tests {
     use super::*;
     use crate::tool::test_utils::TestFixture;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn restricted_git_tool_does_not_run_repository_filters() {
+        let fixture = TestFixture::new();
+        crate::util::git::setup_test_clean_filter(&fixture.project_root);
+        let error = GitTool::restricted(fixture.project_root.clone())
+            .execute(json!({"op": "status"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("untrusted workspace"));
+        assert!(!fixture.project_root.join("clean-filter-ran").exists());
+    }
 
     fn init_git_repo(root: &Path) {
         for args in [

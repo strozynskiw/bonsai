@@ -1,6 +1,89 @@
 use super::*;
 
 #[tokio::test]
+async fn delegated_agent_inherits_restricted_workspace_steering_boundary() {
+    struct CaptureProvider(Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait]
+    impl Provider for CaptureProvider {
+        async fn chat_stream(
+            &self,
+            messages: &[ChatCompletionRequestMessage],
+            _tools: &[ChatCompletionTool],
+            _cancellation: CancellationToken,
+            _sink: SharedSink,
+        ) -> crate::provider::ProviderResult<StreamedResponse> {
+            self.0.lock().unwrap().push(format!("{messages:?}"));
+            Ok(StreamedResponse {
+                content: "Inspection complete.".to_string(),
+                ..StreamedResponse::default()
+            })
+        }
+        async fn list_models(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project.path().join("nested")).unwrap();
+    std::fs::write(project.path().join("nested/file.rs"), "fn entry() {}\n").unwrap();
+    std::fs::write(
+        project.path().join("nested/AGENTS.md"),
+        "SCOPED_TRUST_BOUNDARY_MARKER",
+    )
+    .unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+
+    for (runtime, trusted) in [
+        (ProjectInfoRuntime::new(None), true),
+        (ProjectInfoRuntime::restricted(None), false),
+    ] {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory: SubagentProviderFactory = {
+            let captured = captured.clone();
+            Arc::new(move |_, _| {
+                let provider = CaptureProvider(captured.clone());
+                Box::pin(async move {
+                    SubagentProviderConfig::new(
+                        Box::new(provider),
+                        DEFAULT_CONTEXT_WINDOW_TOKENS as usize,
+                        PromptEstimator::heuristic(),
+                        "test-model".to_string(),
+                    )
+                })
+            })
+        };
+        let runner = SubagentRunner::new(
+            factory,
+            empty_sub_registry(),
+            empty_sub_registry(),
+            ReadTracker::new(),
+            Arc::new(runtime),
+            Arc::new(SubagentRegistry::new()),
+            project_root.clone(),
+        );
+        let (result, _, _, _) = runner
+            .run_new(
+                test_run_spec(
+                    "explore",
+                    "Inspect the project.",
+                    "Inspect @nested/file.rs",
+                    empty_sub_registry(),
+                    BuiltinSubagentBudget::Explore.limits(),
+                ),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        let requests = captured.lock().unwrap();
+        assert!(!requests.is_empty());
+        assert_eq!(
+            requests.join("\n").contains("SCOPED_TRUST_BOUNDARY_MARKER"),
+            trusted
+        );
+    }
+}
+
+#[tokio::test]
 async fn explore_returns_subagent_conclusion() {
     let tool = agent_tool();
     let result = tool

@@ -218,10 +218,6 @@ impl RuntimeBuilder {
         validate_session_binding(surface, capabilities.session_binding, current_session_id)?;
         let smol_preference = storage.smol_preference().await?;
 
-        let read_tracker = ReadTracker::new();
-        let path_evidence = crate::tool::PathEvidence::new(&project_root)?;
-        let lsp_hub =
-            Arc::new(LspHub::new(project_root.clone()).with_path_evidence(path_evidence.clone()));
         let project_id = storage.ensure_project(&session_project_root).await?;
         let permissions = PermissionManager::load(storage.clone(), project_id).await?;
         let domain_permissions =
@@ -230,6 +226,14 @@ impl RuntimeBuilder {
             workspace_trust.state(),
             crate::workspace_trust::WorkspaceTrust::Trusted
         );
+        let read_tracker = ReadTracker::new();
+        let path_evidence = if workspace_trusted {
+            crate::tool::PathEvidence::new(&project_root)?
+        } else {
+            crate::tool::PathEvidence::restricted(&project_root)?
+        };
+        let lsp_hub =
+            Arc::new(LspHub::new(project_root.clone()).with_path_evidence(path_evidence.clone()));
         if !workspace_trusted {
             tracing::warn!(
                 surface = surface.label(),
@@ -294,7 +298,7 @@ impl RuntimeBuilder {
         let context_snapshot = if workspace_trusted {
             crate::context::trusted_project_context_snapshot(&project_root, &path_evidence)
         } else {
-            crate::context::project_context_snapshot(&project_root)
+            crate::context::restricted_project_context_snapshot(&project_root)
         };
         let mut project_context = context_snapshot
             .with_skills_index(skills_snapshot.index_section())
@@ -308,15 +312,17 @@ impl RuntimeBuilder {
             project_context =
                 project_context.with_repo_map(crate::tool::build_repo_map(&project_root));
         }
-        if !workspace_trusted {
-            project_context = project_context.restrict_untrusted_workspace();
-        }
-
         let project_info_runtime = {
             let session_store = session_store.lock().await;
-            Arc::new(ProjectInfoRuntime::new(Some(
-                crate::model_resolution::project_info_provider_state(&registry, &session_store),
-            )))
+            let provider = Some(crate::model_resolution::project_info_provider_state(
+                &registry,
+                &session_store,
+            ));
+            Arc::new(if workspace_trusted {
+                ProjectInfoRuntime::new(provider)
+            } else {
+                ProjectInfoRuntime::restricted(provider)
+            })
         };
         let peer_bus = Arc::new(crate::peer::PeerBus::new(
             storage.clone(),
@@ -501,7 +507,8 @@ impl RuntimeBuilder {
         agent.set_background_wakes(background_wakes.clone());
         agent.set_peer_bus(peer_bus.clone());
         agent.set_refresh_volatile(
-            capabilities.volatile_context == VolatileContextMode::RefreshEachTurn,
+            workspace_trusted
+                && capabilities.volatile_context == VolatileContextMode::RefreshEachTurn,
         );
 
         fire_session_start_hooks(&mut agent, &hooks).await;

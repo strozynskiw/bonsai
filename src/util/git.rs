@@ -54,3 +54,48 @@ pub(crate) fn setup_test_fsmonitor(root: &Path) {
     );
     std::fs::remove_file(marker).unwrap();
 }
+
+#[cfg(test)]
+pub(crate) fn setup_test_clean_filter(root: &Path) {
+    std::fs::write(root.join(".gitattributes"), "*.txt filter=probe\n").unwrap();
+    std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+    std::fs::write(root.join("probe.sh"), "touch clean-filter-ran\ncat\n").unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test"],
+        vec!["add", ".gitattributes", "tracked.txt"],
+        vec!["commit", "-m", "initial"],
+        vec!["config", "filter.probe.clean", "sh probe.sh"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+    let tracked = root.join("tracked.txt");
+    std::fs::write(&tracked, "after!\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&tracked)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)),
+        )
+        .unwrap();
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let marker = root.join("clean-filter-ran");
+    assert!(
+        marker.exists(),
+        "raw git status did not run the configured clean filter"
+    );
+    std::fs::remove_file(marker).unwrap();
+}

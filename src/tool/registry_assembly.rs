@@ -404,7 +404,11 @@ pub(crate) fn build_tool_registries(
         references: Arc::new(ReferencesTool::new(lsp_hub.clone())),
         hover: Arc::new(HoverTool::new(lsp_hub.clone())),
         workspace_symbol: Arc::new(WorkspaceSymbolTool::new(lsp_hub.clone())),
-        git: Arc::new(GitTool::new(project_root.clone())),
+        git: Arc::new(if path_evidence.allows_git_inspection() {
+            GitTool::new(project_root.clone())
+        } else {
+            GitTool::restricted(project_root.clone())
+        }),
     };
     let question_tool = Arc::new(QuestionTool::new(interaction.clone()));
     let action_policy = ActionPolicy::with_ledger(

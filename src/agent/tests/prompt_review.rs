@@ -1,6 +1,25 @@
 use super::*;
 
 #[tokio::test]
+async fn restricted_review_paths_do_not_execute_repository_filters() {
+    let fixture = TestFixture::new();
+    crate::util::git::setup_test_clean_filter(&fixture.project_root);
+    let mut agent = review_agent(&fixture, String::new());
+    agent.workspace_trust = crate::workspace_trust::WorkspaceTrust::Restricted;
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+    agent
+        .arm_self_review_for_coding_task("Implement a change")
+        .await;
+    assert!(!agent.review_pending_changes(ReviewScope::Uncommitted).await);
+    assert!(
+        !agent
+            .security_review_pending_changes(ReviewScope::Uncommitted)
+            .await
+    );
+    assert!(!fixture.project_root.join("clean-filter-ran").exists());
+}
+
+#[tokio::test]
 async fn contract_checkpoint_follows_mutation_without_an_extra_model_turn() {
     let fixture = TestFixture::new();
     let mut registry = ToolRegistry::new();
