@@ -54,6 +54,7 @@ struct MissingEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitFingerprint {
+    usable: bool,
     worktree: Option<PathBuf>,
     git_dir: Option<PathBuf>,
     head: Option<String>,
@@ -273,7 +274,7 @@ impl MissingEntry {
         // A repository whose status could not be collected has no worktree
         // evidence to compare. Two failed observations are not proof that the
         // worktree stayed unchanged.
-        if self.git_fingerprint.git_dir.is_some() && self.git_fingerprint.state_digest.is_none() {
+        if !self.git_fingerprint.usable {
             return false;
         }
         matches!(
@@ -319,6 +320,7 @@ fn nearest_existing_ancestor(path: &Path) -> Option<(PathBuf, Metadata)> {
 
 fn git_fingerprint(root: &Path) -> GitFingerprint {
     let output = crate::util::git::inspection_command(root)
+        .env("LC_ALL", "C")
         .args([
             "rev-parse",
             "--show-toplevel",
@@ -328,32 +330,59 @@ fn git_fingerprint(root: &Path) -> GitFingerprint {
         ])
         .output();
     let Ok(output) = output else {
-        return GitFingerprint {
-            worktree: None,
-            git_dir: None,
-            head: None,
-            state_digest: None,
-        };
+        return empty_git_fingerprint(false);
     };
-    if !output.status.success() {
-        return GitFingerprint {
-            worktree: None,
-            git_dir: None,
-            head: None,
-            state_digest: None,
-        };
-    }
     let lines = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    if lines.len() < 2 {
+        let not_a_repository = String::from_utf8_lossy(&output.stderr)
+            .contains("fatal: not a git repository")
+            && clearly_outside_git(root);
+        return empty_git_fingerprint(not_a_repository);
+    }
+    // An unborn branch has a worktree and Git directory but no HEAD commit.
+    // Any other failed discovery leaves the identity unverified.
+    let unborn = !output.status.success()
+        && lines.len() == 2
+        && String::from_utf8_lossy(&output.stderr).contains("fatal: Needed a single revision");
+    if !output.status.success() && !unborn {
+        return empty_git_fingerprint(false);
+    }
     let state_digest = git_worktree_state_digest(root);
     GitFingerprint {
+        usable: state_digest.is_some() && (unborn || lines.len() >= 3),
         worktree: lines.first().map(PathBuf::from),
         git_dir: lines.get(1).map(PathBuf::from),
         head: lines.get(2).cloned(),
         state_digest,
     }
+}
+
+fn empty_git_fingerprint(usable: bool) -> GitFingerprint {
+    GitFingerprint {
+        usable,
+        worktree: None,
+        git_dir: None,
+        head: None,
+        state_digest: None,
+    }
+}
+
+fn clearly_outside_git(root: &Path) -> bool {
+    if ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return false;
+    }
+    root.ancestors().all(|ancestor| {
+        matches!(
+            std::fs::symlink_metadata(ancestor.join(".git")),
+            Err(error) if error.kind() == ErrorKind::NotFound
+        )
+    })
 }
 
 fn git_worktree_state_digest(root: &Path) -> Option<blake3::Hash> {
@@ -580,6 +609,29 @@ mod tests {
         let cache = evidence(project.path());
         miss(&cache, "missing.md");
         std::fs::write(project.path().join("tracked"), "changed").unwrap();
+        assert!(cache.reused_missing("missing.md", false).is_none());
+    }
+
+    #[test]
+    fn malformed_git_directory_does_not_look_like_a_non_repository() {
+        let project = TempDir::new().unwrap();
+        git(project.path(), &["init"]);
+        std::fs::write(project.path().join(".git/HEAD"), "invalid HEAD\n").unwrap();
+        let cache = evidence(project.path());
+        miss(&cache, "missing.md");
+        assert!(cache.reused_missing("missing.md", false).is_none());
+    }
+
+    #[test]
+    fn unborn_git_repository_tracks_worktree_changes() {
+        let project = TempDir::new().unwrap();
+        git(project.path(), &["init"]);
+        std::fs::write(project.path().join("tracked"), "one").unwrap();
+        git(project.path(), &["add", "tracked"]);
+        let cache = evidence(project.path());
+        miss(&cache, "missing.md");
+        assert!(cache.reused_missing("missing.md", false).is_some());
+        std::fs::write(project.path().join("tracked"), "two").unwrap();
         assert!(cache.reused_missing("missing.md", false).is_none());
     }
 
