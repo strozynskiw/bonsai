@@ -3395,7 +3395,7 @@ async fn steering_interrupts_verification_binding_before_stale_command() {
     crate::util::git::setup_test_clean_filter(root);
     std::fs::write(
         root.join("probe.sh"),
-        "touch binding-started\nwhile [ ! -e binding-release ]; do sleep 0.05; done\ncat\n",
+        "touch binding-started\nwhile [ ! -e binding-release ]; do sleep 0.05; done\ntouch binding-child-finished\ncat\n",
     )
     .unwrap();
     let (sender, receiver) = mpsc::unbounded_channel();
@@ -3423,7 +3423,7 @@ async fn steering_interrupts_verification_binding_before_stale_command() {
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
     let sink = Arc::new(CaptureSink::default());
     let run = agent.run_with_queue(
-        crate::agent::UserInput::from_text("Inspect the project"),
+        crate::agent::UserInput::from_text("Run cargo test"),
         CancellationToken::new(),
         sink.clone(),
         receiver,
@@ -3443,7 +3443,7 @@ async fn steering_interrupts_verification_binding_before_stale_command() {
         }
         result = &mut run => panic!("run finished before binding started: {result:?}"),
     }
-    let text = "Stop that. Say done.";
+    let text = "Stop the previous task. Say done.";
     sender
         .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
             id: 92,
@@ -3458,6 +3458,8 @@ async fn steering_interrupts_verification_binding_before_stale_command() {
         .expect("steering waited for verification binding")
         .unwrap();
     assert_eq!(result, AgentRunResult::Completed("done".into()));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!root.join("binding-child-finished").exists());
     assert!(sink.tool_finishes().iter().any(|(id, message, status)| {
         id == "stale-check" && message.contains("queued user message") && !status.is_success()
     }));

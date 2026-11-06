@@ -389,13 +389,16 @@ async fn capture_git_untracked_inputs(
     worktree_root: &Path,
     command: &str,
 ) -> Result<BTreeMap<String, String>, std::io::Error> {
-    let mut child = tokio::process::Command::new("git")
+    let mut git_command = tokio::process::Command::new("git");
+    git_command
         .args(["ls-files", "--others", "--exclude-standard", "-z"])
         .current_dir(worktree_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    crate::process_group::configure(&mut git_command);
+    let mut child = git_command.spawn()?;
+    let mut guard = crate::process_group::ProcessGroupGuard::new(child.id());
     let stdout = child
         .stdout
         .take()
@@ -424,6 +427,7 @@ async fn capture_git_untracked_inputs(
         }
     }
     let status = child.wait().await?;
+    guard.disarm();
     if !status.success() {
         return Err(std::io::Error::other(format!(
             "Git exited with status {status}"
@@ -715,12 +719,19 @@ async fn git_stdout(root: &Path, args: &[&str]) -> Result<String, std::io::Error
 }
 
 async fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, std::io::Error> {
-    let output = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    command
         .args(args)
         .current_dir(root)
         .kill_on_drop(true)
-        .output()
-        .await?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::process_group::configure(&mut command);
+    let child = command.spawn()?;
+    let mut guard = crate::process_group::ProcessGroupGuard::new(child.id());
+    let output = child.wait_with_output().await?;
+    guard.disarm();
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -731,13 +742,16 @@ async fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, std::io::Error
 }
 
 async fn git_digest(root: &Path, args: &[&str]) -> Result<String, std::io::Error> {
-    let mut child = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    command
         .args(args)
         .current_dir(root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    crate::process_group::configure(&mut command);
+    let mut child = command.spawn()?;
+    let mut guard = crate::process_group::ProcessGroupGuard::new(child.id());
     let mut stdout = child
         .stdout
         .take()
@@ -752,6 +766,7 @@ async fn git_digest(root: &Path, args: &[&str]) -> Result<String, std::io::Error
         hasher.update(&buffer[..read]);
     }
     let status = child.wait().await?;
+    guard.disarm();
     if !status.success() {
         return Err(std::io::Error::other(format!(
             "Git exited with status {status}"
