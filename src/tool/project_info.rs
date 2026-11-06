@@ -9,7 +9,7 @@ use crate::context::{
     SteeringFileContext, collect_steering_file_in_dir, collect_steering_files,
     detect_project_ecosystems,
 };
-use crate::tool::schema::{closed_object, parse_args};
+use crate::tool::schema::{boolean_property, closed_object, parse_args};
 use crate::tool::{ParallelPolicy, Tool, ToolExecutionContext, ToolOutput};
 
 const MAX_PROJECT_INFO_CHARS: usize = 12_000;
@@ -142,7 +142,14 @@ impl ProjectInfoTool {
 }
 
 #[derive(Debug, Deserialize)]
-struct ProjectInfoArgs {}
+struct ProjectInfoArgs {
+    #[serde(default = "include_git_by_default")]
+    include_git: bool,
+}
+
+fn include_git_by_default() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize)]
 struct ProjectInfoOutput {
@@ -205,11 +212,19 @@ impl Tool for ProjectInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Return compact read-only project orientation: cwd, ecosystems, git summary, steering files, available tools, and likely commands."
+        "Return compact project orientation: cwd, ecosystems, git summary, steering files, available tools, and likely commands. Git summary starts Git processes; set include_git to false when commands must not run."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        closed_object([], &[])
+        closed_object(
+            [(
+                "include_git",
+                boolean_property(
+                    "Include Git summary by running Git (default true). Set false to collect orientation without starting Git.",
+                ),
+            )],
+            &[],
+        )
     }
 
     fn parallel_policy(&self) -> ParallelPolicy {
@@ -235,7 +250,7 @@ impl ProjectInfoTool {
         args: serde_json::Value,
         context: Option<&ToolExecutionContext>,
     ) -> Result<ToolOutput> {
-        let _args: ProjectInfoArgs = parse_args("project_info", args)?;
+        let args: ProjectInfoArgs = parse_args("project_info", args)?;
         let steering = match self.runtime.context_scope {
             ProjectInfoContextScope::Inherited => collect_steering_files(&self.project_root),
             ProjectInfoContextScope::Isolated => collect_steering_file_in_dir(&self.project_root)
@@ -248,10 +263,11 @@ impl ProjectInfoTool {
             .into_iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        let git = if matches!(
-            self.runtime.context_scope,
-            ProjectInfoContextScope::Restricted
-        ) {
+        let git = if !args.include_git
+            || matches!(
+                self.runtime.context_scope,
+                ProjectInfoContextScope::Restricted
+            ) {
             None
         } else {
             Some(GitInfo::collect(&self.project_root, context).await)
