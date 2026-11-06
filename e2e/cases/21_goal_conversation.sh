@@ -44,7 +44,7 @@ if python3 - "$provider_requests" "$E2E_BONSAI_HOME/bonsai.db" <<'PY'
 import json, sqlite3, sys
 from pathlib import Path
 requests = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-assert len(requests) == 2, len(requests)
+assert len(requests) == 3, len(requests)
 assert 'FOLLOW_UP_TOKEN' not in json.dumps(requests[0]['messages'])
 assert 'FOLLOW_UP_TOKEN' in json.dumps(requests[1]['messages'])
 assert 'ADDITIONAL_TOKEN' in json.dumps(requests[1]['messages'])
@@ -57,7 +57,7 @@ with sqlite3.connect(sys.argv[2]) as db:
     runs = db.execute('SELECT outcome, wall_ms FROM task_runs WHERE goal_id = ?', (goal_id,)).fetchall()
     assert len(runs) == 1 and runs[0][0] == 'succeeded' and runs[0][1] > 0, runs
 PY
-then _pass "one goal, one run, two requests, and durable elapsed time"
+then _pass "one goal, one run, follow-ups, and durable elapsed time"
 else _fail "goal conversation evidence"; fi
 cp "$provider_requests" "$E2E_EVIDENCE/provider-requests.jsonl"
 tui_keys "/quit" Enter

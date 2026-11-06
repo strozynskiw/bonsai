@@ -219,6 +219,8 @@ impl Agent {
             completion: CompletionGuardState::default(),
             goal: crate::goal::GoalService::default(),
             goal_run_id: None,
+            goal_run_lease: None,
+            active_goal_tool_schema: None,
             defer_goal_finalization: false,
             read_only_task_progress: ReadOnlyTaskProgress::default(),
             finalization: FinalizationState::default(),

@@ -107,6 +107,13 @@ pub(crate) struct GoalRecord {
 pub(crate) struct GoalRunLease {
     pub(crate) record: GoalRecord,
     revision: u64,
+    completion_claimed: Arc<AtomicBool>,
+}
+
+impl GoalRunLease {
+    pub(crate) fn invalidate_completion_claim(&self) {
+        self.completion_claimed.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Default)]
@@ -199,7 +206,32 @@ impl GoalService {
             .map(|record| GoalRunLease {
                 record: record.clone(),
                 revision: data.revision,
+                completion_claimed: Arc::new(AtomicBool::new(false)),
             })
+    }
+
+    /// Record a model's explicit completion claim only for the still-current
+    /// run generation. The completion gate remains authoritative.
+    pub(crate) async fn claim_completion(&self, lease: &GoalRunLease) -> anyhow::Result<()> {
+        let data = self.0.lock().await;
+        anyhow::ensure!(
+            data.revision == lease.revision
+                && data.record.as_ref().is_some_and(|record| {
+                    record.id == lease.record.id && record.state == GoalState::Active
+                }),
+            "This goal run is no longer active; the completion claim was not recorded"
+        );
+        lease.completion_claimed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) async fn completion_claimed(&self, lease: &GoalRunLease) -> bool {
+        let data = self.0.lock().await;
+        data.revision == lease.revision
+            && data.record.as_ref().is_some_and(|record| {
+                record.id == lease.record.id && record.state == GoalState::Active
+            })
+            && lease.completion_claimed.load(Ordering::Acquire)
     }
 
     /// Run a synchronous projection while goal mutations are fenced.
@@ -389,6 +421,34 @@ impl<'a> GoalCommand<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completion_claim_is_scoped_to_the_active_run_generation() {
+        let service = GoalService::default();
+        let first = service.set("Finish the original goal").await.unwrap();
+        let lease = service.active_run_lease().await.unwrap();
+        assert!(!service.completion_claimed(&lease).await);
+        service.claim_completion(&lease).await.unwrap();
+        assert!(service.completion_claimed(&lease).await);
+        lease.invalidate_completion_claim();
+        assert!(!service.completion_claimed(&lease).await);
+        service.claim_completion(&lease).await.unwrap();
+        service
+            .transition(&first.id, GoalState::Paused, None)
+            .await
+            .unwrap();
+        assert!(!service.completion_claimed(&lease).await);
+        assert!(service.claim_completion(&lease).await.is_err());
+        service
+            .transition(&first.id, GoalState::Active, None)
+            .await
+            .unwrap();
+        let resumed = service.active_run_lease().await.unwrap();
+        assert!(!service.completion_claimed(&resumed).await);
+        assert!(service.claim_completion(&lease).await.is_err());
+        service.set("A replacement goal").await.unwrap();
+        assert!(service.claim_completion(&resumed).await.is_err());
+    }
 
     #[tokio::test]
     async fn stale_run_cannot_complete_replacement_or_paused_goal() {

@@ -1,0 +1,60 @@
+id = "goal_completion"
+seed = 510
+repetitions = 3
+
+[budgets]
+max_logical_turns = 24
+max_provider_attempts = 30
+max_duration_ms = 120000
+
+[[tasks]]
+id = "inspect_and_complete_goal"
+fixture = "fixtures/tiny_project"
+goal = "Inspect README.md and explain the purpose of this project. Do not modify files or run commands."
+prompt = "Inspect README.md and explain the purpose of this project. Do not modify files or run commands."
+
+[tasks.mock]
+final_response = "README.md describes a small fixture used for isolated evaluation tasks."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '''{"path":"README.md"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "goal_complete"
+arguments = '''{"evidence":"README.md was read and its purpose identified."}'''
+
+[[tasks.graders]]
+type = "changed-files"
+exact = []
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection", "local-state"]
+forbidden = ["workspace-mutation", "command-execution", "interaction"]
+forbidden_attempts = ["workspace-mutation", "command-execution", "interaction"]
+
+[[tasks.graders]]
+type = "assertion"
+matches = ['(?i)\b(fixture|evaluation|eval)\b', '(?i)\breadme(?:\.md)?\b']
+
+[[tasks]]
+id = "progress_without_completion_claim"
+fixture = "fixtures/tiny_project"
+goal = "Inspect README.md and explain the purpose of this project."
+prompt = "Inspect README.md and explain the purpose of this project."
+expected_status = "failed"
+
+[tasks.mock]
+read = ["README.md"]
+final_response = "README.md describes a small evaluation fixture."
+
+[[tasks.graders]]
+type = "changed-files"
+exact = []
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection"]
+forbidden = ["workspace-mutation", "command-execution", "interaction"]
+forbidden_attempts = ["workspace-mutation", "command-execution", "interaction"]

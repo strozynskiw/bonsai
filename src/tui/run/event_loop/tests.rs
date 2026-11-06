@@ -2142,7 +2142,8 @@ async fn goal_follow_up_reaches_the_same_run_without_interrupting_or_replacing_o
                 .capture
                 .chat_stream(messages, tools, cancellation.clone(), sink)
                 .await?;
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
                 self.started.notify_one();
                 self.release.notified().await;
             }
@@ -2150,7 +2151,19 @@ async fn goal_follow_up_reaches_the_same_run_without_interrupting_or_replacing_o
                 !cancellation.is_cancelled(),
                 "conversation must preserve the run"
             );
-            Ok(response)
+            if call == 1 {
+                Ok(StreamedResponse {
+                    tool_calls: vec![crate::provider::ToolCall {
+                        id: "goal-complete".into(),
+                        name: "goal_complete".into(),
+                        arguments:
+                            r#"{"evidence":"The explanation and follow-up were addressed."}"#.into(),
+                    }],
+                    ..StreamedResponse::default()
+                })
+            } else {
+                Ok(response)
+            }
         }
         async fn list_models(&self) -> anyhow::Result<Vec<String>> {
             Ok(Vec::new())
@@ -2206,7 +2219,7 @@ async fn goal_follow_up_reaches_the_same_run_without_interrupting_or_replacing_o
     .unwrap();
     let requests = requests.lock().await;
     assert!(requests[0].iter().any(|text| text == &objective.objective));
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert!(
         !requests[0]
             .iter()

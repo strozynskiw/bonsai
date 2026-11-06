@@ -456,6 +456,8 @@ type ProviderFallbackModelObserver = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct Agent {
     pub(crate) goal: crate::goal::GoalService,
     goal_run_id: Option<String>,
+    goal_run_lease: Option<crate::goal::GoalRunLease>,
+    active_goal_tool_schema: Option<ToolSchemaPayload>,
     /// The server finalizes its goal only after its completion evidence is durable.
     pub(crate) defer_goal_finalization: bool,
     provider: Box<dyn Provider>,
@@ -1192,7 +1194,9 @@ impl Agent {
     fn active_tool_schema(&self) -> ToolSchemaPayload {
         // Use the *active* registry, not `registry_for_mode(self.mode)` — a custom
         // persona runs a scoped registry that no built-in mode maps to.
-        self.tool_schema_for_registry(&self.tool_registry)
+        self.active_goal_tool_schema
+            .clone()
+            .unwrap_or_else(|| self.tool_schema_for_registry(&self.tool_registry))
     }
 
     /// The persona currently applied to the agent (registry + system prompt).
@@ -2043,7 +2047,9 @@ use batching::*;
 use compaction::*;
 pub use completion::{CompletionFailureOutcome, CompletionGap, CompletionGuardFailure};
 use completion::{CompletionGuardState, CompletionGuardVerdict, ReadOnlyTaskProgress};
-pub(crate) use completion::{CompletionGuardTrace, TaskCompletionContract};
+pub(crate) use completion::{
+    CompletionGuardTrace, TaskCompletionContract, only_goal_continuation_gaps,
+};
 use finalization::{FinalizationState, FinalizationStep};
 use messages::*;
 use output::*;

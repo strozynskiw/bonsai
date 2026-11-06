@@ -22,7 +22,9 @@ impl Agent {
              Continue actionable work within the existing run and session limits; inspect current \
              files, todo state, and verification evidence before repeating work. A progress report \
              is not completion. Finish only when the entire objective and required checks are \
-             satisfied; otherwise report the remaining blocker or exhausted limit. Ask questions \
+             satisfied. When satisfied, call goal_complete alone with evidence before the final \
+             answer. A progress response is not a completion claim. Otherwise continue work or \
+             report the remaining blocker or exhausted limit. Ask questions \
              with the question tool, put the recommended option first, and continue independent \
              work when possible. Goal questions default to that recommendation after {} seconds. \
              A timeout never grants a permission or sandbox approval.",
@@ -55,10 +57,7 @@ impl Agent {
             ),
             Ok(AgentRunResult::Incomplete { failure, .. }) => {
                 if failure.outcome == crate::agent::CompletionFailureOutcome::Failed
-                    && matches!(
-                        failure.gaps.as_slice(),
-                        [crate::agent::CompletionGap::GoalWorkRemaining]
-                    )
+                    && crate::agent::only_goal_continuation_gaps(&failure.gaps)
                 {
                     (GoalState::Paused, Some(crate::goal::GOAL_STAGNATED.into()))
                 } else {

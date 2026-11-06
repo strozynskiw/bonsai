@@ -60,8 +60,11 @@ Restoring an active goal pauses it; opening a session never starts it silently.
 Existing turn, token, cost, and time limits still apply, including cumulative
 session usage. An exhausted goal reports a limited state; it cannot be resumed
 by bypassing that state. Inspect its limits and evidence before establishing a
-new attempt. Completion uses the normal structured completion and verification
-gates; a progress report alone does not complete a goal.
+new attempt. The agent must explicitly claim that the full objective is complete;
+the normal structured completion and verification gates still apply. A progress
+report alone does not complete a goal. If repeated reports add no new progress,
+Bonsai pauses the goal with a reason; inspect it with `/goal status` and use
+`/goal resume` to try again.
 
 In goal mode the `question` tool normally returns immediately so independent
 work can continue. Unanswered questions assume the recommended option after

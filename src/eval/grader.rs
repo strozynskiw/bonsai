@@ -41,8 +41,8 @@ impl EvalToolEffect {
             "question" => Self::Interaction,
             "agent" | "task" => Self::Delegation,
             "webfetch" | "websearch" | "imagegen" => Self::ExternalAccess,
-            "todowrite" | "set_session_title" | "start_new_plan" | "memory_write" | "peers"
-            | "tasks" => Self::LocalState,
+            "todowrite" | "set_session_title" | "goal_complete" | "start_new_plan"
+            | "memory_write" | "peers" | "tasks" => Self::LocalState,
             name if name.starts_with("plan_") => Self::LocalState,
             name if name.starts_with("mcp__") => Self::ExternalAccess,
             _ => Self::Unknown,

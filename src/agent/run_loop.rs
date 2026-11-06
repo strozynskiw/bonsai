@@ -451,6 +451,7 @@ impl Agent {
     ) -> Result<AgentRunResult> {
         let goal = self.goal.active_run_lease().await;
         self.goal_run_id = goal.as_ref().map(|goal| goal.record.id.clone());
+        self.goal_run_lease = goal.clone();
         let result = coordinator::run(
             self,
             cancellation,
@@ -460,6 +461,8 @@ impl Agent {
         )
         .await;
         self.goal_run_id = None;
+        self.goal_run_lease = None;
+        self.active_goal_tool_schema = None;
         if self.execution_lane.kind == ExecutionLaneKind::Parent
             && let Some(interaction) = &self.interaction
         {

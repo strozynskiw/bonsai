@@ -19,7 +19,7 @@ tui_keys Left End Right
 tui_keys "mock-model" Enter
 expect_meta "mock model selected" "Coding · mock-model"
 tui_keys "/goal Review README.md, lib.sh, run.sh and verifier.sh and report findings for all four files" Enter
-expect "unfinished work is reported" "goal response reports unfinished work"
+expect "unfinished work is reported" "goal response reports unfinished"
 expect_meta "stalled run returns to composer" "● Coding"
 forbid "unfinished goal is not completed" "goal complete ·"
 expect "stalled goal is paused" "goal paused ·"

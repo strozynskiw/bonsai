@@ -31,10 +31,25 @@ impl Provider for MockProvider {
     async fn chat_stream(
         &self,
         messages: &[async_openai::types::chat::ChatCompletionRequestMessage],
-        _tools: &[async_openai::types::chat::ChatCompletionTool],
+        tools: &[async_openai::types::chat::ChatCompletionTool],
         cancel: CancellationToken,
         sink: SharedSink,
     ) -> crate::provider::ProviderResult<StreamedResponse> {
+        let goal_active = tools
+            .iter()
+            .any(|tool| tool.function.name == "goal_complete");
+        let claimed = messages.iter().any(|message| match message {
+            async_openai::types::chat::ChatCompletionRequestMessage::Assistant(message) => {
+                message.tool_calls.as_ref().is_some_and(|calls| {
+                    calls.iter().any(|call| matches!(
+                    call,
+                    async_openai::types::chat::ChatCompletionMessageToolCalls::Function(call)
+                        if call.function.name == "goal_complete"
+                ))
+                })
+            }
+            _ => false,
+        });
         self.0
             .requests
             .lock()
@@ -43,7 +58,7 @@ impl Provider for MockProvider {
         let call = self.0.calls.fetch_add(1, Ordering::SeqCst);
         if self.0.ignore_cancel.load(Ordering::SeqCst) {
             self.0.release.notified().await;
-        } else if !self.0.immediate.load(Ordering::SeqCst) {
+        } else if !self.0.immediate.load(Ordering::SeqCst) && !(goal_active && claimed) {
             tokio::select! {
                 () = self.0.release.notified() => {},
                 () = cancel.cancelled() => return Ok(StreamedResponse::interrupted()),
@@ -65,6 +80,12 @@ impl Provider for MockProvider {
                     id: "late-call".into(),
                     name: "bash".into(),
                     arguments: r#"{"command":"touch late-marker"}"#.into(),
+                }]
+            } else if goal_active && !claimed {
+                vec![crate::provider::ToolCall {
+                    id: "goal-complete".into(),
+                    name: "goal_complete".into(),
+                    arguments: r#"{"evidence":"The requested explanation was provided."}"#.into(),
                 }]
             } else {
                 Vec::new()

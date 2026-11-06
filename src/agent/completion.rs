@@ -455,6 +455,7 @@ pub enum CompletionGap {
     ExternalWaitPending(usize),
     ImplementationStall(usize),
     GoalWorkRemaining,
+    GoalCompletionUnconfirmed,
 }
 
 impl CompletionGap {
@@ -483,6 +484,9 @@ impl CompletionGap {
                 format!("implementation stalled after {turns} consecutive tool turns")
             }
             Self::GoalWorkRemaining => "the goal response reports unfinished work".to_string(),
+            Self::GoalCompletionUnconfirmed => {
+                "goal completion has not been explicitly claimed".to_string()
+            }
         }
     }
 
@@ -498,6 +502,16 @@ impl CompletionGap {
                 | Self::ExternalWaitPending(_)
         )
     }
+}
+
+pub(crate) fn only_goal_continuation_gaps(gaps: &[CompletionGap]) -> bool {
+    !gaps.is_empty()
+        && gaps.iter().all(|gap| {
+            matches!(
+                gap,
+                CompletionGap::GoalWorkRemaining | CompletionGap::GoalCompletionUnconfirmed
+            )
+        })
 }
 
 /// Supporting prose signals extracted from the candidate final response.
@@ -614,9 +628,10 @@ pub(crate) struct CompletionGuardTrace {
 impl CompletionGuardTrace {
     pub(crate) fn stopped_on_unfinished_goal(&self) -> bool {
         self.disposition == CompletionGuardDisposition::Failed
-            && self.attempts.last().is_some_and(|attempt| {
-                matches!(attempt.gaps.as_slice(), [CompletionGap::GoalWorkRemaining])
-            })
+            && self
+                .attempts
+                .last()
+                .is_some_and(|attempt| only_goal_continuation_gaps(&attempt.gaps))
     }
 
     pub(crate) fn render_compact(&self) -> String {
@@ -786,6 +801,9 @@ impl Agent {
 
     pub(super) fn merge_completion_steering(&mut self, prompt: &str) {
         if self.goal_run_id.is_some() {
+            if let Some(lease) = &self.goal_run_lease {
+                lease.invalidate_completion_claim();
+            }
             // An explicit session objective changes only through /goal. A
             // mid-run message may add requirements without discarding the
             // original contract or its evidence baseline.
@@ -837,6 +855,9 @@ impl Agent {
     }
 
     pub(super) fn note_completion_workspace_mutation(&mut self) {
+        if let Some(lease) = &self.goal_run_lease {
+            lease.invalidate_completion_claim();
+        }
         self.completion.action_observed = true;
         self.completion.workspace_mutated = true;
         self.finalization.note_workspace_change();
@@ -873,6 +894,12 @@ impl Agent {
         let signals = response_signals(response);
         let evidence = self.completion_decision_evidence(signals).await;
         let mut gaps = completion_gaps(&evidence);
+        if let Some(lease) = self.goal_run_lease.as_ref()
+            && self.execution_lane.kind == ExecutionLaneKind::Parent
+            && !self.goal.completion_claimed(lease).await
+        {
+            gaps.push(CompletionGap::GoalCompletionUnconfirmed);
+        }
         if let Some(goal_id) = self.goal_run_id.as_deref()
             && let Some(goal) = self.goal.snapshot().await
             && goal.id == goal_id
@@ -902,8 +929,12 @@ impl Agent {
                 "Completion blocked: the assistant explicitly reported an unresolved blocker.",
             );
         }
-        if gaps.contains(&CompletionGap::GoalWorkRemaining)
-            && !gaps.iter().any(CompletionGap::is_external_blocker)
+        if gaps.iter().any(|gap| {
+            matches!(
+                gap,
+                CompletionGap::GoalWorkRemaining | CompletionGap::GoalCompletionUnconfirmed
+            )
+        }) && !gaps.iter().any(CompletionGap::is_external_blocker)
         {
             let revision = self.completion.goal_progress_revision;
             let progressed = self
@@ -926,7 +957,7 @@ impl Agent {
                 self.completion.disposition = Some(CompletionGuardDisposition::Continued);
                 return CompletionGuardVerdict::Continue {
                     note: format!(
-                        "The active goal is not complete ({detail}). Continue the original objective using current evidence. Do not repeat a status report without making progress; preserve the user's scope, requested checks, and permissions. Run requested checks directly so their failures are visible."
+                        "The active goal is not complete ({detail}). Continue the original objective using current evidence. Do not repeat a status report without making progress; preserve the user's scope, requested checks, and permissions. Run requested checks directly so their failures are visible. Call goal_complete alone only after the full objective is satisfied and verified."
                     ),
                 };
             }

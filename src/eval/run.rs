@@ -1316,6 +1316,9 @@ async fn run_task(
             .any(|grader| matches!(grader, GraderSpec::VisibleBeforeEffect { .. })),
     );
     let agent = &mut harness.agent;
+    if let Some(goal) = task.goal.as_deref() {
+        agent.goal.set(goal).await?;
+    }
     let sink: SharedSink = eval_sink.clone();
     let cancellation_token = CancellationToken::new();
     let cancellation_task = if let Some(attempts) = task.cancel_after_provider_attempts {
@@ -1930,6 +1933,9 @@ struct EvalTask {
     id: String,
     fixture: String,
     prompt: String,
+    /// Optional explicit goal, exercised through the normal agent lifecycle.
+    #[serde(default)]
+    goal: Option<String>,
     #[serde(default)]
     lsp_condition: EvalLspCondition,
     #[serde(default)]
@@ -1998,6 +2004,13 @@ struct SharedWorkspacePeer {
 impl EvalTask {
     fn validate(&self, suite_base_dir: &Path) -> Result<()> {
         validate_id(&self.id)?;
+        if self
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.trim().is_empty())
+        {
+            anyhow::bail!("Task '{}' goal must not be empty", self.id);
+        }
         if self.subagent_mock.is_some() && !self.enable_subagents {
             anyhow::bail!("Task '{}' subagent_mock requires enable_subagents", self.id);
         }
@@ -3908,6 +3921,7 @@ arguments = '{"command":"grep -q missing_marker README.md"}'
                     id: "same".to_string(),
                     fixture: "fixture".to_string(),
                     prompt: "do it".to_string(),
+                    goal: None,
                     lsp_condition: EvalLspCondition::Inherited,
                     profile: EvalAgentProfile::Full,
                     enable_subagents: false,
@@ -3953,6 +3967,7 @@ arguments = '{"command":"grep -q missing_marker README.md"}'
                     id: "same".to_string(),
                     fixture: "fixture".to_string(),
                     prompt: "do it again".to_string(),
+                    goal: None,
                     lsp_condition: EvalLspCondition::Inherited,
                     profile: EvalAgentProfile::Full,
                     enable_subagents: false,
@@ -4016,6 +4031,7 @@ arguments = '{"command":"grep -q missing_marker README.md"}'
                 id: "no-graders".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "do it".to_string(),
+                goal: None,
                 lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
                 enable_subagents: false,
@@ -4073,6 +4089,7 @@ arguments = '{"command":"grep -q missing_marker README.md"}'
                 id: "missing-read".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "read missing file".to_string(),
+                goal: None,
                 lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
                 enable_subagents: false,
@@ -4138,6 +4155,7 @@ arguments = '{"command":"grep -q missing_marker README.md"}'
                 id: "mock-task".to_string(),
                 fixture: "fixture".to_string(),
                 prompt: "update readme".to_string(),
+                goal: None,
                 lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
                 enable_subagents: false,
@@ -4373,6 +4391,23 @@ arguments = '{"command":"grep -q missing_marker README.md"}'
         .unwrap();
 
         assert_eq!((outcome.passed_tasks, outcome.total_tasks), (5, 5));
+        assert!(!outcome.should_fail_process());
+    }
+
+    #[tokio::test]
+    async fn goal_completion_suite_exercises_explicit_goal_claims() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let suite =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/goal_completion.toml");
+        let outcome = run(EvalCliConfig {
+            suite,
+            out_dir: temp.path().to_path_buf(),
+            fail_on_task_failure: true,
+            ..EvalCliConfig::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!((outcome.passed_tasks, outcome.total_tasks), (6, 6));
         assert!(!outcome.should_fail_process());
     }
 

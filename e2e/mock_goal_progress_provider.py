@@ -17,7 +17,17 @@ class GoalProgressHandler(CompletionHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Connection", "close")
         self.end_headers()
-        if request in (1, 3, 5, 7):
+        if request == 8 and not self.server.repeat_read:
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "id": "goal-complete", "type": "function",
+                    "function": {"name": "goal_complete", "arguments": json.dumps({
+                        "evidence": "All four requested files were inspected."
+                    })},
+                }]}}]},
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            ]
+        elif request in (1, 3, 5, 7):
             paths = [
                 "README.md"
                 if self.server.repeat_read

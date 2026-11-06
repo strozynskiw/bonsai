@@ -9,6 +9,7 @@ mod edit_recovery;
 mod file_mutation;
 pub(crate) mod git;
 pub(crate) mod glob;
+pub(crate) mod goal_complete;
 pub(crate) mod grep;
 pub(crate) mod lsp;
 pub(crate) mod memory_write;
@@ -1400,6 +1401,25 @@ impl ToolRegistry {
         self.order.iter().map(String::as_str)
     }
 
+    /// Add one run-scoped tool without modifying the shared registry or
+    /// allowing it to shadow an existing capability.
+    pub(crate) fn with_extra(self: &Arc<Self>, tool: Arc<dyn Tool>) -> Result<Arc<Self>> {
+        anyhow::ensure!(
+            !self.tools.contains_key(tool.name()),
+            "Run-scoped tool '{}' conflicts with an existing tool",
+            tool.name()
+        );
+        let mut projected = Self::new();
+        projected.set_authorization_ledger(self.authorization_ledger.clone());
+        for name in &self.order {
+            if let Some(existing) = self.tools.get(name) {
+                projected.register(existing.clone());
+            }
+        }
+        projected.register(tool);
+        Ok(Arc::new(projected))
+    }
+
     /// Project a registry without one model-visible tool while preserving the
     /// remaining registration order and authorization ledger.
     pub(crate) fn without(self: &Arc<Self>, excluded_name: &str) -> Arc<Self> {
@@ -1577,6 +1597,19 @@ mod registry_tests {
         assert!(projected.get("set_session_title").is_none());
         assert!(projected.get("read").is_some());
         assert!(projected.get("bash").is_some());
+    }
+
+    #[test]
+    fn run_scoped_tool_preserves_base_and_rejects_collisions() {
+        let base = Arc::new(sample_registry());
+        let extra: Arc<dyn Tool> = Arc::new(EffectTool {
+            name: "goal_complete",
+            effect: ToolEffectPolicy::LocalState,
+        });
+        let projected = base.with_extra(extra.clone()).unwrap();
+        assert!(base.get("goal_complete").is_none());
+        assert_eq!(projected.names().last(), Some("goal_complete"));
+        assert!(projected.with_extra(extra).is_err());
     }
 
     #[test]

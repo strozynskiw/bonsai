@@ -26,12 +26,15 @@ if python3 - "$requests" <<'PY'
 import json, sys
 from pathlib import Path
 requests = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-assert len(requests) == 8, len(requests)
+assert len(requests) == 9, len(requests)
+assert any(tool.get("function", {}).get("name") == "goal_complete" for tool in requests[0]["tools"])
 for index in (2, 4, 6):
     assert "goal response reports unfinished work" in json.dumps(requests[index]["messages"])
 tool_results = [m for m in requests[7]["messages"] if m.get("role") == "tool"]
 assert len(tool_results) == 4, len(tool_results)
 assert all("error" not in str(m.get("content", "")).lower()[:100] for m in tool_results)
+assert any(call.get("function", {}).get("name") == "goal_complete"
+           for message in requests[8]["messages"] for call in message.get("tool_calls", []))
 PY
 then _pass "recovery inspected the remaining files in the same run"
 else _fail "goal recovery evidence"; fi

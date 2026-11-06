@@ -14,6 +14,193 @@ fn goal_agent(fixture: &TestFixture, responses: Vec<StreamedResponse>) -> Agent 
 }
 
 #[tokio::test]
+async fn progress_reply_cannot_complete_a_goal_without_an_explicit_claim() {
+    let fixture = TestFixture::new();
+    let responses = (0..3)
+        .map(|_| StreamedResponse {
+            content: "Here is the progress so far.".into(),
+            ..StreamedResponse::default()
+        })
+        .collect();
+    let mut agent = goal_agent(&fixture, responses);
+    agent.goal.set("Explain the project").await.unwrap();
+    let result = agent
+        .run(
+            "Explain the project",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentRunResult::Incomplete { .. }));
+    assert_eq!(
+        agent.goal.snapshot().await.unwrap().state,
+        GoalState::Paused
+    );
+    let trace = agent.completion_guard_trace().unwrap();
+    assert!(
+        trace
+            .attempts
+            .last()
+            .unwrap()
+            .gaps
+            .contains(&crate::agent::CompletionGap::GoalCompletionUnconfirmed)
+    );
+}
+
+#[tokio::test]
+async fn completion_claim_must_be_standalone_and_follow_the_work() {
+    let fixture = TestFixture::new();
+    std::fs::write(fixture.project_root.join("file.txt"), "content\n").unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(crate::tool::ReadTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    let registry = Arc::new(registry);
+    let claim = || test_tool_call("claim", "goal_complete", r#"{"evidence":"File reviewed"}"#);
+    let responses = vec![
+        StreamedResponse {
+            tool_calls: vec![
+                claim(),
+                test_tool_call("read", "read", r#"{"path":"file.txt"}"#),
+            ],
+            ..StreamedResponse::default()
+        },
+        StreamedResponse {
+            content: "Reviewed the file.".into(),
+            ..StreamedResponse::default()
+        },
+        StreamedResponse {
+            tool_calls: vec![claim()],
+            ..StreamedResponse::default()
+        },
+        StreamedResponse {
+            content: "Reviewed the file.".into(),
+            ..StreamedResponse::default()
+        },
+    ];
+    let provider = MockProvider::new(responses.into_iter().map(Ok).collect());
+    let tool_names = provider.tool_names();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        registry.clone(),
+        registry,
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.goal.set("Review file.txt").await.unwrap();
+    let result = agent
+        .run(
+            "Review file.txt",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentRunResult::Completed(_)));
+    let trace = agent.completion_guard_trace().unwrap();
+    assert!(
+        trace.attempts[0]
+            .gaps
+            .contains(&crate::agent::CompletionGap::GoalCompletionUnconfirmed)
+    );
+    assert_eq!(
+        agent.goal.snapshot().await.unwrap().state,
+        GoalState::Complete
+    );
+    assert!(
+        tool_names
+            .lock()
+            .await
+            .iter()
+            .all(|names| names.iter().any(|name| name == "goal_complete"))
+    );
+    assert!(
+        !agent
+            .active_tool_schema()
+            .names()
+            .iter()
+            .any(|name| name == "goal_complete")
+    );
+}
+
+#[tokio::test]
+async fn completion_claim_alone_does_not_count_as_requested_work() {
+    let fixture = TestFixture::new();
+    let responses = vec![
+        StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "claim",
+                "goal_complete",
+                r#"{"evidence":"Done"}"#,
+            )],
+            ..StreamedResponse::default()
+        },
+        StreamedResponse {
+            content: "Done.".into(),
+            ..StreamedResponse::default()
+        },
+        StreamedResponse {
+            content: "Done.".into(),
+            ..StreamedResponse::default()
+        },
+    ];
+    let mut agent = goal_agent(&fixture, responses);
+    agent.goal.set("Review the files").await.unwrap();
+    let result = agent
+        .run(
+            "Review the files",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentRunResult::Incomplete { .. }));
+    let trace = agent.completion_guard_trace().unwrap();
+    assert!(
+        trace
+            .attempts
+            .last()
+            .unwrap()
+            .gaps
+            .contains(&crate::agent::CompletionGap::RequestedActionMissing)
+    );
+}
+
+#[tokio::test]
+async fn goal_requires_a_current_claim_and_new_steering_revokes_it() {
+    use crate::agent::completion::CompletionGuardVerdict;
+
+    let fixture = TestFixture::new();
+    let mut agent = goal_agent(&fixture, vec![]);
+    let goal = agent.goal.set("Review all four files").await.unwrap();
+    let lease = agent.goal.active_run_lease().await.unwrap();
+    agent.goal_run_id = Some(goal.id);
+    agent.goal_run_lease = Some(lease.clone());
+    agent.begin_inferred_completion_task("Review all four files");
+    agent.note_completion_action();
+    assert!(matches!(
+        agent.completion_guard_verdict("Reviewed the files.").await,
+        CompletionGuardVerdict::Continue { .. }
+    ));
+    agent.goal.claim_completion(&lease).await.unwrap();
+    assert!(matches!(
+        agent
+            .completion_guard_verdict("Reviewed all four files.")
+            .await,
+        CompletionGuardVerdict::Accept
+    ));
+    agent.note_completion_workspace_mutation();
+    assert!(!agent.goal.completion_claimed(&lease).await);
+    agent.goal.claim_completion(&lease).await.unwrap();
+    agent.merge_completion_steering("Also check the tests.");
+    assert!(!agent.goal.completion_claimed(&lease).await);
+}
+
+#[tokio::test]
 async fn explicit_unfinished_goal_work_triggers_recovery_before_completion() {
     use crate::agent::completion::{CompletionGap, CompletionGuardVerdict};
 
@@ -158,7 +345,7 @@ async fn goal_recovery_continues_with_progress_but_bounds_repeated_status() {
 #[tokio::test]
 async fn deferred_goal_finalization_leaves_the_surface_to_classify_the_result() {
     let fixture = TestFixture::new();
-    let responses = (0..2)
+    let responses = (0..3)
         .map(|_| StreamedResponse {
             content: "I will implement the feature next.".into(),
             ..StreamedResponse::default()
@@ -185,7 +372,7 @@ async fn deferred_goal_finalization_leaves_the_surface_to_classify_the_result() 
 #[tokio::test]
 async fn goal_rejects_progress_only_completion_and_stops_after_bounded_retry() {
     let fixture = TestFixture::new();
-    let responses = (0..2)
+    let responses = (0..3)
         .map(|_| StreamedResponse {
             content: "I will implement the feature next.".into(),
             ..StreamedResponse::default()

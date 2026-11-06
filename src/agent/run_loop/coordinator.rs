@@ -14,7 +14,7 @@ pub(super) async fn run(
         sink,
         queued_messages,
         session_title_policy,
-    )
+    )?
     .run()
     .await
 }
@@ -34,6 +34,8 @@ struct TurnCoordinator<'agent, 'receiver> {
     cancelled_queued_message_ids: HashSet<u64>,
     tool_schema: ToolSchemaPayload,
     tool_registry: Arc<ToolRegistry>,
+    goal_tool: Option<Arc<dyn crate::tool::Tool>>,
+    goal_registry_cache: HashMap<crate::tool::ToolRegistryCacheKey, Arc<ToolRegistry>>,
     state: TurnState,
 }
 
@@ -151,17 +153,33 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         sink: SharedSink,
         queued_messages: Option<&'receiver mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
         session_title_policy: SessionTitleRunPolicy,
-    ) -> Self {
+    ) -> Result<Self> {
         let state = TurnState {
             policies: TurnPolicies::new(session_title_policy),
             ..TurnState::default()
         };
-        let tool_registry = state
-            .policies
-            .session_title
-            .project_registry(agent.tool_registry_for_current_task());
+        let goal_tool: Option<Arc<dyn crate::tool::Tool>> = agent
+            .goal_run_lease
+            .as_ref()
+            .filter(|_| agent.execution_lane.kind == ExecutionLaneKind::Parent)
+            .map(|lease| {
+                Arc::new(crate::tool::goal_complete::GoalCompleteTool::new(
+                    agent.goal.clone(),
+                    lease.clone(),
+                )) as Arc<dyn crate::tool::Tool>
+            });
+        let mut goal_registry_cache = HashMap::new();
+        let base = Self::project_goal_tool(
+            agent.tool_registry_for_current_task(),
+            goal_tool.as_ref(),
+            &mut goal_registry_cache,
+        )?;
+        let tool_registry = state.policies.session_title.project_registry(base);
         let tool_schema = agent.tool_schema_for_registry(&tool_registry);
-        Self {
+        if goal_tool.is_some() {
+            agent.active_goal_tool_schema = Some(tool_schema.clone());
+        }
+        Ok(Self {
             agent,
             cancellation_token: cancellation.foreground_token(),
             detached_subagent_cancellation: cancellation.detached_subagents_token(),
@@ -171,17 +189,41 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             cancelled_queued_message_ids: HashSet::new(),
             tool_schema,
             tool_registry,
+            goal_tool,
+            goal_registry_cache,
             state,
-        }
+        })
     }
 
-    fn refresh_tool_registry(&mut self) {
-        self.tool_registry = self
-            .state
-            .policies
-            .session_title
-            .project_registry(self.agent.tool_registry_for_current_task());
+    fn project_goal_tool(
+        base: Arc<ToolRegistry>,
+        tool: Option<&Arc<dyn crate::tool::Tool>>,
+        cache: &mut HashMap<crate::tool::ToolRegistryCacheKey, Arc<ToolRegistry>>,
+    ) -> Result<Arc<ToolRegistry>> {
+        let Some(tool) = tool else {
+            return Ok(base);
+        };
+        let key = base.cache_key();
+        if let Some(projected) = cache.get(&key) {
+            return Ok(projected.clone());
+        }
+        let projected = base.with_extra(tool.clone())?;
+        cache.insert(key, projected.clone());
+        Ok(projected)
+    }
+
+    fn refresh_tool_registry(&mut self) -> Result<()> {
+        let base = Self::project_goal_tool(
+            self.agent.tool_registry_for_current_task(),
+            self.goal_tool.as_ref(),
+            &mut self.goal_registry_cache,
+        )?;
+        self.tool_registry = self.state.policies.session_title.project_registry(base);
         self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
+        if self.goal_tool.is_some() {
+            self.agent.active_goal_tool_schema = Some(self.tool_schema.clone());
+        }
+        Ok(())
     }
 
     async fn accept_queued_steering(&mut self) -> Result<()> {
@@ -197,7 +239,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         {
             self.state.policies.reset_for_user_steering();
             self.agent.set_planning_advisory(None);
-            self.refresh_tool_registry();
+            self.refresh_tool_registry()?;
         }
         Ok(())
     }
@@ -277,6 +319,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         }
         let background_changed = self.agent.refresh_background_context(&self.sink).await;
         if background_changed || volatile_changed {
+            if let Some(lease) = &self.agent.goal_run_lease {
+                lease.invalidate_completion_claim();
+            }
             self.agent.emit_context_updated(&self.sink);
             let reason = match (volatile_changed, background_changed) {
                 (true, true) => "workspace and background state changed",
@@ -439,7 +484,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             self.agent.apply_queued_messages(queued, &self.sink).await?;
             self.state.policies.reset_for_user_steering();
             self.agent.set_planning_advisory(None);
-            self.refresh_tool_registry();
+            self.refresh_tool_registry()?;
             return Ok(TurnOutcome::Continue);
         }
         self.execute_tool_turn(response, response_id).await
@@ -682,7 +727,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         self.agent.apply_queued_messages(queued, &self.sink).await?;
         self.state.policies.reset_for_user_steering();
         self.agent.set_planning_advisory(None);
-        self.refresh_tool_registry();
+        self.refresh_tool_registry()?;
         Ok(true)
     }
 
@@ -691,6 +736,13 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         response: StreamedResponse,
         response_id: crate::provider::ResponseId,
     ) -> Result<TurnOutcome> {
+        let has_other_tool = response
+            .tool_calls
+            .iter()
+            .any(|call| call.name != "goal_complete");
+        if has_other_tool && let Some(lease) = &self.agent.goal_run_lease {
+            lease.invalidate_completion_claim();
+        }
         let policies = &mut self.state.policies;
         let session_title_action = policies.session_title.action_for(&response.tool_calls);
         let session_title_rejection =
@@ -804,7 +856,19 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         let auto_background = self
             .agent
             .auto_background_verification_calls(&response.tool_calls);
-        let finalization = self.agent.finalization_rejections(&response.tool_calls);
+        let mut finalization = self.agent.finalization_rejections(&response.tool_calls);
+        if has_other_tool {
+            for call in response
+                .tool_calls
+                .iter()
+                .filter(|call| call.name == "goal_complete")
+            {
+                finalization.insert(
+                    call.id.clone(),
+                    "Call goal_complete alone after all other work has finished.".to_string(),
+                );
+            }
+        }
 
         self.agent
             .push_model_response_message(build_assistant_message(&response)?, response_id);
@@ -839,14 +903,20 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 },
             )
             .await?;
+        // A completion claim in a mixed batch cannot attest to work that may
+        // have run after it. Require a fresh standalone claim on a later turn.
+        if has_other_tool && let Some(lease) = &self.agent.goal_run_lease {
+            lease.invalidate_completion_claim();
+        }
         self.state.policies.observe_tool_execution(&tool_execution);
-        self.refresh_tool_registry();
+        self.refresh_tool_registry()?;
         if tool_execution.tool_observations.iter().any(|observation| {
-            matches!(
-                observation.status,
-                crate::output::ToolExecutionStatus::Succeeded
-                    | crate::output::ToolExecutionStatus::Started
-            )
+            observation.tool_name != "goal_complete"
+                && matches!(
+                    observation.status,
+                    crate::output::ToolExecutionStatus::Succeeded
+                        | crate::output::ToolExecutionStatus::Started
+                )
         }) {
             self.agent.note_completion_action();
         }
@@ -1065,7 +1135,8 @@ mod tests {
             sink.clone(),
             Some(&mut receiver),
             SessionTitleRunPolicy::ContinuationOrAutomatic,
-        );
+        )
+        .unwrap();
         let _ = coordinator.advance_turn().await.unwrap();
 
         assert!(sink.delivered_before_refresh.load(Ordering::SeqCst));
@@ -1122,7 +1193,8 @@ mod tests {
             sink,
             Some(&mut receiver),
             SessionTitleRunPolicy::ContinuationOrAutomatic,
-        );
+        )
+        .unwrap();
         let mut finish = Box::pin(coordinator.finish_or_continue_without_tools(
             StreamedResponse {
                 content: "Initial answer".into(),

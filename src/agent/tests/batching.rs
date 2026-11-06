@@ -1,5 +1,22 @@
 use super::*;
 
+#[tokio::test]
+async fn goal_completion_claim_is_serialized_with_other_tools() {
+    let goal = crate::goal::GoalService::default();
+    goal.set("Review the files").await.unwrap();
+    let lease = goal.active_run_lease().await.unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(crate::tool::goal_complete::GoalCompleteTool::new(
+        goal, lease,
+    )));
+    let calls = vec![
+        test_tool_call("read", "read", r#"{"path":"src/main.rs"}"#),
+        test_tool_call("complete", "goal_complete", r#"{"evidence":"reviewed"}"#),
+    ];
+    let batches = super::tool_call_batches(&calls, &registry, batch_root());
+    assert_eq!(batch_ids(&batches), vec![vec!["read"], vec!["complete"]]);
+}
+
 #[test]
 fn batches_read_only_calls_together() {
     let calls = vec![

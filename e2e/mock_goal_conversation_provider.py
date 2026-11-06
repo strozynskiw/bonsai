@@ -25,6 +25,16 @@ class ConversationHandler(CompletionHandler):
                 deadline = time.monotonic() + 30
                 while not self.server.release_file.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
+            elif request == 2:
+                messages = json.dumps(payload["messages"])
+                valid = "GOAL_CONVERSATION" in messages and "FOLLOW_UP_TOKEN" in messages
+                delta = {"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "id": "goal-complete", "type": "function",
+                    "function": {"name": "goal_complete", "arguments": json.dumps({
+                        "evidence": "Goal and follow-ups addressed" if valid else "missing context"
+                    })},
+                }]}}]}
+                self.wfile.write(f"data: {json.dumps(delta)}\n\n".encode())
             else:
                 messages = json.dumps(payload["messages"])
                 valid = "GOAL_CONVERSATION" in messages and "FOLLOW_UP_TOKEN" in messages
@@ -33,7 +43,8 @@ class ConversationHandler(CompletionHandler):
                 )
                 delta = {"choices": [{"delta": {"content": content}}]}
                 self.wfile.write(f"data: {json.dumps(delta)}\n\n".encode())
-            self.wfile.write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+            finish = "tool_calls" if request == 2 else "stop"
+            self.wfile.write(f'data: {{"choices":[{{"delta":{{}},"finish_reason":"{finish}"}}]}}\n\ndata: [DONE]\n\n'.encode())
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass

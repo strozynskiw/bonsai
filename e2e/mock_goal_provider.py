@@ -29,6 +29,11 @@ class GoalHandler(CompletionHandler):
             for message in messages
             for call in message.get("tool_calls", [])
         )
+        claimed = any(
+            call.get("function", {}).get("name") == "goal_complete"
+            for message in messages
+            for call in message.get("tool_calls", [])
+        )
         if not asked:
             arguments = {
                 "question": f"Select cache strategy ({flow})",
@@ -39,6 +44,14 @@ class GoalHandler(CompletionHandler):
             delta = {"tool_calls": [{
                 "index": 0, "id": "goal_question", "type": "function",
                 "function": {"name": "question", "arguments": json.dumps(arguments)},
+            }]}
+            finish = "tool_calls"
+        elif answered and not claimed:
+            delta = {"tool_calls": [{
+                "index": 0, "id": "goal_complete", "type": "function",
+                "function": {"name": "goal_complete", "arguments": json.dumps({
+                    "evidence": f"The {flow} question was answered and the choice was explained."
+                })},
             }]}
             finish = "tool_calls"
         else:
