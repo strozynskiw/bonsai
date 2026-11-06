@@ -62,7 +62,7 @@ prompt = "Replace README.md with a migration notice."
 queued_messages = ["Stop the requested mutation. Review README.md only and explain its current purpose; do not modify any files."]
 
 [tasks.mock]
-final_response = "Stopped the old mutation and reviewed the existing README without changing it."
+final_response = "No mutation performed — README.md is untouched. Reviewed its current purpose."
 final_request_contains = [
   "Replace README.md with a migration notice.",
   "Stop the requested mutation.",
@@ -87,7 +87,7 @@ type = "assertion"
 # Accept ordinary descriptions of cancellation; the tool-effect and
 # changed-file graders independently verify that no mutation occurred.
 matches = [
-    '(?i)\b(stopp\w*|supersed\w*|cancel\w*|abandon\w*|no files? (?:were )?(?:modified|changed))\b',
+    '(?i)\b(stopp\w*|supersed\w*|cancel\w*|abandon\w*|no files? (?:were )?(?:modified|changed)|no mutation (?:was )?(?:performed|made))\b',
     '(?i)\breadme(?:\.md)?\b',
 ]
 
