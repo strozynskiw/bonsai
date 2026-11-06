@@ -210,6 +210,16 @@ impl GoalService {
             })
     }
 
+    /// Read the objective only if this run still owns its active generation.
+    pub(crate) async fn snapshot_for_run(&self, lease: &GoalRunLease) -> Option<GoalRecord> {
+        let data = self.0.lock().await;
+        (data.revision == lease.revision)
+            .then_some(data.record.as_ref())
+            .flatten()
+            .filter(|record| record.id == lease.record.id && record.state == GoalState::Active)
+            .cloned()
+    }
+
     /// Record a model's explicit completion claim only for the still-current
     /// run generation. The completion gate remains authoritative.
     pub(crate) async fn claim_completion(&self, lease: &GoalRunLease) -> anyhow::Result<()> {

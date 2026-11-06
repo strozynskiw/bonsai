@@ -389,6 +389,18 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             ModelCallOutcome::Response(response, id) => (response, id),
         };
 
+        // A paused and resumed objective keeps its ID but gets a new run
+        // generation. Never execute a response from the previous generation.
+        if let Some(lease) = self.agent.goal_run_lease.as_ref()
+            && self.agent.goal.snapshot_for_run(lease).await.is_none()
+        {
+            deferred_sink.discard();
+            self.agent.log_response(&response, true);
+            return Ok(TurnOutcome::Finished(AgentRunResult::Interrupted(
+                String::new(),
+            )));
+        }
+
         // Providers use `Completed(Stop)` for an ordinary terminal response;
         // only an explicit interrupted terminal or a stop arriving while the
         // provider call completed ends this turn as cancelled. In particular,

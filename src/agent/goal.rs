@@ -9,10 +9,13 @@ impl Agent {
         let Some(run_id) = self.goal_run_id.as_deref() else {
             return Ok(true);
         };
-        let Some(goal) = self.goal.snapshot().await else {
+        let Some(lease) = self.goal_run_lease.as_ref() else {
             return Ok(false);
         };
-        if goal.state != GoalState::Active || goal.id != run_id {
+        let Some(goal) = self.goal.snapshot_for_run(lease).await else {
+            return Ok(false);
+        };
+        if goal.id != run_id {
             return Ok(false);
         }
         let note = harness_note(&format!(

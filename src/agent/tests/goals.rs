@@ -14,6 +14,79 @@ fn goal_agent(fixture: &TestFixture, responses: Vec<StreamedResponse>) -> Agent 
 }
 
 #[tokio::test]
+async fn paused_and_resumed_goal_rejects_old_provider_response() {
+    struct PauseResumeProvider {
+        goal: crate::goal::GoalService,
+        id: String,
+    }
+
+    #[async_trait]
+    impl Provider for PauseResumeProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[ChatCompletionRequestMessage],
+            _tools: &[ChatCompletionTool],
+            _cancellation_token: CancellationToken,
+            _sink: SharedSink,
+        ) -> crate::provider::ProviderResult<StreamedResponse> {
+            self.goal
+                .transition(&self.id, GoalState::Paused, None)
+                .await
+                .unwrap();
+            self.goal
+                .transition(&self.id, GoalState::Active, None)
+                .await
+                .unwrap();
+            Ok(StreamedResponse {
+                tool_calls: vec![test_tool_call("stale", "read", r#"{"path":"file.txt"}"#)],
+                ..StreamedResponse::default()
+            })
+        }
+
+        async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    let fixture = TestFixture::new();
+    std::fs::write(fixture.project_root.join("file.txt"), "content").unwrap();
+    let goal = crate::goal::GoalService::default();
+    let record = goal.set("Review file.txt").await.unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(crate::tool::ReadTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    let registry = Arc::new(registry);
+    let mut agent = Agent::new(
+        Box::new(PauseResumeProvider {
+            goal: goal.clone(),
+            id: record.id.clone(),
+        }),
+        registry.clone(),
+        registry,
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.goal = goal.clone();
+    let sink = Arc::new(CaptureSink::default());
+    let result = agent
+        .run("Review file.txt", CancellationToken::new(), sink.clone())
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentRunResult::Interrupted(_)));
+    assert!(
+        sink.tool_starts().is_empty(),
+        "stale tool call must not execute"
+    );
+    let current = goal.snapshot().await.unwrap();
+    assert_eq!(current.id, record.id);
+    assert_eq!(current.state, GoalState::Active);
+}
+
+#[tokio::test]
 async fn progress_reply_cannot_complete_a_goal_without_an_explicit_claim() {
     let fixture = TestFixture::new();
     let responses = (0..3)
@@ -426,6 +499,7 @@ async fn goal_note_is_reconstructed_after_compaction_and_provider_change() {
     let objective = "Preserve every requirement, including the original acceptance criteria.";
     let record = agent.goal.set(objective).await.unwrap();
     agent.goal_run_id = Some(record.id.clone());
+    agent.goal_run_lease = agent.goal.active_run_lease().await;
     agent.refresh_goal_context().await.unwrap();
     for index in 0..40 {
         agent.push_user_message_raw(&format!(
