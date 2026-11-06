@@ -209,9 +209,22 @@ pub(crate) fn requests_no_commands(prompt: &str) -> bool {
             .enumerate()
             .any(|(index, window)| {
                 window == needle
-                    && !words[index + needle.len()..]
-                        .iter()
-                        .any(|word| matches!(*word, "but" | "run" | "execute"))
+                    && !words[index.saturating_sub(3)..index].iter().any(|word| {
+                        matches!(*word, "old" | "previous" | "earlier" | "former" | "prior")
+                    })
+                    && !words[index + needle.len()..].iter().any(|word| {
+                        matches!(
+                            *word,
+                            "but"
+                                | "run"
+                                | "execute"
+                                | "lifted"
+                                | "revoked"
+                                | "rescinded"
+                                | "retracted"
+                                | "obsolete"
+                        )
+                    })
             })
     })
 }
@@ -258,6 +271,9 @@ mod tests {
             "Do not run commands. Actually run tests.",
             "Do not run shell commands.",
             "Ignore the words do not run commands.",
+            "The old instruction do not run commands has been lifted. Use bash to print READY.",
+            "The previous instruction was do not run commands.",
+            "Do not run commands has been revoked. Use bash to print READY.",
             "If I say do not run commands, what happens?",
             "Do not run only shell commands; use Git.",
         ] {
