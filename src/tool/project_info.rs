@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::context::{
-    ProjectContextSnapshot, detect_project_ecosystems, isolated_project_context_snapshot,
-    project_context_snapshot,
+    SteeringFileContext, collect_steering_file_in_dir, collect_steering_files,
+    detect_project_ecosystems,
 };
 use crate::tool::schema::{closed_object, parse_args};
 use crate::tool::{ParallelPolicy, Tool, ToolOutput};
@@ -218,14 +218,12 @@ impl Tool for ProjectInfoTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let _args: ProjectInfoArgs = parse_args("project_info", args)?;
-        let context = match self.runtime.context_scope {
-            ProjectInfoContextScope::Inherited => project_context_snapshot(&self.project_root),
-            ProjectInfoContextScope::Isolated => {
-                isolated_project_context_snapshot(&self.project_root)
-            }
-            ProjectInfoContextScope::Restricted => {
-                crate::context::restricted_project_context_snapshot(&self.project_root)
-            }
+        let steering = match self.runtime.context_scope {
+            ProjectInfoContextScope::Inherited => collect_steering_files(&self.project_root),
+            ProjectInfoContextScope::Isolated => collect_steering_file_in_dir(&self.project_root)
+                .into_iter()
+                .collect(),
+            ProjectInfoContextScope::Restricted => Vec::new(),
         };
         let runtime = self.runtime.snapshot();
         let ecosystems = detect_project_ecosystems(&self.project_root)
@@ -246,7 +244,7 @@ impl Tool for ProjectInfoTool {
             provider: runtime.provider,
             ecosystems: ecosystems.clone(),
             git,
-            steering_files: steering_files(&context),
+            steering_files: steering_files(&steering),
             known_commands: known_commands(&self.project_root, &ecosystems),
             tools: runtime.tools,
             truncated: false,
@@ -328,9 +326,8 @@ impl GitInfo {
     }
 }
 
-fn steering_files(context: &ProjectContextSnapshot) -> Vec<SteeringFileInfo> {
-    context
-        .steering_files
+fn steering_files(files: &[SteeringFileContext]) -> Vec<SteeringFileInfo> {
+    files
         .iter()
         .map(|file| SteeringFileInfo {
             name: file.name.clone(),
@@ -448,6 +445,29 @@ mod tests {
         let info = GitInfo::collect(dir.path()).await;
         assert!(info.repository);
         assert!(!dir.path().join("fsmonitor-ran").exists());
+    }
+
+    #[tokio::test]
+    async fn orientation_collects_git_status_only_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::util::git::setup_test_clean_filter(dir.path());
+        std::fs::write(
+            dir.path().join("probe.sh"),
+            "printf x >> clean-filter-ran\ncat\n",
+        )
+        .unwrap();
+        let marker = dir.path().join("clean-filter-ran");
+        for runtime in [
+            ProjectInfoRuntime::new(None),
+            ProjectInfoRuntime::isolated(None),
+        ] {
+            let tool = ProjectInfoTool::new(dir.path().to_path_buf(), Arc::new(runtime));
+            let output = tool.execute(serde_json::json!({})).await.unwrap();
+            let value: serde_json::Value = serde_json::from_str(output.rendered_summary()).unwrap();
+            assert_eq!(value["git"]["repository"], true);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+            std::fs::remove_file(&marker).unwrap();
+        }
     }
 
     #[tokio::test]

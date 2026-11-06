@@ -996,7 +996,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn collect_steering_files(root: &Path) -> Vec<SteeringFileContext> {
+pub(crate) fn collect_steering_files(root: &Path) -> Vec<SteeringFileContext> {
     let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
     let mut files = Vec::new();
     let mut dir = Some(root);
@@ -1019,7 +1019,7 @@ fn collect_steering_files(root: &Path) -> Vec<SteeringFileContext> {
     files
 }
 
-fn collect_steering_file_in_dir(dir: &Path) -> Option<SteeringFileContext> {
+pub(crate) fn collect_steering_file_in_dir(dir: &Path) -> Option<SteeringFileContext> {
     for name in STEERING_FILES {
         let path = dir.join(name);
         let Ok(raw) = std::fs::read_to_string(path) else {
