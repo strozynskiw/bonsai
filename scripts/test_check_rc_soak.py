@@ -130,8 +130,9 @@ class EvidenceFixture:
             # evidence bytes — and thus the whole fixture git history — are
             # reproducible.
             with (
+                archive_path.open("wb") as compressed_file,
                 gzip.GzipFile(
-                    filename="", mode="wb", mtime=0, fileobj=open(archive_path, "wb")
+                    filename="", mode="wb", mtime=0, fileobj=compressed_file
                 ) as gz,
                 tarfile.open(fileobj=gz, mode="w") as archive,
             ):
