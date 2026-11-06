@@ -14,6 +14,56 @@ fn goal_agent(fixture: &TestFixture, responses: Vec<StreamedResponse>) -> Agent 
 }
 
 #[tokio::test]
+async fn explicit_unfinished_goal_work_triggers_recovery_before_completion() {
+    use crate::agent::completion::{CompletionGap, CompletionGuardVerdict};
+
+    let fixture = TestFixture::new();
+    let mut agent = goal_agent(&fixture, vec![]);
+    let goal = agent.goal.set("Review all four files").await.unwrap();
+    agent.goal_run_id = Some(goal.id);
+    agent.begin_inferred_completion_task("Review all four files");
+    agent.note_completion_action();
+
+    let verdict = agent
+        .completion_guard_verdict("I reviewed README.md. The other three files remain unreviewed.")
+        .await;
+    assert!(matches!(verdict, CompletionGuardVerdict::Continue { .. }));
+    let trace = agent.completion_guard_trace().unwrap();
+    assert!(
+        trace.attempts[0]
+            .gaps
+            .contains(&CompletionGap::GoalWorkRemaining)
+    );
+    assert!(matches!(
+        agent
+            .completion_guard_verdict("All four files were reviewed.")
+            .await,
+        CompletionGuardVerdict::Accept
+    ));
+
+    agent.goal_run_id = None;
+    agent.begin_inferred_completion_task("Report the review progress");
+    agent.note_completion_action();
+    assert!(matches!(
+        agent
+            .completion_guard_verdict("Three files remain unreviewed.")
+            .await,
+        CompletionGuardVerdict::Accept
+    ));
+
+    let reporting_goal = agent.goal.set("List the unreviewed files").await.unwrap();
+    agent.goal_run_id = Some(reporting_goal.id);
+    agent.begin_inferred_completion_task("List the unreviewed files");
+    agent.note_completion_action();
+    assert!(matches!(
+        agent
+            .completion_guard_verdict("Three files remain unreviewed.")
+            .await,
+        CompletionGuardVerdict::Accept
+    ));
+}
+
+#[tokio::test]
 async fn deferred_goal_finalization_leaves_the_surface_to_classify_the_result() {
     let fixture = TestFixture::new();
     let responses = (0..2)

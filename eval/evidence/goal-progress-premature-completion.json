@@ -1,5 +1,5 @@
 {
-  "scope": "Reproduce premature goal completion after an explicit partial-progress response; this is an open defect, not a passing goal-completion qualification.",
+  "scope": "Reproduce premature goal completion and verify a limited safeguard for explicit unfinished-work reports; this is not a general goal-completion qualification.",
   "revision": "2eafa156",
   "reference": {
     "repository": "https://github.com/openai/codex",
@@ -14,5 +14,10 @@
     "observation": "The mock provider requested one README read and answered that the other three files remained unreviewed. The TUI displayed goal complete after two provider requests.",
     "result": "Defect reproduced: a partial answer can be recorded as completion. The probe passes when the bug is observed; it is not a regression test for the intended behavior."
   },
-  "limitations": "This is a deterministic mock-provider reproduction of one partial-report form. It does not establish how often a live provider behaves this way or prescribe a safe continuation policy."
+  "follow_up": {
+    "test": "e2e/cases/27_goal_progress_recovery.sh",
+    "evidence": "target/tui-verification/e2e/20261106T181046Z-79675",
+    "result": "A partial report led to a bounded continuation, three additional file reads, and only then a completed goal."
+  },
+  "limitations": "The safeguard recognizes certain explicit unfinished-work statements; absence of a matching statement does not prove the full objective is satisfied. This deterministic mock-provider test does not establish live-provider frequency or a general cross-turn continuation policy."
 }

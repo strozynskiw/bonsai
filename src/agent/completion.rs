@@ -454,6 +454,7 @@ pub enum CompletionGap {
     TerminalPending(usize),
     ExternalWaitPending(usize),
     ImplementationStall(usize),
+    GoalWorkRemaining,
 }
 
 impl CompletionGap {
@@ -481,6 +482,7 @@ impl CompletionGap {
             Self::ImplementationStall(turns) => {
                 format!("implementation stalled after {turns} consecutive tool turns")
             }
+            Self::GoalWorkRemaining => "the goal response reports unfinished work".to_string(),
         }
     }
 
@@ -852,7 +854,14 @@ impl Agent {
         }
         let signals = response_signals(response);
         let evidence = self.completion_decision_evidence(signals).await;
-        let gaps = completion_gaps(&evidence);
+        let mut gaps = completion_gaps(&evidence);
+        if let Some(goal_id) = self.goal_run_id.as_deref()
+            && let Some(goal) = self.goal.snapshot().await
+            && goal.id == goal_id
+            && reports_unfinished_goal_work(response, &goal.objective)
+        {
+            gaps.push(CompletionGap::GoalWorkRemaining);
+        }
         let ordinal = self.completion.attempts.len().saturating_add(1);
         self.completion.attempts.push(CompletionGuardAttempt {
             ordinal,
@@ -1251,6 +1260,99 @@ fn push_check_gap(
     }
 }
 
+// A positive admission of unfinished work is enough to keep a goal from
+// completing. Absence of this signal is not proof that the goal is complete.
+fn reports_unfinished_goal_work(response: &str, objective: &str) -> bool {
+    let objective_words = normalized_words(objective);
+    let directive = action_directive(&objective_words);
+    let reporting = [
+        "list ",
+        "identify ",
+        "find ",
+        "show ",
+        "report ",
+        "summarize ",
+    ]
+    .iter()
+    .any(|prefix| directive.starts_with(prefix));
+    let mut in_fence = false;
+    response.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            return false;
+        }
+        if in_fence || trimmed.starts_with('>') || line.contains("\\\"") {
+            return false;
+        }
+        let mut plain = String::with_capacity(line.len());
+        for (index, part) in line.split('`').enumerate() {
+            if index % 2 == 0 {
+                plain.push_str(part);
+            }
+            plain.push(' ');
+        }
+        let mut unquoted = String::with_capacity(plain.len());
+        for (index, part) in plain.split('"').enumerate() {
+            if index % 2 == 0 {
+                unquoted.push_str(part);
+            }
+            unquoted.push(' ');
+        }
+        unquoted.split(['.', '!', '?', ';']).any(|clause| {
+            let normalized = normalized_words(clause);
+            let words = normalized.split_whitespace().collect::<Vec<_>>();
+            words.iter().enumerate().any(|(index, word)| {
+                if !matches!(*word, "remain" | "remains" | "remaining" | "still") {
+                    return false;
+                }
+                let context = &words[index.saturating_sub(6)..(index + 6).min(words.len())];
+                if context.iter().any(|word| {
+                    matches!(
+                        *word,
+                        "no" | "none" | "nothing" | "zero" | "0" | "not" | "never"
+                    )
+                }) {
+                    return false;
+                }
+                let requested_work = context.iter().any(|word| {
+                    matches!(
+                        *word,
+                        "file"
+                            | "files"
+                            | "test"
+                            | "tests"
+                            | "check"
+                            | "checks"
+                            | "task"
+                            | "tasks"
+                            | "item"
+                            | "items"
+                            | "step"
+                            | "steps"
+                            | "requirement"
+                            | "requirements"
+                            | "work"
+                            | "implementation"
+                    )
+                });
+                requested_work
+                    && context.iter().any(|word| {
+                        matches!(
+                            *word,
+                            "unreviewed"
+                                | "untested"
+                                | "unverified"
+                                | "unimplemented"
+                                | "unfinished"
+                        ) && !(reporting
+                            && objective_words.split_whitespace().any(|part| part == *word))
+                    })
+            })
+        })
+    })
+}
+
 fn response_signals(response: &str) -> CompletionResponseSignals {
     let normalized = normalized_words(response);
     CompletionResponseSignals {
@@ -1398,6 +1500,40 @@ pub(super) fn supersedes_goal(prompt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfinished_goal_report_distinguishes_negation_and_quoted_examples() {
+        for response in [
+            "I reviewed README.md. The other three files remain unreviewed.",
+            "Two tests are still unverified.",
+            "The remaining tasks are unfinished.",
+        ] {
+            assert!(
+                reports_unfinished_goal_work(response, "Review all four files"),
+                "{response}"
+            );
+        }
+        for response in [
+            "No files remain unreviewed.",
+            "Nothing remains unverified.",
+            "All requested tests passed; no tests remain untested.",
+            "The message `three files remain unreviewed` was an example.",
+            "The message \"three files remain unreviewed\" was an example.",
+            "> Three files remain unreviewed.\nAll requested files were reviewed.",
+            "```text\nThree files remain unreviewed.\n```\nAll files were reviewed.",
+            "Three issues remain, but all requested files were reviewed.",
+            "Some risks remain unverified after the requested review.",
+        ] {
+            assert!(
+                !reports_unfinished_goal_work(response, "Review all four files"),
+                "{response}"
+            );
+        }
+        assert!(!reports_unfinished_goal_work(
+            "Three files remain unreviewed.",
+            "List the unreviewed files."
+        ));
+    }
 
     fn evidence(contract: TaskCompletionContract) -> CompletionDecisionEvidence {
         CompletionDecisionEvidence {
