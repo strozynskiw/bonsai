@@ -43,6 +43,10 @@ CACHE = os.path.expanduser("~/.bonsai/cache/models-dev.json")
 LIVE_DIR = os.path.expanduser("~/.bonsai/cache/live-models")
 MODELS_DEV_URL = "https://models.dev/api.json"
 CACHE_MAX_AGE_SECS = 24 * 3600
+# Match the runtime's live-model cache TTL in commands/providers.rs.
+LIVE_CACHE_MAX_AGE_SECS = 300
+# Match LIVE_MODEL_CACHE_SCHEMA_VERSION in model_catalog/mod.rs.
+LIVE_CACHE_SCHEMA_VERSION = 5
 
 BUILTIN_DIR = os.path.join(REPO, "models", "builtin")
 
@@ -340,12 +344,23 @@ def main() -> int:
     # without a live cache, fall back to the whole block.
     live_served: dict[str, set] = {}
     live_mapped: dict[str, set] = {}
+    stale_live: set[str] = set()
     if os.path.isdir(LIVE_DIR):
         for fn in os.listdir(LIVE_DIR):
             if fn.endswith(".json"):
-                with open(os.path.join(LIVE_DIR, fn)) as f:
-                    data = json.load(f)
+                path = os.path.join(LIVE_DIR, fn)
                 connection_id = fn[:-5]
+                with open(path) as f:
+                    data = json.load(f)
+                fetched_at = data.get("fetched_at_unix_secs")
+                if (
+                    data.get("schema_version") != LIVE_CACHE_SCHEMA_VERSION
+                    or not data.get("models")
+                    or not isinstance(fetched_at, int)
+                    or max(0, int(time.time()) - fetched_at) > LIVE_CACHE_MAX_AGE_SECS
+                ):
+                    stale_live.add(connection_id)
+                    continue
                 live_served[connection_id] = {
                     str(lm.get("remote_model_id"))
                     for lm in data.get("models") or []
@@ -356,7 +371,14 @@ def main() -> int:
                     if lm.get("model_id")
                 }
 
-    print("## lineup gaps (served + in models.dev, but no static or dynamic target)")
+    print("## live listing coverage")
+    for name in tomls:
+        if name in live_served:
+            continue
+        status = "stale cache" if name in stale_live else "no cache"
+        print(f"- `{name}`: {status}; current served lineup not verified")
+
+    print("\n## lineup gaps (served + in models.dev, but no static or dynamic target)")
     for name in tomls:
         for block in blocks_of_interest.get(name, []):
             have = covered.get(name, set())
@@ -372,13 +394,13 @@ def main() -> int:
                     problems += 1
                     print(f"- `{name}` (block `{block}`): {', '.join(missing)}")
             else:
-                # No live cache (never listed with a key) — the block's full
-                # lineup is only a hint, so report without counting.
+                # A missing or expired listing cannot establish what is served.
                 missing = sorted(rows - have)
                 if missing:
+                    status = "stale live cache" if name in stale_live else "no live cache yet"
                     print(
-                        f"- `{name}` (block `{block}`, informational — no live "
-                        f"cache yet): {', '.join(missing)}"
+                        f"- `{name}` (block `{block}`, informational — {status}): "
+                        f"{', '.join(missing)}"
                     )
 
     # Live caches: unmapped rows = served models with no catalog target at the
@@ -406,6 +428,8 @@ def main() -> int:
             if not fn.endswith(".json"):
                 continue
             conn = fn[:-5]
+            if conn in stale_live:
+                continue
             if conn not in curated:
                 continue
             if args and conn != args[0]:

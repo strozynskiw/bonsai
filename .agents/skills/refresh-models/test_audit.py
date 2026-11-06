@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -16,7 +17,8 @@ SPEC.loader.exec_module(audit)
 
 
 class LiveModelCoverageTests(unittest.TestCase):
-    def audit_fixture(self, target_owner=None, exclusion_owner=None, scoped=False):
+    def audit_fixture(self, target_owner=None, exclusion_owner=None, scoped=False, stale=False,
+                      schema=None, missing_timestamp=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             builtin = root / "models" / "builtin"
@@ -43,7 +45,10 @@ class LiveModelCoverageTests(unittest.TestCase):
                 metadata[connection] = {"models": rows}
             source = root / "models-dev.json"
             source.write_text(json.dumps(metadata), encoding="utf-8")
-            (live / "alpha.json").write_text(json.dumps({"models": [
+            cache = live / "alpha.json"
+            fetched_at = int(time.time()) - (audit.LIVE_CACHE_MAX_AGE_SECS + 1 if stale else 0)
+            cache.write_text(json.dumps({"schema_version": schema if schema is not None else audit.LIVE_CACHE_SCHEMA_VERSION,
+                                         "fetched_at_unix_secs": None if missing_timestamp else fetched_at, "models": [
                 {"remote_model_id": "shared-model", "model_id": None},
             ]}), encoding="utf-8")
             arguments = ["audit.py", *(["alpha"] if scoped else []), "--source", str(source)]
@@ -77,6 +82,25 @@ class LiveModelCoverageTests(unittest.TestCase):
         status, output = self.audit_fixture(exclusion_owner="alpha")
         self.assertEqual(status, 0, output)
         self.assertIn("shared-model (deliberately not shipped)", output)
+
+    def test_stale_listing_is_unverified_and_not_treated_as_current(self):
+        status, output = self.audit_fixture(target_owner="beta", stale=True)
+        self.assertEqual(status, 0, output)
+        self.assertIn("`alpha`: stale cache; current served lineup not verified", output)
+        self.assertIn("`beta`: no cache; current served lineup not verified", output)
+        self.assertNotIn("- `alpha`: shared-model\n", output)
+
+    def test_fresh_listing_is_not_reported_as_unverified(self):
+        _, output = self.audit_fixture()
+        self.assertNotIn("`alpha`: stale cache; current served lineup not verified", output)
+        self.assertNotIn("`alpha`: no cache; current served lineup not verified", output)
+
+    def test_old_schema_or_missing_timestamp_is_unverified(self):
+        for args in [{"schema": 1}, {"missing_timestamp": True}]:
+            with self.subTest(args=args):
+                status, output = self.audit_fixture(target_owner="beta", **args)
+                self.assertEqual(status, 0, output)
+                self.assertIn("`alpha`: stale cache; current served lineup not verified", output)
 
 
 if __name__ == "__main__":

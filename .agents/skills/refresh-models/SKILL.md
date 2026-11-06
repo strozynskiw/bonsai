@@ -30,8 +30,11 @@ python3 .agents/skills/refresh-models/audit.py [connection-id] --fetch
 
 `--fetch` forces a fresh models.dev download; omit it to accept a cache up to
 24h old. To also refresh the live caches first, run the TUI once (`/refresh`
-inside it) or let startup do it, since live files older than 5 min refetch on
-launch. Exit code 1 means unexplained findings.
+inside it), run `bonsai model-catalog refresh`, or let startup do it for
+authorized connections. Live listings older than 5 minutes are reported as
+stale and cannot establish a provider's current lineup. Missing or stale
+listings remain unverified even when there are zero unexplained findings.
+Exit code 1 means unexplained findings.
 
 ### 2. Interpret each finding
 
