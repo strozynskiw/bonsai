@@ -533,6 +533,9 @@ impl Agent {
             self.self_review.append_request(&message.input.text);
             self.merge_completion_steering(&message.input.text);
             self.push_live_user_message(&message.input).await?;
+            if crate::task_intent::requests_current_task_status(&message.input.text) {
+                self.push_harness_note("The latest queued human message requests a status update. For the next response to that message only, before issuing more tool calls, briefly report the current observed state and next step; then continue any work the user asked to continue. Do not invent progress. Once answered, do not repeat this reminder; follow later human corrections.");
+            }
             // Mid-run steering only moves the episode boundary anchor (and
             // opens a span when none is active); it never closes an episode.
             self.observe_user_turn_for_episodes(&message.input.text);
@@ -4438,6 +4441,50 @@ mod tests {
             name: name.to_string(),
             arguments: arguments.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn queued_status_reminder_is_harness_context_after_the_human_message() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let registry = Arc::new(ToolRegistry::new());
+        let mut agent = Agent::new(
+            Box::new(SchemaRecordingProvider {
+                tools: Arc::new(StdMutex::new(Vec::new())),
+                failure: None,
+            }),
+            registry.clone(),
+            registry,
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        let text = "Give a concise status update, then continue and finish the task.";
+        let sink: SharedSink = Arc::new(crate::output::StdoutSink);
+        agent
+            .apply_queued_messages(
+                vec![QueuedUserMessage {
+                    id: 7,
+                    display_text: text.into(),
+                    transcript_text: text.into(),
+                    input: UserInput::from_text(text),
+                }],
+                &sink,
+            )
+            .await
+            .unwrap();
+        let human = agent.messages.iter().position(|message| matches!(message,
+            ChatCompletionRequestMessage::User(user) if user.name.is_none() && try_message_content_string(message).as_deref() == Some(text)
+        )).unwrap();
+        let note = &agent.messages[human + 1];
+        assert!(
+            matches!(note, ChatCompletionRequestMessage::System(system) if system.name.as_deref() == Some("bonsai_harness"))
+        );
+        assert!(
+            try_message_content_string(note)
+                .unwrap()
+                .contains("before issuing more tool calls")
+        );
     }
 
     #[tokio::test]

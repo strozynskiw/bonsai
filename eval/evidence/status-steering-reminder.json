@@ -1,0 +1,48 @@
+{
+  "scope": "A reminder for direct queued requests about the current task; it does not enforce an update or cover every phrasing.",
+  "suite": "eval/suites/intent_continuity.toml",
+  "task": "status_request_updates_then_continues",
+  "model": "deepseek/deepseek-flash",
+  "effort": "low",
+  "baseline": {
+    "seeds": [439, 440, 441, 442],
+    "reports": [
+      "target/eval-visible-order-439/1793973250036-live-439/report.json",
+      "target/eval-visible-order-440/1793973280369-live-440/report.json",
+      "target/eval-visible-order-441/1793973280378-live-441/report.json",
+      "target/eval-visible-order-442/1793973333320-live-442/report.json"
+    ],
+    "observation": "Manual trace inspection with the final patterns found matching updates before edit in 2 of 4 runs; two runs had no intermediate assistant text."
+  },
+  "candidate": {
+    "seeds": [443, 444, 445],
+    "reports": [
+      "target/eval-status-reminder-443/1793973840821-live-443/report.json",
+      "target/eval-status-reminder-444/1793973887267-live-444/report.json",
+      "target/eval-status-reminder-445/1793973887246-live-445/report.json"
+    ],
+    "observation": "All three traces showed a timely update and a successful edit. Seed 443's stored report used an earlier, narrower wording pattern and failed the ordering grader; its update matched the final patterns on offline recheck. These runs used an initial reminder before adding an explicit next-response and later-correction scope."
+  },
+  "controls": {
+    "mock_suite": "target/eval-status-reminder-mock/1793973920129-mock-406/report.json",
+    "additive": "target/eval-status-reminder-additive/1793973920275-live-446/report.json",
+    "superseding": "target/eval-status-reminder-stop/1793973920277-live-446/report.json",
+    "observation": "The mock suite and both live controls passed; neither control transcript contained the status reminder."
+  },
+  "scoped_reminder": {
+    "mock_suite": "target/eval-status-scoped-mock/1793974518821-mock-406/report.json",
+    "seeds": [447, 448, 449],
+    "reports": [
+      "target/eval-status-scoped-447/1793974380471-live-447/report.json",
+      "target/eval-status-scoped-448/1793974380473-live-448/report.json",
+      "target/eval-status-scoped-449/1793974380473-live-449/report.json"
+    ],
+    "observation": "All three final-wording runs passed the ordering, file and effect graders.",
+    "later_correction": {
+      "suite": "target/status-reminder-override-suite/suite.toml",
+      "report": "target/eval-status-override-450/1793974450276-live-450/report.json",
+      "observation": "After a queued status request followed by a request to stop and provide no status, the single sampled run replied Done and recorded no tool effects or file changes."
+    }
+  },
+  "limitations": "Small, non-randomized samples with different seeds cannot establish a causal effect or reliability rate. The ordering check is lexical and classifies effects by tool name. A reminder is not a guarantee; the general no-command authority gap remains open."
+}

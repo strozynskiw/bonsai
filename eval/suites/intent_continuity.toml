@@ -131,7 +131,7 @@ contains = ["# Tiny Project", "This fixture is intentionally small. Eval tasks m
 [[tasks.graders]]
 type = "visible-before-effect"
 effect = "workspace-mutation"
-matches = ['(?i)\b(status|progress|currently|now)\b', '(?i)\b(read|inspect\w*|working|edit\w*|add\w*|append\w*)\b']
+matches = ['(?i)\b(status|progress|currently|now|next step)\b', '(?i)\b(read|inspect\w*|working|edit\w*|add\w*|append\w*)\b']
 
 [[tasks]]
 id = "compaction_preserves_steered_intent"

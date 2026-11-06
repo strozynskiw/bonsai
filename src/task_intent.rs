@@ -111,9 +111,83 @@ pub(crate) fn action_directive(normalized: &str) -> &str {
     }
 }
 
+/// Recognize unambiguous requests for an update on the current agent task.
+pub(crate) fn requests_current_task_status(prompt: &str) -> bool {
+    if prompt.contains(['"', '`', '\n', '\r']) {
+        return false;
+    }
+    let normalized = normalized_words(prompt);
+    let directive = action_directive(&normalized);
+    if [
+        "do not",
+        "don t",
+        "without",
+        "no status",
+        "instead of",
+        "unless",
+        "if ",
+    ]
+    .iter()
+    .any(|negative| directive.contains(negative))
+    {
+        return false;
+    }
+    if let Some(remainder) = [
+        "give a concise status update",
+        "give a brief status update",
+        "give a status update",
+    ]
+    .iter()
+    .find_map(|prefix| directive.strip_prefix(prefix))
+    {
+        let remainder = remainder.trim_start();
+        return remainder.is_empty()
+            || remainder.starts_with("then ")
+            || remainder.starts_with("and continue")
+            || remainder.starts_with("on the current task")
+            || remainder.starts_with("on the task");
+    }
+    [
+        "what are you working on",
+        "what are you doing now",
+        "what are you fixing now",
+        "how is it going",
+        "how its going",
+        "how s it going",
+    ]
+    .iter()
+    .any(|prefix| {
+        directive == *prefix
+            || directive
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_direct_current_status_requests_without_negated_or_quoted_text() {
+        for prompt in [
+            "Give a concise status update, then continue and finish the original task.",
+            "what are you working on now?",
+            "How's it going?",
+        ] {
+            assert!(requests_current_task_status(prompt), "{prompt}");
+        }
+        for prompt in [
+            "Do not give a status update",
+            "Explain the phrase \"what are you working on\"",
+            "What is the status of issue 42?",
+            "Give a status update without continuing",
+            "If asked, give a status update",
+            "Give a status update for the customer",
+        ] {
+            assert!(!requests_current_task_status(prompt), "{prompt}");
+        }
+    }
 
     #[test]
     fn classifies_retry_phrases_as_continuations() {
