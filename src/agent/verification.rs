@@ -151,10 +151,26 @@ impl Agent {
         command: &str,
         arguments: &str,
     ) -> Option<VerificationKind> {
-        self.verification_kind_for_command(command).or_else(|| {
-            self.is_requested_shell_check(command, arguments)
-                .then_some(VerificationKind::Test)
-        })
+        self.verification_kind_for_command(command)
+            .or_else(|| {
+                self.is_requested_shell_check(command, arguments)
+                    .then_some(VerificationKind::Test)
+            })
+            .or_else(|| {
+                (self
+                    .verification
+                    .requested_cargo_checks
+                    .contains("test--no-run")
+                    && command_has_cargo_check(command, "test--no-run")
+                    && matches!(
+                        (
+                            bash_command_cwd(&self.project_root, arguments).canonicalize(),
+                            self.project_root.canonicalize()
+                        ),
+                        (Ok(cwd), Ok(root)) if cwd == root
+                    ))
+                .then_some(VerificationKind::Build)
+            })
     }
 
     fn is_requested_shell_check(&self, command: &str, arguments: &str) -> bool {
@@ -1620,7 +1636,15 @@ fn direct_check_request_words(prompt: &str) -> Option<Vec<&str>> {
 }
 
 fn requested_cargo_checks(prompt: &str) -> HashSet<String> {
-    let Some(words) = direct_check_request_words(prompt) else {
+    let lower = prompt.to_ascii_lowercase();
+    // An explicit compile-only request can be followed by a clarification that
+    // tests must not run. Keep that distinct from a prohibition on commands.
+    let cleaned = if lower.contains("cargo test") && lower.contains("--no-run") {
+        lower.replace("do not run the tests", "")
+    } else {
+        lower
+    };
+    let Some(words) = direct_check_request_words(&cleaned) else {
         return HashSet::new();
     };
     let mut checks = HashSet::new();
@@ -1665,7 +1689,12 @@ fn requested_cargo_checks(prompt: &str) -> HashSet<String> {
         let cargo = words[index + 1].trim_start_matches('`');
         let subcommand = words[index + 2].trim_end_matches([',', '.', ';', ':', '?', '`']);
         if cargo == "cargo" && matches!(subcommand, "test" | "check" | "build") {
-            checks.insert(subcommand.to_string());
+            let no_run = subcommand == "test"
+                && words[index + 3..]
+                    .iter()
+                    .take_while(|word| !matches!(**word, "and" | "then" | "&&" | "--"))
+                    .any(|word| word.trim_matches(['`', '.', ',', ';', '?']) == "--no-run");
+            checks.insert(if no_run { "test--no-run" } else { subcommand }.to_string());
         }
     }
     checks
@@ -1686,7 +1715,10 @@ fn coordinated_requested_checks(prompt: &str) -> (HashSet<(String, String)>, Has
         }
         let first = words[index + 1].trim_matches('`');
         let second = words[index + 2].trim_end_matches([',', '.', ';', ':', '?', '`']);
-        if first == "cargo" && explicit_cargo.contains(second) {
+        if first == "cargo"
+            && (explicit_cargo.contains(second)
+                || (second == "test" && explicit_cargo.contains("test--no-run")))
+        {
             let mut connector = index + 3;
             while words
                 .get(connector)
@@ -1724,7 +1756,12 @@ fn coordinated_requested_checks(prompt: &str) -> (HashSet<(String, String)>, Has
         {
             let subcommand = subcommand.trim_end_matches([',', '.', ';', ':', '?', '`']);
             if matches!(subcommand, "test" | "check" | "build") {
-                cargo.insert(subcommand.to_string());
+                let no_run = subcommand == "test"
+                    && words[index + 6..]
+                        .iter()
+                        .take_while(|word| !matches!(**word, "and" | "then" | "&&" | "--"))
+                        .any(|word| word.trim_matches(['`', '.', ',', ';', '?']) == "--no-run");
+                cargo.insert(if no_run { "test--no-run" } else { subcommand }.to_string());
             }
         }
     }
@@ -1746,6 +1783,7 @@ fn verification_segments(command: &str) -> Option<Vec<Vec<String>>> {
             let command = segment.join(" ");
             direct_shell_check(&command).is_some()
                 || observed_verification_kind(&command).is_some()
+                || cargo_test_no_run_segment(segment)
                 || segment.first().is_some_and(|word| word == "echo")
                 || segment.as_slice() == ["true"]
         })
@@ -1755,11 +1793,31 @@ fn verification_segments(command: &str) -> Option<Vec<Vec<String>>> {
 pub(super) fn command_has_cargo_check(command: &str, expected: &str) -> bool {
     verification_segments(command).is_some_and(|segments| {
         segments.iter().any(|segment| {
-            segment.first().is_some_and(|word| word == "cargo")
-                && segment.get(1).is_some_and(|word| word == expected)
-                && observed_verification_kind(&segment.join(" ")).is_some()
+            if expected == "test--no-run" {
+                cargo_test_no_run_segment(segment)
+            } else {
+                segment.first().is_some_and(|word| word == "cargo")
+                    && segment.get(1).is_some_and(|word| word == expected)
+                    && observed_verification_kind(&segment.join(" ")).is_some()
+            }
         })
     })
+}
+
+fn cargo_test_no_run_segment(segment: &[String]) -> bool {
+    segment.first().is_some_and(|word| word == "cargo")
+        && segment.get(1).is_some_and(|word| word == "test")
+        && segment
+            .iter()
+            .skip(2)
+            .take_while(|word| word.as_str() != "--")
+            .any(|word| word == "--no-run")
+        && !segment.iter().skip(2).any(|word| {
+            matches!(
+                word.as_str(),
+                "--help" | "-h" | "--version" | "-V" | "--list"
+            )
+        })
 }
 
 pub(super) fn command_has_shell_check(command: &str, expected: &(String, String)) -> bool {
@@ -2124,6 +2182,34 @@ mod tests {
     }
 
     #[test]
+    fn cargo_compile_only_request_is_not_a_test_run() {
+        assert_eq!(
+            requested_cargo_checks(
+                "Run cargo test --no-run and report the result; do not run the tests."
+            ),
+            HashSet::from(["test--no-run".to_string()])
+        );
+        assert_eq!(
+            requested_cargo_checks("Run cargo test --locked --no-run."),
+            HashSet::from(["test--no-run".to_string()])
+        );
+        assert!(command_has_cargo_check(
+            "cargo test --no-run",
+            "test--no-run"
+        ));
+        assert!(!command_has_cargo_check("cargo test --no-run", "test"));
+        assert!(!command_has_cargo_check(
+            "cargo test -- --no-run",
+            "test--no-run"
+        ));
+        assert!(!command_has_cargo_check(
+            "cargo test --no-run --help",
+            "test--no-run"
+        ));
+        assert!(requested_cargo_checks("Do not run cargo test --no-run.").is_empty());
+    }
+
+    #[test]
     fn coordinated_check_requests_share_the_run_directive() {
         let script = HashSet::from([("sh".to_string(), "check_task.sh".to_string())]);
         let cargo = HashSet::from(["test".to_string()]);
@@ -2138,6 +2224,12 @@ mod tests {
         let (_, requested_cargo) =
             coordinated_requested_checks("Run sh check_task.sh and cargo test before finishing.");
         assert_eq!(requested_cargo, cargo);
+        let (scripts, _) =
+            coordinated_requested_checks("Run cargo test --no-run and sh check_task.sh.");
+        assert_eq!(scripts, script);
+        let (_, compile_only) =
+            coordinated_requested_checks("Run sh check_task.sh and cargo test --no-run.");
+        assert_eq!(compile_only, HashSet::from(["test--no-run".to_string()]));
         for prompt in [
             "Explain how to run cargo test and sh check_task.sh.",
             "Run cargo test and sh check_task.sh only on Linux.",

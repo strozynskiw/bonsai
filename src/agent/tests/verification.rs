@@ -522,6 +522,55 @@ async fn missing_requested_checks_explain_how_to_produce_evidence() {
 }
 
 #[tokio::test]
+async fn requested_compile_only_check_is_build_evidence_not_a_test_pass() {
+    use crate::agent::completion::CompletionCheckEvidence;
+
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(&fixture.project_root, "source.rs", "source\n", "source");
+    let mut agent = verification_agent(&fixture);
+    let prompt = "Run cargo test --no-run and report the result; do not run the tests.";
+    agent.begin_inferred_completion_task(prompt);
+    agent.begin_requested_shell_checks(prompt, None);
+    let call = test_tool_call("compile", "bash", r#"{"command":"cargo test --no-run"}"#);
+    assert_eq!(
+        agent.verification_kind_for_call("cargo test --no-run", &call.arguments),
+        Some(VerificationKind::Build)
+    );
+    agent
+        .capture_pending_verification_bindings(std::slice::from_ref(&call))
+        .await;
+    agent
+        .record_verification_tool_result(
+            &call,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    agent.revalidate_verification_for_delivery(0).await;
+    assert_eq!(
+        agent.verification_runs().last().unwrap().kind,
+        VerificationKind::Build
+    );
+    assert_eq!(
+        agent.completion_verification_evidence(),
+        CompletionCheckEvidence::Satisfied
+    );
+
+    let mut tests_requested = verification_agent(&fixture);
+    tests_requested.begin_inferred_completion_task("Run cargo test.");
+    tests_requested.begin_requested_shell_checks("Run cargo test.", None);
+    assert_eq!(
+        tests_requested.verification_kind_for_call("cargo test --no-run", &call.arguments),
+        None
+    );
+    assert_eq!(
+        tests_requested.completion_verification_evidence(),
+        CompletionCheckEvidence::Missing
+    );
+}
+
+#[tokio::test]
 async fn foreground_profile_checks_feed_self_review_and_verification_evidence() {
     let fixture = TestFixture::new();
     std::fs::write(
