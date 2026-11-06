@@ -109,6 +109,38 @@ fn websearch_is_independent_read_only_network_work() {
 }
 
 #[test]
+fn serialized_and_unknown_tools_bound_independent_calls_in_both_orders() {
+    let registry = registry_with_policies(&[
+        ("serial", crate::tool::ParallelPolicy::Serialized),
+        ("independent", crate::tool::ParallelPolicy::AlwaysSafe),
+    ]);
+    for serialized_name in ["serial", "unknown_external_tool"] {
+        let calls = vec![
+            test_tool_call("before", "independent", "{}"),
+            test_tool_call("middle", serialized_name, "{}"),
+            test_tool_call("after", "independent", "{}"),
+        ];
+        let batches = super::tool_call_batches(&calls, &registry, batch_root());
+        assert_eq!(
+            batch_ids(&batches),
+            vec![vec!["before"], vec!["middle"], vec!["after"]]
+        );
+    }
+    let independent_calls = vec![
+        test_tool_call("first", "independent", "{}"),
+        test_tool_call("second", "independent", "{}"),
+    ];
+    assert_eq!(
+        batch_ids(&super::tool_call_batches(
+            &independent_calls,
+            &registry,
+            batch_root()
+        )),
+        vec![vec!["first", "second"]]
+    );
+}
+
+#[test]
 fn read_only_agent_fan_out_runs_in_parallel() {
     // Three read-only research subagents spawned in one turn should batch
     // together (a whole-tree read each) instead of serializing.

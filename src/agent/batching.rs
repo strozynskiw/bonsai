@@ -25,7 +25,8 @@ enum ToolAccess {
     /// or other serialized state changes until a narrower shell classifier can
     /// prove the command is read-only.
     ParallelBash,
-    /// No shared state at all (`AlwaysSafe` tools) — never conflicts.
+    /// No shared state (`AlwaysSafe` tools); only a serialized boundary or
+    /// parallel Bash needs to keep these calls apart.
     Independent,
 }
 
@@ -107,11 +108,12 @@ fn accesses_conflict(left: &ToolAccess, right: &ToolAccess) -> bool {
     match (left, right) {
         (ToolAccess::ParallelBash, ToolAccess::ParallelBash) => false,
         (ToolAccess::ParallelBash, _) | (_, ToolAccess::ParallelBash) => true,
-        // `Independent` (AlwaysSafe tools) shares no state — never conflicts.
-        (ToolAccess::Independent, _) | (_, ToolAccess::Independent) => false,
         // `GlobalWrite` (serialized side effects, unknown/unparseable calls)
         // conflicts with everything that can run.
         (ToolAccess::GlobalWrite, _) | (_, ToolAccess::GlobalWrite) => true,
+        // Independent calls can share a batch with path-scoped work, but
+        // cannot bypass a serialized boundary.
+        (ToolAccess::Independent, _) | (_, ToolAccess::Independent) => false,
         (ToolAccess::ReadPath(_), ToolAccess::ReadPath(_)) => false,
         (ToolAccess::ReadPath(left), ToolAccess::WritePath(right))
         | (ToolAccess::WritePath(left), ToolAccess::ReadPath(right))
