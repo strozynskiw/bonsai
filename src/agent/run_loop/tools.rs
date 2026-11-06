@@ -3,6 +3,15 @@
 
 use super::*;
 
+fn verification_binding_arguments_changed(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> bool {
+    ["command", "workdir", "parallel"]
+        .iter()
+        .any(|key| before.get(key) != after.get(key))
+}
+
 impl Agent {
     /// Run one batch concurrently, selected against `cancellation_token` so a
     /// mid-batch cancel returns synthetic interrupted results instead of
@@ -197,9 +206,19 @@ impl Agent {
                     );
                 }
                 crate::hooks::HookDecision::ModifyArgs { args: rewritten } => {
-                    if batch_is_parallel && rewritten != args {
+                    if (batch_is_parallel && rewritten != args)
+                        || (tool_rejections
+                            .bound_verification_calls
+                            .contains(&tool_call.id)
+                            && verification_binding_arguments_changed(&args, &rewritten))
+                    {
+                        let message = if batch_is_parallel {
+                            "Tool arguments changed after parallel scheduling; retry so the batch can be replanned under the current hook."
+                        } else {
+                            "Tool arguments changed after verification binding; retry so the check can be replanned under the current hook."
+                        };
                         break 'call (
-                            ToolOutput::Text("Tool arguments changed after parallel scheduling; retry so the batch can be replanned under the current hook.".to_string()),
+                            ToolOutput::Text(message.to_string()),
                             crate::output::ToolExecutionStatus::Skipped,
                         );
                     }
@@ -340,4 +359,27 @@ pub(super) fn is_delegation_call(tool_registry: &ToolRegistry, tool_call: &ToolC
     tool_registry
         .get(&tool_call.name)
         .is_some_and(|tool| tool.effect_policy() == crate::tool::ToolEffectPolicy::Delegated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verification_binding_arguments_changed;
+    use serde_json::json;
+
+    #[test]
+    fn verification_binding_allows_timeout_changes_but_not_command_or_cwd_changes() {
+        let before = json!({"command": "sh check.sh", "timeout": 10});
+        assert!(!verification_binding_arguments_changed(
+            &before,
+            &json!({"command": "sh check.sh", "timeout": 30})
+        ));
+        assert!(verification_binding_arguments_changed(
+            &before,
+            &json!({"command": "true", "timeout": 10})
+        ));
+        assert!(verification_binding_arguments_changed(
+            &before,
+            &json!({"command": "sh check.sh", "workdir": "other"})
+        ));
+    }
 }

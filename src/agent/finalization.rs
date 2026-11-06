@@ -156,7 +156,8 @@ impl Agent {
             .filter_map(|call| {
                 let verification_command = call.name == "bash"
                     && bash_command(&call.arguments).is_some_and(|command| {
-                        self.verification_kind_for_command(&command).is_some()
+                        self.verification_kind_for_call(&command, &call.arguments)
+                            .is_some()
                     });
                 finalization_rejection(&self.finalization, call, verification_command)
                     .map(|rejection| (call.id.clone(), rejection.message().to_string()))

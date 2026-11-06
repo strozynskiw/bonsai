@@ -288,6 +288,10 @@ impl Agent {
             .snapshot()
             .await
             .filter(|goal| goal.state == crate::goal::GoalState::Active);
+        self.begin_requested_shell_checks(
+            &input.text,
+            explicit_goal.as_ref().map(|goal| goal.id.as_str()),
+        );
         let continuation_goal = self.begin_inferred_completion_task(
             explicit_goal
                 .as_ref()
@@ -525,6 +529,7 @@ impl Agent {
         sink: &SharedSink,
     ) -> Result<()> {
         for message in queued {
+            self.add_requested_shell_checks(&message.input.text);
             self.self_review.append_request(&message.input.text);
             self.merge_completion_steering(&message.input.text);
             self.push_live_user_message(&message.input).await?;
@@ -1163,6 +1168,17 @@ impl Agent {
             tool_rejections
                 .repeated_failure
                 .extend(self.capture_pending_verification_bindings(&batch).await);
+            tool_rejections.bound_verification_calls.clear();
+            tool_rejections.bound_verification_calls.extend(
+                batch
+                    .iter()
+                    .filter(|call| {
+                        self.verification
+                            .pending_verification_bindings
+                            .contains_key(&call.id)
+                    })
+                    .map(|call| call.id.clone()),
+            );
             let todo_baseline = if batch.iter().any(|tool_call| tool_call.name == "todowrite") {
                 match &self.todo_store {
                     Some(store) => Some(store.lock().await.todos().to_vec()),
@@ -2257,6 +2273,8 @@ struct ToolRejections {
     /// Identical calls that already failed twice. Keyed by call id so a fresh
     /// sibling in the same batch still executes.
     repeated_failure: HashMap<String, String>,
+    /// Calls whose verification evidence was bound to the planned arguments.
+    bound_verification_calls: HashSet<String>,
     /// Serial reviewer calls after automatic review, plus verification calls
     /// after the unchanged workspace passed its final gate.
     finalization: HashMap<String, String>,
@@ -4151,7 +4169,7 @@ mod tests {
     struct BackgroundModeProbeTool;
 
     #[tokio::test]
-    async fn parallel_batch_rejects_arguments_rewritten_after_planning() {
+    async fn parallel_or_bound_check_rejects_arguments_rewritten_after_planning() {
         use crate::config::{
             Config, ConfigSource, FailureBehavior, HookAction, HookDef, HookMatcher,
         };
@@ -4164,8 +4182,9 @@ mod tests {
                     event: HookEvent::PreToolUse,
                     matcher: HookMatcher::default(),
                     action: HookAction::Shell {
-                        command: r#"echo '{"decision":"modify","tool_args":{"changed":true}}'"#
-                            .to_string(),
+                        command:
+                            r#"echo '{"decision":"modify","tool_args":{"command":"echo changed"}}'"#
+                                .to_string(),
                     },
                     timeout_secs: 5,
                     blocking: true,
@@ -4190,29 +4209,35 @@ mod tests {
         );
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(ReadyTool));
-        let (_, output, status) = Agent::execute_single_tool_call(
-            None,
-            call("ready", "{}"),
-            Arc::new(registry),
-            ToolRejections::default(),
-            Arc::new(crate::output::StdoutSink),
-            CancellationToken::new(),
-            hooks,
-            None,
-            None,
-            None,
-            Arc::new(crate::timing::TimingLedger::system(
-                crate::timing::TimingPolicy::ActiveCompute,
-            )),
-            true,
-        )
-        .await;
-        assert_eq!(status, crate::output::ToolExecutionStatus::Skipped);
-        assert!(
-            output
-                .rendered_summary()
-                .contains("retry so the batch can be replanned")
-        );
+        let registry = Arc::new(registry);
+        for (parallel, bound, expected) in [
+            (true, false, "retry so the batch can be replanned"),
+            (false, true, "retry so the check can be replanned"),
+        ] {
+            let mut rejections = ToolRejections::default();
+            if bound {
+                rejections.bound_verification_calls.insert("ready-1".into());
+            }
+            let (_, output, status) = Agent::execute_single_tool_call(
+                None,
+                call("ready", r#"{"command":"echo original"}"#),
+                registry.clone(),
+                rejections,
+                Arc::new(crate::output::StdoutSink),
+                CancellationToken::new(),
+                hooks.clone(),
+                None,
+                None,
+                None,
+                Arc::new(crate::timing::TimingLedger::system(
+                    crate::timing::TimingPolicy::ActiveCompute,
+                )),
+                parallel,
+            )
+            .await;
+            assert_eq!(status, crate::output::ToolExecutionStatus::Skipped);
+            assert!(output.rendered_summary().contains(expected));
+        }
     }
 
     #[async_trait]

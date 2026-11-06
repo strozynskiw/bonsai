@@ -703,6 +703,10 @@ impl CompletionGuardState {
 }
 
 impl Agent {
+    pub(super) fn task_requires_explicit_verification(&self) -> bool {
+        self.completion.contract.verification_required
+    }
+
     pub(super) fn prompt_authorizes_background_work(prompt: &str) -> bool {
         !TaskPromptKind::classify(prompt).is_continuation()
             && TaskCompletionContract::inferred(prompt).goal_kind == CompletionGoalKind::Action

@@ -824,6 +824,7 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                     repeated_inspection: repeated_inspection_rejection,
                     read_storm: read_storm_rejection,
                     repeated_failure: repeated_failure_rejection.unwrap_or_default(),
+                    bound_verification_calls: HashSet::new(),
                     finalization,
                 },
                 &self.sink,

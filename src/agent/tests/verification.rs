@@ -162,6 +162,230 @@ async fn rewritten_cargo_test_produces_truthful_observed_verification() {
 }
 
 #[tokio::test]
+async fn directly_requested_shell_check_requires_execution_and_fresh_workspace() {
+    for (succeeds, policy, configured) in [
+        (true, VerifyAfterEdit::Off, false),
+        (false, VerifyAfterEdit::Off, false),
+        (true, VerifyAfterEdit::On, false),
+        (true, VerifyAfterEdit::Off, true),
+    ] {
+        let fixture = TestFixture::new();
+        init_repo(&fixture.project_root);
+        commit_file(
+            &fixture.project_root,
+            "check_task.sh",
+            if succeeds { "exit 0\n" } else { "exit 7\n" },
+            "check",
+        );
+        commit_file(&fixture.project_root, "source.rs", "before\n", "source");
+        let bash = Arc::new(crate::tool::BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        ));
+        let mut registry = ToolRegistry::new();
+        registry.register(bash.clone());
+        let mut config = crate::config::Config::empty();
+        config.verification.after_edit = policy;
+        if configured {
+            config.verification.test = Some(vec!["sh ./check_task.sh".to_string()]);
+        }
+        let mut agent = Agent::builder(
+            MockProvider::empty(),
+            Arc::new(registry),
+            empty_registry(),
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .system_context(String::new())
+        .config(Arc::new(config))
+        .build()
+        .unwrap();
+        agent.begin_requested_shell_checks(
+            "Implement the feature, and run sh check_task.sh before finishing.",
+            None,
+        );
+        agent.self_review.arm(None, None);
+        agent.verification.after_edit_verification_pending = true;
+        let args = serde_json::json!({"command": "sh ./check_task.sh"});
+        let call = crate::provider::ToolCall {
+            id: "requested-check".into(),
+            name: "bash".into(),
+            arguments: args.to_string(),
+        };
+        agent
+            .capture_pending_verification_bindings(std::slice::from_ref(&call))
+            .await;
+        let output = bash.execute(args).await.unwrap();
+        let status = if succeeds {
+            crate::output::ToolExecutionStatus::Succeeded
+        } else {
+            crate::output::ToolExecutionStatus::Failed
+        };
+        agent
+            .record_verification_tool_result(&call, &output, status)
+            .await;
+        assert_eq!(
+            agent.self_review.checks_run(),
+            &[("sh ./check_task.sh".to_string(), succeeds)]
+        );
+        assert_eq!(
+            agent.verification.after_edit_verification_pending,
+            !succeeds || policy != VerifyAfterEdit::Off
+        );
+        agent.revalidate_verification_for_delivery(0).await;
+        let run = agent.verification_runs().last().expect("check recorded");
+        assert_eq!(
+            run.status,
+            if succeeds {
+                VerificationRunStatus::Passed
+            } else {
+                VerificationRunStatus::Failed
+            }
+        );
+        if succeeds {
+            std::fs::write(fixture.project_root.join("source.rs"), "changed\n").unwrap();
+            agent.revalidate_verification_for_delivery(0).await;
+            assert_eq!(
+                agent.verification_runs().last().unwrap().status,
+                VerificationRunStatus::Stale
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn requested_check_is_not_inferred_for_different_workdir_or_new_task() {
+    let fixture = TestFixture::new();
+    fixture.create_file("check_task.sh", "exit 0\n");
+    std::fs::create_dir(fixture.project_root.join("other")).unwrap();
+    let mut agent = verification_agent(&fixture);
+    agent.begin_requested_shell_checks("Run sh check_task.sh", None);
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{"workdir":"other"}"#),
+        None
+    );
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        Some(VerificationKind::Test)
+    );
+    agent.begin_requested_shell_checks("continue", None);
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        Some(VerificationKind::Test)
+    );
+    agent.add_requested_shell_checks("Do not run commands now.");
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        None
+    );
+    agent.begin_requested_shell_checks("Run sh check_task.sh", None);
+    agent.begin_requested_shell_checks("Explain the unrelated module", None);
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        None
+    );
+    agent.begin_requested_shell_checks("Run sh check_task.sh", Some("goal-1"));
+    agent.begin_requested_shell_checks("What are you working on?", Some("goal-1"));
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        Some(VerificationKind::Test)
+    );
+    agent.begin_requested_shell_checks("continue", Some("goal-2"));
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        None
+    );
+    fixture.create_file("check_other.sh", "exit 0\n");
+    agent.begin_inferred_completion_task(
+        "Fix the feature and run sh check_task.sh and run sh check_other.sh",
+    );
+    agent.begin_requested_shell_checks(
+        "Fix the feature and run sh check_task.sh and run sh check_other.sh",
+        None,
+    );
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        None
+    );
+    agent.begin_inferred_completion_task("Fix the feature and run sh check_task.sh and cargo test");
+    agent.begin_requested_shell_checks(
+        "Fix the feature and run sh check_task.sh and cargo test",
+        None,
+    );
+    assert_eq!(
+        agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
+        None
+    );
+}
+
+#[tokio::test]
+async fn task_accepts_a_successful_directly_requested_check() {
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(&fixture.project_root, "source.rs", "before\n", "source");
+    commit_file(&fixture.project_root, "check_task.sh", "exit 0\n", "check");
+    let bash = Arc::new(crate::tool::BashTool::new(
+        fixture.project_root.clone(),
+        fixture.permissions.clone(),
+        fixture.read_tracker.clone(),
+        fixture.interaction.clone(),
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(bash);
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "edit",
+                "bash",
+                r#"{"command":"printf after > source.rs"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "check",
+                "bash",
+                r#"{"command":"sh ./check_task.sh"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        Ok(StreamedResponse {
+            content: "Done.".into(),
+            ..StreamedResponse::default()
+        }),
+    ]);
+    let mut agent = Agent::builder(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .system_context(String::new())
+    .build()
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+
+    let result = agent
+        .run(
+            "Fix source.rs and run sh check_task.sh before finishing.",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("Done.".into()));
+    assert_eq!(
+        agent.verification_runs().last().unwrap().status,
+        VerificationRunStatus::Passed,
+        "records: {:#?}",
+        agent.verification_runs()
+    );
+}
+
+#[tokio::test]
 async fn foreground_profile_checks_feed_self_review_and_verification_evidence() {
     let fixture = TestFixture::new();
     std::fs::write(

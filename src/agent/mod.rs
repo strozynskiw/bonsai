@@ -405,6 +405,9 @@ pub(crate) struct VerificationState {
         HashMap<String, crate::verification::VerificationBinding>,
     pub(crate) suppressed_verification_calls: HashSet<String>,
     pub(crate) observed_verification_run_indices: HashMap<String, usize>,
+    /// Direct, unambiguous human requests for shell check scripts in this task.
+    pub(crate) requested_shell_checks: HashSet<(String, String)>,
+    pub(crate) requested_check_goal_id: Option<String>,
     pub(crate) background_verification_bindings: HashMap<String, BackgroundVerificationCapture>,
     pub(crate) after_edit_verification_pending: bool,
     pub(crate) after_edit_verification_injected: bool,

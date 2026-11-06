@@ -101,6 +101,78 @@ impl Agent {
         self.verification.observed_verification_run_indices.clear();
     }
 
+    /// Remember only direct human requests; this is evidence classification,
+    /// never permission to execute a command.
+    pub(super) fn begin_requested_shell_checks(&mut self, prompt: &str, goal_id: Option<&str>) {
+        let previous_goal = self.verification.requested_check_goal_id.as_deref();
+        let same_goal = goal_id.is_some() && previous_goal == goal_id;
+        if previous_goal != goal_id
+            || (!same_goal
+                && !crate::task_intent::TaskPromptKind::classify(prompt).is_continuation())
+        {
+            self.verification.requested_shell_checks.clear();
+        }
+        self.verification.requested_check_goal_id = goal_id.map(str::to_owned);
+        self.add_requested_shell_checks(prompt);
+    }
+
+    pub(super) fn add_requested_shell_checks(&mut self, prompt: &str) {
+        let lower = prompt.to_ascii_lowercase();
+        if [
+            "not run",
+            "don't run",
+            "never run",
+            "no commands",
+            "without running",
+            "stop that",
+            "instead",
+        ]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+        {
+            self.verification.requested_shell_checks.clear();
+        }
+        self.verification
+            .requested_shell_checks
+            .extend(requested_shell_checks(prompt));
+    }
+
+    pub(super) fn verification_kind_for_call(
+        &self,
+        command: &str,
+        arguments: &str,
+    ) -> Option<VerificationKind> {
+        self.verification_kind_for_command(command).or_else(|| {
+            self.is_requested_shell_check(command, arguments)
+                .then_some(VerificationKind::Test)
+        })
+    }
+
+    fn is_requested_shell_check(&self, command: &str, arguments: &str) -> bool {
+        // A single observed script cannot prove that other requested checks ran.
+        if self.task_requires_explicit_verification()
+            || self.verification.requested_shell_checks.len() != 1
+        {
+            return false;
+        }
+        let Some(check) = direct_shell_check(command) else {
+            return false;
+        };
+        if !self.verification.requested_shell_checks.contains(&check) {
+            return false;
+        }
+        let Ok(root) = self.project_root.canonicalize() else {
+            return false;
+        };
+        let Ok(cwd) = bash_command_cwd(&self.project_root, arguments).canonicalize() else {
+            return false;
+        };
+        let Ok(script) = root.join(&check.1).canonicalize() else {
+            return false;
+        };
+        cwd == root && script.starts_with(&root) && script.is_file()
+    }
+
     pub(super) async fn capture_pending_verification_bindings(
         &mut self,
         calls: &[ToolCall],
@@ -113,7 +185,10 @@ impl Agent {
             let Some(command) = bash_command(&call.arguments) else {
                 continue;
             };
-            if self.verification_kind_for_command(&command).is_none() {
+            if self
+                .verification_kind_for_call(&command, &call.arguments)
+                .is_none()
+            {
                 continue;
             }
             let fallback_cwd = bash_command_cwd(&self.project_root, &call.arguments);
@@ -645,7 +720,10 @@ impl Agent {
         let Some(command) = bash_command(&tool_call.arguments) else {
             return;
         };
-        if self.verification_kind_for_command(&command).is_none() {
+        if self
+            .verification_kind_for_call(&command, &tool_call.arguments)
+            .is_none()
+        {
             self.verification
                 .pending_verification_bindings
                 .remove(&tool_call.id);
@@ -733,6 +811,15 @@ impl Agent {
                     .await
             }
         };
+        if self.verification_kind_for_command(&command).is_none()
+            && let Some(cwd) = binding_command_cwd(&binding)
+            && self.project_root.canonicalize().ok().as_deref() != Some(Path::new(cwd))
+        {
+            self.verification
+                .suppressed_verification_calls
+                .remove(&tool_call.id);
+            return;
+        }
         let deterministic_failure_suppressed = self
             .verification
             .suppressed_verification_calls
@@ -782,6 +869,10 @@ impl Agent {
             );
             return;
         }
+        let explicit_requested = self.is_requested_shell_check(&command, &tool_call.arguments)
+            && binding_command_cwd(&binding).is_some_and(|cwd| {
+                self.project_root.canonicalize().ok().as_deref() == Some(Path::new(cwd))
+            });
         let explicit = self
             .verification
             .active_verification
@@ -793,7 +884,8 @@ impl Agent {
                     .checks
                     .iter()
                     .any(|check| normalize_verification_command(&check.command) == command)
-            });
+            })
+            || explicit_requested;
         let passed = matches!(
             result,
             ToolOutput::Command {
@@ -802,6 +894,15 @@ impl Agent {
                 ..
             }
         ) && status.is_success();
+        if explicit_requested
+            && passed
+            && matches!(&binding, VerificationBinding::Bound { .. })
+            && self.config.verification.after_edit == VerifyAfterEdit::Off
+        {
+            // The user already supplied the check; don't append a later
+            // policy-disabled skip that masks its real result.
+            self.verification.after_edit_verification_pending = false;
+        }
         self.self_review
             .note_check_result(&command, passed, explicit);
         if self.verification.active_verification.is_none() {
@@ -982,7 +1083,7 @@ impl Agent {
         status: ToolExecutionStatus,
         binding: VerificationBinding,
     ) {
-        let Some(kind) = self.verification_kind_for_command(command) else {
+        let Some(kind) = self.verification_kind_for_call(command, &tool_call.arguments) else {
             return;
         };
         let normalized = normalize_verification_command(command);
@@ -1411,6 +1512,121 @@ fn verification_nonexecution_reason(
     }
 }
 
+/// Recognize only unambiguous imperative requests for conventionally named
+/// shell checks. Quoted prose, conditional, and negative language stays unclassified.
+fn requested_shell_checks(prompt: &str) -> HashSet<(String, String)> {
+    if prompt.contains(['\'', '"', '\n', '\r']) || prompt.contains("```") {
+        return HashSet::new();
+    }
+    if prompt.contains('?')
+        && !["can you ", "could you ", "would you ", "please "]
+            .iter()
+            .any(|prefix| prompt.trim_start().to_ascii_lowercase().starts_with(prefix))
+    {
+        return HashSet::new();
+    }
+    let words = prompt.split_whitespace().collect::<Vec<_>>();
+    if words.iter().any(|word| {
+        matches!(
+            word.trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_ascii_lowercase()
+                .as_str(),
+            "not"
+                | "no"
+                | "never"
+                | "without"
+                | "unless"
+                | "if"
+                | "when"
+                | "only"
+                | "avoid"
+                | "forbid"
+                | "forbidden"
+                | "prohibit"
+                | "except"
+                | "hypothetically"
+                | "how"
+                | "whether"
+                | "why"
+                | "what"
+        )
+    }) {
+        return HashSet::new();
+    }
+    let mut checks = HashSet::new();
+    for index in 0..words.len().saturating_sub(2) {
+        if !words[index].eq_ignore_ascii_case("run") {
+            continue;
+        }
+        if index > 0 {
+            let previous = words[index - 1]
+                .trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_ascii_lowercase();
+            let direct_question = previous == "you"
+                && index >= 2
+                && ["can", "could", "would"]
+                    .iter()
+                    .any(|word| words[index - 2].eq_ignore_ascii_case(word));
+            if !matches!(previous.as_str(), "and" | "then" | "please") && !direct_question {
+                continue;
+            }
+        }
+        let mut shell = words[index + 1];
+        let mut script = words[index + 2].trim_end_matches([',', '.', ';', ':', '?']);
+        if let Some(unquoted_shell) = shell.strip_prefix('`') {
+            let Some(unquoted_script) = script.strip_suffix('`') else {
+                continue;
+            };
+            shell = unquoted_shell;
+            script = unquoted_script;
+        } else if let Some(quoted_script) = script.strip_prefix('`') {
+            let Some(unquoted_script) = quoted_script.strip_suffix('`') else {
+                continue;
+            };
+            script = unquoted_script;
+        }
+        if let Some(check) = direct_shell_check(&format!("{shell} {script}")) {
+            checks.insert(check);
+        }
+    }
+    checks
+}
+
+/// Restrict inferred checks to one direct shell invocation, with no arguments
+/// or shell operators. The actual result and workspace binding are still required.
+fn direct_shell_check(command: &str) -> Option<(String, String)> {
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    let [shell, script] = words.as_slice() else {
+        return None;
+    };
+    if !matches!(*shell, "sh" | "bash") {
+        return None;
+    }
+    let script = script.strip_prefix("./").unwrap_or(script);
+    let path = Path::new(script);
+    if !path
+        .components()
+        .all(|part| matches!(part, Component::Normal(_)))
+        || !script
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+    {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if !name.ends_with(".sh")
+        || !(name == "check.sh"
+            || name == "test.sh"
+            || name.starts_with("check_")
+            || name.starts_with("check-")
+            || name.starts_with("test_")
+            || name.starts_with("test-"))
+    {
+        return None;
+    }
+    Some((shell.to_string(), script.to_string()))
+}
+
 fn observed_verification_kind(command: &str) -> Option<VerificationKind> {
     let mut saw_build = false;
     let segments = crate::tool::normalize_verification_conjunction(command)?;
@@ -1642,6 +1858,50 @@ fn bindings_are_fresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_checks_require_an_unambiguous_direct_human_request() {
+        assert_eq!(
+            requested_shell_checks(
+                "Read the spec, implement it, and run sh check_task_todo.sh before finishing."
+            ),
+            HashSet::from([("sh".to_string(), "check_task_todo.sh".to_string())])
+        );
+        assert_eq!(
+            requested_shell_checks("Read `source.rs` and run `sh check_task.sh`."),
+            HashSet::from([("sh".to_string(), "check_task.sh".to_string())])
+        );
+        assert_eq!(
+            requested_shell_checks("Could you run sh check_task.sh?"),
+            HashSet::from([("sh".to_string(), "check_task.sh".to_string())])
+        );
+        for prompt in [
+            "Do not run sh check_task_todo.sh",
+            "Never run sh check_task_todo.sh",
+            "No commands, and run sh check_task_todo.sh",
+            "Explain how to run sh check_task_todo.sh",
+            "How would you run sh check_task_todo.sh?",
+            "Could you explain how would you run sh check_task_todo.sh?",
+            "The log says \"run sh check_task_todo.sh\"",
+            "The log says `run sh check_task_todo.sh`",
+            "Explain the following log:\nrun sh check_task_todo.sh",
+            "Run sh check_task_todo.sh only on Linux",
+            "Run sh check_task_todo.sh if the user approves",
+            "Run sh deploy.sh",
+        ] {
+            assert!(requested_shell_checks(prompt).is_empty(), "{prompt}");
+        }
+        for command in [
+            "sh check_task_todo.sh --help",
+            "sh check_task_todo.sh || true",
+            "sh check_task_todo.sh | cat",
+            "sh ../check_task_todo.sh",
+            "bash -c 'sh check_task_todo.sh'",
+            "sh checkout.sh",
+        ] {
+            assert!(direct_shell_check(command).is_none(), "{command}");
+        }
+    }
 
     #[test]
     fn bash_command_requires_the_structured_command_field() {
