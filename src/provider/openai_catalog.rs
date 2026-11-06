@@ -22,6 +22,17 @@ pub(crate) fn available_models_from_response(value: &Value) -> Vec<AvailableMode
 
 pub(crate) fn available_model_from_item(item: &Value) -> Option<AvailableModel> {
     let id = item.get("id").and_then(Value::as_str)?;
+    // Some gateways list several wire APIs together. An explicitly native-only
+    // route cannot be sent through Chat Completions or Anthropic Messages;
+    // general Responses is also distinct from Bonsai's Codex transport. Keep
+    // legacy/unknown metadata formats so this never guesses from model names.
+    if let Some(api) = item.get("api").and_then(Value::as_object)
+        && !api.contains_key("chat-completions")
+        && !api.contains_key("messages")
+        && (api.contains_key("responses") || api.contains_key("generate-content"))
+    {
+        return None;
+    }
     // Google's OpenAI-compat layer lists ids under the native resource name
     // (`models/gemini-2.5-flash`) while its chat endpoint accepts the bare id.
     let id = id.strip_prefix("models/").unwrap_or(id);
@@ -410,6 +421,27 @@ pub(crate) fn normalize_openai_base_url(input: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_keeps_compatible_routes_and_excludes_unsupported_wire_apis() {
+        let models = available_models_from_response(&serde_json::json!({
+            "data": [
+                {"id": "legacy"},
+                {"id": "chat", "api": {"chat-completions": {}}},
+                {"id": "messages", "api": {"messages": {}}},
+                {"id": "both", "api": {"responses": {}, "chat-completions": {}}},
+                {"id": "responses-only", "api": {"responses": {}}},
+                {"id": "native-only", "api": {"generate-content": {}}}
+            ]
+        }));
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.remote_model_id.as_ref())
+                .collect::<Vec<_>>(),
+            ["legacy", "chat", "messages", "both"]
+        );
+    }
 
     #[test]
     fn model_ids_parse_from_openai_data_response() {

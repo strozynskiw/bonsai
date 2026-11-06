@@ -745,12 +745,12 @@ mod tests {
             ExpectedDefaults {
                 id: "opencode",
                 display_name: "OpenCode Go",
-                default_model: "qwen3.7-max",
+                default_model: "qwen3.8-max",
                 default_base_url: "https://opencode.ai/zen/go/v1",
                 env_var_api_key: Some("OPENCODE_API_KEY"),
                 env_var_model: Some("OPENCODE_MODEL"),
                 env_var_base_url: Some("OPENCODE_BASE_URL"),
-                seed_models: &["qwen3.7-max", "glm-5.2"],
+                seed_models: &["qwen3.8-max", "glm-5.2"],
                 protocol: Protocol::OpenAiChat,
                 endpoint_path: "chat/completions",
                 auth_requirement: AuthRequirement::ApiKeyRequired,
@@ -792,6 +792,8 @@ mod tests {
                 seed_models: &[
                     "claude-sonnet-4-5",
                     "claude-sonnet-5",
+                    "claude-sonnet-5-5",
+                    "claude-haiku-5-5",
                     "claude-sonnet-4-6",
                     "claude-opus-5",
                     "claude-opus-5-5",

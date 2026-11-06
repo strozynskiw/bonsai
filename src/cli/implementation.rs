@@ -40,6 +40,8 @@ pub(crate) enum CliMode {
     ModelCatalogCheck {
         path: std::path::PathBuf,
     },
+    /// Refresh metadata and authorized provider listings without model inference.
+    ModelCatalogRefresh,
     Doctor {
         request: DoctorRequest,
     },
@@ -111,7 +113,10 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
                 path: std::path::PathBuf::from(&args[3]),
             });
         }
-        anyhow::bail!("Usage: bonsai model-catalog check <models-dev.json>");
+        if args.get(2).is_some_and(|arg| arg == "refresh") && args.len() == 3 {
+            return Ok(CliMode::ModelCatalogRefresh);
+        }
+        anyhow::bail!("Usage: bonsai model-catalog check <models-dev.json> | refresh");
     }
 
     if args.get(1).is_some_and(|arg| arg == "completions") {
@@ -970,6 +975,7 @@ Usage:
   bonsai eval adapter run --request <path> [--out <dir>] [--force] [--json]
   bonsai eval adapter import-harbor --result <path> --out <path> [--json]
   bonsai model-catalog check <models-dev.json>
+  bonsai model-catalog refresh
   bonsai doctor [--json] [--online]
   bonsai update [--check]
   bonsai bug --description <text> [--include-log]
@@ -1088,6 +1094,9 @@ Model catalog:
   bonsai model-catalog check validates a Models.dev JSON payload with Bonsai's
   parser. scripts/update-model-catalog.sh fetches the live payload and can update
   the local cache used by runtime model descriptions.
+  `bonsai model-catalog refresh` refreshes Models.dev and all authorized providers'
+  live model listings without calling a language model. Failed sources retain
+  their cached listings and are named in the summary.
 ",
         env!("CARGO_PKG_VERSION"),
     )
@@ -1596,8 +1605,20 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "Usage: bonsai model-catalog check <models-dev.json>"
+            "Usage: bonsai model-catalog check <models-dev.json> | refresh"
         );
+    }
+
+    #[test]
+    fn model_catalog_refresh_is_a_standalone_command_with_no_extra_arguments() {
+        let args: Vec<String> = ["bonsai", "model-catalog", "refresh"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(parse_cli_args(&args).unwrap(), CliMode::ModelCatalogRefresh);
+        let mut extra = args;
+        extra.push("unexpected".into());
+        assert!(parse_cli_args(&extra).is_err());
     }
 
     #[test]

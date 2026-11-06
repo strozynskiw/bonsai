@@ -144,6 +144,12 @@ fn main() -> anyhow::Result<()> {
             println!("Models.dev catalog ok: {} models", catalog.len());
             Ok(())
         }
+        CliMode::ModelCatalogRefresh => {
+            logging::init_headless_tracing();
+            let report = block_on_with_shutdown(commands::providers::refresh_standalone())??;
+            println!("{report}");
+            Ok(())
+        }
         CliMode::Bug {
             description,
             include_log,

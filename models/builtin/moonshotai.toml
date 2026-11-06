@@ -6,9 +6,9 @@ recommended = true
 token_counter = "tiktoken"
 reasoning_codec = "openai-chat-completions"
 context_window = 1048576
-output_limit = 131072
+output_limit = 1048576
 features = ["tool-call", "attachment"]
-pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000 }
+pricing = { input_micros_per_million = 3000000, output_micros_per_million = 15000000, cache_read_micros_per_million = 300000, cache_write_micros_per_million = 3000000 }
 
 [[targets.reasoning_options]]
 type = "effort"
@@ -67,3 +67,37 @@ pricing = { input_micros_per_million = 600000, output_micros_per_million = 30000
 
 [[targets.reasoning_options]]
 type = "toggle"
+
+# Current generation; reasoning controls follow the provider contract.
+[[targets]]
+connection = "moonshotai"
+model = "moonshotai/kimi-k3.1-pro"
+remote_model = "kimi-k3.1-pro"
+recommended_effort = "high"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+context_window = 1048576
+output_limit = 1048576
+features = ["tool-call", "attachment"]
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 10000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 2000000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
+
+# Current generation; reasoning controls follow the provider contract.
+[[targets]]
+connection = "moonshotai"
+model = "moonshotai/kimi-k3.1-pro-highspeed"
+remote_model = "kimi-k3.1-pro-highspeed"
+recommended_effort = "high"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+context_window = 1048576
+output_limit = 1048576
+features = ["tool-call", "attachment"]
+pricing = { input_micros_per_million = 4000000, output_micros_per_million = 20000000, cache_read_micros_per_million = 200000, cache_write_micros_per_million = 4000000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]

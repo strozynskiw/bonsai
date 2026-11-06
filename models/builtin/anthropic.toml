@@ -242,3 +242,39 @@ type = "effort"
 # No "none": thinking is always on for the fable family and an explicit
 # `{"type": "disabled"}` returns HTTP 400.
 values = ["low", "medium", "high", "xhigh", "max"]
+
+# Current generation; reasoning controls follow the provider contract.
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-sonnet-5-5"
+remote_model = "claude-sonnet-5-5"
+recommended_effort = "high"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+context_window = 1000000
+output_limit = 128000
+features = ["tool-call", "attachment"]
+endpoint_path = "v1/messages"
+max_tokens = 16000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+# Current generation; reasoning controls follow the provider contract.
+[[targets]]
+connection = "anthropic"
+model = "anthropic/claude-haiku-5-5"
+remote_model = "claude-haiku-5-5"
+recommended_effort = "high"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+context_window = 1000000
+output_limit = 128000
+features = ["tool-call", "attachment"]
+endpoint_path = "v1/messages"
+max_tokens = 16000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "medium", "high", "xhigh", "max"]

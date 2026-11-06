@@ -63,7 +63,7 @@ const BASH: &str = r#"_bonsai() {
       return
       ;;
     model-catalog)
-      COMPREPLY=( $(compgen -W "check" -- "$cur") )
+      COMPREPLY=( $(compgen -W "check refresh" -- "$cur") )
       return
       ;;
     completions)
@@ -118,7 +118,7 @@ _bonsai() {
     doctor) _values 'doctor option' --json --online -h --help; return ;;
     update) _values 'update option' --check -h --help; return ;;
     recovery) _values 'recovery command' list inspect merge keep discard; return ;;
-    model-catalog) _values 'model catalog command' check; return ;;
+    model-catalog) _values 'model catalog command' check refresh; return ;;
     completions) _values 'shell' bash zsh fish; return ;;
     eval) _values 'eval option' adapter --suite --mode --provider --model --effort --task --seed --out --baseline --json --fail-on-task-failure; return ;;
   esac
@@ -156,7 +156,7 @@ complete -c bonsai -n '__fish_seen_subcommand_from doctor' -l json
 complete -c bonsai -n '__fish_seen_subcommand_from doctor' -l online
 complete -c bonsai -n '__fish_seen_subcommand_from update' -l check
 complete -c bonsai -n '__fish_seen_subcommand_from recovery' -a 'list inspect merge keep discard'
-complete -c bonsai -n '__fish_seen_subcommand_from model-catalog' -a check
+complete -c bonsai -n '__fish_seen_subcommand_from model-catalog' -a 'check refresh'
 complete -c bonsai -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
 "#;
 

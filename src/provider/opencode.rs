@@ -28,12 +28,12 @@ pub static OPENCODE_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
     ProviderMetadata::new(
         "opencode",
         "OpenCode Go",
-        "qwen3.7-max",
+        "qwen3.8-max",
         "https://opencode.ai/zen/go/v1",
         Some("OPENCODE_API_KEY"),
         Some("OPENCODE_MODEL"),
         Some("OPENCODE_BASE_URL"),
-        &["qwen3.7-max", "glm-5.2"],
+        &["qwen3.8-max", "glm-5.2"],
         Protocol::OpenAiChat,
         // IMPORTANT CACHE INVARIANT: the zen backends cache prompts server-side
         // (usage frames report cache_read tokens for qwen and GLM alike —
@@ -1511,6 +1511,36 @@ mod tests {
         )
     }
 
+    // Codec serialization is independent of the gateway's changing model list.
+    // Give these wire tests an explicit selection without catalog normalization.
+    fn default_codec_provider(
+        reasoning: crate::provider::ReasoningSelection,
+    ) -> OpenAiCompatibleProvider {
+        let session = provider_session("sk-test", "https://example.com/v1", "generic-model");
+        let mut target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
+        target.reasoning = reasoning;
+        OpenAiCompatibleProvider::with_api_key_policy(
+            OPENCODE_METADATA.id.as_ref(),
+            &session,
+            &target,
+            ApiKeyPolicy::Required,
+            PLAIN,
+        )
+    }
+
+    #[test]
+    fn current_gateway_models_send_top_level_reasoning_effort() {
+        for model in ["minimax-m3.1-flash", "kimi-k3.1-pro", "glm-5.3", "hy4"] {
+            let mut session = provider_session("sk-test", "https://example.com/v1", model);
+            session.reasoning = crate::provider::ReasoningSelection::High;
+            let provider = resolved_opencode_provider(&session);
+            let body = provider.request_body(&[user_message("hi")], &[]).unwrap();
+            assert_eq!(body["reasoning_effort"], "high", "{model}");
+            assert!(body.get("reasoning").is_none(), "{model}");
+            assert!(body.get("thinking").is_none(), "{model}");
+        }
+    }
+
     fn loopback_opencode_provider(session: &ProviderSession) -> OpenAiCompatibleProvider {
         let url = reqwest::Url::parse(&session.base_url).unwrap();
         let host = url.host_str().unwrap().parse::<std::net::IpAddr>().unwrap();
@@ -1602,7 +1632,7 @@ mod tests {
         let session = provider_session(
             "sk-oc",
             OPENCODE_METADATA.default_base_url.as_ref(),
-            "deepseek-v4-flash",
+            "deepseek-v4.1-flash",
         );
         let provider = resolved_opencode_provider(&session);
         assert_eq!(
@@ -1712,7 +1742,7 @@ mod tests {
 
     #[test]
     fn prompt_cache_key_is_gated_on_support_and_stable_across_turns() {
-        let session = provider_session("sk", "http://localhost/v1", "qwen3.7-max");
+        let session = provider_session("sk", "http://localhost/v1", "qwen3.8-max");
         let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
 
         let unsupported = OpenAiCompatibleProvider::with_api_key_policy(
@@ -2508,7 +2538,7 @@ mod tests {
         let session = provider_session(
             "sk",
             OPENCODE_METADATA.default_base_url.as_ref(),
-            "opencode/deepseek-v4-flash",
+            "opencode/deepseek-v4.1-flash",
         );
         let connection_id = "opencode"
             .parse::<crate::model_catalog::ConnectionId>()
@@ -2641,7 +2671,7 @@ mod tests {
 
     #[test]
     fn qwen_cache_layout_remains_identical_with_durable_project_state() {
-        let session = provider_session("sk", "http://localhost/v1", "qwen3.7-max");
+        let session = provider_session("sk", "http://localhost/v1", "qwen3.8-max");
         let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
         let provider = OpenAiCompatibleProvider::with_api_key_policy(
             OPENCODE_METADATA.id.as_ref(),
@@ -2696,7 +2726,7 @@ mod tests {
 
     #[test]
     fn request_body_normalizes_malformed_tool_call_arguments() {
-        let session = provider_session("sk", "http://localhost/v1", "qwen3.7-max");
+        let session = provider_session("sk", "http://localhost/v1", "qwen3.8-max");
         let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
         let provider = OpenAiCompatibleProvider::with_api_key_policy(
             OPENCODE_METADATA.id.as_ref(),
@@ -2730,10 +2760,10 @@ mod tests {
     #[test]
     fn metadata_is_opencode() {
         assert_eq!(OPENCODE_METADATA.id.as_ref(), "opencode");
-        assert_eq!(OPENCODE_METADATA.default_model.as_ref(), "qwen3.7-max");
+        assert_eq!(OPENCODE_METADATA.default_model.as_ref(), "qwen3.8-max");
         assert_eq!(
             OPENCODE_METADATA.seed_model_list(),
-            ["qwen3.7-max".to_string(), "glm-5.2".to_string()]
+            ["qwen3.8-max".to_string(), "glm-5.2".to_string()]
         );
         assert_eq!(
             OPENCODE_METADATA.env_var_api_key.as_deref(),
@@ -2782,13 +2812,7 @@ mod tests {
 
     #[test]
     fn openai_reasoning_payload_emits_max_effort_for_default_codec() {
-        let mut session = provider_session(
-            "sk-oc",
-            OPENCODE_METADATA.default_base_url.as_ref(),
-            "deepseek-v4-flash",
-        );
-        session.reasoning = crate::provider::ReasoningSelection::Max;
-        let provider = resolved_opencode_provider(&session);
+        let provider = default_codec_provider(crate::provider::ReasoningSelection::Max);
 
         assert_eq!(
             provider.reasoning_payload(),
@@ -2798,13 +2822,7 @@ mod tests {
 
     #[test]
     fn request_local_reasoning_override_does_not_mutate_provider_default() {
-        let mut session = provider_session(
-            "sk-oc",
-            OPENCODE_METADATA.default_base_url.as_ref(),
-            "deepseek-v4-flash",
-        );
-        session.reasoning = crate::provider::ReasoningSelection::High;
-        let provider = resolved_opencode_provider(&session);
+        let provider = default_codec_provider(crate::provider::ReasoningSelection::High);
 
         let body = provider
             .request_body_with_reasoning(
@@ -2823,13 +2841,7 @@ mod tests {
 
     #[test]
     fn openai_reasoning_payload_omits_off_for_default_codec() {
-        let mut session = provider_session(
-            "sk-oc",
-            OPENCODE_METADATA.default_base_url.as_ref(),
-            "deepseek-v4-flash",
-        );
-        session.reasoning = crate::provider::ReasoningSelection::Off;
-        let provider = resolved_opencode_provider(&session);
+        let provider = default_codec_provider(crate::provider::ReasoningSelection::Off);
 
         assert_eq!(provider.reasoning_payload(), None);
     }
@@ -2900,21 +2912,21 @@ mod tests {
                                     "completion": "0.00000028"
                                 }
                             },
-                            {"id": "qwen3.7-max"}
+                            {"id": "qwen3.8-max"}
                         ]
                     }"#,
             ))
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.8-max");
         let availability = OpenCodeFactory
             .list_available_models(&session)
             .await
             .unwrap();
         assert_eq!(
             availability.remote_model_ids(),
-            vec!["deepseek-v4-flash".to_string(), "qwen3.7-max".to_string()]
+            vec!["deepseek-v4-flash".to_string(), "qwen3.8-max".to_string()]
         );
         assert_eq!(availability.models[0].context_window, Some(131_072));
         assert_eq!(
@@ -3199,7 +3211,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.8-max");
         let catalog =
             crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
         let connection_id = OPENCODE_METADATA
@@ -3320,7 +3332,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_string(sse))
                 .mount(&server)
                 .await;
-            let session = provider_session("test", &server.uri(), "qwen3.7-max");
+            let session = provider_session("test", &server.uri(), "qwen3.8-max");
             let provider = loopback_opencode_provider(&session);
             let sink = std::sync::Arc::new(RecordingSink::default());
 
@@ -3356,7 +3368,7 @@ mod tests {
             ReasoningCodec::MistralChatCompletions,
             ReasoningCodec::Hunyuan,
         ] {
-            let session = provider_session("test", &server.uri(), "qwen3.7-max");
+            let session = provider_session("test", &server.uri(), "qwen3.8-max");
             let mut provider = loopback_opencode_provider(&session);
             provider.reasoning_codec = codec;
             let sink = std::sync::Arc::new(RecordingSink::default());
@@ -3387,7 +3399,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let session = provider_session("test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("test", &server.uri(), "qwen3.8-max");
         let mut provider = loopback_opencode_provider(&session);
         provider.echoes_reasoning_content = true;
         let sink = std::sync::Arc::new(RecordingSink::default());
@@ -3989,7 +4001,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.8-max");
         let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
         let connection_id = OPENCODE_METADATA
             .id
@@ -4048,7 +4060,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-test", &server.uri(), "qwen3.8-max");
         let catalog = crate::model_catalog::ModelCatalog::load_builtin().unwrap();
         let connection_id = OPENCODE_METADATA.id.parse().unwrap();
         let resolved = catalog
@@ -4173,7 +4185,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let session = provider_session("sk-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-test", &server.uri(), "qwen3.8-max");
         let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
         let provider = OpenAiCompatibleProvider::with_api_key_policy(
             OPENCODE_METADATA.id.as_ref(),
@@ -4298,7 +4310,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.8-max");
         let catalog =
             crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
         let connection_id = OPENCODE_METADATA
@@ -4345,7 +4357,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.8-max");
         let catalog =
             crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
         let connection_id = OPENCODE_METADATA
@@ -4397,7 +4409,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.8-max");
         let target = crate::provider::fallback_run_target(&OPENCODE_METADATA, &session);
         let provider = OpenAiCompatibleProvider::with_api_key_policy(
             OPENCODE_METADATA.id.as_ref(),
@@ -4436,7 +4448,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.7-max");
+        let session = provider_session("sk-oc-test", &server.uri(), "qwen3.8-max");
         let catalog =
             crate::model_catalog::ModelCatalog::load_builtin().expect("built-in catalog loads");
         let connection_id = OPENCODE_METADATA
@@ -4509,13 +4521,13 @@ mod tests {
         let session = provider_session(
             "",
             OPENCODE_METADATA.default_base_url.as_ref(),
-            "qwen3.7-max",
+            "qwen3.8-max",
         );
         assert!(!factory.is_authorized(&session));
         let session = provider_session(
             "sk-oc",
             OPENCODE_METADATA.default_base_url.as_ref(),
-            "qwen3.7-max",
+            "qwen3.8-max",
         );
         assert!(factory.is_authorized(&session));
     }
@@ -4526,7 +4538,7 @@ mod tests {
         let mut session = provider_session(
             "sk-oc",
             OPENCODE_METADATA.default_base_url.as_ref(),
-            "qwen3.7-max",
+            "qwen3.8-max",
         );
         factory.clear_authorization(&mut session);
         assert!(session.api_key.is_empty());
@@ -4537,7 +4549,7 @@ mod tests {
         let session = provider_session(
             "",
             OPENCODE_METADATA.default_base_url.as_ref(),
-            "deepseek-v4-flash",
+            "deepseek-v4.1-flash",
         );
         let provider = resolved_opencode_provider(&session);
         let result = provider.list_models().await;
@@ -4549,7 +4561,7 @@ mod tests {
         let session = provider_session(
             "",
             OPENCODE_METADATA.default_base_url.as_ref(),
-            "deepseek-v4-flash",
+            "deepseek-v4.1-flash",
         );
         let provider = resolved_opencode_provider(&session);
         let output: crate::output::SharedSink = std::sync::Arc::new(crate::output::StdoutSink);

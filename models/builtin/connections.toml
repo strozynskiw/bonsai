@@ -7,7 +7,7 @@ default_base_url = "https://opencode.ai/zen/go/v1"
 api_key_env = "OPENCODE_API_KEY"
 model_env = "OPENCODE_MODEL"
 base_url_env = "OPENCODE_BASE_URL"
-default_model = "opencode/qwen3.7-max"
+default_model = "opencode/qwen3.8-max"
 default_endpoint_path = "chat/completions"
 default_token_counter = "qwen3"
 # Live model ids are bare (`hy3`), while models.dev stores this gateway under

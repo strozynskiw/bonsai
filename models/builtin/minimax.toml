@@ -42,7 +42,7 @@ token_counter = "anthropic-count-tokens"
 max_tokens = 16000
 context_window = 204800
 output_limit = 131072
-pricing = { input_micros_per_million = 600000, output_micros_per_million = 2400000, cache_read_micros_per_million = 60000, cache_write_micros_per_million = 375000 }
+pricing = { input_micros_per_million = 600000, output_micros_per_million = 2400000, cache_read_micros_per_million = 30000, cache_write_micros_per_million = 375000 }
 reasoning_options = []
 
 [[targets]]
@@ -112,3 +112,22 @@ context_window = 204800
 output_limit = 131072
 pricing = { input_micros_per_million = 600000, output_micros_per_million = 2400000, cache_read_micros_per_million = 30000, cache_write_micros_per_million = 375000 }
 reasoning_options = []
+
+# Current generation; reasoning controls follow the provider contract.
+[[targets]]
+connection = "minimax"
+model = "minimax/MiniMax-M3.1-Flash"
+remote_model = "MiniMax-M3.1-Flash"
+recommended_effort = "high"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+context_window = 1000000
+output_limit = 524288
+features = ["tool-call", "attachment"]
+endpoint_path = "v1/messages"
+max_tokens = 16000
+pricing = { input_micros_per_million = 150000, output_micros_per_million = 600000, cache_read_micros_per_million = 15000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]

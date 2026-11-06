@@ -384,14 +384,14 @@ def main() -> int:
     # Live caches: unmapped rows = served models with no catalog target at the
     # time the cache was WRITTEN. Ids whose target exists now are stale-cache
     # artifacts (mapping recomputes on the connection's next 5-min refresh).
-    all_remote_ids: set[str] = set()
-    all_not_shipped: set[str] = set()
+    remote_ids_by_connection: dict[str, set[str]] = {}
+    not_shipped_by_connection: dict[str, set[str]] = {}
     for name in ALL_TOMLS:
         path = os.path.join(REPO, "models", "builtin", f"{name}.toml")
-        all_not_shipped |= not_shipped_ids(path)
+        not_shipped_by_connection[name] = not_shipped_ids(path)
         with open(path, "rb") as f:
             for t in tomllib.load(f).get("targets", []):
-                all_remote_ids.add(
+                remote_ids_by_connection.setdefault(t["connection"], set()).add(
                     t.get("remote_model", t["model"].split("/", 1)[1])
                 )
 
@@ -418,17 +418,21 @@ def main() -> int:
                 if not lm.get("model_id")
             ]
             if unmapped:
+                # A name or exclusion in another provider says nothing about
+                # this connection's routing. Gateway namespaces overlap often.
+                known = remote_ids_by_connection.get(conn, set())
+                excluded = not_shipped_by_connection.get(conn, set())
                 annotated = [
                     f"{mid} (target exists — stale cache)"
-                    if mid in all_remote_ids
+                    if mid in known
                     else f"{mid} (deliberately not shipped)"
-                    if mid in all_not_shipped
+                    if mid in excluded
                     else mid
                     for mid in unmapped
                 ]
                 print(f"- `{conn}`: {', '.join(annotated)}")
                 if any(
-                    mid not in all_remote_ids and mid not in all_not_shipped
+                    mid not in known and mid not in excluded
                     for mid in unmapped
                 ):
                     problems += 1

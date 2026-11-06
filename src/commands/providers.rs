@@ -579,8 +579,8 @@ pub(crate) async fn refresh_provider_source(
 /// it always hits the network. Best-effort per provider: one failing
 /// endpoint doesn't block the rest, and the summary names each outcome.
 ///
-/// This is the blocking summary-string path used by headless (`bonsai -p
-/// /refresh`) and shared command fallback. The TUI uses the incremental
+/// This is the blocking summary-string path used by `bonsai model-catalog
+/// refresh` and shared command fallback. The TUI uses the incremental
 /// [`refresh_sources_incremental`] / [`refresh_models_dev_source`] pair so it
 /// can render live per-source status.
 pub(crate) async fn refresh_all_provider_models(
@@ -649,6 +649,19 @@ pub(crate) async fn refresh_all_provider_models(
         );
     }
     Ok(format!("Refreshed model catalogs — {}", lines.join("; ")))
+}
+
+/// Refresh user-level catalogs without an agent, project steering, or inference.
+///
+/// # Errors
+/// Returns an error if local state cannot be loaded or every source fails.
+pub(crate) async fn refresh_standalone() -> Result<String> {
+    let storage = crate::storage::Storage::open().await?;
+    let catalog =
+        crate::model_catalog::load_catalog_from_home_and_project(storage.home_dir(), None)?;
+    let registry = ProviderRegistry::from_catalog(&catalog);
+    let sessions = SessionStore::load_with_storage_and_catalog(&storage, Some(&catalog)).await?;
+    refresh_all_provider_models(&registry, &sessions, &catalog).await
 }
 
 pub(in crate::commands) fn resolve_provider(

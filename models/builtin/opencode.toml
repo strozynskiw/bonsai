@@ -1,21 +1,92 @@
+# OpenCode Go lineup verified against the public /models listing and
+# https://opencode.ai/docs/go/ on 2026-11-05. Lean rows backfill gateway-specific
+# prices and limits from models.dev's opencode-go block.
+# Retired routes are omitted; persisted custom model ids remain loadable.
+# not-shipped: hy3-preview — retired preview; the current listing serves hy3
+# Responses-only routes need a general Responses transport, not Codex auth.
+# not-shipped: grok-4.7 — requires the gateway Responses transport
+# not-shipped: muse-spark-1.2-contributor — requires the gateway Responses transport
+# not-shipped: muse-spark-1.3-contributor — requires the gateway Responses transport
+# not-shipped: gpt-5.6-luna — requires the gateway Responses transport
+# not-shipped: gpt-6-luna — requires the gateway Responses transport
+# not-shipped: gemini-4-argon — requires the gateway native GenerateContent transport
+
 [[targets]]
 connection = "opencode"
-model = "opencode/qwen3.7-max"
-metadata_model = "opencode-go/qwen3.7-max"
-remote_model = "qwen3.7-max"
+model = "opencode/qwen3.8-max"
+metadata_model = "opencode-go/qwen3.8-max"
+remote_model = "qwen3.8-max"
 recommended = true
 default = true
 recommended_effort = "default"
-discouraged_efforts = ["on"]
+display_name = "Qwen3.8 Max"
+context_window = 1000000
+output_limit = 131072
+features = ["tool-call", "reasoning", "attachment", "structured-output", "temperature"]
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 6000000, cache_read_micros_per_million = 250000, cache_write_micros_per_million = 2500000 }
 transport = "anthropic-messages"
 endpoint_path = "messages"
 token_counter = "qwen3"
-context_window = 1000000
-output_limit = 65536
-pricing = { input_micros_per_million = 2500000, output_micros_per_million = 7500000, cache_read_micros_per_million = 500000, cache_write_micros_per_million = 3125000 }
 
 [[targets.reasoning_options]]
 type = "toggle"
+
+[[targets]]
+connection = "opencode"
+model = "opencode/beam-free"
+metadata_model = "opencode-go/beam-free"
+remote_model = "beam-free"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/claude-haiku-5-5"
+metadata_model = "opencode-go/claude-haiku-5-5"
+remote_model = "claude-haiku-5-5"
+transport = "anthropic-messages"
+endpoint_path = "messages"
+token_counter = "anthropic-count-tokens"
+reasoning_codec = "anthropic-adaptive"
+
+[[targets.reasoning_options]]
+type = "toggle"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/deepseek-v4-pro"
+metadata_model = "opencode-go/deepseek-v4-pro"
+remote_model = "deepseek-v4-pro"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["high", "max"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/deepseek-v4.1-flash"
+metadata_model = "opencode-go/deepseek-v4.1-flash"
+remote_model = "deepseek-v4.1-flash"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+roles = ["cheap"]
+# Keep the bounded per-turn allowance used for the previous Flash route.
+pinned_fields = ["output-limit"]
+output_limit = 32768
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
 
 [[targets]]
 connection = "opencode"
@@ -49,6 +120,136 @@ values = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 [[targets]]
 connection = "opencode"
+model = "opencode/glm-5.3"
+metadata_model = "opencode-go/glm-5.3"
+remote_model = "glm-5.3"
+token_counter = "tiktoken"
+reasoning_codec = "zai-reasoning-effort"
+# Keep the proven GLM turn bound: unbounded thinking can consume the whole turn.
+pinned_fields = ["output-limit"]
+output_limit = 12000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/glm-5.3-flash"
+metadata_model = "opencode-go/glm-5.3-flash"
+remote_model = "glm-5.3-flash"
+token_counter = "tiktoken"
+reasoning_codec = "zai-reasoning-effort"
+# Keep the proven GLM turn bound: unbounded thinking can consume the whole turn.
+pinned_fields = ["output-limit"]
+output_limit = 12000
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/hy3"
+metadata_model = "opencode-go/hy3"
+remote_model = "hy3"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "low", "high"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/hy4"
+metadata_model = "opencode-go/hy4"
+remote_model = "hy4"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "high"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/hy4-preview"
+metadata_model = "opencode-go/hy4-preview"
+remote_model = "hy4-preview"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["none", "high"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/iceman-contributor-free"
+metadata_model = "opencode-go/iceman-contributor-free"
+remote_model = "iceman-contributor-free"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets]]
+connection = "opencode"
+model = "opencode/kimi-k2.7-code"
+metadata_model = "opencode-go/kimi-k2.7-code"
+remote_model = "kimi-k2.7-code"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets]]
+connection = "opencode"
+model = "opencode/kimi-k3"
+metadata_model = "opencode-go/kimi-k3"
+remote_model = "kimi-k3"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["max"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/kimi-k3.1-pro"
+metadata_model = "opencode-go/kimi-k3.1-pro"
+remote_model = "kimi-k3.1-pro"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "high", "max"]
+
+[[targets]]
+connection = "opencode"
+model = "opencode/longcat-2.0"
+metadata_model = "opencode-go/longcat-2.0"
+remote_model = "longcat-2.0"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets]]
+connection = "opencode"
+model = "opencode/mimo-v2.6-flash"
+metadata_model = "opencode-go/mimo-v2.6-flash"
+remote_model = "mimo-v2.6-flash"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets]]
+connection = "opencode"
+model = "opencode/mimo-v2.6-pro"
+metadata_model = "opencode-go/mimo-v2.6-pro"
+remote_model = "mimo-v2.6-pro"
+token_counter = "tiktoken"
+reasoning_codec = "openai-chat-completions"
+
+[[targets]]
+connection = "opencode"
 model = "opencode/minimax-m3"
 metadata_model = "opencode-go/minimax-m3"
 remote_model = "minimax-m3"
@@ -68,94 +269,51 @@ type = "toggle"
 
 [[targets]]
 connection = "opencode"
-model = "opencode/deepseek-v4-flash"
-metadata_model = "opencode-go/deepseek-v4-flash"
-remote_model = "deepseek-v4-flash"
-roles = ["cheap"]
-transport = "openai-chat"
-endpoint_path = "chat/completions"
+model = "opencode/minimax-m3.1-flash"
+metadata_model = "opencode-go/minimax-m3.1-flash"
+remote_model = "minimax-m3.1-flash"
 token_counter = "tiktoken"
-context_window = 1000000
-# A sane per-turn bound on another thinking-heavy chat-completions model; the
-# OpenCode reference client clamps all models to 32k output.
-pinned = true
-output_limit = 32768
-recommended_effort = "default"
-discouraged_efforts = ["high", "max"]
-pricing = { input_micros_per_million = 140000, output_micros_per_million = 280000, cache_read_micros_per_million = 2800 }
+reasoning_codec = "openai-chat-completions"
 
 [[targets.reasoning_options]]
 type = "effort"
-values = ["high", "max"]
-
-# ---------------------------------------------------------------------------
-# Remaining OpenCode Go lineup (live /models serves these; verified against
-# the models.dev `opencode-go` provider block). Deliberately lean: context,
-# output, pricing, and reasoning options backfill from models.dev via
-# `metadata_model`, so gateway-side changes track without a binary update.
-# Transports mirror the per-family choices proven above (qwen and minimax ride
-# the anthropic-style endpoint for its caching; the rest use the connection's
-# chat-completions default).
-# ---------------------------------------------------------------------------
+values = ["low", "medium", "high", "xhigh", "max"]
 
 [[targets]]
 connection = "opencode"
-model = "opencode/deepseek-v4-pro"
-metadata_model = "opencode-go/deepseek-v4-pro"
-remote_model = "deepseek-v4-pro"
-token_counter = "tiktoken"
+model = "opencode/qwen3.7-plus"
+metadata_model = "opencode-go/qwen3.7-plus"
+remote_model = "qwen3.7-plus"
+transport = "anthropic-messages"
+endpoint_path = "messages"
+token_counter = "qwen3"
+
+[[targets.reasoning_options]]
+type = "toggle"
 
 [[targets]]
 connection = "opencode"
-model = "opencode/glm-5"
-metadata_model = "opencode-go/glm-5"
-remote_model = "glm-5"
-token_counter = "tiktoken"
-# Pre-5.2 GLM wants the explicit `thinking` enable alongside effort.
-reasoning_codec = "zai-thinking"
+model = "opencode/qwen3.8-flash"
+metadata_model = "opencode-go/qwen3.8-flash"
+remote_model = "qwen3.8-flash"
+transport = "anthropic-messages"
+endpoint_path = "messages"
+token_counter = "qwen3"
+
+[[targets.reasoning_options]]
+type = "toggle"
 
 [[targets]]
 connection = "opencode"
-model = "opencode/glm-5.1"
-metadata_model = "opencode-go/glm-5.1"
-remote_model = "glm-5.1"
+model = "opencode/step-5-preview"
+metadata_model = "opencode-go/step-5-preview"
+remote_model = "step-5-preview"
 token_counter = "tiktoken"
-reasoning_codec = "zai-thinking"
+reasoning_codec = "openai-chat-completions"
 
-[[targets]]
-connection = "opencode"
-model = "opencode/kimi-k2.5"
-metadata_model = "opencode-go/kimi-k2.5"
-remote_model = "kimi-k2.5"
-token_counter = "tiktoken"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/kimi-k2.6"
-metadata_model = "opencode-go/kimi-k2.6"
-remote_model = "kimi-k2.6"
-token_counter = "tiktoken"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/kimi-k2.7-code"
-metadata_model = "opencode-go/kimi-k2.7-code"
-remote_model = "kimi-k2.7-code"
-token_counter = "tiktoken"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/mimo-v2-omni"
-metadata_model = "opencode-go/mimo-v2-omni"
-remote_model = "mimo-v2-omni"
-token_counter = "tiktoken"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/mimo-v2-pro"
-metadata_model = "opencode-go/mimo-v2-pro"
-remote_model = "mimo-v2-pro"
-token_counter = "tiktoken"
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high"]
 
 [[targets]]
 connection = "opencode"
@@ -173,66 +331,9 @@ token_counter = "tiktoken"
 
 [[targets]]
 connection = "opencode"
-model = "opencode/minimax-m2.5"
-metadata_model = "opencode-go/minimax-m2.5"
-remote_model = "minimax-m2.5"
-transport = "anthropic-messages"
-endpoint_path = "messages"
-token_counter = "anthropic-count-tokens"
-
-[[targets]]
-connection = "opencode"
 model = "opencode/minimax-m2.7"
 metadata_model = "opencode-go/minimax-m2.7"
 remote_model = "minimax-m2.7"
 transport = "anthropic-messages"
 endpoint_path = "messages"
 token_counter = "anthropic-count-tokens"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/qwen3.5-plus"
-metadata_model = "opencode-go/qwen3.5-plus"
-remote_model = "qwen3.5-plus"
-transport = "anthropic-messages"
-endpoint_path = "messages"
-token_counter = "qwen3"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/qwen3.6-plus"
-metadata_model = "opencode-go/qwen3.6-plus"
-remote_model = "qwen3.6-plus"
-transport = "anthropic-messages"
-endpoint_path = "messages"
-token_counter = "qwen3"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/qwen3.7-plus"
-metadata_model = "opencode-go/qwen3.7-plus"
-remote_model = "qwen3.7-plus"
-transport = "anthropic-messages"
-endpoint_path = "messages"
-token_counter = "qwen3"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/kimi-k3"
-metadata_model = "opencode-go/kimi-k3"
-remote_model = "kimi-k3"
-token_counter = "tiktoken"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/grok-4.5"
-metadata_model = "opencode-go/grok-4.5"
-remote_model = "grok-4.5"
-token_counter = "tiktoken"
-
-[[targets]]
-connection = "opencode"
-model = "opencode/hy3"
-metadata_model = "opencode-go/hy3"
-remote_model = "hy3"
-token_counter = "tiktoken"

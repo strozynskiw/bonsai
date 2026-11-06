@@ -556,7 +556,7 @@ mod tests {
         let store = make_store();
         let session = store.session("opencode");
         assert_eq!(session.base_url, "https://opencode.ai/zen/go/v1");
-        assert_eq!(session.model, "qwen3.7-max");
+        assert_eq!(session.model, "qwen3.8-max");
 
         let codex = store.session("codex");
         assert_eq!(codex.base_url, "https://chatgpt.com/backend-api/codex");

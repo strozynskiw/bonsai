@@ -10,29 +10,33 @@ per-model TOML files — see [Models](models.md).
 
 ## Built-in connections
 
-Nineteen connections ship in the binary, in this registry/picker order:
+23 connections ship in the binary, in this registry/picker order:
 
 | id | Display name | Transport | Auth | Default model | Env vars (key / model / base URL) |
 | --- | --- | --- | --- | --- | --- |
-| `opencode` | OpenCode Go | openai-chat | api-key | `opencode/qwen3.7-max` | `OPENCODE_API_KEY` / `OPENCODE_MODEL` / `OPENCODE_BASE_URL` |
-| `opencode-zen` | OpenCode Zen | openai-chat | api-key | `opencode-zen/grok-code` | `OPENCODE_API_KEY` / `OPENCODE_ZEN_MODEL` / `OPENCODE_ZEN_BASE_URL` |
-| `codex` | Codex | codex-responses | codex-cache | `openai/gpt-5.5` | — / `CODEX_MODEL` / `CODEX_BASE_URL` |
-| `anthropic` | Anthropic API | anthropic-messages | api-key | `anthropic/claude-sonnet-4-5` | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_BASE_URL` |
+| `opencode` | OpenCode Go | openai-chat | api-key | `opencode/qwen3.8-max` | `OPENCODE_API_KEY` / `OPENCODE_MODEL` / `OPENCODE_BASE_URL` |
+| `opencode-zen` | OpenCode Zen | openai-chat | api-key | `opencode-zen/claude-sonnet-5` | `OPENCODE_API_KEY` / `OPENCODE_ZEN_MODEL` / `OPENCODE_ZEN_BASE_URL` |
+| `codex` | Codex | codex-responses | codex-cache | `openai/gpt-5.6-sol` | — / `CODEX_MODEL` / `CODEX_BASE_URL` |
+| `anthropic` | Anthropic API | anthropic-messages | api-key | `anthropic/claude-sonnet-5` | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `ANTHROPIC_BASE_URL` |
 | `minimax` | MiniMax API | anthropic-messages | api-key | `minimax/MiniMax-M3` | `MINIMAX_API_KEY` / `MINIMAX_MODEL` / `MINIMAX_BASE_URL` |
-| `minimax-coding-plan` | MiniMax Coding Plan | anthropic-messages | api-key | `minimax-coding-plan/MiniMax-M3` | `MINIMAX_CODING_PLAN_API_KEY` / `…_MODEL` / `…_BASE_URL` |
+| `minimax-coding-plan` | MiniMax Coding Plan | anthropic-messages | api-key | `minimax-coding-plan/MiniMax-M3` | `MINIMAX_CODING_PLAN_API_KEY` / `MINIMAX_CODING_PLAN_MODEL` / `MINIMAX_CODING_PLAN_BASE_URL` |
 | `zai` | Z.AI API | openai-chat | api-key | `zai/glm-5.2` | `ZAI_API_KEY` / `ZAI_MODEL` / `ZAI_BASE_URL` |
-| `zai-coding-plan` | Z.AI Coding Plan | openai-chat | api-key | `zai-coding-plan/glm-5.2` | `ZAI_CODING_PLAN_API_KEY` / `…_MODEL` / `…_BASE_URL` |
+| `zai-coding-plan` | Z.AI Coding Plan | openai-chat | api-key | `zai-coding-plan/glm-5.2` | `ZAI_CODING_PLAN_API_KEY` / `ZAI_CODING_PLAN_MODEL` / `ZAI_CODING_PLAN_BASE_URL` |
 | `moonshotai` | Moonshot AI API | openai-chat | api-key | `moonshotai/kimi-k2.7-code` | `MOONSHOT_API_KEY` / `MOONSHOT_MODEL` / `MOONSHOT_BASE_URL` |
-| `kimi-coding-plan` | Kimi Coding Plan | openai-chat | api-key | `kimi-coding-plan/kimi-for-coding` | `KIMI_CODING_PLAN_API_KEY` / `…_MODEL` / `…_BASE_URL` |
+| `kimi-coding-plan` | Kimi Coding Plan | openai-chat | api-key | `kimi-coding-plan/kimi-for-coding` | `KIMI_CODING_PLAN_API_KEY` / `KIMI_CODING_PLAN_MODEL` / `KIMI_CODING_PLAN_BASE_URL` |
 | `mimo` | Xiaomi MiMo API | openai-chat | api-key | `mimo/mimo-v2.5-pro` | `MIMO_API_KEY` / `MIMO_MODEL` / `MIMO_BASE_URL` |
-| `mimo-coding-plan` | Xiaomi MiMo Coding Plan | openai-chat | optional-api-key | `mimo-coding-plan/mimo-v2.5-pro` | `MIMO_CODING_PLAN_API_KEY` / `…_MODEL` / `…_BASE_URL` |
-| `openrouter` | OpenRouter | openai-chat | api-key | `openrouter/gpt-5.2` | `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` / `OPENROUTER_BASE_URL` |
-| `openai` | OpenAI API | openai-chat | api-key | `openai/gpt-5.6` | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` |
-| `openai-compatible` | OpenAI Compatible | openai-chat | optional-api-key | — (discovered) | `OPENAI_COMPATIBLE_API_KEY` / `…_MODEL` / `…_BASE_URL` |
-| `anthropic-compatible` | Anthropic Compatible | anthropic-messages | optional-api-key | — (discovered) | `ANTHROPIC_COMPATIBLE_API_KEY` / `…_MODEL` / `…_BASE_URL` |
+| `mimo-coding-plan` | Xiaomi MiMo Coding Plan | openai-chat | optional-api-key | `mimo-coding-plan/mimo-v2.5-pro` | `MIMO_CODING_PLAN_API_KEY` / `MIMO_CODING_PLAN_MODEL` / `MIMO_CODING_PLAN_BASE_URL` |
+| `openrouter` | OpenRouter | openai-chat | api-key | `openrouter/gpt-5.6-sol` | `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` / `OPENROUTER_BASE_URL` |
+| `openai` | OpenAI API | openai-chat | api-key | `openai/gpt-5.6-sol` | `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL` |
+| `openai-compatible` | OpenAI Compatible | openai-chat | optional-api-key | — (discovered) | `OPENAI_COMPATIBLE_API_KEY` / `OPENAI_COMPATIBLE_MODEL` / `OPENAI_COMPATIBLE_BASE_URL` |
+| `anthropic-compatible` | Anthropic Compatible | anthropic-messages | optional-api-key | — (discovered) | `ANTHROPIC_COMPATIBLE_API_KEY` / `ANTHROPIC_COMPATIBLE_MODEL` / `ANTHROPIC_COMPATIBLE_BASE_URL` |
 | `deepseek` | DeepSeek API | openai-chat | api-key | `deepseek/deepseek-flash` | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` |
 | `qwencloud` | Qwen Cloud API | openai-chat | api-key | `qwencloud/qwen3.7-plus` | `DASHSCOPE_API_KEY` / `DASHSCOPE_MODEL` / `DASHSCOPE_BASE_URL` |
-| `qwencloud-token-plan` | Qwen Cloud Token Plan | openai-chat | api-key | `qwencloud-token-plan/qwen3.7-max` | `DASHSCOPE_TOKEN_PLAN_API_KEY` / `…_MODEL` / `…_BASE_URL` |
+| `qwencloud-token-plan` | Qwen Cloud Token Plan | openai-chat | api-key | `qwencloud-token-plan/qwen3.7-max` | `DASHSCOPE_TOKEN_PLAN_API_KEY` / `DASHSCOPE_TOKEN_PLAN_MODEL` / `DASHSCOPE_TOKEN_PLAN_BASE_URL` |
+| `gemini` | Google Gemini | openai-chat | api-key | `gemini/gemini-3.1-pro-preview-customtools` | `GEMINI_API_KEY` / `GEMINI_MODEL` / `GEMINI_BASE_URL` |
+| `xai` | xAI Grok | openai-chat | api-key | `xai/grok-build-0.1` | `XAI_API_KEY` / `XAI_MODEL` / `XAI_BASE_URL` |
+| `mistral` | Mistral AI | openai-chat | api-key | `mistral/mistral-medium-latest` | `MISTRAL_API_KEY` / `MISTRAL_MODEL` / `MISTRAL_BASE_URL` |
+| `tencent` | Tencent Hunyuan | openai-chat | api-key | `tencent/hy3` | `HUNYUAN_API_KEY` / `HUNYUAN_MODEL` / `HUNYUAN_BASE_URL` |
 
 `openai-compatible` defaults its base URL to `http://localhost:11434/v1`
 (Ollama) and `anthropic-compatible` to `http://localhost:8080`, so pointing

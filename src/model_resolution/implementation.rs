@@ -1586,14 +1586,14 @@ mod tests {
         store.set_current_kind_id("opencode");
         let session = store.session_mut("opencode");
         session.api_key = "opencode-token".to_string();
-        session.model = "opencode/qwen3.7-max".to_string();
+        session.model = "opencode/qwen3.8-max".to_string();
 
         let provider = build_provider(&registry, &store, Some(&catalog));
         let preview = provider.preview_request(&[], &[]).unwrap();
 
         assert_eq!(preview.endpoint, "https://opencode.ai/zen/go/v1/messages");
-        assert_eq!(preview.body["model"], serde_json::json!("qwen3.7-max"));
-        assert_eq!(preview.body["max_tokens"], serde_json::json!(65536));
+        assert_eq!(preview.body["model"], serde_json::json!("qwen3.8-max"));
+        assert_eq!(preview.body["max_tokens"], serde_json::json!(131072));
     }
 
     #[test]

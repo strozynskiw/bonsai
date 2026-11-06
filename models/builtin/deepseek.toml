@@ -6,8 +6,8 @@
 # nearest entry (`deepseek-v4-flash`) still describes the retired pre-V4.1 Flash
 # as text-only with superseded rates. The V4.1 values therefore come from
 # DeepSeek's own docs: flash is pinned end to end, while pro pins only the
-# rates, output cap, and reasoning levels models.dev cannot represent (its
-# context window and capabilities still refresh).
+# rates, working window, output cap, and reasoning levels models.dev cannot
+# represent (its capabilities still refresh).
 #
 # Context caching is automatic, on-disk, and strictly prefix-based: a request
 # hits the cache only when it fully matches a cached prefix unit (docs:
@@ -38,7 +38,7 @@
 connection = "deepseek"
 model = "deepseek/deepseek-flash"
 remote_model = "deepseek-flash"
-display_name = "DeepSeek V4.1 Flash"
+display_name = "DeepSeek V4.1 Flash 1017"
 # DeepSeek-V4.1-Flash is GA as of 2026-09-10 and the wire name is now
 # `deepseek-flash`; `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are
 # retired but still accepted, their requests served by V4.1 Flash (docs:
@@ -92,17 +92,15 @@ token_counter = "tiktoken"
 reasoning_codec = "zai-thinking"
 context_window = 1000000
 recommended_effort = "high"
-# Same deliberate 32K max_tokens cap as flash — see the comment there.
-pinned_fields = ["output-limit", "pricing", "reasoning"]
+# Keep the documented 1M working window and deliberate 32K max_tokens cap
+# (as on flash), plus the time-based pricing models.dev cannot represent.
+pinned_fields = ["context-window", "output-limit", "pricing", "reasoning"]
 output_limit = 32000
 features = ["tool-call", "reasoning", "structured-output"]
-# V4 Pro is being retired, and every `deepseek-v4-pro` request is routed to V4.1
-# Flash and billed at Flash's price from 2026-09-14 04:00 UTC (12:00 Beijing;
-# docs: quick_start/pricing footnote 2). The V4.1-Flash launch already had pro
-# served by Flash, so this mirrors the flash table rather than pro's own, higher
-# published column. Kept as a selector so pro-pinned sessions keep resolving.
-pricing = { input_micros_per_million = 150000, output_micros_per_million = 600000, cache_read_micros_per_million = 3000 }
-peak_pricing = { input_micros_per_million = 300000, output_micros_per_million = 1200000, cache_read_micros_per_million = 6000 }
+# DeepSeek's current pricing table lists V4-Pro-0813 as a separate text-only
+# model, not a Flash redirect. https://api-docs.deepseek.com/quick_start/pricing/
+pricing = { input_micros_per_million = 660000, output_micros_per_million = 1980000, cache_read_micros_per_million = 22000 }
+peak_pricing = { input_micros_per_million = 1320000, output_micros_per_million = 3960000, cache_read_micros_per_million = 44000 }
 
 [[targets.reasoning_options]]
 type = "toggle"

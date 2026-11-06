@@ -1919,7 +1919,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 244);
+        assert_eq!(catalog.targets.len(), 256);
         assert!(
             catalog
                 .connections
@@ -2220,7 +2220,7 @@ mod tests {
             .find(|target| target.model.as_str() == "minimax-coding-plan/MiniMax-M3")
             .unwrap();
         assert_eq!(minimax_api.context_window, Some(512_000));
-        assert_eq!(minimax_plan.context_window, Some(1_048_576));
+        assert_eq!(minimax_plan.context_window, Some(1_000_000));
         assert_eq!(
             minimax_api
                 .pricing
@@ -2460,7 +2460,7 @@ default_base_url = "http://localhost:11434/v1"
             .write_live_availability(
                 &opencode,
                 LiveModelAvailability::from_remote_ids([
-                    "qwen3.7-max".to_string(),
+                    "qwen3.8-max".to_string(),
                     "unknown-live".to_string(),
                 ]),
             )
@@ -2469,15 +2469,15 @@ default_base_url = "http://localhost:11434/v1"
         let path = home.path().join("cache/live-models/opencode.json");
         let content = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["models"][0]["remote_model_id"], "qwen3.7-max");
-        assert_eq!(value["models"][0]["model_id"], "opencode/qwen3.7-max");
+        assert_eq!(value["models"][0]["remote_model_id"], "qwen3.8-max");
+        assert_eq!(value["models"][0]["model_id"], "opencode/qwen3.8-max");
         assert_eq!(value["models"][1]["remote_model_id"], "unknown-live");
         assert!(value["models"][1].get("model_id").is_none());
 
         let reloaded = load_catalog_from_home(home.path()).unwrap();
         assert_eq!(
             reloaded.available_models_for_connection(&opencode, Vec::new()),
-            vec!["qwen3.7-max".to_string(), "unknown-live".to_string()]
+            vec!["qwen3.8-max".to_string(), "unknown-live".to_string()]
         );
     }
 
@@ -2723,7 +2723,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 244);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 256);
 
         let cases = [
             EquivalenceCase {
@@ -2828,8 +2828,8 @@ default_base_url = "http://localhost:11434/v1"
             },
             EquivalenceCase {
                 connection_id: "opencode",
-                model_id: "opencode/qwen3.7-max",
-                remote_model: "qwen3.7-max",
+                model_id: "opencode/qwen3.8-max",
+                remote_model: "qwen3.8-max",
             },
             EquivalenceCase {
                 connection_id: "opencode",
@@ -2843,8 +2843,8 @@ default_base_url = "http://localhost:11434/v1"
             },
             EquivalenceCase {
                 connection_id: "opencode",
-                model_id: "opencode/deepseek-v4-flash",
-                remote_model: "deepseek-v4-flash",
+                model_id: "opencode/deepseek-v4.1-flash",
+                remote_model: "deepseek-v4.1-flash",
             },
         ];
 
@@ -2923,7 +2923,7 @@ default_base_url = "http://localhost:11434/v1"
             .unwrap();
         assert_eq!(moonshot.remote_model_id.as_ref(), "kimi-k3");
         assert_eq!(moonshot.context_window, Some(1_048_576));
-        assert_eq!(moonshot.output_limit, Some(131_072));
+        assert_eq!(moonshot.output_limit, Some(1_048_576));
         assert_eq!(moonshot.reasoning_options, expected_efforts);
         assert!(moonshot.features.contains(&ModelFeature::ToolCall));
         assert!(moonshot.features.contains(&ModelFeature::Attachment));
@@ -2997,13 +2997,76 @@ default_base_url = "http://localhost:11434/v1"
     }
 
     #[test]
+    fn current_always_thinking_models_do_not_offer_a_rejected_off_control() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        for (connection, model, codec) in [
+            (
+                "anthropic",
+                "claude-sonnet-5-5",
+                ReasoningCodec::AnthropicAdaptive,
+            ),
+            (
+                "minimax",
+                "MiniMax-M3.1-Flash",
+                ReasoningCodec::AnthropicAdaptive,
+            ),
+            (
+                "minimax-coding-plan",
+                "MiniMax-M3.1-Flash",
+                ReasoningCodec::AnthropicAdaptive,
+            ),
+            (
+                "moonshotai",
+                "kimi-k3.1-pro",
+                ReasoningCodec::OpenAiChatCompletions,
+            ),
+            (
+                "moonshotai",
+                "kimi-k3.1-pro-highspeed",
+                ReasoningCodec::OpenAiChatCompletions,
+            ),
+            (
+                "kimi-coding-plan",
+                "k3.1-pro",
+                ReasoningCodec::OpenAiChatCompletions,
+            ),
+            (
+                "kimi-coding-plan",
+                "k3.1-pro-highspeed",
+                ReasoningCodec::OpenAiChatCompletions,
+            ),
+        ] {
+            let resolved = catalog
+                .resolve_connection_model(&connection_id(connection), model)
+                .unwrap();
+            assert_eq!(resolved.reasoning_codec, codec, "{connection}/{model}");
+            assert!(
+                resolved
+                    .reasoning_selections()
+                    .contains(&ReasoningSelection::High),
+                "{connection}/{model}"
+            );
+            assert!(
+                !resolved
+                    .reasoning_selections()
+                    .contains(&ReasoningSelection::Off),
+                "{connection}/{model}"
+            );
+            assert!(
+                resolved.features.contains(&ModelFeature::Attachment),
+                "{connection}/{model}"
+            );
+        }
+    }
+
+    #[test]
     fn builtin_catalog_resolves_qwen3_token_counters() {
         let catalog = ModelCatalog::load_builtin().unwrap();
 
         let opencode = catalog
             .resolve(
                 &connection_id("opencode"),
-                &model_id("opencode/qwen3.7-max"),
+                &model_id("opencode/qwen3.8-max"),
             )
             .unwrap();
         assert_eq!(opencode.token_counter, Some(TokenCounterKind::Qwen3));
@@ -4147,11 +4210,11 @@ default_base_url = "http://localhost:11434/v1"
         let codex_id = connection_id("codex");
 
         let opencode = catalog
-            .resolve_connection_model(&opencode_id, "qwen3.7-max")
+            .resolve_connection_model(&opencode_id, "qwen3.8-max")
             .unwrap();
         assert_eq!(opencode.connection_id.as_str(), "opencode");
-        assert_eq!(opencode.model_id.as_str(), "opencode/qwen3.7-max");
-        assert_eq!(opencode.remote_model_id.as_ref(), "qwen3.7-max");
+        assert_eq!(opencode.model_id.as_str(), "opencode/qwen3.8-max");
+        assert_eq!(opencode.remote_model_id.as_ref(), "qwen3.8-max");
 
         let minimax = catalog
             .resolve_connection_model(&minimax_id, "MiniMax-M3")
@@ -4189,7 +4252,7 @@ default_base_url = "http://localhost:11434/v1"
     fn prompt_cache_policy_matrix_preserves_provider_boundaries() {
         let catalog = ModelCatalog::load_builtin().unwrap();
         let cases = [
-            ("opencode", "qwen3.7-max", PromptCachePolicy::RollingHistory),
+            ("opencode", "qwen3.8-max", PromptCachePolicy::RollingHistory),
             (
                 "opencode",
                 "deepseek-v4-pro",
@@ -4956,7 +5019,7 @@ default_base_url = "http://localhost:11434/v1"
 
         for (model, input, output, cache_read) in [
             ("deepseek/deepseek-flash", 150_000, 600_000, 3_000),
-            ("deepseek/deepseek-v4-pro", 150_000, 600_000, 3_000),
+            ("deepseek/deepseek-v4-pro", 660_000, 1_980_000, 22_000),
         ] {
             let resolved = catalog
                 .resolve(&deepseek_id, &model_id(model))
@@ -4996,8 +5059,8 @@ default_base_url = "http://localhost:11434/v1"
             ] {
                 assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
             }
-            // V4.1 Flash takes images; V4 Pro does not, and is routed to Flash
-            // anyway. Claiming vision on pro would send images the API rejects.
+            // V4.1 Flash takes images; V4 Pro does not. Claiming vision on pro
+            // would send images the API rejects.
             assert_eq!(
                 resolved.features.contains(&ModelFeature::Attachment),
                 model == "deepseek/deepseek-flash",
@@ -5008,7 +5071,7 @@ default_base_url = "http://localhost:11434/v1"
                 // picker must not fall back to the raw id.
                 assert_eq!(
                     resolved.display_name.as_ref(),
-                    "DeepSeek V4.1 Flash",
+                    "DeepSeek V4.1 Flash 1017",
                     "{model}: display name"
                 );
             }
@@ -5075,7 +5138,7 @@ default_base_url = "http://localhost:11434/v1"
 
         assert_eq!(
             refreshed.display_name.as_ref(),
-            "DeepSeek V4.1 Flash",
+            "DeepSeek V4.1 Flash 1017",
             "the V4.1 name is pinned while models.dev lags on the rename"
         );
         assert_eq!(
@@ -5198,7 +5261,7 @@ default_base_url = "http://localhost:11434/v1"
             actual,
             vec![
                 [150_000, 300_000, 150_000, 300_000, 150_000],
-                [150_000, 300_000, 150_000, 300_000, 150_000],
+                [660_000, 1_320_000, 660_000, 1_320_000, 660_000],
             ]
         );
     }
