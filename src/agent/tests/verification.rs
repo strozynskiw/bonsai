@@ -394,7 +394,7 @@ async fn completion_requires_every_requested_script_and_separate_test_evidence()
     commit_file(&fixture.project_root, "source.rs", "source\n", "source");
     commit_file(&fixture.project_root, "check_task.sh", "exit 0\n", "check");
     let mut agent = verification_agent(&fixture);
-    let prompt = "Fix the feature, run cargo test and run sh check_task.sh.";
+    let prompt = "Fix the feature, run cargo test and sh check_task.sh.";
     agent.begin_inferred_completion_task(prompt);
     agent.begin_requested_shell_checks(prompt, None);
 

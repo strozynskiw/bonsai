@@ -20,5 +20,17 @@
     "result": "The first sample used a semicolon chain and was unverified. In the second sample, the continuation guidance was delivered and the agent reran the checks with &&; the guard accepted the final result. These are small stochastic samples, not proof of a general reliability rate."
   },
   "limitations": "Tracking is conservative and covers directly recognized Cargo test/check/build requests and conventionally named shell checks. It does not prove arbitrary natural-language requirements, exact Cargo arguments, or all equivalent shell forms. Failed, skipped, or stale evidence does not satisfy a recognized requested check; user task supersession clears the old requirements.",
-  "terminal_control": "target/tui-verification/e2e/20261106T163419Z-4205: verifier isolation, unverified completion, goal conversation, and stream steering passed."
+  "terminal_control": "target/tui-verification/e2e/20261106T163419Z-4205: verifier isolation, unverified completion, goal conversation, and stream steering passed.",
+  "coordinated_request_followup": {
+    "prompt": "Fix the total function, run cargo test --locked and sh check_extra.sh before finishing.",
+    "baseline": "target/eval-coordinated-check-before/1793982991937-mock-474/report.json",
+    "baseline_result": "The guard accepted completion when the script was omitted.",
+    "negative_control": "target/eval-coordinated-check-after/1793983391208-mock-474/report.json",
+    "positive_separate": "target/eval-coordinated-check-positive/1793983391210-mock-475/report.json",
+    "positive_combined": "target/eval-coordinated-check-combined/1793983391216-mock-476/report.json",
+    "deepseek": "target/eval-coordinated-check-deepseek/1793983391213-live-477/report.json",
+    "result": "The omitted-script mock was unverified; both successful mock forms and one DeepSeek run passed. DeepSeek ran both checks in one && chain.",
+    "limitations": "The coordinated inference recognizes only constrained direct command pairs; unrelated optional, conditional, quoted-prose, and more complex requests are not comprehensively interpreted.",
+    "terminal_control": "target/tui-verification/e2e/20261106T164538Z-40761: isolation, unverified completion, and goal conversation passed."
+  }
 }

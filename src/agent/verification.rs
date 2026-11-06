@@ -141,6 +141,9 @@ impl Agent {
         self.verification
             .requested_cargo_checks
             .extend(requested_cargo_checks(prompt));
+        let (scripts, cargo) = coordinated_requested_checks(prompt);
+        self.verification.requested_shell_checks.extend(scripts);
+        self.verification.requested_cargo_checks.extend(cargo);
     }
 
     pub(super) fn verification_kind_for_call(
@@ -1668,6 +1671,73 @@ fn requested_cargo_checks(prompt: &str) -> HashSet<String> {
     checks
 }
 
+/// Recognize a pair of checks governed by the same explicit `run` directive.
+fn coordinated_requested_checks(prompt: &str) -> (HashSet<(String, String)>, HashSet<String>) {
+    let Some(words) = direct_check_request_words(prompt) else {
+        return (HashSet::new(), HashSet::new());
+    };
+    let explicit_cargo = requested_cargo_checks(prompt);
+    let explicit_scripts = requested_shell_checks(prompt);
+    let mut scripts = HashSet::new();
+    let mut cargo = HashSet::new();
+    for index in 0..words.len().saturating_sub(2) {
+        if !words[index].eq_ignore_ascii_case("run") {
+            continue;
+        }
+        let first = words[index + 1].trim_matches('`');
+        let second = words[index + 2].trim_end_matches([',', '.', ';', ':', '?', '`']);
+        if first == "cargo" && explicit_cargo.contains(second) {
+            let mut connector = index + 3;
+            while words
+                .get(connector)
+                .is_some_and(|word| word.trim_matches('`').starts_with('-'))
+            {
+                connector += 1;
+            }
+            if words
+                .get(connector)
+                .is_some_and(|word| matches!(*word, "and" | "&&"))
+                && let (Some(shell), Some(script)) =
+                    (words.get(connector + 1), words.get(connector + 2))
+                && !words
+                    .get(connector + 3)
+                    .is_some_and(|word| word.starts_with('-'))
+                && !has_optional_qualifier(&words[connector + 3..])
+                && let Some(check) = direct_shell_check(&format!(
+                    "{} {}",
+                    shell.trim_matches('`'),
+                    script.trim_end_matches([',', '.', ';', ':', '?', '`'])
+                ))
+            {
+                scripts.insert(check);
+            }
+        } else if let Some(check) = direct_shell_check(&format!("{first} {second}"))
+            && explicit_scripts.contains(&check)
+            && words
+                .get(index + 3)
+                .is_some_and(|word| matches!(*word, "and" | "&&"))
+            && words
+                .get(index + 4)
+                .is_some_and(|word| word.trim_matches('`') == "cargo")
+            && let Some(subcommand) = words.get(index + 5)
+            && !has_optional_qualifier(&words[index + 6..])
+        {
+            let subcommand = subcommand.trim_end_matches([',', '.', ';', ':', '?', '`']);
+            if matches!(subcommand, "test" | "check" | "build") {
+                cargo.insert(subcommand.to_string());
+            }
+        }
+    }
+    (scripts, cargo)
+}
+
+fn has_optional_qualifier(words: &[&str]) -> bool {
+    words.iter().take(3).any(|word| {
+        word.trim_matches(|character: char| !character.is_ascii_alphabetic())
+            .eq_ignore_ascii_case("optional")
+    })
+}
+
 fn verification_segments(command: &str) -> Option<Vec<Vec<String>>> {
     let segments = crate::tool::normalize_verification_conjunction(command)?;
     segments
@@ -2051,6 +2121,32 @@ mod tests {
             "sh check_task.sh || true",
             &script
         ));
+    }
+
+    #[test]
+    fn coordinated_check_requests_share_the_run_directive() {
+        let script = HashSet::from([("sh".to_string(), "check_task.sh".to_string())]);
+        let cargo = HashSet::from(["test".to_string()]);
+        for prompt in [
+            "Fix the feature, run cargo test --locked and sh check_task.sh.",
+            "Run `cargo test --locked` and `sh check_task.sh`.",
+            "Implement optional mode, run cargo test and sh check_task.sh.",
+        ] {
+            let (scripts, _) = coordinated_requested_checks(prompt);
+            assert_eq!(scripts, script, "{prompt}");
+        }
+        let (_, requested_cargo) =
+            coordinated_requested_checks("Run sh check_task.sh and cargo test before finishing.");
+        assert_eq!(requested_cargo, cargo);
+        for prompt in [
+            "Explain how to run cargo test and sh check_task.sh.",
+            "Run cargo test and sh check_task.sh only on Linux.",
+            "Run cargo test and sh check_task.sh is optional.",
+            "The log says run cargo test and sh check_task.sh.",
+        ] {
+            let (scripts, cargo) = coordinated_requested_checks(prompt);
+            assert!(scripts.is_empty() && cargo.is_empty(), "{prompt}");
+        }
     }
 
     #[test]
