@@ -332,6 +332,30 @@ async fn real_server_approval_diff_interrupt_restart_and_python_client() -> Resu
         0,
         "create/resume must not run model"
     );
+    let session_arg = id.to_string();
+    server
+        .python(&["goal", &session_arg, "set", "Inspect README.md"])
+        .await?;
+    let goal = server.python(&["goal", &session_arg, "get"]).await?;
+    assert_eq!(goal["goal"]["objective"], "Inspect README.md");
+    assert_eq!(goal["goal"]["state"], "active");
+    server.python(&["goal", &session_arg, "pause"]).await?;
+    assert_eq!(
+        server.python(&["goal", &session_arg, "get"]).await?["goal"]["state"],
+        "paused"
+    );
+    server.python(&["goal", &session_arg, "resume"]).await?;
+    assert_eq!(
+        server.python(&["goal", &session_arg, "get"]).await?["goal"]["state"],
+        "active"
+    );
+    server.python(&["goal", &session_arg, "clear"]).await?;
+    assert!(server.python(&["goal", &session_arg, "get"]).await?["goal"].is_null());
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "goal controls must not run model"
+    );
     // Local CLI can delegate read without control, and revoke it immediately.
     let delegated_file = home.path().join("delegated-token");
     let minted = command(home.path(), workspace.path(), &mock.uri())

@@ -167,9 +167,17 @@ auto-approves prompts and verifies the API version:
 ```sh
 python3 examples/server_client.py --url "$BASE" --token-file "$TOKEN_FILE" list
 python3 examples/server_client.py --url "$BASE" --token-file "$TOKEN_FILE" --request-id create-2 create
+python3 examples/server_client.py --url "$BASE" --token-file "$TOKEN_FILE" goal 12 set "Inspect README.md"
+python3 examples/server_client.py --url "$BASE" --token-file "$TOKEN_FILE" goal 12 get
+python3 examples/server_client.py --url "$BASE" --token-file "$TOKEN_FILE" message 12 "Inspect README.md"
 python3 examples/server_client.py --url "$BASE" --token-file "$TOKEN_FILE" events 12
 python3 examples/server_client.py --url "$BASE" --token-file "$TOKEN_FILE" answer 12 RUN 1 '{"kind":"permission","decision":"deny"}'
 ```
+
+Use `goal 12 pause`, `goal 12 resume`, or `goal 12 clear` for the other
+controls. Mutations return an acknowledgement; use `goal 12 get` for the
+current record. Setting or resuming a goal does not start a run: send a
+message separately.
 
 ## SSE, persistence and bounds
 
@@ -210,7 +218,7 @@ request DTOs, decision decoding and event projections by normal `cargo test`; CI
 therefore rejects fixture drift. Breaking preview changes must be recorded in
 [server-changelog.md](server-changelog.md) with client migration guidance.
 
-No uploads, steer/queue, provider/credential management, ACP,
+No uploads, general-purpose steering outside active goal runs, provider/credential management, ACP,
 web UI, parallel workspaces/scheduler or stable v1 compatibility. Pending prompts
 and work are never automatically replayed on restart. After a hard crash, resume
 can return 409 until the conservative 15-second heartbeat fence expires; retry

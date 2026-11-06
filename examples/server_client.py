@@ -33,6 +33,14 @@ def main() -> None:
     message = subs.add_parser("message")
     message.add_argument("session", type=int)
     message.add_argument("text")
+    goal = subs.add_parser("goal", help="Inspect or control a session goal")
+    goal.add_argument("session", type=int)
+    goal_actions = goal.add_subparsers(dest="goal_action", required=True)
+    goal_actions.add_parser("get")
+    goal_set = goal_actions.add_parser("set")
+    goal_set.add_argument("objective")
+    for action in ("pause", "resume", "clear"):
+        goal_actions.add_parser(action)
     events = subs.add_parser("events")
     events.add_argument("session", type=int)
     events.add_argument("--last-event-id")
@@ -60,6 +68,10 @@ def main() -> None:
             path += f"/{suffix}"
         if args.operation in ("resume", "interrupt", "message", "answer"):
             payload = {}
+        if args.operation == "goal" and args.goal_action != "get":
+            payload = {"action": args.goal_action}
+            if args.goal_action == "set":
+                payload["objective"] = args.objective
         if args.operation == "message":
             payload["text"] = args.text
         if args.operation == "answer":
