@@ -655,6 +655,9 @@ pub(super) struct CompletionGuardState {
     workspace_mutated: bool,
     pending_work_started: bool,
     continuation_used: bool,
+    goal_progress_revision: u64,
+    goal_recovery_checkpoint: Option<u64>,
+    goal_stagnant_reports: usize,
     superseded_goals: usize,
     attempts: Vec<CompletionGuardAttempt>,
     disposition: Option<CompletionGuardDisposition>,
@@ -784,6 +787,9 @@ impl Agent {
                 .contract
                 .merge(TaskCompletionContract::inferred(prompt));
             self.completion.continuation_used = false;
+            self.completion.goal_progress_revision = 0;
+            self.completion.goal_recovery_checkpoint = None;
+            self.completion.goal_stagnant_reports = 0;
             self.completion.attempts.clear();
             self.completion.disposition = None;
         } else {
@@ -816,6 +822,11 @@ impl Agent {
 
     pub(super) fn note_completion_action(&mut self) {
         self.completion.action_observed = true;
+    }
+
+    pub(super) fn note_goal_progress(&mut self) {
+        self.completion.goal_progress_revision =
+            self.completion.goal_progress_revision.saturating_add(1);
     }
 
     pub(super) fn note_completion_workspace_mutation(&mut self) {
@@ -883,6 +894,37 @@ impl Agent {
                 gaps,
                 "Completion blocked: the assistant explicitly reported an unresolved blocker.",
             );
+        }
+        if gaps.contains(&CompletionGap::GoalWorkRemaining)
+            && !gaps.iter().any(CompletionGap::is_external_blocker)
+        {
+            let revision = self.completion.goal_progress_revision;
+            let progressed = self
+                .completion
+                .goal_recovery_checkpoint
+                .is_some_and(|checkpoint| checkpoint != revision)
+                || (self.completion.goal_recovery_checkpoint.is_none() && revision > 0);
+            self.completion.goal_recovery_checkpoint = Some(revision);
+            self.completion.goal_stagnant_reports = if progressed {
+                0
+            } else {
+                self.completion.goal_stagnant_reports.saturating_add(1)
+            };
+            if self.completion.goal_stagnant_reports < 3 {
+                let detail = gaps
+                    .iter()
+                    .map(CompletionGap::label)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                self.completion.disposition = Some(CompletionGuardDisposition::Continued);
+                return CompletionGuardVerdict::Continue {
+                    note: format!(
+                        "The active goal is not complete ({detail}). Continue the original objective using current evidence. Do not repeat a status report without making progress; preserve the user's scope, requested checks, and permissions. Run requested checks directly so their failures are visible."
+                    ),
+                };
+            }
+            let failure = CompletionGuardFailure::from_gaps(gaps);
+            return self.reject_reported_completion(failure.outcome, failure.gaps, &failure.detail);
         }
         if gaps.is_empty() {
             self.completion.disposition = Some(CompletionGuardDisposition::Accepted);

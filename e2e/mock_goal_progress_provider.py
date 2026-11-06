@@ -17,8 +17,12 @@ class GoalProgressHandler(CompletionHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Connection", "close")
         self.end_headers()
-        if request in (1, 3):
-            paths = ["README.md"] if request == 1 else ["lib.sh", "run.sh", "verifier.sh"]
+        if request in (1, 3, 5, 7):
+            paths = [
+                "README.md"
+                if self.server.repeat_read
+                else {1: "README.md", 3: "lib.sh", 5: "run.sh", 7: "verifier.sh"}[request]
+            ]
             calls = [
                 {
                     "index": index,
@@ -33,11 +37,13 @@ class GoalProgressHandler(CompletionHandler):
                 {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
             ]
         else:
-            answer = (
-                "I reviewed README.md. The other three files remain unreviewed."
-                if request == 2
-                else "All four requested files were reviewed."
-            )
+            answer = {
+                2: "I reviewed README.md. The other three files remain unreviewed.",
+                4: "I reviewed lib.sh. Two files remain unreviewed.",
+                6: "I reviewed run.sh. One file remains unreviewed.",
+            }.get(request, "All four requested files were reviewed.")
+            if self.server.repeat_read:
+                answer = "I reviewed README.md. The other three files remain unreviewed."
             chunks = [
                 {"choices": [{"delta": {"content": answer}}]},
                 {"choices": [{"delta": {}, "finish_reason": "stop"}]},
@@ -52,9 +58,10 @@ class GoalProgressHandler(CompletionHandler):
 
 
 if __name__ == "__main__":
-    ready, log = map(Path, sys.argv[1:])
+    ready, log = map(Path, sys.argv[1:3])
     log.write_text("", encoding="utf-8")
     with CompletionServer(("127.0.0.1", 0), log) as server:
         server.RequestHandlerClass = GoalProgressHandler
+        server.repeat_read = "--repeat-read" in sys.argv[3:]
         ready.write_text(f"http://127.0.0.1:{server.server_port}/v1", encoding="utf-8")
         server.serve_forever()

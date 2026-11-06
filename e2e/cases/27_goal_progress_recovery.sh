@@ -26,9 +26,10 @@ if python3 - "$requests" <<'PY'
 import json, sys
 from pathlib import Path
 requests = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-assert len(requests) == 4, len(requests)
-assert "goal response reports unfinished work" in json.dumps(requests[2]["messages"])
-tool_results = [m for m in requests[3]["messages"] if m.get("role") == "tool"]
+assert len(requests) == 8, len(requests)
+for index in (2, 4, 6):
+    assert "goal response reports unfinished work" in json.dumps(requests[index]["messages"])
+tool_results = [m for m in requests[7]["messages"] if m.get("role") == "tool"]
 assert len(tool_results) == 4, len(tool_results)
 assert all("error" not in str(m.get("content", "")).lower()[:100] for m in tool_results)
 PY

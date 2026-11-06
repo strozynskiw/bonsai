@@ -60,6 +60,7 @@ struct TurnPolicies {
     single_call_streak: SingleCallStreakGuard,
     serial_delegation: SerialDelegationGuard,
     implementation_stall: ImplementationStallGuard,
+    goal_progress: ImplementationStallGuard,
     recovery: super::recovery::RecoveryAdvisory,
     empty_response_nudges: usize,
     truncated_response_nudges: usize,
@@ -86,6 +87,7 @@ impl TurnPolicies {
         self.single_call_streak = SingleCallStreakGuard::default();
         self.serial_delegation = SerialDelegationGuard::default();
         self.reset_implementation_stall_for_external_progress("user steering received");
+        self.goal_progress.reset();
         self.empty_response_nudges = 0;
         self.truncated_response_nudges = 0;
         self.contract_checkpoint_sent = false;
@@ -116,6 +118,7 @@ impl TurnPolicies {
             self.reset_implementation_stall_for_external_progress(
                 "queued user steering interrupted the tool batch",
             );
+            self.goal_progress.reset();
         }
     }
 
@@ -885,6 +888,17 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         }
         if implementation_stall.made_progress {
             self.state.policies.empty_response_nudges = 0;
+        }
+        if self.agent.goal_run_id.is_some()
+            && !tool_execution.reset_loop_guards
+            && self
+                .state
+                .policies
+                .goal_progress
+                .observe_turn(&tool_execution.tool_observations)
+                .made_progress
+        {
+            self.agent.note_goal_progress();
         }
         self.agent.log_turn_line(
             &response.tool_calls,

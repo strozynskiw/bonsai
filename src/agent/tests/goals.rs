@@ -64,6 +64,37 @@ async fn explicit_unfinished_goal_work_triggers_recovery_before_completion() {
 }
 
 #[tokio::test]
+async fn goal_recovery_continues_with_progress_but_bounds_repeated_status() {
+    use crate::agent::completion::CompletionGuardVerdict;
+
+    let fixture = TestFixture::new();
+    let mut agent = goal_agent(&fixture, vec![]);
+    let goal = agent.goal.set("Review all four files").await.unwrap();
+    agent.goal_run_id = Some(goal.id);
+    agent.begin_inferred_completion_task("Review all four files");
+    agent.note_completion_action();
+    let partial = "The remaining files are unreviewed.";
+
+    for _ in 0..4 {
+        agent.note_goal_progress();
+        assert!(matches!(
+            agent.completion_guard_verdict(partial).await,
+            CompletionGuardVerdict::Continue { .. }
+        ));
+    }
+    for _ in 0..2 {
+        assert!(matches!(
+            agent.completion_guard_verdict(partial).await,
+            CompletionGuardVerdict::Continue { .. }
+        ));
+    }
+    assert!(matches!(
+        agent.completion_guard_verdict(partial).await,
+        CompletionGuardVerdict::Reject(_)
+    ));
+}
+
+#[tokio::test]
 async fn deferred_goal_finalization_leaves_the_surface_to_classify_the_result() {
     let fixture = TestFixture::new();
     let responses = (0..2)

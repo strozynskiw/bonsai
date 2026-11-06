@@ -16,8 +16,13 @@
   },
   "follow_up": {
     "test": "e2e/cases/27_goal_progress_recovery.sh",
-    "evidence": "target/tui-verification/e2e/20261106T181046Z-79675",
-    "result": "A partial report led to a bounded continuation, three additional file reads, and only then a completed goal."
+    "evidence": "target/tui-verification/e2e/20261106T183614Z-54035",
+    "result": "Three partial reports separated by distinct file reads continued in the same run; the goal completed after all four reads."
+  },
+  "stagnation": {
+    "test": "e2e/cases/28_goal_no_progress.sh",
+    "evidence": "target/tui-verification/e2e/20261106T183207Z-28042",
+    "result": "Repeated reads of the same file did not count as fresh progress or complete the goal; recovery stopped within the configured bound."
   },
   "limitations": "The safeguard recognizes certain explicit unfinished-work statements; absence of a matching statement does not prove the full objective is satisfied. This deterministic mock-provider test does not establish live-provider frequency or a general cross-turn continuation policy."
 }
