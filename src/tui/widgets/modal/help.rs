@@ -150,6 +150,14 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
             Span::styled(" copy row", theme::dim()),
         ]),
         Line::from(vec![
+            Span::styled("Ctrl+B/F", theme::body(theme::palette().text)),
+            Span::styled("  move  ", theme::dim()),
+            Span::styled("Ctrl+E", theme::body(theme::palette().text)),
+            Span::styled(" line end  ", theme::dim()),
+            Span::styled("Ctrl+D", theme::body(theme::palette().text)),
+            Span::styled(" delete", theme::dim()),
+        ]),
+        Line::from(vec![
             Span::styled("Shift+←/→", theme::body(theme::palette().text)),
             Span::styled(" extend  ", theme::dim()),
             Span::styled("Click/Drag", theme::body(theme::palette().text)),

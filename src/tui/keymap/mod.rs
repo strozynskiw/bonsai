@@ -878,6 +878,26 @@ fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
             ..
         } if matches!(app.focus, Focus::Input) => KeyIntent::Action(AppAction::HistoryNext),
         KeyEvent {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } if matches!(app.focus, Focus::Input) => KeyIntent::Action(AppAction::CursorLeft),
+        KeyEvent {
+            code: KeyCode::Char('f'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } if matches!(app.focus, Focus::Input) => KeyIntent::Action(AppAction::CursorRight),
+        KeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } if matches!(app.focus, Focus::Input) => KeyIntent::Action(AppAction::CursorEnd),
+        KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } if matches!(app.focus, Focus::Input) => KeyIntent::Action(AppAction::DeleteForward),
+        KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::CONTROL,
             ..
@@ -1983,6 +2003,40 @@ mod tests {
         assert!(matches!(
             down,
             KeyIntent::Action(AppAction::ExtendTranscriptCursor(1))
+        ));
+    }
+
+    #[test]
+    fn emacs_composer_shortcuts_are_scoped_to_input() {
+        let mut app = input_app_with_text("hello");
+        for (key, expected) in [('b', "left"), ('f', "right"), ('e', "end"), ('d', "delete")] {
+            let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL);
+            let intent = map_key(event, &app);
+            assert!(matches!(
+                (expected, intent),
+                ("left", KeyIntent::Action(AppAction::CursorLeft))
+                    | ("right", KeyIntent::Action(AppAction::CursorRight))
+                    | ("end", KeyIntent::Action(AppAction::CursorEnd))
+                    | ("delete", KeyIntent::Action(AppAction::DeleteForward))
+            ));
+            app.focus = Focus::Transcript;
+            assert!(!matches!(
+                map_key(event, &app),
+                KeyIntent::Action(
+                    AppAction::CursorLeft
+                        | AppAction::CursorRight
+                        | AppAction::CursorEnd
+                        | AppAction::DeleteForward
+                )
+            ));
+            app.focus = Focus::Input;
+        }
+        assert!(matches!(
+            map_key(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                &app
+            ),
+            KeyIntent::Action(AppAction::ComposerSelectAll)
         ));
     }
 
