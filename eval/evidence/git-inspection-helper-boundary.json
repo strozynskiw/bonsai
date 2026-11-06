@@ -10,6 +10,16 @@
       "clean_filter": "git diff --no-ext-diff --no-textconv, and git status when rechecking a same-sized modified tracked file, executed filter.probe.clean."
     }
   },
+  "isolation_prototype": {
+    "script": "eval/evidence/git-isolation-probe.py",
+    "environment": "Git 2.51.0 on macOS; fresh temporary repositories with user and system Git configuration disabled.",
+    "observations": [
+      "A temporary common Git directory with a sanitized config suppressed the clean-filter marker for status and diff in a normal repository and a linked worktree, including an info/attributes rule.",
+      "A minimal projected config incorrectly reported a SHA-256 repository as SHA-1; an explicit object-format config restored a successful status check.",
+      "Disabling a legitimate content-transforming clean filter caused a clean tracked file to appear modified. A raw unfiltered status or diff cannot be presented as equivalent to the repository's configured Git view."
+    ],
+    "decision": "Research only. Do not substitute this projection for authoritative Git output until format, linked worktree, attributes, configuration, filter semantics, portability, and concurrency behavior have explicit coverage and an honest user-facing contract."
+  },
   "mitigation": "The Git tool, project context, project info, and missing-path evidence disable fsmonitor and signature display, avoid optional locks and lazy fetching, and terminate async Git processes on cancellation. The Git tool also disables external diff and textconv for diff/show. Restricted workspaces skip automatic Git status and self-review baselines, disable Git-backed missing-path caching, and reject Git inspection and Git-based review. Real headless and TUI tests use a clean-filter fixture, including ask and yolo modes.",
   "remaining_limitations": "In trusted workspaces a configured clean or process filter can still execute during working-tree inspection, including through .git/info/attributes and automatic status calls. This mitigation is not a general no-command or untrusted-repository sandbox. Natural-language restrictions are not enforced by this change."
 }
