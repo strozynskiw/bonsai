@@ -3352,6 +3352,45 @@ mod tests {
         assert!(!fixture.project_root.join(".pwned").exists());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_executable_cannot_bypass_balanced_approval_by_name_or_version() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = TestFixture::new();
+        for name in ["version-probe", "cargo", "echo"] {
+            let script = fixture.project_root.join(name);
+            std::fs::write(&script, "#!/bin/sh\nprintf reached > version-marker\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let tool = BashTool::with_background_tasks_and_yolo_mode(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(InteractionService::noninteractive()),
+            Arc::new(BackgroundTaskRegistry::new()),
+            YoloMode::with_level(ApprovalLevel::Balanced),
+            CommandSandbox::disabled(),
+        );
+        for command in [
+            "./version-probe --version",
+            "./cargo test",
+            "./echo hello",
+            "PATH=.:$PATH cargo test",
+            "env PATH=.:$PATH cargo test",
+        ] {
+            let error = tool
+                .execute(json!({"command": command}))
+                .await
+                .expect_err("an explicit project executable must require approval");
+            assert!(error.to_string().contains("noninteractive mode"), "{error}");
+            assert!(
+                !fixture.project_root.join("version-marker").exists(),
+                "{command}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn compound_allow_does_not_approve_an_unapproved_inspection() {
         let fixture = TestFixture::new();

@@ -7,7 +7,7 @@
 //! prompt and which guardrails stay on. The shared holder lives in
 //! [`crate::yolo`].
 
-use super::bash::command::CommandAnalysis;
+use super::bash::command::{CommandAnalysis, is_safe_env_assignment};
 
 /// How risky a single tool action is. Ordered least → most dangerous so the
 /// threshold can be expressed as "auto-approve at or below tier X".
@@ -290,12 +290,29 @@ fn program_tier(words: &[&str], lower: &str) -> RiskTier {
     // Without this the wrapper becomes the "program" and the dangerous command
     // it fronts rides through at a wrapper-shaped tier.
     let prog_index = effective_program_index(words);
+    // Wrappers can carry assignments that change which program is run, even
+    // when the final word looks like a trusted bare command.
+    if words[..prog_index.min(words.len())]
+        .iter()
+        .any(|word| is_env_assignment_word(word) && !is_safe_env_assignment(word))
+    {
+        return RiskTier::Destructive;
+    }
     let (raw_prog, effective) = match words.get(prog_index) {
         Some(_) => (words[prog_index], &words[prog_index..]),
         // A bare wrapper with no trailing command (`env`): classify it as itself.
         None => (words.first().copied().unwrap_or(""), words),
     };
     let prog = executable_basename(raw_prog);
+
+    // A path ending in a familiar name is not necessarily that tool. Retain
+    // the established project-wrapper exception for common verification forms,
+    // but do not classify arbitrary paths by basename alone.
+    let project_verification_wrapper =
+        matches!(raw_prog, "./gradlew" | "./mvnw") && is_low_risk(prog, &effective[1..]);
+    if raw_prog.contains('/') && !project_verification_wrapper {
+        return RiskTier::Destructive;
+    }
 
     // `echo`/`printf`/`true`/`false`/`:` never execute their arguments, so a
     // scary string in an argument (`echo "rm -rf /"`) is harmless once the
@@ -323,12 +340,21 @@ fn program_tier(words: &[&str], lower: &str) -> RiskTier {
         return RiskTier::Destructive;
     }
 
-    // `<prog> --version` prints a version and exits for effectively every
-    // tool, including ones classified dangerous below (`curl --version`,
-    // `rm --version`). Only the exact long-flag two-word form: `-v`/`-V` are
-    // verbose/other flags for too many programs to bless generically.
+    // A version flag does not constrain an arbitrary executable. Restrict the
+    // convenience shortcut to familiar bare program names; explicit paths may
+    // point to project scripts, including scripts named after common tools.
     if matches!(effective, [_, "--version"]) {
-        return RiskTier::ReadOnly;
+        const VERSION_COMMANDS: &[&str] = &[
+            "bash", "bun", "cargo", "cmake", "curl", "docker", "fd", "gh", "git", "go", "java",
+            "javac", "jq", "make", "node", "npm", "npx", "pip", "pip3", "pnpm", "python",
+            "python3", "rg", "rm", "rustc", "rustup", "sh", "sqlite3", "tar", "uv", "wget", "yarn",
+            "zsh",
+        ];
+        return if VERSION_COMMANDS.contains(&prog) {
+            RiskTier::ReadOnly
+        } else {
+            RiskTier::Destructive
+        };
     }
 
     // Project scaffolding (`npm init -y`, `go mod init`, `python -m venv`,
@@ -2212,7 +2238,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_version_queries_are_read_only() {
+    fn known_bare_version_queries_are_read_only() {
         for command in [
             "rustup --version",
             "curl --version",
@@ -2224,6 +2250,22 @@ mod tests {
         }
         // The short forms stay per-tool: `sh -v` opens a verbose shell.
         assert_eq!(tier("sh -v"), RiskTier::Destructive);
+        for command in [
+            "./version-probe --version",
+            "version-probe --version",
+            "./cargo --version",
+            "/tmp/git --version",
+            "env FOO=1 ./curl --version",
+            "./cargo test",
+            "/tmp/git status",
+            "./echo hello",
+            "env FOO=1 ./cargo test",
+            "/tmp/gradlew test",
+            "PATH=.:$PATH cargo test",
+            "env PATH=.:$PATH cargo test",
+        ] {
+            assert_eq!(tier(command), RiskTier::Destructive, "{command}");
+        }
     }
 
     #[test]

@@ -1,0 +1,16 @@
+{
+  "purpose": "Prevent explicit executable paths and inline PATH overrides from borrowing a familiar command's risk classification.",
+  "issue": 153,
+  "baseline": "A disposable executable named version-probe wrote a local marker when invoked as ./version-probe --version. The real Bash gate auto-approved it at Balanced with the sandbox disabled; the regression test failed because execution succeeded.",
+  "change": "Unknown version commands and explicit executable paths require approval. Inline PATH assignments are retained for risk analysis. The established ./gradlew and ./mvnw verification forms remain available at Balanced.",
+  "regression": "project_executable_cannot_bypass_balanced_approval_by_name_or_version checks a version probe, scripts named cargo and echo, and direct and env-wrapped PATH overrides without allowing their marker to be created.",
+  "terminal_control": "target/tui-verification/e2e/20261106T152907Z-12040: verifier isolation and compound permission flow passed on the final build.",
+  "compatibility": {
+    "deepseek_model": "deepseek/deepseek-flash",
+    "effort": "low",
+    "seed": 466,
+    "report": "target/eval-executable-policy-466/1793978784506-live-466/report.json",
+    "result": "3/3 diagnose, fix, and verify repetitions passed."
+  },
+  "limitations": "Bare executable names still depend on the inherited PATH; the Gradle and Maven wrapper exceptions deliberately execute project code. Other environment variables and execution surfaces are not comprehensively classified by this change. This is not a sandbox or a complete qualification of issue 153."
+}

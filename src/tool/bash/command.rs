@@ -518,11 +518,12 @@ fn is_env_assignment(token: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn is_safe_env_assignment(token: &str) -> bool {
-    let Some((_name, value)) = token.split_once('=') else {
+pub(crate) fn is_safe_env_assignment(token: &str) -> bool {
+    let Some((name, value)) = token.split_once('=') else {
         return false;
     };
-    !env_assignment_value_may_execute(value)
+    // PATH changes which executable a bare command name resolves to.
+    !name.eq_ignore_ascii_case("PATH") && !env_assignment_value_may_execute(value)
 }
 
 fn env_assignment_value_may_execute(value: &str) -> bool {
