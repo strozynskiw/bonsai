@@ -28,8 +28,7 @@ pub(crate) enum ProviderAuthMutationWarning {
         /// Bounded error detail suitable for the command transcript.
         detail: String,
     },
-    /// Durable auth was cleared but a Bonsai-owned external secret needs a
-    /// retry before cleanup is complete.
+    /// Durable auth was cleared but a Bonsai-owned external secret remains.
     CredentialCleanup {
         /// Backend error detail suitable for the command transcript.
         detail: String,
@@ -45,7 +44,7 @@ impl std::fmt::Display for ProviderAuthMutationWarning {
             ),
             Self::CredentialCleanup { detail } => write!(
                 formatter,
-                "Provider auth was cleared, but stored credential cleanup is incomplete: {detail}. Retry /unauthorize to finish cleanup."
+                "Provider auth was cleared, but stored credential cleanup is incomplete: {detail}. Remove the credential manually from the reported store."
             ),
         }
     }
@@ -304,7 +303,8 @@ pub(crate) async fn unauthorize_provider(
     // Commit the conservative state before touching replaceable caches or
     // external credential stores. A save failure therefore leaves the live
     // session and its credential explicitly unchanged; every later failure
-    // leaves both SQLite and the runtime session unauthorized.
+    // leaves both SQLite and the runtime session unauthorized. Keep the old
+    // reference separately so cleanup can still identify its backend.
     let mut staged_session_store = session_store.clone();
     factory.clear_authorization(staged_session_store.session_mut(id));
     let staged_session = staged_session_store.session_mut(id);
@@ -314,11 +314,11 @@ pub(crate) async fn unauthorize_provider(
     staged_session_store
         .save_allowing_auth_clear_async()
         .await?;
-    *session_store = staged_session_store;
+    let mut cleanup_session_store = std::mem::replace(session_store, staged_session_store);
 
     let mut mutation =
         ProviderAuthMutationOutcome::committed(ProviderAuthorizationState::Unauthorized);
-    if let Err(err) = session_store.clear_provider_credential(id).await {
+    if let Err(err) = cleanup_session_store.clear_provider_credential(id).await {
         tracing::warn!(provider = %id, error = %err, "provider auth cleared with incomplete credential cleanup");
         mutation
             .warnings
@@ -583,6 +583,71 @@ mod tests {
                 .unwrap()
                 .is_authorized(reloaded.session("test-provider"))
         );
+    }
+
+    #[tokio::test]
+    async fn unauthorization_cleans_the_original_credential_and_reports_failure() {
+        use crate::session::{CredentialSource, CredentialStore};
+
+        for fail_delete in [false, true] {
+            let home = tempfile::TempDir::new().unwrap();
+            let storage = crate::storage::Storage::open_at(home.path().join("bonsai.db"))
+                .await
+                .unwrap();
+            let credentials = if fail_delete {
+                CredentialStore::memory_with_keyring_delete_failure()
+            } else {
+                CredentialStore::memory()
+            };
+            let mut store =
+                SessionStore::load_with_storage_and_credential_store(&storage, credentials.clone())
+                    .await
+                    .unwrap();
+            let registry = ProviderRegistry::new(vec![Arc::new(TestProviderFactory(
+                TestCatalogBehavior::Available,
+            ))]);
+            store
+                .set_provider_credential(
+                    "test-provider",
+                    "synthetic-secret".to_string(),
+                    CredentialSource::Keyring,
+                )
+                .await;
+            store.save_async().await.unwrap();
+
+            let outcome = unauthorize_provider(&registry, "test-provider", &mut store, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.session("test-provider").credential_source,
+                CredentialSource::None
+            );
+            assert!(store.session("test-provider").api_key.is_empty());
+            let stored = credentials
+                .get(&CredentialSource::Keyring, "test-provider")
+                .await
+                .unwrap();
+            if fail_delete {
+                assert!(stored.is_some());
+                assert!(matches!(
+                    outcome.warnings.as_slice(),
+                    [ProviderAuthMutationWarning::CredentialCleanup { .. }]
+                ));
+                assert!(outcome.warnings[0].to_string().contains("manually"));
+            } else {
+                assert!(stored.is_none());
+                assert!(outcome.warnings.is_empty());
+            }
+            let reloaded =
+                SessionStore::load_with_storage_and_credential_store(&storage, credentials)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                reloaded.session("test-provider").credential_source,
+                CredentialSource::None
+            );
+            assert!(reloaded.session("test-provider").api_key.is_empty());
+        }
     }
 
     #[tokio::test]
