@@ -1259,6 +1259,9 @@ fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
 fn supersedes_goal(prompt: &str) -> bool {
     let normalized = normalized_words(prompt);
     let directive = action_directive(&normalized);
+    if directive.starts_with("stop the previous task from ") {
+        return false;
+    }
     starts_with_command(
         directive,
         &[
@@ -1266,6 +1269,7 @@ fn supersedes_goal(prompt: &str) -> bool {
             "do this instead",
             "new goal",
             "stop that",
+            "stop the previous task",
             "actually do",
             "scratch that",
             "forget that instead",
@@ -1647,5 +1651,11 @@ mod tests {
         assert_eq!(state.contract, TaskCompletionContract::informational());
         assert!(!state.action_observed);
         assert_eq!(state.superseded_goals, 1);
+    }
+
+    #[test]
+    fn stop_previous_task_supersedes_but_preventing_failure_does_not() {
+        assert!(supersedes_goal("Stop the previous task. Say done."));
+        assert!(!supersedes_goal("Stop the previous task from failing."));
     }
 }
