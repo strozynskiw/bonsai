@@ -27,6 +27,11 @@ command = "sh check_task_todo.sh"
 timeout_secs = 180
 
 [[tasks.graders]]
+type = "file-state"
+path = "check_task_todo.sh"
+exact_file = "fixtures/task_todo/check_task_todo.sh"
+
+[[tasks.graders]]
 type = "assertion"
 contains = ["tasklog"]
 not_contains = ["could not", "unable to", "did not finish"]

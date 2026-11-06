@@ -81,6 +81,16 @@
     "fresh_live_report": "target/eval-tasklog-459/1793976367553-live-459/report.json",
     "fresh_live_result": "Completed in 27 turns and passed all expanded checks within budget. One sample does not establish overall reliability."
   },
+  "checker_integrity_followup": {
+    "problem": "The test-pass grader ran the editable worktree checker without comparing it to the original, so replacing it with an unconditional success produced a false pass.",
+    "negative_control_before": "target/eval-checker-integrity-before/1793976977750-mock-463/report.json",
+    "negative_control_after": "target/eval-checker-integrity-after-final/1793977259263-mock-463/report.json",
+    "result": "The unchanged mock replaced the checker and did not implement the CLI. The old graders passed; the new exact-file grader failed while the fake command still exited zero.",
+    "positive_control": "The seed-459 live worktree checker matched the original fixture byte for byte.",
+    "fresh_live_report": "target/eval-tasklog-464/1793977015187-live-464/report.json",
+    "fresh_live_result": "Completed in 26 turns; checker integrity, test-pass, output, and budget checks all passed.",
+    "limitation": "The comparison protects the task score for a changed checker; it does not sandbox the checker, prevent it from running, or establish integrity for other files."
+  },
   "low_effort_experiment": {
     "model": "deepseek/deepseek-flash",
     "provider": "deepseek",
