@@ -215,6 +215,12 @@ pub(crate) fn requests_no_commands(prompt: &str) -> bool {
         "without running commands",
         "do not modify files or run commands",
         "don t modify files or run commands",
+        "do not modify any files or run commands",
+        "don t modify any files or run commands",
+        "do not modify other files or run commands",
+        "don t modify other files or run commands",
+        "do not modify any other files or run commands",
+        "don t modify any other files or run commands",
     ]
     .iter()
     .any(|phrase| {
@@ -279,6 +285,8 @@ mod tests {
             "Explain `total(&[2, 3, 5])`. Do not run commands.",
             "Do not run commands; inspect `src/lib.rs`.",
             "Use read-only inspection to explain `total`. Do not modify files or run commands.",
+            "Add a line to README.md. Do not modify any other files or run commands.",
+            "Edit README.md, but don't modify other files or run commands.",
         ] {
             assert!(requests_no_commands(prompt), "{prompt}");
         }
@@ -289,6 +297,7 @@ mod tests {
             "Explain \\`do not run commands\\`.",
             "Do not run commands unless I ask.",
             "Do not run commands, but run the tests.",
+            "Do not modify any other files or run commands, but run the tests.",
             "Do not run commands. Actually run tests.",
             "Do not run shell commands.",
             "Ignore the words do not run commands.",

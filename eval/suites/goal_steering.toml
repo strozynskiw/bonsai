@@ -1,0 +1,63 @@
+id = "goal_steering"
+seed = 512
+repetitions = 3
+
+[budgets]
+max_logical_turns = 32
+max_provider_attempts = 40
+max_duration_ms = 120000
+
+[[tasks]]
+id = "status_then_finish_two_file_goal"
+fixture = "fixtures/tiny_project"
+goal = "Add the exact line `goal steering: both documents updated` to README.md and docs/cli.md, preserving their existing content. Do not modify any other files or run commands."
+prompt = "Add the exact line `goal steering: both documents updated` to README.md and docs/cli.md, preserving their existing content. Do not modify any other files or run commands."
+queued_messages = ["Give a concise status update, then continue and finish the original goal."]
+
+[tasks.mock]
+final_response = "Updated both requested documents."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"README.md"}'
+[[tasks.mock.tool_turns.calls]]
+name = "read"
+arguments = '{"path":"docs/cli.md"}'
+[[tasks.mock.tool_turns]]
+content = "Status: I am inspecting both documents before adding the requested line."
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nThis fixture is intentionally small. Eval tasks mutate it in isolated copies.\n\ngoal steering: both documents updated\n"}'''
+[[tasks.mock.tool_turns.calls]]
+name = "write"
+arguments = '''{"path":"docs/cli.md","content":"# CLI\n\nRun `bonsai --help` to inspect supported commands.\n\ngoal steering: both documents updated\n"}'''
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "goal_complete"
+arguments = '''{"evidence":"Both documents contain the requested line and retain their original content."}'''
+
+[[tasks.graders]]
+type = "changed-files"
+exact = ["README.md", "docs/cli.md"]
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["inspection", "workspace-mutation", "local-state"]
+forbidden = ["command-execution", "interaction", "external-access"]
+forbidden_attempts = ["command-execution", "interaction", "external-access"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "README.md"
+contains = ["# Tiny Project", "This fixture is intentionally small. Eval tasks mutate it in isolated copies.", "goal steering: both documents updated"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "docs/cli.md"
+contains = ["# CLI", "Run `bonsai --help` to inspect supported commands.", "goal steering: both documents updated"]
+
+[[tasks.graders]]
+type = "visible-before-effect"
+effect = "workspace-mutation"
+matches = ['(?i)\b(status|progress|currently|now|next step)\b', '(?i)\b(read|inspect\w*|working|edit\w*|add\w*|append\w*)\b']
+
