@@ -1,0 +1,15 @@
+{
+  "purpose": "Record command execution possible through the nominally read-only Git inspection tool.",
+  "reproduction": {
+    "git_version": "2.51.0",
+    "fixture": "A tracked a.txt, modified in the working tree, with a matching .gitattributes entry and a repository-configured helper that creates a marker file.",
+    "observed": {
+      "textconv": "Plain git diff executed diff.probe.textconv.",
+      "external_diff": "Plain git diff executed diff.probe.command.",
+      "filesystem_monitor": "Plain git status executed core.fsmonitor.",
+      "clean_filter": "git diff --no-ext-diff --no-textconv still executed filter.probe.clean."
+    }
+  },
+  "mitigation": "The Git tool disables external diff and textconv for diff/show, disables fsmonitor and signature display, avoids optional locks and lazy fetching, and terminates Git when its timeout expires. The regression test confirms the first three helpers run with raw Git but do not run through the tool.",
+  "remaining_limitations": "A configured clean or process filter can still execute during a working-tree diff, including through .git/info/attributes. The mitigation is not a general no-command or untrusted-repository sandbox. Natural-language restrictions are not enforced by this change."
+}

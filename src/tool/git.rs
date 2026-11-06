@@ -69,8 +69,20 @@ async fn run_git(args: &[&str], cwd: &Path) -> Result<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(GIT_TIMEOUT_SECS),
         tokio::process::Command::new("git")
+            // Inspection must not run repository-configured helpers or write
+            // optional index locks. In particular, status can invoke fsmonitor.
+            .args([
+                "--no-pager",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "log.showSignature=false",
+            ])
             .args(args)
             .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -277,7 +289,7 @@ impl Tool for GitTool {
             }
 
             GitOp::Diff => {
-                let mut cmd = vec!["diff", "--stat"];
+                let mut cmd = vec!["diff", "--no-ext-diff", "--no-textconv", "--stat"];
                 if !args.stat_only {
                     cmd.push("-p");
                 }
@@ -346,7 +358,14 @@ impl Tool for GitTool {
 
             GitOp::Show => {
                 let target = args.target.as_deref().unwrap_or("HEAD");
-                let mut cmd = vec!["show", "--stat", "-p", target];
+                let mut cmd = vec![
+                    "show",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--stat",
+                    "-p",
+                    target,
+                ];
                 if let Some(ref p) = scoped_path {
                     cmd.push("--");
                     cmd.push(p.as_str());
@@ -441,6 +460,58 @@ mod tests {
             .current_dir(root)
             .output()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspection_does_not_run_repository_configured_helpers() {
+        let fixture = TestFixture::new();
+        init_git_repo(&fixture.project_root);
+        fixture.create_file(".gitattributes", "*.txt diff=probe\n");
+        fixture.create_file("a.txt", "before\n");
+        git_add_commit(&fixture.project_root, "init");
+        fixture.create_file("a.txt", "after\n");
+        fixture.create_file("probe.sh", "touch helper-ran\ncat \"$1\"\n");
+
+        let config = |key: &str, value: &str| {
+            let status = std::process::Command::new("git")
+                .args(["config", key, value])
+                .current_dir(&fixture.project_root)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        let assert_raw_git_runs_helper = |op: &str| {
+            let status = std::process::Command::new("git")
+                .args([op])
+                .current_dir(&fixture.project_root)
+                .output()
+                .unwrap();
+            assert!(status.status.success());
+            let marker = fixture.project_root.join("helper-ran");
+            assert!(
+                marker.exists(),
+                "raw git {op} did not run the configured helper"
+            );
+            std::fs::remove_file(marker).unwrap();
+        };
+        let tool = GitTool::new(fixture.project_root.clone());
+        config("diff.probe.textconv", "sh probe.sh");
+        assert_raw_git_runs_helper("diff");
+        let diff = tool.execute(json!({"op": "diff"})).await.unwrap();
+        assert!(diff.rendered_summary().contains("+after"));
+        tool.execute(json!({"op": "show"})).await.unwrap();
+        assert!(!fixture.project_root.join("helper-ran").exists());
+
+        config("diff.probe.command", "sh probe.sh");
+        assert_raw_git_runs_helper("diff");
+        tool.execute(json!({"op": "diff"})).await.unwrap();
+        tool.execute(json!({"op": "show"})).await.unwrap();
+        assert!(!fixture.project_root.join("helper-ran").exists());
+
+        config("core.fsmonitor", "sh probe.sh");
+        assert_raw_git_runs_helper("status");
+        tool.execute(json!({"op": "status"})).await.unwrap();
+        assert!(!fixture.project_root.join("helper-ran").exists());
     }
 
     #[tokio::test]
