@@ -1,0 +1,18 @@
+{
+  "scope": "Reproduce premature goal completion after an explicit partial-progress response; this is an open defect, not a passing goal-completion qualification.",
+  "revision": "2eafa156",
+  "reference": {
+    "repository": "https://github.com/openai/codex",
+    "revision": "4688e49329637b8b50dd8450ef784020537e2215",
+    "observation": "The goal continuation contract keeps an objective active across turns until completion is explicitly established."
+  },
+  "reproduction": {
+    "command": "./e2e/run.sh ../target/goal-progress-probe.sh",
+    "provider": "target/goal-progress-provider.py",
+    "evidence": "target/tui-verification/e2e/20261106T180447Z-72773/case.wZdY5I",
+    "objective": "Review README.md, Cargo.toml, LICENSE and AGENTS.md and report findings for all four files",
+    "observation": "The mock provider requested one README read and answered that the other three files remained unreviewed. The TUI displayed goal complete after two provider requests.",
+    "result": "Defect reproduced: a partial answer can be recorded as completion. The probe passes when the bug is observed; it is not a regression test for the intended behavior."
+  },
+  "limitations": "This is a deterministic mock-provider reproduction of one partial-report form. It does not establish how often a live provider behaves this way or prescribe a safe continuation policy."
+}
