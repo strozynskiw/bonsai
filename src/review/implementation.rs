@@ -727,6 +727,7 @@ fn diff_prompt_sections<'a>(
 
 async fn git_ref_exists(root: &Path, reference: &str) -> bool {
     Command::new("git")
+        .kill_on_drop(true)
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--verify", "--quiet", reference])
@@ -737,6 +738,7 @@ async fn git_ref_exists(root: &Path, reference: &str) -> bool {
 
 async fn git_work_tree_exists(root: &Path) -> bool {
     Command::new("git")
+        .kill_on_drop(true)
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -759,6 +761,7 @@ async fn git_outputs(root: &Path, commands: &[Vec<String>]) -> Option<String> {
 
 async fn git_output(root: &Path, args: &[String]) -> Option<String> {
     let output = Command::new("git")
+        .kill_on_drop(true)
         .arg("-C")
         .arg(root)
         .args(args)

@@ -1072,6 +1072,55 @@ impl Agent {
                     );
                 }
             }
+            if self.self_review.baseline_pending()
+                && batch.iter().any(|call| {
+                    tool_rejections.message_for(call).is_none()
+                        && may_mutate_workspace_for_self_review(call, tool_registry)
+                })
+            {
+                // Steering that arrived while the previous batch finished must
+                // take priority over even the pre-mutation baseline capture.
+                let queued = queued_messages.next();
+                if !queued.is_empty() {
+                    let skipped_calls = batch
+                        .into_iter()
+                        .chain(batches.by_ref().flatten())
+                        .collect();
+                    self.drain_skipped_calls(
+                        skipped_calls,
+                        "Tool skipped because a new queued user message took priority.",
+                        sink,
+                        &mut trusted_contexts,
+                        &mut image_messages,
+                    )
+                    .await?;
+                    self.apply_queued_messages(queued, sink).await?;
+                    outcome.reset_loop_guards = true;
+                    break;
+                }
+                let baseline = tokio::select! {
+                    biased;
+                    _ = cancellation_token.cancelled() => None,
+                    baseline = capture_review_baseline(&self.project_root) => baseline,
+                };
+                self.self_review.set_deferred_baseline(baseline);
+                if cancellation_token.is_cancelled() {
+                    let skipped_calls = batch
+                        .into_iter()
+                        .chain(batches.by_ref().flatten())
+                        .collect();
+                    self.drain_skipped_calls(
+                        skipped_calls,
+                        "Tool skipped because the run was interrupted.",
+                        sink,
+                        &mut trusted_contexts,
+                        &mut image_messages,
+                    )
+                    .await?;
+                    interrupted_mid_tools = true;
+                    break;
+                }
+            }
             tool_rejections
                 .repeated_failure
                 .extend(self.capture_pending_verification_bindings(&batch).await);
@@ -1499,6 +1548,32 @@ impl Agent {
             stall_turns,
             "turn"
         );
+    }
+}
+
+/// Conservative pre-execution classification for deciding whether a review
+/// baseline is needed. Unknown external effects stay on the mutating path.
+fn may_mutate_workspace_for_self_review(call: &ToolCall, registry: &ToolRegistry) -> bool {
+    let Some(tool) = registry.get(&call.name) else {
+        return false;
+    };
+    if serde_json::from_str::<serde_json::Value>(&call.arguments).is_err() {
+        return false;
+    }
+    if matches!(
+        tool.name(),
+        "write" | "edit" | "apply_patch" | "rename_symbol" | "bash" | "terminal"
+    ) {
+        return true;
+    }
+    match tool.effect_policy() {
+        crate::tool::ToolEffectPolicy::ReadOnly => false,
+        crate::tool::ToolEffectPolicy::LocalState => tool.name() == "terminal",
+        // Hooks can rewrite delegation arguments after this classification.
+        crate::tool::ToolEffectPolicy::Delegated => true,
+        crate::tool::ToolEffectPolicy::SelfAuthorized => {
+            !matches!(tool.name(), "webfetch" | "websearch")
+        }
     }
 }
 

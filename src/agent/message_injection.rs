@@ -87,14 +87,13 @@ impl Agent {
             return;
         }
 
-        let baseline = capture_review_baseline(&self.project_root).await;
         // Captured so the reviewer subagent can judge the diff against what was
         // asked. Plan execution supplies the plan's goal contract rather than
         // its full display handoff; ordinary tasks retain the user request.
         let review_target = goal_context.unwrap_or(request);
         let trimmed = review_target.trim();
         let request = (!trimmed.is_empty()).then(|| trimmed.to_string());
-        self.self_review.arm(baseline, request);
+        self.self_review.arm_deferred(request);
         let profile = crate::verification::VerificationProfile::resolve(
             &self.project_root,
             &self.config.verification,

@@ -12,14 +12,14 @@ const SELF_REVIEW_RESULT_MAX_CHARS: usize = 8_000;
 
 /// Self-review policy plus the per-turn arming state it gates: whether a pass
 /// may still fire this turn, the pre-task git baseline to diff against, and
-/// the captured task request. `armed`/`baseline`/`request` are always
-/// set together ([`Self::arm`]) and cleared together ([`Self::disarm`]), so no
-/// field can be forgotten independently of the others.
+/// the captured task request. The baseline is captured immediately before the
+/// first potentially mutating tool call, not for read-only turns.
 #[derive(Debug, Default)]
 pub(super) struct SelfReviewState {
     mode: SelfReviewMode,
     armed: bool,
     baseline: Option<ReviewBaseline>,
+    baseline_pending: bool,
     request: Option<String>,
     /// Configured/detected verification commands recognized for this turn.
     verification_commands: std::collections::BTreeSet<String>,
@@ -111,6 +111,17 @@ impl SelfReviewState {
         self.baseline.as_ref()
     }
 
+    pub(super) fn baseline_pending(&self) -> bool {
+        self.armed && self.baseline_pending
+    }
+
+    pub(super) fn set_deferred_baseline(&mut self, baseline: Option<ReviewBaseline>) {
+        if self.baseline_pending() {
+            self.baseline = baseline;
+            self.baseline_pending = false;
+        }
+    }
+
     pub(super) fn request(&self) -> Option<&str> {
         self.request.as_deref()
     }
@@ -120,6 +131,7 @@ impl SelfReviewState {
     /// the workspace-mutation state — each turn earns its review anew.
     pub(super) fn arm(&mut self, baseline: Option<ReviewBaseline>, request: Option<String>) {
         self.baseline = baseline;
+        self.baseline_pending = false;
         self.armed = true;
         self.request = request;
         self.armed_at_ms = Some(crate::util::time::now_ms());
@@ -133,9 +145,15 @@ impl SelfReviewState {
         self.pending_run_mutated = false;
     }
 
+    pub(super) fn arm_deferred(&mut self, request: Option<String>) {
+        self.arm(None, request);
+        self.baseline_pending = true;
+    }
+
     pub(super) fn disarm(&mut self) {
         self.armed = false;
         self.baseline = None;
+        self.baseline_pending = false;
         self.request = None;
         self.armed_at_ms = None;
         self.workspace_mutated = false;

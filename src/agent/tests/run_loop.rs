@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::{InspectionBatchClass, RetryBackoff};
+use crate::review::capture_review_baseline;
 use std::path::PathBuf;
 
 struct DeltaProvider {
@@ -2463,6 +2464,9 @@ async fn self_review_skip_disarms_stale_baseline() {
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
     agent.arm_self_review_for_coding_task("update lib").await;
     assert!(agent.self_review.is_armed());
+    assert!(agent.self_review.baseline_pending());
+    let baseline = capture_review_baseline(root).await;
+    agent.self_review.set_deferred_baseline(baseline);
     assert!(agent.self_review.baseline().is_some());
 
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
@@ -2475,6 +2479,69 @@ async fn self_review_skip_disarms_stale_baseline() {
 
     assert!(!agent.self_review.is_armed());
     assert!(agent.self_review.baseline().is_none());
+}
+
+#[tokio::test]
+async fn read_only_self_review_does_not_capture_git_baseline() {
+    let fixture = TestFixture::new();
+    crate::util::git::setup_test_clean_filter(&fixture.project_root);
+    let (mut agent, _requests) = self_review_agent(&fixture, Vec::new());
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+
+    agent
+        .arm_self_review_for_coding_task("Explain the code without running commands")
+        .await;
+    assert!(agent.self_review.baseline_pending());
+    assert!(!fixture.project_root.join("clean-filter-ran").exists());
+    let sink: SharedSink = Arc::new(StdoutSink);
+    assert!(
+        !agent
+            .maybe_self_review(&sink, CancellationToken::new())
+            .await
+    );
+    assert!(!fixture.project_root.join("clean-filter-ran").exists());
+}
+
+#[tokio::test]
+async fn read_only_tool_turn_does_not_capture_git_baseline() {
+    let fixture = TestFixture::new();
+    crate::util::git::setup_test_clean_filter(&fixture.project_root);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(crate::tool::ReadTool::new(
+        fixture.project_root.clone(),
+        fixture.read_tracker.clone(),
+    )));
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "read-1",
+                "read",
+                r#"{"path":"tracked.txt"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        finished_response("The tracked file contains after!."),
+    ]);
+    let registry = Arc::new(registry);
+    let mut agent = Agent::new(
+        Box::new(provider),
+        registry.clone(),
+        registry,
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+    let result = agent
+        .run(
+            "Read tracked.txt and explain it; do not run commands.",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(!fixture.project_root.join("clean-filter-ran").exists());
 }
 
 // Regression (session 96): a turn where the agent never touched the workspace
@@ -2808,6 +2875,8 @@ async fn self_review_subagent_injects_reviewer_critique() {
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
     agent.arm_self_review_for_coding_task("change lib").await;
     assert!(agent.self_review.is_armed());
+    let baseline = capture_review_baseline(root).await;
+    agent.self_review.set_deferred_baseline(baseline);
     // Change the tree *after* arming so there is a review-sized diff since the
     // baseline, and mark the turn as the agent's own edit (the run loop does
     // this when an edit/write/bash tool succeeds).
@@ -2947,6 +3016,8 @@ async fn subagent_usage_lands_in_session_totals_at_the_subagent_models_pricing()
     ));
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
     agent.arm_self_review_for_coding_task("change lib").await;
+    let baseline = capture_review_baseline(root).await;
+    agent.self_review.set_deferred_baseline(baseline);
     std::fs::write(root.join("lib.rs"), REVIEWABLE_RUST_CHANGE).unwrap();
     agent
         .self_review
@@ -2991,6 +3062,8 @@ async fn self_review_subagent_failure_is_typed_before_degraded_fallback() {
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
     agent.arm_self_review_for_coding_task("change lib").await;
+    let baseline = capture_review_baseline(root).await;
+    agent.self_review.set_deferred_baseline(baseline);
     std::fs::write(root.join("lib.rs"), REVIEWABLE_RUST_CHANGE).unwrap();
     agent
         .self_review
@@ -3055,6 +3128,8 @@ async fn self_review_parent_cancellation_reconciles_interrupted_terminal_state()
     .unwrap();
     agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
     agent.arm_self_review_for_coding_task("change lib").await;
+    let baseline = capture_review_baseline(root).await;
+    agent.self_review.set_deferred_baseline(baseline);
     std::fs::write(root.join("lib.rs"), REVIEWABLE_RUST_CHANGE).unwrap();
     agent
         .self_review
