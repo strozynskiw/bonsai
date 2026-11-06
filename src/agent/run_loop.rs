@@ -1032,6 +1032,24 @@ impl Agent {
                 id
             });
         while let Some(batch) = batches.next() {
+            if let Some(lease) = self.goal_run_lease.as_ref()
+                && self.goal.snapshot_for_run(lease).await.is_none()
+            {
+                let skipped_calls = batch
+                    .into_iter()
+                    .chain(batches.by_ref().flatten())
+                    .collect();
+                self.drain_skipped_calls(
+                    skipped_calls,
+                    "Tool skipped because this goal run is no longer active.",
+                    sink,
+                    &mut trusted_contexts,
+                    &mut image_messages,
+                )
+                .await?;
+                interrupted_mid_tools = true;
+                break;
+            }
             let mut scoped_target_dirs = HashMap::<String, Vec<PathBuf>>::new();
             for tool_call in &batch {
                 for raw_path in scoped_instruction_paths(tool_call) {
@@ -1349,6 +1367,34 @@ impl Agent {
                 .await?;
                 self.apply_queued_messages(queued, sink).await?;
                 outcome.reset_loop_guards = true;
+                break;
+            }
+            // The goal may have been paused or replaced during asynchronous
+            // preflight, even if a resumed goal still has the same ID.
+            if let Some(lease) = self.goal_run_lease.as_ref()
+                && self.goal.snapshot_for_run(lease).await.is_none()
+            {
+                for call in &eligible_calls {
+                    self.verification
+                        .pending_verification_bindings
+                        .remove(&call.id);
+                    self.verification
+                        .suppressed_verification_calls
+                        .remove(&call.id);
+                }
+                let skipped_calls = batch
+                    .into_iter()
+                    .chain(batches.by_ref().flatten())
+                    .collect();
+                self.drain_skipped_calls(
+                    skipped_calls,
+                    "Tool skipped because this goal run is no longer active.",
+                    sink,
+                    &mut trusted_contexts,
+                    &mut image_messages,
+                )
+                .await?;
+                interrupted_mid_tools = true;
                 break;
             }
             let batch_owner = batch

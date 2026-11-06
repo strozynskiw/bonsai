@@ -14,6 +14,109 @@ fn goal_agent(fixture: &TestFixture, responses: Vec<StreamedResponse>) -> Agent 
 }
 
 #[tokio::test]
+async fn resumed_goal_does_not_launch_remaining_old_run_tool_batches() {
+    struct PauseResumeTool {
+        goal: crate::goal::GoalService,
+        id: String,
+    }
+
+    #[async_trait]
+    impl Tool for PauseResumeTool {
+        fn name(&self) -> &str {
+            "pause_resume_test"
+        }
+        fn description(&self) -> &str {
+            "Change the goal generation"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
+            crate::tool::ParallelPolicy::Serialized
+        }
+        async fn execute(&self, _: serde_json::Value) -> anyhow::Result<ToolOutput> {
+            self.goal
+                .transition(&self.id, GoalState::Paused, None)
+                .await?;
+            self.goal
+                .transition(&self.id, GoalState::Active, None)
+                .await?;
+            Ok(ToolOutput::Text("Goal resumed".into()))
+        }
+    }
+
+    struct LaterTool(Arc<AtomicUsize>);
+    #[async_trait]
+    impl Tool for LaterTool {
+        fn name(&self) -> &str {
+            "later_test"
+        }
+        fn description(&self) -> &str {
+            "Record whether the later tool executed"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
+            crate::tool::ParallelPolicy::Serialized
+        }
+        async fn execute(&self, _: serde_json::Value) -> anyhow::Result<ToolOutput> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::Text("Executed".into()))
+        }
+    }
+
+    let fixture = TestFixture::new();
+    let goal = crate::goal::GoalService::default();
+    let record = goal.set("Perform two steps").await.unwrap();
+    let later_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(PauseResumeTool {
+        goal: goal.clone(),
+        id: record.id.clone(),
+    }));
+    registry.register(Arc::new(LaterTool(later_calls.clone())));
+    let registry = Arc::new(registry);
+    let response = StreamedResponse {
+        tool_calls: vec![
+            test_tool_call("first", "pause_resume_test", "{}"),
+            test_tool_call("later", "later_test", "{}"),
+        ],
+        ..StreamedResponse::default()
+    };
+    assert_eq!(
+        tool_call_batches(&response.tool_calls, &registry, &fixture.project_root).len(),
+        2
+    );
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![Ok(response)])),
+        registry.clone(),
+        registry,
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.goal = goal.clone();
+    let result = agent
+        .run(
+            "Perform two steps",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentRunResult::Interrupted(_)));
+    assert!(
+        later_calls.load(Ordering::SeqCst) == 0,
+        "stale batch must not run"
+    );
+    let current = goal.snapshot().await.unwrap();
+    assert_eq!(current.id, record.id);
+    assert_eq!(current.state, GoalState::Active);
+}
+
+#[tokio::test]
 async fn paused_and_resumed_goal_rejects_old_provider_response() {
     struct PauseResumeProvider {
         goal: crate::goal::GoalService,
