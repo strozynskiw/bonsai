@@ -139,7 +139,7 @@ pub trait OutputSink: Send + Sync {
         }
     }
     fn tool_started(&self, _id: &str, _name: &str, _arguments: &str) {}
-    /// A shell process was successfully spawned for this tool call.
+    /// A command process was successfully spawned for this tool call.
     fn command_spawned(&self, _id: &str) {}
     /// Observe a child tool's effect without forwarding its conversation.
     fn delegated_tool_phase(&self, _name: &str, _phase: DelegatedToolPhase) {}

@@ -2940,6 +2940,43 @@ mod tests {
         ToolCallStart::new(id, name, serde_json::json!({ "path": path }).to_string())
     }
 
+    #[tokio::test]
+    async fn git_inspection_records_the_spawned_command() {
+        use crate::tool::Tool;
+
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&fixture.project_root)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let sink = Arc::new(EvalSink::default());
+        sink.tool_calls_started(&[ToolCallStart::new("git-1", "git", r#"{"op":"status"}"#)]);
+        let context = crate::tool::ToolExecutionContext::new("git-1".into(), sink.clone());
+        let result = crate::tool::git::GitTool::new(fixture.project_root.clone())
+            .execute_with_context(serde_json::json!({"op": "status"}), context)
+            .await
+            .unwrap();
+        sink.tool_finished(
+            "git-1",
+            result.rendered_summary(),
+            crate::output::ToolExecutionStatus::Succeeded,
+        );
+
+        let effects = sink.task_effects();
+        assert!(
+            effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::Inspection)
+        );
+        assert!(
+            effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+    }
+
     #[test]
     fn eval_sink_counts_real_reads_not_reuse_or_rejections() {
         let sink = EvalSink::default();

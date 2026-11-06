@@ -1085,8 +1085,8 @@ impl OutputSink for RecordingSink {
 
     fn command_spawned(&self, _id: &str) {
         if let Some(observer) = &self.effect_observer {
-            // Only Bash emits this spawn signal, so it stays unambiguous even
-            // if a provider reused an ID for another call in the same batch.
+            // Report the process effect independently of call IDs, which a
+            // provider may reuse for another call in the same batch.
             observer.delegated_tool_phase("bash", crate::output::DelegatedToolPhase::Reached);
         }
     }

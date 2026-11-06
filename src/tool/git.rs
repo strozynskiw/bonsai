@@ -11,7 +11,7 @@ use crate::tool::schema::{
     boolean_property, bounded_integer_property, closed_object, parse_args, path_property,
     string_enum_property, string_property,
 };
-use crate::tool::{ParallelPolicy, ProjectPathResolver, Tool, ToolOutput};
+use crate::tool::{ParallelPolicy, ProjectPathResolver, Tool, ToolExecutionContext, ToolOutput};
 
 const GIT_TIMEOUT_SECS: u64 = 15;
 const MAX_OUTPUT_CHARS: usize = 40_000;
@@ -82,13 +82,24 @@ fn default_limit() -> usize {
     20
 }
 
-async fn run_git(args: &[&str], cwd: &Path) -> Result<String> {
-    let out = tokio::time::timeout(
-        Duration::from_secs(GIT_TIMEOUT_SECS),
-        crate::util::git::async_inspection_command(cwd)
+async fn run_git(
+    args: &[&str],
+    cwd: &Path,
+    context: Option<&ToolExecutionContext>,
+) -> Result<String> {
+    let out = tokio::time::timeout(Duration::from_secs(GIT_TIMEOUT_SECS), async {
+        let mut command = crate::util::git::async_inspection_command(cwd);
+        command
             .args(args)
-            .output(),
-    )
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = command.spawn()?;
+        if let Some(context) = context {
+            context.sink().command_spawned(context.tool_call_id());
+        }
+        child.wait_with_output().await
+    })
     .await
     .map_err(|_| anyhow::anyhow!("git timed out after {GIT_TIMEOUT_SECS}s"))??;
 
@@ -128,9 +139,10 @@ async fn empty_diff_message(
     staged: bool,
     scoped_path: Option<&str>,
     scoped_ref: bool,
+    context: Option<&ToolExecutionContext>,
 ) -> String {
     if let Some(path) = scoped_path {
-        if let Ok(status) = run_git(&["status", "--porcelain", "--", path], root).await
+        if let Ok(status) = run_git(&["status", "--porcelain", "--", path], root, context).await
             && status.lines().any(|line| line.starts_with("??"))
         {
             return format!(
@@ -144,7 +156,7 @@ async fn empty_diff_message(
     if scoped_ref {
         return "no diff".to_string();
     }
-    let Ok(status) = run_git(&["status", "--porcelain"], root).await else {
+    let Ok(status) = run_git(&["status", "--porcelain"], root, context).await else {
         return "no diff".to_string();
     };
     let untracked = status.lines().filter(|line| line.starts_with("??")).count();
@@ -248,6 +260,24 @@ impl Tool for GitTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        self.execute_inner(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        args: serde_json::Value,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput> {
+        self.execute_inner(args, Some(&context)).await
+    }
+}
+
+impl GitTool {
+    async fn execute_inner(
+        &self,
+        args: serde_json::Value,
+        context: Option<&ToolExecutionContext>,
+    ) -> Result<ToolOutput> {
         if matches!(self.access, GitAccess::Restricted) {
             anyhow::bail!(
                 "Git inspection is unavailable in an untrusted workspace because Git may execute repository-configured filters. Trust the workspace and restart Bonsai to enable it."
@@ -289,7 +319,7 @@ impl Tool for GitTool {
         let root = &self.project_root;
         let output = match args.op {
             GitOp::Status => {
-                let raw = run_git(&["status", "--short", "--branch"], root).await?;
+                let raw = run_git(&["status", "--short", "--branch"], root, context).await?;
                 if raw.trim().is_empty() {
                     "nothing to commit, working tree clean".to_string()
                 } else {
@@ -314,13 +344,14 @@ impl Tool for GitTool {
                     cmd.push("--");
                     cmd.push(p.as_str());
                 }
-                let raw = run_git(&cmd, root).await?;
+                let raw = run_git(&cmd, root, context).await?;
                 if raw.trim().is_empty() {
                     empty_diff_message(
                         root,
                         args.staged,
                         scoped_path.as_deref(),
                         args.target.is_some(),
+                        context,
                     )
                     .await
                 } else {
@@ -340,7 +371,7 @@ impl Tool for GitTool {
                     cmd.push("--");
                     cmd.push(p.as_str());
                 }
-                let raw = run_git(&cmd, root).await?;
+                let raw = run_git(&cmd, root, context).await?;
                 if raw.trim().is_empty() {
                     "no commits".to_string()
                 } else {
@@ -360,7 +391,7 @@ impl Tool for GitTool {
                 }
                 cmd.push("--");
                 cmd.push(p);
-                let raw = run_git(&cmd, root).await?;
+                let raw = run_git(&cmd, root, context).await?;
                 // Porcelain blame is verbose; condense to author + line.
                 condense_blame(&raw)
             }
@@ -379,7 +410,7 @@ impl Tool for GitTool {
                     cmd.push("--");
                     cmd.push(p.as_str());
                 }
-                run_git(&cmd, root).await?
+                run_git(&cmd, root, context).await?
             }
         };
 
@@ -438,6 +469,45 @@ mod tests {
     use super::*;
     use crate::tool::test_utils::TestFixture;
     use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct ProcessSink(AtomicUsize);
+
+    impl crate::output::OutputSink for ProcessSink {
+        fn command_spawned(&self, _id: &str) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_only_git_processes_that_actually_spawn() {
+        let fixture = TestFixture::new();
+        init_git_repo(&fixture.project_root);
+        let sink = Arc::new(ProcessSink::default());
+        let context = ToolExecutionContext::new("git-call".to_string(), sink.clone());
+
+        GitTool::new(fixture.project_root.clone())
+            .execute_with_context(json!({"op": "status"}), context.clone())
+            .await
+            .unwrap();
+        assert_eq!(sink.0.load(Ordering::Relaxed), 1);
+
+        assert!(
+            GitTool::restricted(fixture.project_root.clone())
+                .execute_with_context(json!({"op": "status"}), context.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            GitTool::new(fixture.project_root.clone())
+                .execute_with_context(json!({"op": "blame"}), context)
+                .await
+                .is_err()
+        );
+        assert_eq!(sink.0.load(Ordering::Relaxed), 1);
+    }
 
     #[tokio::test]
     async fn restricted_git_tool_does_not_run_repository_filters() {
@@ -566,6 +636,7 @@ mod tests {
         let err = run_git(
             &["rev-parse", "HEAD", "definitely-not-a-ref"],
             &fixture.project_root,
+            None,
         )
         .await
         .unwrap_err()
