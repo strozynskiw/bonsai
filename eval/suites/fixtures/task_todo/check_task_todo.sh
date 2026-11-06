@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -10,50 +10,50 @@ pass() {
   printf 'ok - %s\n' "$*"
 }
 
-capture() {
-  local out
+capture() (
   set +e
   out="$("$@" 2>&1)"
-  local status=$?
-  set -e
+  status=$?
   printf '%s' "$out"
-  return "$status"
-}
+  exit "$status"
+)
 
 lowercase() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-assert_contains() {
-  local haystack="$1"
-  local needle="$2"
-  local label="$3"
-  [[ "$(lowercase "$haystack")" == *"$(lowercase "$needle")"* ]] ||
-    fail "$label: expected output to contain '$needle'. Output was: $haystack"
-}
+assert_contains() (
+  haystack="$1"
+  needle="$2"
+  label="$3"
+  case "$(lowercase "$haystack")" in
+    *"$(lowercase "$needle")"*) ;;
+    *) fail "$label: expected output to contain '$needle'. Output was: $haystack" ;;
+  esac
+)
 
-assert_not_contains() {
-  local haystack="$1"
-  local needle="$2"
-  local label="$3"
-  [[ "$haystack" != *"$needle"* ]] ||
-    fail "$label: expected output not to contain '$needle'. Output was: $haystack"
-}
+assert_not_contains() (
+  haystack="$1"
+  needle="$2"
+  label="$3"
+  case "$haystack" in
+    *"$needle"*) fail "$label: expected output not to contain '$needle'. Output was: $haystack" ;;
+  esac
+)
 
-assert_fails_with() {
-  local label="$1"
-  local needle="$2"
+assert_fails_with() (
+  label="$1"
+  needle="$2"
   shift 2
-  local out
   if out="$(capture "$@")"; then
     fail "$label: command succeeded unexpectedly. Output was: $out"
   fi
   assert_contains "$out" "$needle" "$label"
   assert_contains "$out" "line" "$label"
   pass "$label"
-}
+)
 
-[[ -f Cargo.toml ]] || fail "run from the generated tasklog Rust project root"
+[ -f Cargo.toml ] || fail "run from the generated tasklog Rust project root"
 command -v cargo >/dev/null 2>&1 || fail "cargo is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
@@ -65,7 +65,7 @@ tmp_dir="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmp_dir"
 }
-trap cleanup EXIT
+trap cleanup 0
 
 export TASKLOG_TMP="$tmp_dir"
 python3 <<'PY'
@@ -128,7 +128,7 @@ cargo test --locked
 pass "cargo test --locked"
 cargo build --quiet --bin tasklog
 bin="./target/debug/tasklog"
-[[ -x "$bin" ]] || fail "tasklog binary is not executable"
+[ -x "$bin" ] || fail "tasklog binary is not executable"
 
 valid="$tmp_dir/valid.tasklog"
 out="$(capture "$bin" validate "$valid")" || fail "valid file failed: $out"
@@ -206,7 +206,7 @@ assert_fails_with "bad priority validation" priority "$bin" validate "$tmp_dir/b
 assert_fails_with "task outside section validation" section "$bin" validate "$tmp_dir/outside_section.tasklog"
 assert_fails_with "bad section validation" section "$bin" validate "$tmp_dir/bad_section.tasklog"
 
-[[ -f README.md ]] || fail "README.md is required"
+[ -f README.md ] || fail "README.md is required"
 readme="$(cat README.md)"
 for expected in tasklog validate summary list export; do
   assert_contains "$readme" "$expected" README

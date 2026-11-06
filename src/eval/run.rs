@@ -2882,6 +2882,28 @@ pub(crate) fn millis_u64(duration: Duration) -> u64 {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn tasklog_checker_reaches_project_guard_under_dash() {
+        let fixture = tempfile::tempdir().unwrap();
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("eval/suites/fixtures/task_todo/check_task_todo.sh");
+        let result = std::process::Command::new("dash")
+            .arg(script)
+            .current_dir(fixture.path())
+            .output();
+        let output = match result {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("failed to launch dash: {error}"),
+        };
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("FAIL: run from the generated tasklog Rust project root")
+        );
+    }
+
     #[test]
     fn eval_context_window_override_is_guarded() {
         assert_eq!(parse_eval_context_window_tokens("32768").unwrap(), 32_768);
