@@ -75,12 +75,7 @@ pub(super) async fn capture_worktree_snapshot_including(
     let mut paths = retained_paths.iter().cloned().collect::<BTreeSet<_>>();
     let mut command_succeeded = false;
     for args in commands {
-        let output = tokio::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .await
-            .ok()?;
+        let output = git_output(root, args).await.ok()?;
         if !output.status.success() {
             continue;
         }
@@ -719,6 +714,17 @@ async fn git_stdout(root: &Path, args: &[&str]) -> Result<String, std::io::Error
 }
 
 async fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, std::io::Error> {
+    let output = git_output(root, args).await?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+async fn git_output(root: &Path, args: &[&str]) -> Result<std::process::Output, std::io::Error> {
     let mut command = tokio::process::Command::new("git");
     command
         .args(args)
@@ -732,13 +738,7 @@ async fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, std::io::Error
     let mut guard = crate::process_group::ProcessGroupGuard::new(child.id());
     let output = child.wait_with_output().await?;
     guard.disarm();
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(std::io::Error::other(
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ))
-    }
+    Ok(output)
 }
 
 async fn git_digest(root: &Path, args: &[&str]) -> Result<String, std::io::Error> {

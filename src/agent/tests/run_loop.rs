@@ -3390,6 +3390,17 @@ async fn steering_interrupts_pending_review_baseline_before_stale_write() {
 #[cfg(unix)]
 #[tokio::test]
 async fn steering_interrupts_verification_binding_before_stale_command() {
+    steering_interrupts_git_preparation("cargo test").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn steering_interrupts_workspace_snapshot_before_stale_command() {
+    steering_interrupts_git_preparation("printf hello").await;
+}
+
+#[cfg(unix)]
+async fn steering_interrupts_git_preparation(command: &str) {
     let fixture = TestFixture::new();
     let root = &fixture.project_root;
     crate::util::git::setup_test_clean_filter(root);
@@ -3404,7 +3415,7 @@ async fn steering_interrupts_verification_binding_before_stale_command() {
             tool_calls: vec![test_tool_call(
                 "stale-check",
                 "bash",
-                r#"{"command":"cargo test"}"#,
+                &serde_json::json!({"command": command}).to_string(),
             )],
             ..StreamedResponse::default()
         }),
@@ -3438,7 +3449,7 @@ async fn steering_interrupts_verification_binding_before_stale_command() {
         result = tokio::time::timeout(std::time::Duration::from_secs(5), started) => {
             if result.is_err() {
                 std::fs::write(root.join("binding-release"), "").unwrap();
-                panic!("verification binding did not start");
+                panic!("Git preparation did not start for {command}");
             }
         }
         result = &mut run => panic!("run finished before binding started: {result:?}"),
@@ -3455,7 +3466,7 @@ async fn steering_interrupts_verification_binding_before_stale_command() {
     let result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut run).await;
     std::fs::write(root.join("binding-release"), "").unwrap();
     let result = result
-        .expect("steering waited for verification binding")
+        .expect("steering waited for Git preparation")
         .unwrap();
     assert_eq!(result, AgentRunResult::Completed("done".into()));
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;

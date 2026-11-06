@@ -1240,30 +1240,73 @@ impl Agent {
                 None
             };
             let foreground_bash = eligible_calls.iter().any(foreground_bash_call);
-            let diagnostic_baseline = if foreground_bash && self.lsp_hub.is_some() {
-                Some(crate::lsp::DiagnosticSnapshot::default())
-            } else {
-                self.lsp_diagnostic_baseline_for_batch(&eligible_calls)
-                    .await
-            };
             // Git-based snapshots can execute repository-configured clean
             // filters. Never run them before workspace trust, even when a
             // tool call will later be denied or a child is read-only.
             let allow_git_snapshot =
                 self.workspace_trust == crate::workspace_trust::WorkspaceTrust::Trusted;
-            let bash_baseline = if foreground_bash && allow_git_snapshot {
-                capture_worktree_snapshot(&self.project_root).await
-            } else {
-                None
+            let capture_baselines = async {
+                let diagnostic = if foreground_bash && self.lsp_hub.is_some() {
+                    Some(crate::lsp::DiagnosticSnapshot::default())
+                } else {
+                    self.lsp_diagnostic_baseline_for_batch(&eligible_calls)
+                        .await
+                };
+                let bash = if foreground_bash && allow_git_snapshot {
+                    capture_worktree_snapshot(&self.project_root).await
+                } else {
+                    None
+                };
+                let delegated = if allow_git_snapshot
+                    && eligible_calls
+                        .iter()
+                        .any(|call| tools::is_delegation_call(tool_registry, call))
+                {
+                    capture_worktree_snapshot(&self.project_root).await
+                } else {
+                    None
+                };
+                (diagnostic, bash, delegated)
             };
-            let delegated_baseline = if allow_git_snapshot
-                && eligible_calls
-                    .iter()
-                    .any(|call| tools::is_delegation_call(tool_registry, call))
-            {
-                capture_worktree_snapshot(&self.project_root).await
-            } else {
-                None
+            let (baselines, steering) = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => (None, None),
+                steering = queued_messages.wait_for_message() => (None, Some(steering)),
+                baselines = capture_baselines => (Some(baselines), None),
+            };
+            let Some((diagnostic_baseline, bash_baseline, delegated_baseline)) = baselines else {
+                for call in &eligible_calls {
+                    self.verification
+                        .pending_verification_bindings
+                        .remove(&call.id);
+                    self.verification
+                        .suppressed_verification_calls
+                        .remove(&call.id);
+                }
+                let skipped_calls = batch
+                    .into_iter()
+                    .chain(batches.by_ref().flatten())
+                    .collect();
+                let message = if steering.is_some() {
+                    "Tool skipped because a new queued user message took priority."
+                } else {
+                    "Tool skipped because the run was interrupted."
+                };
+                self.drain_skipped_calls(
+                    skipped_calls,
+                    message,
+                    sink,
+                    &mut trusted_contexts,
+                    &mut image_messages,
+                )
+                .await?;
+                if let Some(steering) = steering {
+                    self.apply_queued_messages(steering, sink).await?;
+                    outcome.reset_loop_guards = true;
+                } else {
+                    interrupted_mid_tools = true;
+                }
+                break;
             };
             // A batch made only of delegations is child work, not a tool
             // process: the parent is waiting on agents that are themselves
