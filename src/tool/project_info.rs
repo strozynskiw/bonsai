@@ -10,7 +10,7 @@ use crate::context::{
     detect_project_ecosystems,
 };
 use crate::tool::schema::{closed_object, parse_args};
-use crate::tool::{ParallelPolicy, Tool, ToolOutput};
+use crate::tool::{ParallelPolicy, Tool, ToolExecutionContext, ToolOutput};
 
 const MAX_PROJECT_INFO_CHARS: usize = 12_000;
 const PROJECT_INFO_TRUNCATION_NOTE: &str =
@@ -217,6 +217,24 @@ impl Tool for ProjectInfoTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        self.execute_inner(args, None).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        args: serde_json::Value,
+        context: ToolExecutionContext,
+    ) -> Result<ToolOutput> {
+        self.execute_inner(args, Some(&context)).await
+    }
+}
+
+impl ProjectInfoTool {
+    async fn execute_inner(
+        &self,
+        args: serde_json::Value,
+        context: Option<&ToolExecutionContext>,
+    ) -> Result<ToolOutput> {
         let _args: ProjectInfoArgs = parse_args("project_info", args)?;
         let steering = match self.runtime.context_scope {
             ProjectInfoContextScope::Inherited => collect_steering_files(&self.project_root),
@@ -236,7 +254,7 @@ impl Tool for ProjectInfoTool {
         ) {
             None
         } else {
-            Some(GitInfo::collect(&self.project_root).await)
+            Some(GitInfo::collect(&self.project_root, context).await)
         };
         let output = ProjectInfoOutput {
             cwd: self.project_root.display().to_string(),
@@ -288,8 +306,13 @@ fn render_project_info(mut output: ProjectInfoOutput) -> Result<String> {
 }
 
 impl GitInfo {
-    async fn collect(root: &Path) -> Self {
-        let branch = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await;
+    async fn collect(root: &Path, context: Option<&ToolExecutionContext>) -> Self {
+        let branch = git(
+            root,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            context,
+        )
+        .await;
         let Some(branch) = branch else {
             return Self {
                 repository: false,
@@ -306,6 +329,7 @@ impl GitInfo {
                 "--untracked-files=normal",
                 "--no-renames",
             ],
+            context,
         )
         .await
         .map(|status| {
@@ -314,7 +338,7 @@ impl GitInfo {
                 .filter(|line| !line.trim().is_empty())
                 .count()
         });
-        let last_commit = git(root, &["log", "-1", "--pretty=%s"])
+        let last_commit = git(root, &["log", "-1", "--pretty=%s"], context)
             .await
             .filter(|line| !line.is_empty());
         Self {
@@ -406,12 +430,18 @@ fn known_commands(root: &Path, ecosystems: &[String]) -> Vec<KnownCommand> {
     commands
 }
 
-async fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let output = crate::util::git::async_inspection_command(root)
+async fn git(root: &Path, args: &[&str], context: Option<&ToolExecutionContext>) -> Option<String> {
+    let mut command = crate::util::git::async_inspection_command(root);
+    command
         .args(args)
-        .output()
-        .await
-        .ok()?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = command.spawn().ok()?;
+    if let Some(context) = context {
+        context.sink().command_spawned(context.tool_call_id());
+    }
+    let output = child.wait_with_output().await.ok()?;
     output
         .status
         .success()
@@ -442,7 +472,7 @@ mod tests {
     async fn project_info_git_summary_does_not_run_fsmonitor() {
         let dir = tempfile::TempDir::new().unwrap();
         crate::util::git::setup_test_fsmonitor(dir.path());
-        let info = GitInfo::collect(dir.path()).await;
+        let info = GitInfo::collect(dir.path(), None).await;
         assert!(info.repository);
         assert!(!dir.path().join("fsmonitor-ran").exists());
     }

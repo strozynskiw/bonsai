@@ -2999,6 +2999,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn project_info_records_git_spawn_even_outside_a_repository() {
+        use crate::tool::Tool;
+
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let sink = Arc::new(EvalSink::default());
+        sink.tool_calls_started(&[ToolCallStart::new("info-1", "project_info", "{}")]);
+        let context = crate::tool::ToolExecutionContext::new("info-1".into(), sink.clone());
+        let runtime = Arc::new(crate::tool::ProjectInfoRuntime::isolated(None));
+        let result = crate::tool::ProjectInfoTool::new(fixture.project_root.clone(), runtime)
+            .execute_with_context(serde_json::json!({}), context)
+            .await
+            .unwrap();
+        sink.tool_finished(
+            "info-1",
+            result.rendered_summary(),
+            crate::output::ToolExecutionStatus::Succeeded,
+        );
+        let effects = sink.task_effects();
+        assert!(
+            effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::Inspection)
+        );
+        assert!(
+            effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_project_info_does_not_record_a_command() {
+        use crate::tool::Tool;
+
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let sink = Arc::new(EvalSink::default());
+        sink.tool_calls_started(&[ToolCallStart::new("info-1", "project_info", "{}")]);
+        let context = crate::tool::ToolExecutionContext::new("info-1".into(), sink.clone());
+        let runtime = Arc::new(crate::tool::ProjectInfoRuntime::restricted(None));
+        let result = crate::tool::ProjectInfoTool::new(fixture.project_root.clone(), runtime)
+            .execute_with_context(serde_json::json!({}), context)
+            .await
+            .unwrap();
+        sink.tool_finished(
+            "info-1",
+            result.rendered_summary(),
+            crate::output::ToolExecutionStatus::Succeeded,
+        );
+        let effects = sink.task_effects();
+        assert!(
+            effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::Inspection)
+        );
+        assert!(
+            !effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+    }
+
     #[test]
     fn eval_sink_counts_real_reads_not_reuse_or_rejections() {
         let sink = EvalSink::default();
