@@ -30,7 +30,7 @@ impl Tool for GoalCompleteTool {
     }
 
     fn description(&self) -> &str {
-        "Claim that the full active goal is complete only after checking its requirements and evidence. Do not call for a progress update, unfinished work, or an unresolved blocker. Call alone after all other work; the completion gate still checks outstanding work and verification."
+        "Claim that the full active goal is complete only after checking its requirements and evidence. Do not call for a progress update, unfinished work, or an unresolved blocker. Call alone after all other work; the completion gate still checks outstanding work and verification. After the tool returns, provide a self-contained final answer with the requested result, even if you gave details alongside this call."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -59,7 +59,7 @@ impl Tool for GoalCompleteTool {
         );
         self.goal.claim_completion(&self.lease).await?;
         Ok(ToolOutput::Text(
-            "Goal completion claimed; final checks and the active run still determine the outcome."
+            "Goal completion claimed; final checks and the active run still determine the outcome. Now provide a self-contained final answer that includes the requested result, rather than referring to an earlier message."
                 .into(),
         ))
     }
@@ -79,9 +79,13 @@ mod tests {
         let tool = GoalCompleteTool::new(goal.clone(), lease.clone());
         assert!(tool.execute(json!({"evidence": " "})).await.is_err());
         assert!(!goal.completion_claimed(&lease).await);
-        tool.execute(json!({"evidence": "All files were inspected."}))
+        let output = tool
+            .execute(json!({"evidence": "All files were inspected."}))
             .await
             .unwrap();
+        assert!(
+            matches!(output, ToolOutput::Text(text) if text.contains("self-contained final answer"))
+        );
         assert!(goal.completion_claimed(&lease).await);
         goal.transition(&record.id, GoalState::Paused, None)
             .await

@@ -1,0 +1,18 @@
+{
+  "scenario": "Inspect README.md and explain the purpose of an evaluation fixture while pursuing an explicit goal.",
+  "suite": "eval/suites/goal_completion.toml",
+  "provider": "deepseek/deepseek-flash",
+  "effort": "low",
+  "baseline": {
+    "revision": "4f804af7",
+    "seed": 515,
+    "report": "target/goal-answer-repro/1793996300926-live-515/report.json",
+    "observation": "One final answer referred to an earlier summary and omitted the README's isolated-copy detail. The original grader accepted it because it contained README and fixture; the stricter check would score this sample 2/3."
+  },
+  "candidate": {
+    "seed": 515,
+    "report": "target/goal-answer-candidate/1793996647047-live-515/report.json",
+    "observation": "All three final answers included the isolated-copy or disposable-fixture detail and passed the stricter grader."
+  },
+  "limitation": "The tool instruction is advisory. Three nonrandom live trials cannot establish a compliance rate or prove that the instruction caused the difference. The grader checks this fixture's key detail; it is not a general self-contained-answer detector."
+}
