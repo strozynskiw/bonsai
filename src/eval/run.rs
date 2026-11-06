@@ -125,6 +125,15 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
         tool_versions = qualification_preflight(config.mode).await?;
     }
     let selected_tasks = select_tasks(&suite, config.task.as_deref())?;
+    if config.mode == EvalMode::Mock {
+        for task in &selected_tasks {
+            anyhow::ensure!(
+                !task.enable_subagents || task.subagent_mock.is_some(),
+                "Task '{}' requires subagent_mock in mock mode",
+                task.id
+            );
+        }
+    }
     let stream_mode = config.record_provider_streams.is_some() || config.mode == EvalMode::Replay;
     if stream_mode {
         anyhow::ensure!(
@@ -134,7 +143,8 @@ pub(crate) async fn run(config: EvalCliConfig) -> Result<EvalRunOutcome> {
         for task in &selected_tasks {
             anyhow::ensure!(
                 task.shared_workspace_peer.is_none()
-                    && task.lsp_condition == EvalLspCondition::Inherited,
+                    && task.lsp_condition == EvalLspCondition::Inherited
+                    && !task.enable_subagents,
                 "stream replay/capture requires single-agent tasks without reviewer providers"
             );
         }
@@ -403,13 +413,17 @@ impl ProviderSetup {
         stats: Arc<EvalProviderStats>,
         max_attempts: Option<usize>,
         seed: u64,
+        mock_script: Option<MockScript>,
     ) -> Result<crate::tool::SubagentProviderFactory> {
         let factory: crate::tool::SubagentProviderFactory = match self {
             #[cfg(test)]
             Self::CaptureTest { .. } => anyhow::bail!("capture test does not support reviewers"),
             Self::Replay { .. } => anyhow::bail!("replay does not support reviewer providers"),
             Self::Mock => {
-                let script: MockScript = toml::from_str("final_response = 'No findings.'")?;
+                let script: MockScript = match mock_script {
+                    Some(script) => script,
+                    None => toml::from_str("final_response = 'No findings.'")?,
+                };
                 Arc::new(move |_, _| {
                     let provider = Box::new(MockEvalProvider::new(script.clone(), seed));
                     Box::pin(async move {
@@ -884,6 +898,8 @@ struct EvalAgentBuild<'a> {
     storage: &'a Storage,
     provider_setup: &'a ProviderSetup,
     mock_script: Option<MockScript>,
+    subagent_mock: Option<MockScript>,
+    enable_subagents: bool,
     seed: u64,
     max_provider_attempts: Option<usize>,
     max_logical_turns: Option<usize>,
@@ -952,7 +968,7 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         None => context::isolated_project_context_snapshot(config.worktree_path),
     };
     let path_evidence = crate::tool::PathEvidence::new(config.worktree_path)?;
-    let project_info_runtime = Arc::new(crate::tool::ProjectInfoRuntime::new(Some(
+    let project_info_runtime = Arc::new(crate::tool::ProjectInfoRuntime::isolated(Some(
         config.provider_setup.project_info_provider_state(),
     )));
     let lsp_hub = Arc::new(
@@ -988,15 +1004,17 @@ async fn build_eval_agent(config: EvalAgentBuild<'_>) -> Result<EvalAgentHarness
         config.max_provider_attempts,
         config.stream,
     )?;
-    let review_factory = if config.lsp_condition != EvalLspCondition::Inherited {
-        Some(config.provider_setup.review_factory(
-            provider_stats.clone(),
-            config.max_provider_attempts,
-            config.seed,
-        )?)
-    } else {
-        None
-    };
+    let review_factory =
+        if config.enable_subagents || config.lsp_condition != EvalLspCondition::Inherited {
+            Some(config.provider_setup.review_factory(
+                provider_stats.clone(),
+                config.max_provider_attempts,
+                config.seed,
+                config.subagent_mock,
+            )?)
+        } else {
+            None
+        };
     let (tool_registry, planning_registry, smol_registry, subagent_runner) =
         crate::bootstrap::build_tool_registries(crate::bootstrap::ToolRegistryDeps {
             project_root: config.worktree_path.to_path_buf(),
@@ -1149,6 +1167,8 @@ async fn run_shared_workspace_peer(
         storage,
         provider_setup,
         mock_script: Some(peer.mock.clone()),
+        subagent_mock: None,
+        enable_subagents: false,
         seed: seed.saturating_add(1),
         max_provider_attempts: Some(12),
         max_logical_turns: Some(12),
@@ -1211,18 +1231,26 @@ async fn run_task(
     let worktree_path = run_dir.join("worktrees").join(task_run_id);
     let fixture_path = SafeRelativePath::parse(&task.fixture, "fixture")?.join(&suite.base_dir);
     copy_dir_all(&fixture_path, &worktree_path)?;
-    if task.lsp_condition != EvalLspCondition::Inherited {
-        // Keep review baselines inside this task, never the enclosing source checkout.
-        // Untracked fixture signatures let the existing review path detect edits.
-        let output = tokio::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(&worktree_path)
-            .output()
-            .await
-            .context("Initialize isolated qualification review repository")?;
-        if !output.status.success() {
-            anyhow::bail!("Cannot initialize qualification review repository");
-        }
+    // Every fixture needs its own Git boundary, including ordinary live/mock
+    // runs. Otherwise Git walks out of target/eval into Bonsai's source tree,
+    // leaking its branch, history and diff into requests and tool results.
+    // Untracked fixture signatures also let review baselines detect edits.
+    let output = tokio::process::Command::new("git")
+        .args([
+            "init",
+            "--quiet",
+            "--initial-branch=bonsai-eval",
+            "--template=",
+        ])
+        .current_dir(&worktree_path)
+        .output()
+        .await
+        .context("Initialize isolated eval repository")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Cannot initialize isolated eval repository: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let stream = StreamSession::for_task(
@@ -1242,6 +1270,8 @@ async fn run_task(
         storage,
         provider_setup,
         mock_script: task.mock.clone(),
+        subagent_mock: task.subagent_mock.clone(),
+        enable_subagents: task.enable_subagents,
         seed,
         max_provider_attempts: budgets.max_provider_attempts,
         max_logical_turns: budgets.max_logical_turns,
@@ -1601,6 +1631,7 @@ async fn run_task(
         resume_prompt: task.resume_prompt.clone(),
         queued_messages: task.queued_messages.clone(),
         profile: task.profile,
+        enable_subagents: task.enable_subagents,
         status,
         expected_status: task.expected_status,
         passed,
@@ -1624,7 +1655,9 @@ async fn run_task(
         shared_workspace,
         changed_files: primary_changed_files,
         tool_effects: task_effects.tool_effects,
+        reached_tool_effects: task_effects.reached_tool_effects,
         attempted_tool_effects: task_effects.attempted_tool_effects,
+        delegated_tool_effects: task_effects.delegated_tool_effects,
         worktree_path: worktree_path.display().to_string(),
         graders: grader_results,
     })
@@ -1899,6 +1932,10 @@ struct EvalTask {
     #[serde(default)]
     mock: Option<MockScript>,
     #[serde(default)]
+    enable_subagents: bool,
+    #[serde(default)]
+    subagent_mock: Option<MockScript>,
+    #[serde(default)]
     graders: Vec<GraderSpec>,
     #[serde(default)]
     budgets: EvalBudgets,
@@ -1956,6 +1993,18 @@ struct SharedWorkspacePeer {
 impl EvalTask {
     fn validate(&self, suite_base_dir: &Path) -> Result<()> {
         validate_id(&self.id)?;
+        if self.subagent_mock.is_some() && !self.enable_subagents {
+            anyhow::bail!("Task '{}' subagent_mock requires enable_subagents", self.id);
+        }
+        if self.enable_subagents && self.profile != EvalAgentProfile::Full {
+            anyhow::bail!("Task '{}' subagents require the full profile", self.id);
+        }
+        if self.enable_subagents && self.lsp_condition != EvalLspCondition::Inherited {
+            anyhow::bail!(
+                "Task '{}' cannot combine subagents with LSP qualification",
+                self.id
+            );
+        }
         if self.lsp_condition != EvalLspCondition::Inherited && self.shared_workspace_peer.is_some()
         {
             anyhow::bail!(
@@ -1975,6 +2024,9 @@ impl EvalTask {
             );
         }
         if let Some(mock) = &self.mock {
+            mock.validate(&self.id, &fixture)?;
+        }
+        if let Some(mock) = &self.subagent_mock {
             mock.validate(&self.id, &fixture)?;
         }
         if self.expected_status == TaskStatus::Completed && self.graders.is_empty() {
@@ -2437,7 +2489,10 @@ struct EvalSink {
 struct EvalSinkState {
     pending: HashMap<String, EvalToolAction>,
     pending_effects: HashMap<String, EvalToolEffect>,
+    spawned_commands: HashSet<String>,
     observed_tool_effects: HashSet<EvalToolEffect>,
+    delegated_tool_effects: HashSet<EvalToolEffect>,
+    reached_tool_effects: HashSet<EvalToolEffect>,
     attempted_tool_effects: HashSet<EvalToolEffect>,
     read_calls: HashMap<String, EvalReadCall>,
     path_generations: HashMap<String, usize>,
@@ -2482,16 +2537,30 @@ impl EvalSink {
             .copied()
             .collect::<Vec<_>>();
         tool_effects.sort();
+        let mut reached_tool_effects = state
+            .reached_tool_effects
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        reached_tool_effects.sort();
         let mut attempted_tool_effects = state
             .attempted_tool_effects
             .iter()
             .copied()
             .collect::<Vec<_>>();
         attempted_tool_effects.sort();
+        let mut delegated_tool_effects = state
+            .delegated_tool_effects
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        delegated_tool_effects.sort();
         EvalTaskEffects {
             changed_files,
             tool_effects,
+            reached_tool_effects,
             attempted_tool_effects,
+            delegated_tool_effects,
         }
     }
 
@@ -2559,18 +2628,32 @@ impl EvalSink {
         result: &str,
         status: crate::output::ToolExecutionStatus,
         diff_paths: &[String],
+        reached: bool,
+        effect_hint: Option<EvalToolEffect>,
     ) {
         let success = status.is_success();
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(effect) = state.pending_effects.remove(id)
-            && success
-        {
-            state.observed_tool_effects.insert(effect);
+        let spawned = state.spawned_commands.remove(id);
+        let pending_effect = if status == crate::output::ToolExecutionStatus::Started {
+            state.pending_effects.get(id).copied()
+        } else {
+            state.pending_effects.remove(id)
+        };
+        let effect = effect_hint.or(pending_effect);
+        if let Some(effect) = effect {
+            if success {
+                state.observed_tool_effects.insert(effect);
+            }
+            if reached || (spawned && effect == EvalToolEffect::CommandExecution) {
+                state.reached_tool_effects.insert(effect);
+            }
         }
-        if let Some(call) = state.read_calls.get_mut(id) {
+        if effect_hint != Some(EvalToolEffect::CommandExecution)
+            && let Some(call) = state.read_calls.get_mut(id)
+        {
             call.outcome = if result.starts_with(crate::agent::REUSED_READ_MARKER)
                 || result.starts_with(crate::agent::REUSED_INSPECTION_MARKER)
             {
@@ -2593,6 +2676,9 @@ impl EvalSink {
             return;
         };
         if !success {
+            if reached && !spawned && matches!(action, EvalToolAction::GlobalMutate) {
+                state.global_generation = state.global_generation.saturating_add(1);
+            }
             return;
         }
         match action {
@@ -2601,7 +2687,9 @@ impl EvalSink {
             }
             EvalToolAction::Mutate(_) => record_changed_paths(&mut state, diff_paths),
             EvalToolAction::GlobalMutate => {
-                state.global_generation = state.global_generation.saturating_add(1);
+                if !spawned {
+                    state.global_generation = state.global_generation.saturating_add(1);
+                }
                 record_changed_paths(&mut state, diff_paths);
             }
         }
@@ -2618,6 +2706,63 @@ fn record_changed_paths(state: &mut EvalSinkState, paths: &[String]) {
 impl OutputSink for EvalSink {
     fn wants_context_updates(&self) -> bool {
         false
+    }
+
+    fn delegated_tool_phase(&self, name: &str, phase: crate::output::DelegatedToolPhase) {
+        use crate::output::DelegatedToolPhase;
+        let effect = EvalToolEffect::for_tool_name(name);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.attempted_tool_effects.insert(effect);
+        if matches!(
+            phase,
+            DelegatedToolPhase::Reached | DelegatedToolPhase::Succeeded
+        ) {
+            state.reached_tool_effects.insert(effect);
+        }
+        if phase == DelegatedToolPhase::Succeeded {
+            state.observed_tool_effects.insert(effect);
+            state.delegated_tool_effects.insert(effect);
+        }
+    }
+
+    fn command_spawned(&self, id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.spawned_commands.insert(id.to_string()) {
+            state.global_generation = state.global_generation.saturating_add(1);
+        }
+        state
+            .attempted_tool_effects
+            .insert(EvalToolEffect::CommandExecution);
+        state
+            .reached_tool_effects
+            .insert(EvalToolEffect::CommandExecution);
+    }
+
+    fn tool_result(&self, id: &str, result: crate::protocol::ToolResult) {
+        let command_result = matches!(
+            &result.content,
+            crate::protocol::ToolResultContent::Command { .. }
+        );
+        let reached = result.status.is_success()
+            || result.status == crate::output::ToolExecutionStatus::Started
+            || (result.status.is_failure() && command_result);
+        let paths = result
+            .diff()
+            .map(|diff| {
+                diff.files()
+                    .map(|file| file.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let hint = (command_result && result.status != crate::output::ToolExecutionStatus::Skipped)
+            .then_some(EvalToolEffect::CommandExecution);
+        self.finish_tool(id, &result.preview, result.status, &paths, reached, hint);
     }
 
     fn tool_calls_started(&self, calls: &[ToolCallStart]) {
@@ -2679,7 +2824,7 @@ impl OutputSink for EvalSink {
     }
 
     fn tool_finished(&self, id: &str, result: &str, status: crate::output::ToolExecutionStatus) {
-        self.finish_tool(id, result, status, &[]);
+        self.finish_tool(id, result, status, &[], status.is_success(), None);
     }
 
     fn tool_finished_with_diff(
@@ -2693,7 +2838,7 @@ impl OutputSink for EvalSink {
             .files()
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
-        self.finish_tool(id, result, status, &paths);
+        self.finish_tool(id, result, status, &paths, status.is_success(), None);
     }
 
     fn workspace_changed(&self, paths: &[String], _intent: &str) {
@@ -2704,6 +2849,9 @@ impl OutputSink for EvalSink {
         if !paths.is_empty() {
             state
                 .observed_tool_effects
+                .insert(EvalToolEffect::WorkspaceMutation);
+            state
+                .reached_tool_effects
                 .insert(EvalToolEffect::WorkspaceMutation);
         }
         record_changed_paths(&mut state, paths);
@@ -2781,7 +2929,7 @@ mod tests {
                 &catalog,
                 metadata,
                 "opencode",
-                "opencode/qwen3.7-max",
+                "opencode/qwen3.8-max",
                 ReasoningSelection::Max,
             ),
             ReasoningSelection::Default
@@ -2868,6 +3016,528 @@ mod tests {
     }
 
     #[test]
+    fn delegated_effects_are_counted_without_call_id_collisions() {
+        let sink = Arc::new(EvalSink::default());
+        let registry = Arc::new(crate::subagent::SubagentRegistry::new());
+        let a = registry.register("a", "first", false);
+        let b = registry.register("b", "second", false);
+        let first =
+            crate::subagent::RecordingSink::observing(registry.clone(), a, Some(sink.clone()));
+        let second = crate::subagent::RecordingSink::observing(registry, b, Some(sink.clone()));
+        first.tool_started("same-id", "bash", r#"{"command":"secret"}"#);
+        second.tool_started("same-id", "read", r#"{"path":"private"}"#);
+        first.command_spawned("same-id");
+        second.tool_result(
+            "same-id",
+            crate::protocol::ToolResult::legacy(
+                "body".into(),
+                crate::output::ToolExecutionStatus::Succeeded,
+            ),
+        );
+        first.tool_result(
+            "same-id",
+            crate::protocol::ToolResult::legacy(
+                "interrupted".into(),
+                crate::output::ToolExecutionStatus::Interrupted,
+            ),
+        );
+        let effects = sink.task_effects();
+        assert_eq!(
+            effects.attempted_tool_effects,
+            vec![EvalToolEffect::Inspection, EvalToolEffect::CommandExecution]
+        );
+        assert_eq!(
+            effects.reached_tool_effects,
+            vec![EvalToolEffect::Inspection, EvalToolEffect::CommandExecution]
+        );
+        assert_eq!(effects.tool_effects, vec![EvalToolEffect::Inspection]);
+        assert!(effects.changed_files.is_empty());
+    }
+
+    #[test]
+    fn shell_spawn_is_recorded_when_a_batch_reuses_a_call_id() {
+        let calls = [
+            ToolCallStart::new("same", "bash", r#"{"command":"true"}"#),
+            ToolCallStart::new("same", "read", r#"{"path":"file.txt"}"#),
+        ];
+        let direct = EvalSink::default();
+        direct.tool_calls_started(&calls);
+        direct.command_spawned("same");
+        direct.tool_result(
+            "same",
+            crate::protocol::ToolResult::legacy(
+                "interrupted".into(),
+                crate::output::ToolExecutionStatus::Interrupted,
+            ),
+        );
+        assert_eq!(
+            direct.task_effects().reached_tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+
+        let parent = Arc::new(EvalSink::default());
+        let registry = Arc::new(crate::subagent::SubagentRegistry::new());
+        let id = registry.register("child", "task", false);
+        let child = crate::subagent::RecordingSink::observing(registry, id, Some(parent.clone()));
+        child.tool_calls_started(&calls);
+        child.command_spawned("same");
+        child.tool_result(
+            "same",
+            crate::protocol::ToolResult::legacy(
+                "done".into(),
+                crate::output::ToolExecutionStatus::Succeeded,
+            ),
+        );
+        assert_eq!(
+            parent.task_effects().reached_tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+        assert!(parent.task_effects().tool_effects.is_empty());
+
+        let command = crate::protocol::ToolResult {
+            status: crate::output::ToolExecutionStatus::Succeeded,
+            preview: "done".into(),
+            content: crate::protocol::ToolResultContent::Command {
+                rendered: "done".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                timed_out: false,
+                truncation: None,
+            },
+            background_task_id: None,
+            subagent_id: None,
+        };
+        child.tool_result("same", command.clone());
+        assert_eq!(
+            parent.task_effects().tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+
+        let direct = EvalSink::default();
+        direct.tool_calls_started(&calls);
+        direct.command_spawned("same");
+        direct.tool_result("same", command);
+        assert_eq!(
+            direct.task_effects().tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+        assert_eq!(
+            direct.task_effects().reached_tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+        assert_eq!(direct.max_reads_per_unchanged_path(), 0);
+    }
+
+    #[tokio::test]
+    async fn delegated_agent_command_is_visible_to_parent_eval() {
+        use crate::tool::{
+            AgentTool, BashTool, SubagentProviderConfig, SubagentProviderFactory, SubagentRunner,
+            Tool, ToolExecutionContext, ToolRegistry,
+        };
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        std::fs::write(fixture.project_root.join("README.md"), "fixture\n").unwrap();
+        let agent_dir = fixture.project_root.join(".bonsai/agents");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("shell-worker.md"),
+            "---\nname: shell-worker\ndescription: test\ntools: [bash]\n---\nInspect.\n",
+        )
+        .unwrap();
+        let script: MockScript = toml::from_str(
+            r#"
+final_response = "Done."
+[[tool_turns]]
+[[tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"grep -q missing_marker README.md"}'
+"#,
+        )
+        .unwrap();
+        let factory: SubagentProviderFactory = Arc::new(move |_, _| {
+            let script = script.clone();
+            Box::pin(async move {
+                SubagentProviderConfig::new(
+                    Box::new(MockEvalProvider::new(script, 9)),
+                    DEFAULT_CONTEXT_WINDOW_TOKENS as usize,
+                    PromptEstimator::heuristic(),
+                    "mock".into(),
+                )
+            })
+        });
+        let mut full = ToolRegistry::new();
+        full.register(Arc::new(BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        )));
+        let runner = SubagentRunner::new(
+            factory,
+            Arc::new(ToolRegistry::new()),
+            Arc::new(full),
+            fixture.read_tracker.clone(),
+            Arc::new(crate::tool::ProjectInfoRuntime::new(None)),
+            Arc::new(crate::subagent::SubagentRegistry::new()),
+            fixture.project_root.clone(),
+        );
+        let agents = crate::resource::agent::AgentRegistry::load_from(
+            &fixture.project_root,
+            &fixture.project_root.join("home"),
+        );
+        let tool = AgentTool::new(
+            runner,
+            crate::resource::agent::shared_registry(Arc::new(agents)),
+        );
+        let sink = Arc::new(EvalSink::default());
+        let context = ToolExecutionContext::new("parent".into(), sink.clone());
+        tool.execute_with_context(
+            serde_json::json!({"agent":"shell-worker", "prompt":"Inspect the fixture"}),
+            context,
+        )
+        .await
+        .unwrap();
+        let effects = sink.task_effects();
+        assert!(
+            effects
+                .attempted_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+        assert!(
+            effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+        assert!(
+            !effects
+                .tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+
+        std::fs::write(fixture.project_root.join("README.md"), "missing_marker\n").unwrap();
+        let allowed = Arc::new(EvalSink::default());
+        tool.execute_with_context(
+            serde_json::json!({"agent":"shell-worker", "prompt":"Inspect the fixture"}),
+            ToolExecutionContext::new("allowed".into(), allowed.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            allowed
+                .task_effects()
+                .tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+
+        fixture
+            .permissions
+            .add_session_rule("grep *", crate::permissions::Permission::Deny);
+        let denied = Arc::new(EvalSink::default());
+        tool.execute_with_context(
+            serde_json::json!({"agent":"shell-worker", "prompt":"Inspect the fixture"}),
+            ToolExecutionContext::new("denied".into(), denied.clone()),
+        )
+        .await
+        .unwrap();
+        let effects = denied.task_effects();
+        assert!(
+            effects
+                .attempted_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+        assert!(
+            !effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_agent_effects_reach_parent_eval_before_it_finishes() {
+        use crate::tool::{
+            AgentTool, ReadTool, SelfReviewRunOptions, SubagentProviderConfig,
+            SubagentProviderFactory, SubagentRunner, Tool, ToolExecutionContext, ToolOutput,
+            ToolRegistry,
+        };
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        std::fs::write(fixture.project_root.join("README.md"), "fixture\n").unwrap();
+        let script: MockScript =
+            toml::from_str("read = [\"README.md\"]\nfinal_response = \"Done.\"\n").unwrap();
+        let factory: SubagentProviderFactory = Arc::new(move |_, _| {
+            let script = script.clone();
+            Box::pin(async move {
+                SubagentProviderConfig::new(
+                    Box::new(MockEvalProvider::new(script, 9)),
+                    DEFAULT_CONTEXT_WINDOW_TOKENS as usize,
+                    PromptEstimator::heuristic(),
+                    "mock".into(),
+                )
+            })
+        });
+        let mut read_only = ToolRegistry::new();
+        read_only.register(Arc::new(ReadTool::new(
+            fixture.project_root.clone(),
+            fixture.read_tracker.clone(),
+        )));
+        let read_only = Arc::new(read_only);
+        let subagents = Arc::new(crate::subagent::SubagentRegistry::new());
+        let runner = SubagentRunner::new(
+            factory,
+            read_only.clone(),
+            read_only.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(crate::tool::ProjectInfoRuntime::new(None)),
+            subagents.clone(),
+            fixture.project_root.clone(),
+        )
+        .with_background_wake();
+        let reviewer = runner.clone();
+        let tool = AgentTool::new(
+            runner,
+            crate::resource::agent::shared_registry(Arc::new(
+                crate::resource::agent::AgentRegistry::empty(),
+            )),
+        );
+        let sink = Arc::new(EvalSink::default());
+        let result = tool.execute_with_context(serde_json::json!({"agent":"explore", "prompt":"Read README.md", "run_in_background":true}), ToolExecutionContext::new("parent".into(), sink.clone())).await.unwrap();
+        let ToolOutput::SubagentStarted { subtask_id, .. } = result else {
+            panic!("expected a detached subagent");
+        };
+        let snapshot = subagents
+            .wait_for_subagent(&subtask_id, Duration::from_secs(15))
+            .await
+            .unwrap();
+        assert!(snapshot.status.is_finished());
+        let effects = sink.task_effects();
+        assert!(
+            effects
+                .attempted_tool_effects
+                .contains(&EvalToolEffect::Inspection)
+        );
+        assert!(
+            effects
+                .reached_tool_effects
+                .contains(&EvalToolEffect::Inspection)
+        );
+        assert!(effects.tool_effects.contains(&EvalToolEffect::Inspection));
+
+        let review_sink = Arc::new(EvalSink::default());
+        let (result, ..) = reviewer
+            .run_self_review(
+                "review",
+                "Review",
+                "Read README.md",
+                read_only,
+                CancellationToken::new(),
+                SelfReviewRunOptions {
+                    effect_observer: Some(review_sink.clone()),
+                    ..SelfReviewRunOptions::default()
+                },
+            )
+            .await;
+        assert!(result.is_ok());
+        assert!(
+            review_sink
+                .task_effects()
+                .tool_effects
+                .contains(&EvalToolEffect::Inspection)
+        );
+    }
+
+    #[test]
+    fn eval_sink_counts_started_and_failed_commands_as_observed_effects() {
+        let sink = EvalSink::default();
+        sink.tool_calls_started(&[ToolCallStart::new(
+            "bg",
+            "bash",
+            r#"{"command":"sleep 30","run_in_background":true}"#,
+        )]);
+        sink.tool_result(
+            "bg",
+            crate::protocol::ToolResult::legacy(
+                "started".into(),
+                crate::output::ToolExecutionStatus::Started,
+            ),
+        );
+        assert_eq!(
+            sink.task_effects().reached_tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+        assert!(sink.task_effects().tool_effects.is_empty());
+        assert!(sink.changed_paths().is_empty());
+
+        let sink = EvalSink::default();
+        sink.tool_calls_started(&[ToolCallStart::new(
+            "failed",
+            "bash",
+            r#"{"command":"false"}"#,
+        )]);
+        sink.tool_result(
+            "failed",
+            crate::protocol::ToolResult {
+                status: crate::output::ToolExecutionStatus::Failed,
+                preview: "exit 1".into(),
+                content: crate::protocol::ToolResultContent::Command {
+                    rendered: "exit 1".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: Some(1),
+                    timed_out: false,
+                    truncation: None,
+                },
+                background_task_id: None,
+                subagent_id: None,
+            },
+        );
+        assert_eq!(
+            sink.task_effects().reached_tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+        assert!(sink.task_effects().tool_effects.is_empty());
+
+        let sink = EvalSink::default();
+        sink.tool_calls_started(&[ToolCallStart::new(
+            "denied",
+            "bash",
+            r#"{"command":"false"}"#,
+        )]);
+        sink.tool_result(
+            "denied",
+            crate::protocol::ToolResult::legacy(
+                "permission denied".into(),
+                crate::output::ToolExecutionStatus::Failed,
+            ),
+        );
+        assert!(sink.task_effects().tool_effects.is_empty());
+        assert!(sink.task_effects().reached_tool_effects.is_empty());
+        assert_eq!(
+            sink.task_effects().attempted_tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_records_spawn_before_an_interrupted_command_returns() {
+        use crate::tool::{BashTool, Tool, ToolExecutionContext};
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let sink = Arc::new(EvalSink::default());
+        sink.tool_calls_started(&[tool_start("read-before", "read", "file.txt")]);
+        sink.tool_finished(
+            "read-before",
+            "original",
+            crate::output::ToolExecutionStatus::Succeeded,
+        );
+        sink.tool_calls_started(&[ToolCallStart::new(
+            "run",
+            "bash",
+            r#"{"command":"exec sleep 30"}"#,
+        )]);
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        );
+        let context = ToolExecutionContext::new("run".into(), sink.clone());
+        let task = tokio::spawn(async move {
+            tool.execute_with_context(serde_json::json!({"command":"exec sleep 30"}), context)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !sink
+                .task_effects()
+                .reached_tool_effects
+                .contains(&EvalToolEffect::CommandExecution)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+        sink.tool_result(
+            "run",
+            crate::protocol::ToolResult::legacy(
+                "interrupted".into(),
+                crate::output::ToolExecutionStatus::Interrupted,
+            ),
+        );
+        let effects = sink.task_effects();
+        assert_eq!(
+            effects.reached_tool_effects,
+            vec![EvalToolEffect::Inspection, EvalToolEffect::CommandExecution]
+        );
+        assert_eq!(effects.tool_effects, vec![EvalToolEffect::Inspection]);
+        sink.tool_calls_started(&[tool_start("read-after", "read", "file.txt")]);
+        sink.tool_finished(
+            "read-after",
+            "observed",
+            crate::output::ToolExecutionStatus::Succeeded,
+        );
+        assert_eq!(sink.max_reads_per_unchanged_path(), 1);
+    }
+
+    #[tokio::test]
+    async fn eval_does_not_report_a_denied_command_as_spawned() {
+        use crate::tool::{BashTool, Tool, ToolExecutionContext};
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        fixture
+            .permissions
+            .add_session_rule("true", crate::permissions::Permission::Deny);
+        let sink = Arc::new(EvalSink::default());
+        sink.tool_calls_started(&[ToolCallStart::new("run", "bash", r#"{"command":"true"}"#)]);
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        );
+        let context = ToolExecutionContext::new("run".into(), sink.clone());
+        assert!(
+            tool.execute_with_context(serde_json::json!({"command":"true"}), context)
+                .await
+                .is_err()
+        );
+        assert!(sink.task_effects().reached_tool_effects.is_empty());
+        assert_eq!(
+            sink.task_effects().attempted_tool_effects,
+            vec![EvalToolEffect::CommandExecution]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eval_records_background_and_terminal_spawn_before_tool_result() {
+        use crate::tool::{BashTool, Tool, ToolExecutionContext};
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        );
+        for args in [
+            serde_json::json!({"command":"true","run_in_background":true}),
+            serde_json::json!({"command":"true","interactive":true}),
+        ] {
+            let sink = Arc::new(EvalSink::default());
+            sink.tool_calls_started(&[ToolCallStart::new("run", "bash", args.to_string())]);
+            let context = ToolExecutionContext::new("run".into(), sink.clone());
+            let output = tool.execute_with_context(args, context).await.unwrap();
+            assert_eq!(
+                output.execution_status(),
+                crate::output::ToolExecutionStatus::Started
+            );
+            assert_eq!(
+                sink.task_effects().reached_tool_effects,
+                vec![EvalToolEffect::CommandExecution]
+            );
+            assert!(sink.task_effects().tool_effects.is_empty());
+        }
+    }
+
+    #[test]
     fn eval_sink_records_multi_file_diffs_and_shell_workspace_changes() {
         let sink = EvalSink::default();
         sink.tool_calls_started(&[ToolCallStart::new(
@@ -2932,6 +3602,8 @@ mod tests {
                     prompt: "do it".to_string(),
                     lsp_condition: EvalLspCondition::Inherited,
                     profile: EvalAgentProfile::Full,
+                    enable_subagents: false,
+                    subagent_mock: None,
                     mock: Some(MockScript {
                         read: Vec::new(),
                         write: Vec::new(),
@@ -2951,6 +3623,8 @@ mod tests {
                     graders: vec![GraderSpec::Assertion {
                         contains: vec!["Done".to_string()],
                         not_contains: Vec::new(),
+                        matches: Vec::new(),
+                        not_matches: Vec::new(),
                     }],
                     budgets: EvalBudgets::default(),
                     expected_status: TaskStatus::Completed,
@@ -2973,6 +3647,8 @@ mod tests {
                     prompt: "do it again".to_string(),
                     lsp_condition: EvalLspCondition::Inherited,
                     profile: EvalAgentProfile::Full,
+                    enable_subagents: false,
+                    subagent_mock: None,
                     mock: Some(MockScript {
                         read: Vec::new(),
                         write: Vec::new(),
@@ -2992,6 +3668,8 @@ mod tests {
                     graders: vec![GraderSpec::Assertion {
                         contains: vec!["Done".to_string()],
                         not_contains: Vec::new(),
+                        matches: Vec::new(),
+                        not_matches: Vec::new(),
                     }],
                     budgets: EvalBudgets::default(),
                     expected_status: TaskStatus::Completed,
@@ -3032,6 +3710,8 @@ mod tests {
                 prompt: "do it".to_string(),
                 lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
+                enable_subagents: false,
+                subagent_mock: None,
                 mock: Some(MockScript {
                     read: Vec::new(),
                     write: Vec::new(),
@@ -3087,6 +3767,8 @@ mod tests {
                 prompt: "read missing file".to_string(),
                 lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
+                enable_subagents: false,
+                subagent_mock: None,
                 mock: Some(MockScript {
                     read: vec!["missing.txt".to_string()],
                     write: Vec::new(),
@@ -3106,6 +3788,8 @@ mod tests {
                 graders: vec![GraderSpec::Assertion {
                     contains: vec!["Done".to_string()],
                     not_contains: Vec::new(),
+                    matches: Vec::new(),
+                    not_matches: Vec::new(),
                 }],
                 budgets: EvalBudgets::default(),
                 expected_status: TaskStatus::Completed,
@@ -3148,6 +3832,8 @@ mod tests {
                 prompt: "update readme".to_string(),
                 lsp_condition: EvalLspCondition::Inherited,
                 profile: EvalAgentProfile::Full,
+                enable_subagents: false,
+                subagent_mock: None,
                 mock: Some(MockScript {
                     read: vec!["README.md".to_string()],
                     write: vec![MockWrite {
@@ -3211,6 +3897,83 @@ mod tests {
             "new\n"
         );
         assert!(report.usage.total_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn delegation_suite_counts_child_effects_and_provider_usage() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/delegation.toml");
+        let suite = EvalSuite::load(&path).unwrap();
+        let storage = Storage::open_at(temp.path().join("bonsai.db"))
+            .await
+            .unwrap();
+        let report = run_task(
+            &suite,
+            &suite.tasks[0],
+            "delegation",
+            suite.seed,
+            temp.path(),
+            &storage,
+            (&ProviderSetup::Mock, None),
+        )
+        .await
+        .unwrap();
+
+        assert!(report.passed, "{:?}", report.graders);
+        assert!(report.tool_effects.contains(&EvalToolEffect::Delegation));
+        assert!(report.tool_effects.contains(&EvalToolEffect::Inspection));
+        assert!(
+            report
+                .delegated_tool_effects
+                .contains(&EvalToolEffect::Inspection)
+        );
+        assert!(
+            report
+                .usage_turns
+                .iter()
+                .any(|turn| turn.lane_kind == crate::agent::ExecutionLaneKind::Subagent)
+        );
+        assert!(report.budget.metrics.provider_attempts >= 4);
+    }
+
+    #[tokio::test]
+    async fn delegation_rejects_stream_replay_before_creating_output() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let output = temp.path().join("output");
+        let error = run(EvalCliConfig {
+            suite: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/delegation.toml"),
+            mode: EvalMode::Replay,
+            replay_dir: Some(temp.path().join("missing-streams")),
+            out_dir: output.clone(),
+            ..EvalCliConfig::default()
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("single-agent"));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn delegation_rejects_incompatible_profiles_and_orphaned_scripts() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eval/suites/delegation.toml");
+        let suite = EvalSuite::load(&path).unwrap();
+        let mut task = suite.tasks[0].clone();
+        task.profile = EvalAgentProfile::Smol;
+        assert!(
+            task.validate(&suite.base_dir)
+                .unwrap_err()
+                .to_string()
+                .contains("full profile")
+        );
+        task.profile = EvalAgentProfile::Full;
+        task.enable_subagents = false;
+        assert!(
+            task.validate(&suite.base_dir)
+                .unwrap_err()
+                .to_string()
+                .contains("requires enable_subagents")
+        );
     }
 
     #[tokio::test]
@@ -3417,5 +4180,137 @@ contains = ["Done"]
         let report = fs::read_to_string(&outcome.report_path).unwrap();
         assert!(report.contains("\"id\": \"observe-run-1\""));
         assert!(report.contains("\"id\": \"observe-run-2\""));
+    }
+
+    #[tokio::test]
+    async fn forbidden_commands_are_detected_when_started_or_unsuccessful() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fixture = temp.path().join("fixture");
+        fs::create_dir_all(&fixture).unwrap();
+        write_file(&fixture.join("README.md"), "ordinary fixture\n");
+        let suite_path = temp.path().join("suite.toml");
+        write_file(
+            &suite_path,
+            r#"
+id = "failed-command-boundary"
+seed = 9
+[[tasks]]
+id = "inspect"
+fixture = "fixture"
+prompt = "Inspect the fixture."
+[tasks.mock]
+final_response = "Done."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"grep -q impossible_marker README.md"}'
+[[tasks.graders]]
+type = "tool-effects"
+forbidden = ["command-execution"]
+
+[[tasks]]
+id = "background"
+fixture = "fixture"
+prompt = "Inspect the fixture."
+[tasks.mock]
+final_response = "Done."
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"sleep 1","run_in_background":true}'
+[[tasks.graders]]
+type = "tool-effects"
+forbidden = ["command-execution"]
+"#,
+        );
+        let outcome = run(EvalCliConfig {
+            suite: suite_path,
+            out_dir: temp.path().join("out"),
+            ..EvalCliConfig::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!((outcome.passed_tasks, outcome.total_tasks), (0, 2));
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(outcome.report_path).unwrap()).unwrap();
+        for task in report["tasks"].as_array().unwrap() {
+            assert_eq!(
+                task["reached_tool_effects"],
+                serde_json::json!(["command-execution"])
+            );
+            assert!(task["tool_effects"].as_array().unwrap().is_empty());
+            assert!(
+                task["graders"][0]["details"]
+                    .as_str()
+                    .unwrap()
+                    .contains("forbidden tool effect was reached")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_eval_git_commands_cannot_discover_the_enclosing_checkout() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let parent = temp.path();
+        let init = std::process::Command::new("git")
+            .args([
+                "init",
+                "--quiet",
+                "--initial-branch=host-checkout",
+                "--template=",
+            ])
+            .current_dir(parent)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let fixture = parent.join("fixture");
+        fs::create_dir_all(&fixture).unwrap();
+        write_file(&fixture.join("README.md"), "fixture\n");
+        let suite_path = parent.join("suite.toml");
+        write_file(
+            &suite_path,
+            r#"
+id = "git-boundary"
+seed = 9
+
+[[tasks]]
+id = "inspect"
+fixture = "fixture"
+prompt = "Inspect the repository root with git and report it."
+
+[tasks.mock]
+final_response = "Inspected."
+forbidden_request_substrings = ["host-checkout"]
+
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "bash"
+arguments = '{"command":"git rev-parse --show-toplevel"}'
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["command-execution"]
+"#,
+        );
+        let outcome = run(EvalCliConfig {
+            suite: suite_path,
+            out_dir: parent.join("out"),
+            fail_on_task_failure: true,
+            ..EvalCliConfig::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!((outcome.passed_tasks, outcome.total_tasks), (1, 1));
+        let worktree = outcome.run_dir.join("worktrees/inspect");
+        let root = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&worktree)
+            .output()
+            .unwrap();
+        assert!(root.status.success());
+        assert_eq!(
+            Path::new(String::from_utf8(root.stdout).unwrap().trim()),
+            worktree.canonicalize().unwrap()
+        );
     }
 }

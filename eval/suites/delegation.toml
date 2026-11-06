@@ -1,0 +1,41 @@
+id = "delegation"
+seed = 411
+repetitions = 3
+
+[budgets]
+max_logical_turns = 16
+max_provider_attempts = 24
+max_duration_ms = 180000
+
+[[tasks]]
+id = "explore_without_commands"
+fixture = "fixtures/language_acceptance/rust"
+enable_subagents = true
+prompt = "Delegate to the built-in explore agent using the agent tool. Have it read src/lib.rs and explain what total does. Report its finding with the source path. Do not run commands or modify files."
+
+[tasks.mock]
+final_response = "src/lib.rs: total multiplies its inputs."
+
+[[tasks.mock.tool_turns]]
+[[tasks.mock.tool_turns.calls]]
+name = "agent"
+arguments = '{"agent":"explore","prompt":"Read src/lib.rs and explain what total does."}'
+
+[tasks.subagent_mock]
+read = ["src/lib.rs"]
+final_response = "src/lib.rs: total multiplies its inputs."
+
+[[tasks.graders]]
+type = "changed-files"
+exact = []
+
+[[tasks.graders]]
+type = "tool-effects"
+required = ["delegation", "inspection"]
+required_delegated = ["inspection"]
+forbidden = ["workspace-mutation", "command-execution", "interaction", "external-access"]
+forbidden_attempts = ["workspace-mutation", "command-execution", "interaction", "external-access"]
+
+[[tasks.graders]]
+type = "assertion"
+matches = ['src/lib\.rs', '(?i)\b(product|multipl\w*)\b']

@@ -13,6 +13,7 @@ max_completion_tokens_per_turn = 32000
 max_missing_usage_turns = 0
 min_post_warmup_cache_percent = 65
 cache_warmup_turns = 5
+max_unmeasured_post_warmup_cache_turns = 0
 max_reads_per_unchanged_path = 2
 
 [[tasks]]

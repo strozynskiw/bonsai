@@ -21,6 +21,7 @@ pub(crate) struct EvalBudgets {
     pub max_missing_usage_turns: Option<usize>,
     pub min_post_warmup_cache_percent: Option<u64>,
     pub cache_warmup_turns: Option<usize>,
+    pub max_unmeasured_post_warmup_cache_turns: Option<usize>,
     pub max_reads_per_unchanged_path: Option<usize>,
 }
 
@@ -46,6 +47,9 @@ impl EvalBudgets {
                 .min_post_warmup_cache_percent
                 .or(self.min_post_warmup_cache_percent),
             cache_warmup_turns: task.cache_warmup_turns.or(self.cache_warmup_turns),
+            max_unmeasured_post_warmup_cache_turns: task
+                .max_unmeasured_post_warmup_cache_turns
+                .or(self.max_unmeasured_post_warmup_cache_turns),
             max_reads_per_unchanged_path: task
                 .max_reads_per_unchanged_path
                 .or(self.max_reads_per_unchanged_path),
@@ -58,11 +62,17 @@ impl EvalBudgets {
 pub(crate) struct EvalMetricsReport {
     pub logical_turns: usize,
     pub provider_attempts: usize,
+    pub unaccounted_retry_attempts: usize,
     pub duration_ms: u64,
     pub uncached_prompt_tokens: u64,
     pub max_completion_tokens_per_turn: u64,
     pub missing_usage_turns: usize,
+    pub missing_prompt_token_turns: usize,
+    pub missing_completion_token_turns: usize,
+    pub missing_uncached_token_turns: usize,
+    pub missing_cost_turns: usize,
     pub post_warmup_cache_percent: Option<u64>,
+    pub unmeasured_post_warmup_cache_turns: usize,
     pub max_reads_per_unchanged_path: usize,
     pub inspection_executed: usize,
     pub inspection_reused: usize,
@@ -104,9 +114,15 @@ impl EvalMetricsReport {
                     .saturating_sub(turn.cache_read_input_tokens.unwrap_or(0))
             })
             .sum();
+        let (cache_percent, unmeasured_cache_turns) =
+            post_warmup_cache_coverage(turns, warmup_turns);
         Self {
             logical_turns,
             provider_attempts,
+            unaccounted_retry_attempts: turns
+                .iter()
+                .map(|turn| turn.provider_attempts.len().saturating_sub(1))
+                .sum(),
             duration_ms: millis_u64(elapsed),
             uncached_prompt_tokens,
             max_completion_tokens_per_turn: turns
@@ -118,7 +134,28 @@ impl EvalMetricsReport {
                 .iter()
                 .filter(|turn| turn.status == UsageTurnStatus::Missing)
                 .count(),
-            post_warmup_cache_percent: post_warmup_cache_percent(turns, warmup_turns),
+            missing_prompt_token_turns: turns
+                .iter()
+                .filter(|turn| turn.prompt_tokens.is_none())
+                .count(),
+            missing_completion_token_turns: turns
+                .iter()
+                .filter(|turn| turn.completion_tokens.is_none())
+                .count(),
+            missing_uncached_token_turns: turns
+                .iter()
+                .filter(|turn| {
+                    turn.cache_measured_input_tokens
+                        .or(turn.prompt_tokens)
+                        .is_none()
+                })
+                .count(),
+            missing_cost_turns: turns
+                .iter()
+                .filter(|turn| turn.turn_cost_micros.is_none())
+                .count(),
+            post_warmup_cache_percent: cache_percent,
+            unmeasured_post_warmup_cache_turns: unmeasured_cache_turns,
             max_reads_per_unchanged_path,
             inspection_executed: turns.iter().map(|turn| turn.inspection_executed).sum(),
             inspection_reused: turns.iter().map(|turn| turn.inspection_reused).sum(),
@@ -204,6 +241,49 @@ impl EvalBudgetReport {
                 .max_reads_per_unchanged_path
                 .map(|value| value as u64),
         );
+        check_max(
+            &mut violations,
+            "unmeasured post-warmup cache turns",
+            metrics.unmeasured_post_warmup_cache_turns as u64,
+            declared
+                .max_unmeasured_post_warmup_cache_turns
+                .map(|value| value as u64),
+        );
+
+        for (label, missing, configured) in [
+            (
+                "prompt tokens",
+                metrics.missing_prompt_token_turns,
+                declared.max_prompt_tokens.is_some(),
+            ),
+            (
+                "completion tokens",
+                metrics.missing_completion_token_turns,
+                declared.max_completion_tokens.is_some()
+                    || declared.max_completion_tokens_per_turn.is_some(),
+            ),
+            (
+                "uncached prompt tokens",
+                metrics.missing_uncached_token_turns,
+                declared.max_uncached_prompt_tokens.is_some(),
+            ),
+        ] {
+            if configured && missing > 0 {
+                violations.push(format!(
+                    "{label} budget cannot be verified: usage missing for {missing} turn(s)"
+                ));
+            }
+        }
+
+        if metrics.unaccounted_retry_attempts > 0
+            && (declared.max_prompt_tokens.is_some()
+                || declared.max_completion_tokens.is_some()
+                || declared.max_uncached_prompt_tokens.is_some()
+                || declared.max_completion_tokens_per_turn.is_some()
+                || declared.max_cost_micros.is_some())
+        {
+            violations.push(format!("token or cost budget cannot be verified: {} earlier retry attempt(s) are not included in usage totals", metrics.unaccounted_retry_attempts));
+        }
 
         if let Some(maximum) = declared.max_cost_micros {
             match usage.cost_micros {
@@ -211,6 +291,12 @@ impl EvalBudgetReport {
                 None => violations.push(format!(
                     "cost is unavailable, so maximum {maximum} micros cannot be verified"
                 )),
+            }
+            if metrics.missing_cost_turns > 0 {
+                violations.push(format!(
+                    "cost budget cannot be verified: cost missing for {} turn(s)",
+                    metrics.missing_cost_turns
+                ));
             }
         }
         if let Some(minimum) = declared.min_post_warmup_cache_percent {
@@ -244,10 +330,14 @@ fn check_max(violations: &mut Vec<String>, label: &str, actual: u64, maximum: Op
     }
 }
 
-fn post_warmup_cache_percent(turns: &[UsageTurnReport], warmup_turns: usize) -> Option<u64> {
+fn post_warmup_cache_coverage(
+    turns: &[UsageTurnReport],
+    warmup_turns: usize,
+) -> (Option<u64>, usize) {
     let mut lane_seen = HashMap::<(ExecutionLaneKind, &str), usize>::new();
     let mut read_tokens = 0u64;
     let mut measured_tokens = 0u64;
+    let mut unmeasured = 0;
     for turn in turns {
         let seen = lane_seen
             .entry((turn.lane_kind, turn.lane_id.as_str()))
@@ -256,13 +346,25 @@ fn post_warmup_cache_percent(turns: &[UsageTurnReport], warmup_turns: usize) -> 
         if *seen <= warmup_turns {
             continue;
         }
+        unmeasured += turn.provider_attempts.len().saturating_sub(1);
+        if turn.cache_measured_input_tokens.is_none() || turn.cache_read_input_tokens.is_none() {
+            unmeasured += 1;
+        }
         let Some(measured) = turn.cache_measured_input_tokens else {
             continue;
         };
         read_tokens = read_tokens.saturating_add(turn.cache_read_input_tokens.unwrap_or(0));
         measured_tokens = measured_tokens.saturating_add(measured);
     }
-    read_tokens.saturating_mul(100).checked_div(measured_tokens)
+    (
+        read_tokens.saturating_mul(100).checked_div(measured_tokens),
+        unmeasured,
+    )
+}
+
+#[cfg(test)]
+fn post_warmup_cache_percent(turns: &[UsageTurnReport], warmup_turns: usize) -> Option<u64> {
+    post_warmup_cache_coverage(turns, warmup_turns).0
 }
 
 #[cfg(test)]
@@ -386,6 +488,182 @@ mod tests {
         assert_eq!(post_warmup_cache_percent(&[turn], 1), None);
     }
 
+    #[tokio::test]
+    async fn cache_coverage_limit_counts_unmeasured_turns_after_each_lane_warmup() {
+        let mut measured = usage_turn_fixture().await;
+        measured.cache_measured_input_tokens = Some(100);
+        measured.cache_read_input_tokens = Some(90);
+        let mut missing = measured.clone();
+        missing.cache_measured_input_tokens = None;
+        let turns = [missing.clone(), measured.clone(), missing.clone()];
+        let metrics =
+            EvalMetricsReport::from_run(&turns, 3, 3, std::time::Duration::ZERO, 0, Vec::new(), 1);
+        assert_eq!(metrics.post_warmup_cache_percent, Some(90));
+        assert_eq!(metrics.unmeasured_post_warmup_cache_turns, 1);
+        let usage = UsageReport {
+            prompt_tokens: 100,
+            completion_tokens: 0,
+            total_tokens: 100,
+            cost_micros: None,
+        };
+        let strict = EvalBudgets {
+            min_post_warmup_cache_percent: Some(65),
+            max_unmeasured_post_warmup_cache_turns: Some(0),
+            ..EvalBudgets::default()
+        };
+        assert!(!EvalBudgetReport::evaluate(strict, metrics.clone(), usage).passed());
+        let permissive = EvalBudgets {
+            max_unmeasured_post_warmup_cache_turns: Some(1),
+            ..strict
+        };
+        assert!(EvalBudgetReport::evaluate(permissive, metrics, usage).passed());
+        missing.lane_kind = ExecutionLaneKind::Subagent;
+        assert_eq!(post_warmup_cache_coverage(&[measured, missing], 1).1, 0);
+    }
+
+    #[tokio::test]
+    async fn token_limits_cannot_pass_with_missing_usage() {
+        let mut turn = usage_turn_fixture().await;
+        turn.status = UsageTurnStatus::Interrupted;
+        turn.prompt_tokens = None;
+        turn.completion_tokens = None;
+        turn.cache_measured_input_tokens = None;
+        let metrics =
+            EvalMetricsReport::from_run(&[turn], 1, 1, std::time::Duration::ZERO, 0, Vec::new(), 0);
+        let usage = UsageReport {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cost_micros: None,
+        };
+        assert!(
+            EvalBudgetReport::evaluate(EvalBudgets::default(), metrics.clone(), usage).passed()
+        );
+        for budgets in [
+            EvalBudgets {
+                max_prompt_tokens: Some(100),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_completion_tokens: Some(100),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_completion_tokens_per_turn: Some(100),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_uncached_prompt_tokens: Some(100),
+                ..EvalBudgets::default()
+            },
+        ] {
+            let result = EvalBudgetReport::evaluate(budgets, metrics.clone(), usage);
+            assert!(!result.passed(), "{budgets:?}");
+            assert!(
+                result
+                    .violations
+                    .iter()
+                    .any(|message| message.contains("cannot be verified"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_cost_cannot_satisfy_budget() {
+        let mut measured = usage_turn_fixture().await;
+        measured.cache_measured_input_tokens = Some(100);
+        measured.cache_read_input_tokens = Some(90);
+        measured.turn_cost_micros = Some(1);
+        let mut missing = measured.clone();
+        missing.cache_measured_input_tokens = None;
+        missing.turn_cost_micros = None;
+        let metrics = EvalMetricsReport::from_run(
+            &[measured.clone(), missing.clone()],
+            2,
+            2,
+            std::time::Duration::ZERO,
+            0,
+            Vec::new(),
+            0,
+        );
+        let usage = UsageReport {
+            prompt_tokens: 200,
+            completion_tokens: 10,
+            total_tokens: 210,
+            cost_micros: Some(1),
+        };
+        let report = EvalBudgetReport::evaluate(
+            EvalBudgets {
+                max_cost_micros: Some(100),
+                ..EvalBudgets::default()
+            },
+            metrics,
+            usage,
+        );
+        assert!(!report.passed());
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|message| message.contains("cost budget cannot be verified"))
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_retry_does_not_hide_unaccounted_attempt() {
+        let mut turn = usage_turn_fixture().await;
+        let mut failed = turn.provider_attempts.last().cloned().unwrap();
+        failed.outcome = crate::agent::ProviderAttemptOutcome::Failed;
+        failed.prompt_tokens = None;
+        failed.completion_tokens = None;
+        turn.provider_attempts.insert(0, failed);
+        turn.cache_measured_input_tokens = Some(100);
+        turn.cache_read_input_tokens = Some(90);
+        turn.turn_cost_micros = Some(1);
+        let metrics =
+            EvalMetricsReport::from_run(&[turn], 1, 2, std::time::Duration::ZERO, 0, Vec::new(), 0);
+        assert_eq!(metrics.unaccounted_retry_attempts, 1);
+        assert_eq!(metrics.unmeasured_post_warmup_cache_turns, 1);
+        let usage = UsageReport {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            total_tokens: 110,
+            cost_micros: Some(1),
+        };
+        for budgets in [
+            EvalBudgets {
+                max_prompt_tokens: Some(1000),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_completion_tokens: Some(1000),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_uncached_prompt_tokens: Some(1000),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_completion_tokens_per_turn: Some(1000),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_cost_micros: Some(1000),
+                ..EvalBudgets::default()
+            },
+            EvalBudgets {
+                max_unmeasured_post_warmup_cache_turns: Some(0),
+                ..EvalBudgets::default()
+            },
+        ] {
+            assert!(
+                !EvalBudgetReport::evaluate(budgets, metrics.clone(), usage).passed(),
+                "{budgets:?}"
+            );
+        }
+        assert!(EvalBudgetReport::evaluate(EvalBudgets::default(), metrics, usage).passed());
+    }
+
     #[test]
     fn task_budgets_overlay_suite_defaults() {
         let suite = EvalBudgets {
@@ -415,11 +693,17 @@ mod tests {
         let metrics = EvalMetricsReport {
             logical_turns: 3,
             provider_attempts: 3,
+            unaccounted_retry_attempts: 0,
             duration_ms: 1,
             uncached_prompt_tokens: 60,
             max_completion_tokens_per_turn: 5,
             missing_usage_turns: 0,
+            missing_prompt_token_turns: 0,
+            missing_completion_token_turns: 0,
+            missing_uncached_token_turns: 0,
+            missing_cost_turns: 0,
             post_warmup_cache_percent: None,
+            unmeasured_post_warmup_cache_turns: 0,
             max_reads_per_unchanged_path: 1,
             inspection_executed: 0,
             inspection_reused: 0,

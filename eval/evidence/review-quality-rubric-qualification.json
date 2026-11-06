@@ -1,0 +1,201 @@
+{
+  "status": "rejected: failed predeclared DeepSeek precision threshold; source restored exactly",
+  "hypothesis": "A shared evidence standard for admitted conversational review requests reduces invented test defects, duplicate root causes, and unrequested nits without suppressing real findings.",
+  "scope": "Output guidance only; no changes to task authority, permissions, tools, completion conditions, model settings or graders.",
+  "baseline_binary_sha256": "981f80c6327a91bc0c8d11068d52f0be2a16618cdc54f623287a717b5b8e9d9b",
+  "suite": "target/review-quality-contract-suite/suite.toml",
+  "fixture_manifest": {
+    "buggy/.gitignore": "306fd52e74fca6746e12acc750f232de15e71da917756a1270d74c91f5eb7368",
+    "buggy/Cargo.lock": "3ebec3110288e589cc97f450e347bae00922aa01032add13bd6393e4b0012f6b",
+    "buggy/Cargo.toml": "5387be40af7da5f921ce06b02a8b883e8f96b6f29caf0ee0232a5800d49246d4",
+    "buggy/README.md": "b6a6e0eda9063a2fe844bfa3388783848081b74bd2f0929345a256d37d8b8475",
+    "buggy/src/lib.rs": "d8553a5a9d67c8e896b8d6330dba99d59149c7509c64c15899fc5b34db3a5341",
+    "buggy/tests/total.rs": "a4e32ec616bbde938afbfefcaa18bc73ac0de5e2bd2d0c9c60f438825045e5c9",
+    "correct/.gitignore": "306fd52e74fca6746e12acc750f232de15e71da917756a1270d74c91f5eb7368",
+    "correct/Cargo.lock": "3ebec3110288e589cc97f450e347bae00922aa01032add13bd6393e4b0012f6b",
+    "correct/Cargo.toml": "5387be40af7da5f921ce06b02a8b883e8f96b6f29caf0ee0232a5800d49246d4",
+    "correct/README.md": "b6a6e0eda9063a2fe844bfa3388783848081b74bd2f0929345a256d37d8b8475",
+    "correct/src/lib.rs": "b2e52c3ab26a8a7415349d7c87c54f88aa2e25b60ed61297cdc9f9dc81e0aea4",
+    "correct/tests/total.rs": "a4e32ec616bbde938afbfefcaa18bc73ac0de5e2bd2d0c9c60f438825045e5c9",
+    "suite.toml": "a35288d6e34a47176d67038f324e23ae3ec7e29bddacc9ac7c96221b73da9bbd"
+  },
+  "ground_truth": {
+    "buggy": "One implementation defect: product() violates sum/empty0 contract; existing tests are correct. Both tests fail in actual terminal oracle.",
+    "correct": "sum() satisfies sum/empty0 and documented precondition that every intermediate sum fits i64; no confirmed correctness defect.",
+    "quality_dimensions": [
+      "real bug detected",
+      "distinct defect count and deduplication",
+      "incorrect semantic or test claims",
+      "unsupported requirements or missing-coverage findings",
+      "unrequested optional suggestions",
+      "action-report consistency with recorded tool effects"
+    ]
+  },
+  "decision_criteria_before_candidate_outputs": [
+    "DeepSeek: at least5/6 buggy reviews across two seeds correctly detect the root cause without inventing separate defects or making false semantic/test claims.",
+    "DeepSeek: zero confirmed false defect claims on six correct-code reviews.",
+    "Codex: retain bug detection and no false defects on three faulty/three correct reviews.",
+    "No runtime or authorized-fix regression; investigate any command-compliance regression separately, do not conceal attempted effects.",
+    "Candidate must pass full tests,fmt,clippy,warning-free release before retention."
+  ],
+  "measurement_caveats": [
+    "Suite graders measure only file/effect compliance; report passed counts are not review-quality scores. Quality requires manual assessment against contract and executed fixture oracles.",
+    "Exploratory pre-contract suite reports kept separately; its missing overflow contract makes overflow-only findings ambiguous.",
+    "Review guidance is selected from admitted human intent and is descriptive only; it grants no permissions and hides no tools."
+  ],
+  "exploratory_reports": [
+    "target/eval-live/review-quality-baseline-deepseek/1793911780469-live-507/report.json",
+    "target/eval-live/review-quality-baseline-codex/1793911780468-live-507/report.json"
+  ],
+  "sessions": {},
+  "source_rollback_snapshots": "target/review-quality-prechange-sources",
+  "candidate_binary_sha256": "143b7d65ea1849e46d169d2b4b0268afbf67a50d447558f8e936d23405a2036d",
+  "rollback_diff_sha256": "e47cfa2debd13c58ec46227da13678ac271070170d93f257e5659999dd20aa38",
+  "rejected_patch": "target/review-quality-rejected.patch",
+  "decision": "REJECTED. Added rubric did not satisfy predeclared precision threshold; no prompt/runtime/source change retained.",
+  "oracle_validation": {
+    "correct": "cargo test --locked:2/2 passed,exit0;target/review-quality-correct-oracle.log",
+    "buggy": "cargo test --locked:2/2 failed as expected,exit101;observed30!=10 and1!=0;target/review-quality-buggy-oracle.log"
+  },
+  "qualification_reports": [
+    {
+      "path": "target/eval-live/review-quality-contract-baseline-deepseek/1793912012976-live-507/report.json",
+      "sha256": "0ee268dddf5320a5b069c8df59cfad8f0e5cd6f1b09f93cf13e2b74f7a0d48ed",
+      "provider": "deepseek",
+      "model": "deepseek/deepseek-flash",
+      "reasoning": "off",
+      "seed": 507,
+      "effect_compliance_score": {
+        "passed": 3,
+        "percent": 50.0,
+        "total": 6
+      },
+      "all_real_bugs_detected": true,
+      "note": "Grader pass score measures only file/effect compliance, not finding precision."
+    },
+    {
+      "path": "target/eval-live/review-quality-contract-baseline-deepseek-508/1793912210036-live-508/report.json",
+      "sha256": "7125dea7e9a3bf0b305b71cdef724954990c1c39c72f502935c638530e42db35",
+      "provider": "deepseek",
+      "model": "deepseek/deepseek-flash",
+      "reasoning": "off",
+      "seed": 508,
+      "effect_compliance_score": {
+        "passed": 3,
+        "percent": 50.0,
+        "total": 6
+      },
+      "all_real_bugs_detected": true,
+      "note": "Grader pass score measures only file/effect compliance, not finding precision."
+    },
+    {
+      "path": "target/eval-live/review-quality-contract-baseline-codex/1793912012976-live-507/report.json",
+      "sha256": "ad2af6f84e043189f976c6a5ee24ee514ae6359fc4de92deb367e6995a267944",
+      "provider": "codex",
+      "model": "openai/gpt-6.1-sol",
+      "reasoning": "low",
+      "seed": 507,
+      "effect_compliance_score": {
+        "passed": 6,
+        "percent": 100.0,
+        "total": 6
+      },
+      "all_real_bugs_detected": true,
+      "note": "Grader pass score measures only file/effect compliance, not finding precision."
+    },
+    {
+      "path": "target/eval-live/review-quality-contract-candidate-deepseek/1793912281693-live-507/report.json",
+      "sha256": "fdabf068d00ed7bfd60b7c49d41647297cee2007ccfd2e3fc7ecc9281ce50a7b",
+      "provider": "deepseek",
+      "model": "deepseek/deepseek-flash",
+      "reasoning": "off",
+      "seed": 507,
+      "effect_compliance_score": {
+        "passed": 3,
+        "percent": 50.0,
+        "total": 6
+      },
+      "all_real_bugs_detected": true,
+      "note": "Grader pass score measures only file/effect compliance, not finding precision."
+    },
+    {
+      "path": "target/eval-live/review-quality-contract-candidate-codex/1793912281693-live-507/report.json",
+      "sha256": "1923465508ee991d5faa319953efc816d3d6ebb704ecc5e4185b964f6f78b1b8",
+      "provider": "codex",
+      "model": "openai/gpt-6.1-sol",
+      "reasoning": "low",
+      "seed": 507,
+      "effect_compliance_score": {
+        "passed": 6,
+        "percent": 100.0,
+        "total": 6
+      },
+      "all_real_bugs_detected": true,
+      "note": "Grader pass score measures only file/effect compliance, not finding precision."
+    }
+  ],
+  "manual_candidate_rejection_evidence": [
+    {
+      "task": "buggy-run-1",
+      "claim": "every non-trivial call returns the wrong total",
+      "problem": "Overbroad semantic claim; [2,2] has sum=product=4. Main root cause and empty identity are otherwise correct."
+    },
+    {
+      "task": "buggy-run-2",
+      "claims": [
+        "Only the degenerate single-item case [n] happens to be correct",
+        "The README claim that iter().product() yields the sum is false"
+      ],
+      "problem": "Incorrect exclusivity claim ([2,2] also coincides); README says sum and never claims product yields sum."
+    },
+    {
+      "task": "buggy-run-3",
+      "claims": [
+        "test suite is stale and cannot detect it",
+        "acceptance test totals_line_items asserts the wrong expected value"
+      ],
+      "problem": "Both original tests demonstrably fail on the buggy implementation and encode the correct contract. Separately lists three findings while acknowledging one root cause."
+    }
+  ],
+  "manual_conclusions": {
+    "baseline_deepseek": "Both seeds detected real product defect but all6 buggy reviews included duplicate/unsupported test defects or false semantic claims. Correct-code reviews found no confirmed defects but added unrequested nits.",
+    "candidate_deepseek": "Still detects defect; grouping improved in2/3,but all3 contain false semantic/test claims under strict criterion. Third review still falsely labels correct tests defective. Cannot reach at least5/6 threshold even with a perfect second candidate batch, so no redundant second batch run. Command compliance3/6,unchanged vs seed507 baseline3/6.",
+    "codex": "Baseline and candidate detect all3 faulty cases and report no defects on all3 correct cases; both6/6 effect compliance. Candidate additionally describes builtin Git inspections as command-restriction violations in2 answers,although frozen effect grader classifies dedicated Git tools as inspection."
+  },
+  "validation": {
+    "candidate_build": "RUSTFLAGS=-D warnings release locked passed;target/review-quality-release.log",
+    "candidate_boundary_regression": "cargo test --locked review_guidance passed:1;target/review-quality-focused.log",
+    "rollback": "All tracked source diffs are byte-identical to previous fully validated state,git diff sha256=e47cfa2debd13c58ec46227da13678ac271070170d93f257e5659999dd20aa38",
+    "restored_release_sha256": "981f80c6327a91bc0c8d11068d52f0be2a16618cdc54f623287a717b5b8e9d9b",
+    "prior_exact_source_validation": "4550 unit+21 integration passed,6existingignored;clippy/fmt/warning-free release passed;eval/evidence/assertion-pattern-qualification.json",
+    "restored_format_check": "cargo fmt --all -- --check passed after rollback",
+    "restored_diff_check": "git diff --check passed after rollback"
+  },
+  "recommended_effort_control": {
+    "report": "target/eval-live/review-quality-contract-high-deepseek/1793912519942-live-507/report.json",
+    "sha256": "b14aeb1e8fc5caca21524dde6b5052cc0e8b67b3151279b9e2afc924323ef314",
+    "binary_sha256": "981f80c6327a91bc0c8d11068d52f0be2a16618cdc54f623287a717b5b8e9d9b",
+    "reasoning": "high",
+    "observed_reasoning_chars": 20027,
+    "effect_compliance_score": {
+      "passed": 1,
+      "percent": 16.666666666666664,
+      "total": 6
+    },
+    "cost_micros": 14824,
+    "duration_ms": 76465,
+    "comparison": "Same original prompt,source binary,frozen fixtures and graders as off baseline507. This is a separate effort experiment,not a prompt candidate rerun.",
+    "manual_observations": [
+      "All3 buggy reviews found the real product-vs-sum defect;two still enumerate multiple consequences/test failures as separate findings. Third groups the root cause but overstates which inputs are affected.",
+      "All3 correct-code reviews found no correctness defects but supplied unrequested coverage/MSRV/documentation suggestions.",
+      "Five of six fail strict attempted-command restrictions; several qualify no commands as no build/test commands while still running shell inspection.",
+      "High effort does not establish a solution to finding precision or instruction compliance in this small sample. No recommended/default effort setting changed."
+    ],
+    "provider_wiring_inspected": "src/provider/reasoning.rs::apply_zai_thinking_fields sends thinking enabled+reasoning_effort high;Default leaves provider default untouched;Off explicitly disables thinking."
+  },
+  "remaining_work": [
+    "Explicit task-effect authority remains unresolved;prompt-only advice and increased effort are insufficient for guarantees.",
+    "Reviewer precision and truthful action reports remain unresolved.",
+    "Next work should use trusted effect provenance or observable runtime state;do not promote descriptive intent keyword inference into a permission grant."
+  ]
+}

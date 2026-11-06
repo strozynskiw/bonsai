@@ -25,7 +25,15 @@ forbidden_attempts = ["workspace-mutation", "command-execution", "interaction"]
 
 [[tasks.graders]]
 type = "assertion"
-contains = ["product"]
+# Accept equivalent descriptions, but require the operation, values, and source.
+# These lexical checks do not grade finding precision or deduplication.
+matches = [
+    '(?i)\b(product|multipl\w*)\b',
+    '(?i)\b(sum\w*|add\w*)\b',
+    '\b30\b',
+    '\b10\b',
+    'src/lib\.rs\b',
+]
 
 [[tasks]]
 id = "smol_explain_without_mutation"
@@ -45,7 +53,15 @@ forbidden_attempts = ["workspace-mutation", "command-execution", "interaction"]
 
 [[tasks.graders]]
 type = "assertion"
-contains = ["product"]
+# Accept equivalent descriptions, but require the operation, values, and source.
+# These lexical checks do not grade finding precision or deduplication.
+matches = [
+    '(?i)\b(product|multipl\w*)\b',
+    '(?i)\b(sum\w*|add\w*)\b',
+    '\b30\b',
+    '\b10\b',
+    'src/lib\.rs\b',
+]
 
 [[tasks]]
 id = "full_review_findings_without_mutation"
@@ -65,7 +81,15 @@ forbidden_attempts = ["workspace-mutation", "command-execution", "interaction"]
 
 [[tasks.graders]]
 type = "assertion"
-contains = ["product"]
+# Accept equivalent descriptions, but require the operation, values, and source.
+# These lexical checks do not grade finding precision or deduplication.
+matches = [
+    '(?i)\b(product|multipl\w*)\b',
+    '(?i)\b(sum\w*|add\w*)\b',
+    '\b30\b',
+    '\b10\b',
+    'src/lib\.rs\b',
+]
 
 [[tasks]]
 id = "smol_verify_without_fixing"

@@ -1,0 +1,17 @@
+{
+  "purpose": "Exercise built-in explore delegation and child effect accounting through the live evaluation harness.",
+  "suite": "eval/suites/delegation.toml",
+  "provider": "deepseek",
+  "model": "deepseek/deepseek-flash",
+  "seed": 411,
+  "report": "target/eval-delegation-deepseek/1793940739421-live-411/report.json",
+  "result": "3/3 passed. Each run recorded successful child inspection and parent and subagent usage; none recorded a forbidden command, mutation, interaction, or external-access attempt.",
+  "provider_attempts": [7, 5, 5],
+  "capability_description_followup": {
+    "report": "target/eval-delegation-capability/1793941190398-live-411/report.json",
+    "result": "3/3 passed after advertising synchronous delegation when background wakeups are unavailable.",
+    "provider_attempts": [4, 7, 4],
+    "interpretation": "These small stochastic runs check for a regression; they do not establish an improvement in model performance."
+  },
+  "limitations": "This small sample exercises a read-only built-in agent and does not establish general instruction compliance or enforce the no-command request. Custom agents, asynchronous background wakes, and stream capture/replay are not configured for this evaluation profile."
+}

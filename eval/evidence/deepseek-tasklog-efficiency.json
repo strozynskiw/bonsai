@@ -1,0 +1,121 @@
+{
+  "purpose": "Fresh live DeepSeek baseline for the multi-phase tasklog CLI after the permission fixes.",
+  "report": "target/eval-live/deepseek-tasklog-current/1793916686013-live-271/report.json",
+  "private_transcript": "target/deepseek-tasklog-transcript.log",
+  "suite": "eval/suites/task_todo.toml",
+  "task": "tasklog_cli",
+  "provider": "deepseek",
+  "model": "deepseek/deepseek-flash",
+  "requested_effort": "high",
+  "repetitions": 1,
+  "result": {
+    "task_status": "completed",
+    "fixture_test_grader": "passed: sh check_task_todo.sh exited 0",
+    "response_assertion_grader": "passed",
+    "suite_result": "failed: 2,137,450 prompt tokens exceeded the 1,500,000 budget",
+    "logical_turns": 41,
+    "duration_ms": 271750,
+    "uncached_prompt_tokens": 46826,
+    "post_warmup_cache_percent": 98,
+    "compactions": 0,
+    "last_turn_prompt_tokens": 76907
+  },
+  "interpretation": "Two DeepSeek samples passed the fixture command; both exceeded total prompt budget, and one exhausted 45 turns without a final response. One Codex sample passed all graders and budgets. Different models and small samples do not isolate a harness regression or justify changes to compaction, routing, or budgets.",
+  "next_steps": "Investigate a robust, cross-family approach to bounded-turn completion and context growth; measure completion, correctness and authority preservation against controls before changing tool availability or runtime limits.",
+  "repeat": {
+    "report": "target/eval-live/tasklog-repeat-deepseek/1793917020038-live-271/report.json",
+    "status": "error: max-turn budget exhausted after 45 iterations",
+    "fixture_test_grader": "passed",
+    "response_assertion_grader": "failed: no final response",
+    "prompt_tokens": 2914484,
+    "uncached_prompt_tokens": 34612,
+    "post_warmup_cache_percent": 99,
+    "duration_ms": 332781,
+    "last_turn": "README edit",
+    "tool_calls": {
+      "bash": 16,
+      "write": 10,
+      "edit": 9,
+      "read": 7,
+      "grep": 2,
+      "todowrite": 1,
+      "apply_patch": 1
+    }
+  },
+  "codex_control": {
+    "report": "target/eval-live/tasklog-control-codex-sol/1793917039078-live-271/report.json",
+    "model": "openai/gpt-6.1-sol",
+    "requested_effort": "high",
+    "status": "completed, both graders and budgets passed",
+    "logical_turns": 35,
+    "prompt_tokens": 878307,
+    "uncached_prompt_tokens": 76771,
+    "post_warmup_cache_percent": 92,
+    "duration_ms": 575150
+  },
+  "unsupported_model_probe": {
+    "report": "target/eval-live/tasklog-control-codex/1793917020038-live-271/report.json",
+    "model": "gpt-5.5",
+    "result": "HTTP 400: model unsupported by this ChatGPT account; no task attempted"
+  },
+  "turn_limit_investigation": {
+    "requests": 45,
+    "responses": 45,
+    "last_request_contains": [
+      "delivery checkpoints at 34, 23 and 11 turns remaining",
+      "budget warning at 6 turns remaining",
+      "explicit final-turn warning"
+    ],
+    "last_response_tool_calls": [
+      "edit"
+    ],
+    "existing_coverage": "src/agent/tests/stall_guard.rs::recovery_advisory_reaches_model_without_extending_turn_limit",
+    "conclusion": "The runtime supplied the warning and enforced the configured limit; the model chose another edit. The evidence does not establish that adding or rewording an advisory would improve completion."
+  },
+  "low_effort_experiment": {
+    "model": "deepseek/deepseek-flash",
+    "provider": "deepseek",
+    "requested_effort": "low",
+    "repetitions": 3,
+    "reports": [
+      {
+        "seed": 271,
+        "path": "target/eval-live/tasklog-low-deepseek/1793925924546-live-271/report.json",
+        "status": "completed",
+        "graders": "2/2",
+        "prompt_tokens": 420651,
+        "logical_turns": 14,
+        "budget": "passed"
+      },
+      {
+        "seed": 272,
+        "path": "target/eval-live/tasklog-low-seed272/1793926065856-live-272/report.json",
+        "status": "completed",
+        "graders": "2/2",
+        "prompt_tokens": 451261,
+        "logical_turns": 12,
+        "budget": "passed"
+      },
+      {
+        "seed": 273,
+        "path": "target/eval-live/tasklog-low-seed273/1793926215906-live-273/report.json",
+        "status": "blocked: verification not confirmed",
+        "graders": "2/2",
+        "prompt_tokens": 2102508,
+        "logical_turns": 40,
+        "budget": "failed: prompt tokens"
+      }
+    ],
+    "interpretation": "Two of three low-effort runs passed all checks with fewer prompt tokens than the two earlier high-effort runs. The third exceeded the budget and its completion guard could not confirm verification even though the independent fixture grader later passed. The final response claimed verification; available evidence does not establish whether the agent actually ran that command or why its evidence was missing. Small, nonpaired samples with changed worktree state do not justify changing the default or claiming a causal improvement.",
+    "official_protocol": "https://api-docs.deepseek.com/guides/thinking_mode/ requires complete reasoning replay when tool definitions are included.",
+    "traced_followup": {
+      "seed": 274,
+      "report": "target/eval-live/tasklog-low-traced/1793927160695-live-274/report.json",
+      "private_transcript": "target/deepseek-tasklog-low-traced.log",
+      "status": "completed, 2/2 graders and budgets passed",
+      "logical_turns": 23,
+      "prompt_tokens": 867067,
+      "observation": "The response trace includes direct Cargo tests piped through tail; Bash rewrites these to direct commands before execution. This run does not establish why seed 273 lacked verification evidence."
+    }
+  }
+}

@@ -172,6 +172,9 @@ contains = ["new content"]
 
 `repetitions` runs every selected task in a fresh copied worktree, with stable
 `<task>-run-N` report ids when the value is greater than one. It defaults to 1.
+Each copy has its own Git repository so Git inspection and per-turn context
+cannot discover the enclosing checkout's branch, history, or diff. This is a
+repository boundary, not a filesystem or network sandbox.
 Tasks default to the `full` coding prompt; `profile = "smol"` exercises the
 compact prompt and tool profile. A suite with tasks that omit `tasks.mock` is
 live-only and must be run with `--mode live`.
@@ -257,12 +260,21 @@ max_completion_tokens_per_turn = 32000
 max_missing_usage_turns = 0
 min_post_warmup_cache_percent = 65
 cache_warmup_turns = 5
+max_unmeasured_post_warmup_cache_turns = 0
 max_reads_per_unchanged_path = 2
 ```
 
 Duration, logical-turn, and provider-attempt limits stop a runaway task. Other
 limits fail its budget report after the run, preserving the full diagnostic
-record.
+record. Token limits cannot pass when the corresponding usage is missing from
+any recorded turn, even if a separate missing-usage limit was not set.
+Cost ceilings likewise require complete per-turn cost measurement. Cache floors
+cover measured post-warmup turns only; reports count excluded turns. Set
+`max_unmeasured_post_warmup_cache_turns = 0` to require complete coverage, or a
+larger explicit limit when an evaluation intentionally includes unmeasured calls.
+Token and cost ceilings also fail as unverifiable when an earlier provider retry
+is not included in the recorded usage totals; a later successful response does
+not establish the earlier attempt's cost.
 
 ## Mock Mode
 
@@ -387,7 +399,11 @@ not_contains = ["TODO"]
 exact_file = "expected/readme.md"
 ```
 
-`assertion` checks the final assistant output.
+`assertion` checks the final assistant output. `contains` and `not_contains`
+use case-sensitive literal substrings. `matches` and `not_matches` use Rust
+regular expressions; every required pattern must match, and no forbidden
+pattern may match. Put alternatives inside a pattern and use `(?i)` for
+case-insensitive matching. Invalid or blank patterns fail suite loading.
 
 ```toml
 [[tasks.graders]]
@@ -395,6 +411,23 @@ type = "assertion"
 contains = ["Updated README.md"]
 not_contains = ["failed"]
 ```
+
+For example, a separate assertion can require both an operation description
+and its source path:
+
+```toml
+[[tasks.graders]]
+type = "assertion"
+matches = ['(?i)\b(product|multipl\w*)\b', 'src/lib\.rs\b']
+not_matches = ['(?i)\bnot implemented\b']
+```
+
+Patterns can accept equivalent wording and check several independent facts;
+they do not establish semantic correctness, review precision, or whether a
+claim is supported. Pair them with worktree and tool-effect checks, and retain
+transcripts for manual review. Changing a suite's assertions changes its
+measurement: report old and new results separately instead of treating an
+improved grade as an agent improvement.
 
 `changed-files` checks the paths Bonsai observed the agent mutate. `exact = []`
 is an explicit no-mutation assertion; `required` and `forbidden` provide subset
@@ -406,12 +439,43 @@ type = "changed-files"
 exact = ["src/lib.rs"]
 ```
 
-`tool-effects` checks successful effect classes: `inspection`,
+`tool-effects` checks effect classes: `inspection`,
 `workspace-mutation`, `command-execution`, `interaction`, `delegation`,
 `external-access`, `local-state`, and the conservative `unknown` fallback.
-`required_attempts` accepts an expected-failing operation as positive evidence;
-`forbidden_attempts` rejects matching calls even when the tool or permission
-path fails, exposing redundant questions and out-of-scope work.
+`required` checks successfully completed calls. `forbidden` rejects effects
+known to have been reached, including a Bash process spawn, a background
+start, or a foreground command with a structured result, even when it exits
+unsuccessfully or is interrupted after spawning.
+`required_delegated` requires a successful effect from a child agent, rather
+than accepting the same effect from the parent.
+`required_attempts` accepts an expected-failing operation as positive
+evidence; `forbidden_attempts` also
+rejects calls stopped before the effect, such as by a permission denial.
+Other tools may not report a start event, and an interruption before a Bash
+process spawns proves only an attempt. Use `forbidden_attempts` when the
+attempt itself matters.
+
+When a delegated agent has a parent execution context, its tool-effect phases
+are included in the parent report without forwarding its arguments or output.
+This includes synchronous self-review. Effects from detached work that happen
+after the report snapshot are absent from that report.
+Effect categories remain based on tool names; subprocesses internal to an
+inspection tool are not separately classified as command executions.
+If a child reuses one call ID for different tools in the same batch, ambiguous
+results are not attributed to either tool; a confirmed Bash spawn or structured
+command result is still counted as command execution.
+Ordinary tasks can opt into built-in subagents with `enable_subagents = true`.
+In mock mode, supply a separate `[tasks.subagent_mock]` script for the child;
+live children inherit the selected provider and model. Child provider attempts
+share the task's attempt budget and child usage is included in the report.
+Custom agents and background wakeups are not configured by this eval profile.
+Stream capture and replay do not support subagent tasks. The delegation suite
+exercises the built-in explore agent through both mock and live providers:
+
+```sh
+cargo run --locked -- eval --mode mock --suite eval/suites/delegation.toml --fail-on-task-failure
+cargo run --release --locked -- eval --mode live --provider deepseek --suite eval/suites/delegation.toml --fail-on-task-failure
+```
 
 ```toml
 [[tasks.graders]]

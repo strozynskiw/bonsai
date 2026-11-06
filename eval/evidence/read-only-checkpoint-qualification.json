@@ -1,0 +1,161 @@
+{
+  "purpose": "Qualification of a read-only conclusion checkpoint fix and rejection of an unreliable prompt-only command-routing experiment.",
+  "suite": "eval/suites/intent_authority.toml",
+  "suite_and_graders_changed": false,
+  "configuration": {
+    "deepseek": {
+      "model": "deepseek/deepseek-flash",
+      "effort": "off"
+    },
+    "codex": {
+      "model": "openai/gpt-6.1-sol",
+      "effort": "low"
+    },
+    "repetitions_per_task": 3,
+    "harness_seeds": [
+      405,
+      406
+    ]
+  },
+  "runtime_fix": {
+    "problem": "The read-only checkpoint emptied the registry after eight qualifying tool turns. A subsequent final answer was rejected for pending todos, while todowrite was unavailable to resolve them.",
+    "before_report": "target/eval-live/readonly-routing-candidate-codex/1793908351554-live-405/report.json",
+    "before_run_error": "Completion rejected: 1 todo(s) pending; 1 todo(s) in progress.",
+    "change": "Keep the checkpoint advisory and preserve the current tool registry. Completion-evidence and permission gates remain unchanged.",
+    "regression": "agent::tests::stall_guard::read_only_checkpoint_preserves_tools_for_remaining_evidence_and_todos",
+    "focused_test_log": "target/readonly-checkpoint-focused.log",
+    "release_sha256": "54aa334de35f6b97e112cedea044faac41895a4201b372c23dbc8c1adae12f9e",
+    "goal_surface_log": "target/readonly-runtime-final-goal-e2e.log",
+    "control_limit": "The final live controls completed without creating todos and did not trigger the advisory. The deterministic regression provides the explicit eight-inspection-turn, ninth-read, and todo-completion coverage."
+  },
+  "prompt_experiment": {
+    "decision": "Rejected; all production prompt edits and temporary prompt-budget changes were reverted.",
+    "observation": "Initial 6/6 DeepSeek review passes did not reproduce: a fresh run of the same wording passed3/6. Explicit no-command adherence remains unresolved.",
+    "retained_production_complexity": "none",
+    "limitations": [
+      "Small exploratory samples, not proof of general reliability.",
+      "Harness seeds do not establish deterministic provider sampling; fresh runs have distinct fixture paths and provider variance.",
+      "Review authority graders do not establish review precision; duplicated and unsupported findings remain.",
+      "One correct baseline Codex answer failed the literal product-word assertion; command-effect checks passed3/3. No grader was changed to improve scores."
+    ]
+  },
+  "results": {
+    "baseline_deepseek_review": {
+      "reports": [
+        "target/eval-live/goal-frozen-review/1793906576757-live-405/report.json",
+        "target/eval-live/readonly-routing-baseline-review-406/1793908223635-live-406/report.json"
+      ],
+      "tasks": 6,
+      "overall_passed": 2,
+      "completed": 6,
+      "tool_effect_checks_passed": 2,
+      "max_logical_turns": 5
+    },
+    "initial_prompt_candidate_review": {
+      "reports": [
+        "target/eval-live/readonly-routing-candidate-review-405/1793908351554-live-405/report.json",
+        "target/eval-live/readonly-routing-candidate-review-406/1793908435521-live-406/report.json"
+      ],
+      "tasks": 6,
+      "overall_passed": 6,
+      "completed": 6,
+      "tool_effect_checks_passed": 6,
+      "max_logical_turns": 5
+    },
+    "compact_candidate_review": {
+      "reports": [
+        "target/eval-live/readonly-final-review-405/1793909369917-live-405/report.json"
+      ],
+      "tasks": 3,
+      "overall_passed": 1,
+      "completed": 3,
+      "tool_effect_checks_passed": 1,
+      "max_logical_turns": 5
+    },
+    "explicit_compact_candidate_review": {
+      "reports": [
+        "target/eval-live/readonly-explicit-review-405/1793909739889-live-405/report.json",
+        "target/eval-live/readonly-explicit-review-406/1793909739889-live-406/report.json"
+      ],
+      "tasks": 6,
+      "overall_passed": 4,
+      "completed": 6,
+      "tool_effect_checks_passed": 4,
+      "max_logical_turns": 5
+    },
+    "original_candidate_repeat_review": {
+      "reports": [
+        "target/eval-live/readonly-qualified-review-405/1793910024596-live-405/report.json",
+        "target/eval-live/readonly-qualified-review-406/1793910024596-live-406/report.json"
+      ],
+      "tasks": 6,
+      "overall_passed": 3,
+      "completed": 6,
+      "tool_effect_checks_passed": 3,
+      "max_logical_turns": 4
+    },
+    "baseline_smol_explain": {
+      "reports": [
+        "target/eval-live/readonly-routing-baseline-smol/1793908223635-live-405/report.json"
+      ],
+      "tasks": 3,
+      "overall_passed": 0,
+      "completed": 3,
+      "tool_effect_checks_passed": 0,
+      "max_logical_turns": 4
+    },
+    "initial_candidate_smol_explain": {
+      "reports": [
+        "target/eval-live/readonly-routing-candidate-smol/1793908351554-live-405/report.json"
+      ],
+      "tasks": 3,
+      "overall_passed": 3,
+      "completed": 3,
+      "tool_effect_checks_passed": 3,
+      "max_logical_turns": 3
+    },
+    "original_candidate_repeat_smol": {
+      "reports": [
+        "target/eval-live/readonly-qualified-smol/1793910024596-live-405/report.json"
+      ],
+      "tasks": 3,
+      "overall_passed": 1,
+      "completed": 3,
+      "tool_effect_checks_passed": 1,
+      "max_logical_turns": 4
+    },
+    "runtime_fix_codex_control": {
+      "reports": [
+        "target/eval-live/readonly-runtime-final-codex/1793910471282-live-405/report.json"
+      ],
+      "tasks": 3,
+      "overall_passed": 3,
+      "completed": 3,
+      "tool_effect_checks_passed": 3,
+      "max_logical_turns": 9
+    },
+    "runtime_fix_deepseek_change_control": {
+      "reports": [
+        "target/eval-live/readonly-runtime-final-fix/1793910471282-live-405/report.json"
+      ],
+      "tasks": 3,
+      "overall_passed": 3,
+      "completed": 3,
+      "tool_effect_checks_passed": 3,
+      "max_logical_turns": 7
+    }
+  },
+  "final_validation": {
+    "status": "passed",
+    "full_test_log": "target/readonly-checkpoint-full-final.log",
+    "unit_tests_passed": 4547,
+    "integration_tests_passed": 21,
+    "existing_ignored_tests": 6,
+    "clippy_log": "target/readonly-checkpoint-clippy-final.log",
+    "clippy": "all-targets/all-features/locked -D warnings passed",
+    "format": "cargo fmt --all -- --check passed",
+    "release_log": "target/readonly-checkpoint-release-final.log",
+    "release": "RUSTFLAGS=-D warnings release --locked passed",
+    "prompt_rollback": "git diff --quiet -- src/agent/prompts.rs passed"
+  }
+}

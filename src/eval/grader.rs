@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -12,7 +13,7 @@ use super::*;
 
 const DEFAULT_GRADER_TIMEOUT_SECS: u64 = 30;
 
-/// Observable class of a successfully completed tool call during an eval task.
+/// Effect category tracked for tool calls during an eval task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum EvalToolEffect {
@@ -54,7 +55,9 @@ impl EvalToolEffect {
 pub(crate) struct EvalTaskEffects {
     pub(crate) changed_files: Vec<String>,
     pub(crate) tool_effects: Vec<EvalToolEffect>,
+    pub(crate) reached_tool_effects: Vec<EvalToolEffect>,
     pub(crate) attempted_tool_effects: Vec<EvalToolEffect>,
+    pub(crate) delegated_tool_effects: Vec<EvalToolEffect>,
 }
 
 /// A single grader declaration parsed from a suite's `[[tasks.graders]]` table.
@@ -79,12 +82,18 @@ pub(crate) enum GraderSpec {
         #[serde(default)]
         exact_file: Option<String>,
     },
-    /// Assert substrings present/absent in the assistant's final output.
+    /// Assert literal substrings and regex patterns in the final output.
     Assertion {
         #[serde(default)]
         contains: Vec<String>,
         #[serde(default)]
         not_contains: Vec<String>,
+        /// Every pattern must match; alternatives belong inside a pattern.
+        #[serde(default)]
+        matches: Vec<String>,
+        /// No pattern may match.
+        #[serde(default)]
+        not_matches: Vec<String>,
     },
     /// Assert the exact, required, or forbidden paths changed by the task.
     ChangedFiles {
@@ -95,10 +104,13 @@ pub(crate) enum GraderSpec {
         #[serde(default)]
         forbidden: Vec<String>,
     },
-    /// Assert successful tool-effect classes observed during the task.
+    /// Require successful calls and forbid calls that reached their effect.
     ToolEffects {
         #[serde(default)]
         required: Vec<EvalToolEffect>,
+        /// Successful effects reported by a delegated agent.
+        #[serde(default)]
+        required_delegated: Vec<EvalToolEffect>,
         #[serde(default)]
         forbidden: Vec<EvalToolEffect>,
         /// Effect classes that must be attempted, regardless of whether the
@@ -107,7 +119,7 @@ pub(crate) enum GraderSpec {
         #[serde(default)]
         required_attempts: Vec<EvalToolEffect>,
         /// Effect classes that must not even be attempted. This is stricter
-        /// than `forbidden`, which covers successfully completed calls.
+        /// than `forbidden`, which covers effects known to have been reached.
         #[serde(default)]
         forbidden_attempts: Vec<EvalToolEffect>,
     },
@@ -145,9 +157,25 @@ impl GraderSpec {
             Self::Assertion {
                 contains,
                 not_contains,
+                matches,
+                not_matches,
             } => {
-                if contains.is_empty() && not_contains.is_empty() {
+                if contains.is_empty()
+                    && not_contains.is_empty()
+                    && matches.is_empty()
+                    && not_matches.is_empty()
+                {
                     anyhow::bail!("Task '{task_id}' assertion grader has no checks");
+                }
+                for (field, patterns) in [("matches", matches), ("not_matches", not_matches)] {
+                    for (index, pattern) in patterns.iter().enumerate() {
+                        if pattern.trim().is_empty() {
+                            anyhow::bail!("Task '{task_id}' assertion {field}[{index}] is empty");
+                        }
+                        Regex::new(pattern).with_context(|| {
+                            format!("Task '{task_id}' assertion {field}[{index}] is invalid")
+                        })?;
+                    }
                 }
             }
             Self::ChangedFiles {
@@ -172,11 +200,13 @@ impl GraderSpec {
             }
             Self::ToolEffects {
                 required,
+                required_delegated,
                 forbidden,
                 required_attempts,
                 forbidden_attempts,
             } => {
                 if required.is_empty()
+                    && required_delegated.is_empty()
                     && forbidden.is_empty()
                     && required_attempts.is_empty()
                     && forbidden_attempts.is_empty()
@@ -184,16 +214,18 @@ impl GraderSpec {
                     anyhow::bail!("Task '{task_id}' tool-effects grader has no checks");
                 }
                 let required = required.iter().collect::<HashSet<_>>();
-                if let Some(effect) = forbidden.iter().find(|effect| required.contains(effect)) {
+                if let Some(effect) = forbidden
+                    .iter()
+                    .find(|effect| required.contains(effect) || required_delegated.contains(effect))
+                {
                     anyhow::bail!(
                         "Task '{task_id}' tool effect is both required and forbidden: {effect:?}"
                     );
                 }
                 let required_attempts = required_attempts.iter().collect::<HashSet<_>>();
-                if let Some(effect) = forbidden_attempts
-                    .iter()
-                    .find(|effect| required_attempts.contains(effect))
-                {
+                if let Some(effect) = forbidden_attempts.iter().find(|effect| {
+                    required_attempts.contains(effect) || required_delegated.contains(effect)
+                }) {
                     anyhow::bail!(
                         "Task '{task_id}' tool effect attempt is both required and forbidden: {effect:?}"
                     );
@@ -242,8 +274,16 @@ impl GraderSpec {
             Self::Assertion {
                 contains,
                 not_contains,
+                matches,
+                not_matches,
             } => {
-                let result = grade_assertion(assistant_output, contains, not_contains);
+                let result = grade_assertion(
+                    assistant_output,
+                    contains,
+                    not_contains,
+                    matches,
+                    not_matches,
+                );
                 ("assertion", result.passed, result.details)
             }
             Self::ChangedFiles {
@@ -261,18 +301,30 @@ impl GraderSpec {
             }
             Self::ToolEffects {
                 required,
+                required_delegated,
                 forbidden,
                 required_attempts,
                 forbidden_attempts,
             } => {
-                let result = grade_tool_effects(
+                let mut result = grade_tool_effects(
                     &effects.tool_effects,
+                    &effects.reached_tool_effects,
                     &effects.attempted_tool_effects,
                     required,
                     forbidden,
                     required_attempts,
                     forbidden_attempts,
                 );
+                if result.passed
+                    && let Some(effect) = required_delegated
+                        .iter()
+                        .find(|effect| !effects.delegated_tool_effects.contains(effect))
+                {
+                    result = GradeOutcome::fail(format!(
+                        "required delegated tool effect was not observed: {effect:?}; observed {:?}",
+                        effects.delegated_tool_effects
+                    ));
+                }
                 ("tool-effects", result.passed, result.details)
             }
         };
@@ -533,14 +585,38 @@ fn grade_assertion(
     assistant_output: &str,
     contains: &[String],
     not_contains: &[String],
+    matches: &[String],
+    not_matches: &[String],
 ) -> GradeOutcome {
-    check_needles(
+    if let Some(outcome) = check_needles(
         assistant_output,
         contains,
         not_contains,
         NeedleContext::AssistantOutput,
-    )
-    .unwrap_or_else(|| GradeOutcome::pass("assistant output assertions passed"))
+    ) {
+        return outcome;
+    }
+    for (patterns, required) in [(matches, true), (not_matches, false)] {
+        for pattern in patterns {
+            let regex = match Regex::new(pattern) {
+                Ok(regex) => regex,
+                Err(err) => {
+                    return GradeOutcome::fail(format!(
+                        "invalid assistant output pattern {pattern:?}: {err}"
+                    ));
+                }
+            };
+            if regex.is_match(assistant_output) != required {
+                let detail = if required {
+                    "missing expected pattern"
+                } else {
+                    "included forbidden pattern"
+                };
+                return GradeOutcome::fail(format!("assistant output {detail}: {pattern:?}"));
+            }
+        }
+    }
+    GradeOutcome::pass("assistant output assertions passed")
 }
 
 fn grade_changed_files(
@@ -573,6 +649,7 @@ fn grade_changed_files(
 
 fn grade_tool_effects(
     observed: &[EvalToolEffect],
+    reached: &[EvalToolEffect],
     attempted: &[EvalToolEffect],
     required: &[EvalToolEffect],
     forbidden: &[EvalToolEffect],
@@ -584,9 +661,9 @@ fn grade_tool_effects(
             "required tool effect was not observed: {effect:?}; observed {observed:?}"
         ));
     }
-    if let Some(effect) = forbidden.iter().find(|effect| observed.contains(effect)) {
+    if let Some(effect) = forbidden.iter().find(|effect| reached.contains(effect)) {
         return GradeOutcome::fail(format!(
-            "forbidden tool effect was observed: {effect:?}; observed {observed:?}"
+            "forbidden tool effect was reached: {effect:?}; reached {reached:?}"
         ));
     }
     if let Some(effect) = required_attempts
@@ -606,7 +683,7 @@ fn grade_tool_effects(
         ));
     }
     GradeOutcome::pass(format!(
-        "tool-effects checks passed: observed {observed:?}; attempted {attempted:?}"
+        "tool-effects checks passed: observed {observed:?}; reached {reached:?}; attempted {attempted:?}"
     ))
 }
 
@@ -633,6 +710,36 @@ mod tests {
         assert!(validate_id("task.ok").is_ok());
         assert!(validate_id(".").is_err());
         assert!(validate_id("..").is_err());
+    }
+
+    #[tokio::test]
+    async fn delegated_requirement_does_not_accept_parent_inspection() {
+        let grader = GraderSpec::ToolEffects {
+            required: vec![],
+            required_delegated: vec![EvalToolEffect::Inspection],
+            forbidden: vec![],
+            required_attempts: vec![],
+            forbidden_attempts: vec![],
+        };
+        let mut effects = EvalTaskEffects {
+            tool_effects: vec![EvalToolEffect::Inspection],
+            ..Default::default()
+        };
+        assert!(
+            !grader
+                .grade(Path::new("."), Path::new("."), "", &effects)
+                .await
+                .passed
+        );
+        effects
+            .delegated_tool_effects
+            .push(EvalToolEffect::Inspection);
+        assert!(
+            grader
+                .grade(Path::new("."), Path::new("."), "", &effects)
+                .await
+                .passed
+        );
     }
 
     #[tokio::test]
@@ -710,6 +817,8 @@ mod tests {
             "done without panic",
             &[String::from("done")],
             &[String::from("error")],
+            &[],
+            &[],
         );
         assert!(pass.passed);
 
@@ -717,8 +826,95 @@ mod tests {
             "done with error",
             &[String::from("done")],
             &[String::from("error")],
+            &[],
+            &[],
         );
         assert!(!fail.passed);
+    }
+
+    #[tokio::test]
+    async fn assertion_patterns_require_every_fact_and_preserve_literal_checks() {
+        let grader: GraderSpec = toml::from_str(
+            r#"
+type = "assertion"
+contains = ["src/lib.rs"]
+not_contains = ["not implemented"]
+matches = ['(?i)\b(product|multipl\w*)\b', '\b30\b']
+not_matches = ['(?i)\bPANIC\b']
+"#,
+        )
+        .unwrap();
+        let root = Path::new(".");
+        grader.validate(root, "patterns").unwrap();
+        let effects = EvalTaskEffects::default();
+        for (output, expected) in [
+            ("src/lib.rs multiplies values, returning 30", true),
+            ("src/lib.rs: PRODUCT returns 30", true),
+            ("src/lib.rs multiplies values", false),
+            ("src/lib.rs returns 30", false),
+            ("other.rs product returns 30", false),
+            ("src/lib.rs product returns 30; not implemented", false),
+            ("src/lib.rs product returns 30; panic", false),
+        ] {
+            let result = grader.grade(root, root, output, &effects).await;
+            assert_eq!(result.passed, expected, "{output}: {}", result.details);
+        }
+    }
+
+    #[test]
+    fn assertion_patterns_reject_invalid_and_empty_configuration() {
+        let root = Path::new(".");
+        for field in ["matches", "not_matches"] {
+            for pattern in ["[", " "] {
+                let grader: GraderSpec =
+                    toml::from_str(&format!("type = 'assertion'\n{field} = ['{pattern}']"))
+                        .unwrap();
+                let error = format!("{:#}", grader.validate(root, "bad-pattern").unwrap_err());
+                assert!(error.contains("bad-pattern"), "{error}");
+                assert!(error.contains(&format!("{field}[0]")), "{error}");
+                if pattern == "[" {
+                    assert!(error.contains("unclosed character class"), "{error}");
+                }
+            }
+        }
+        let grader: GraderSpec = toml::from_str("type = 'assertion'").unwrap();
+        assert!(grader.validate(root, "no-checks").is_err());
+        let result = grade_assertion("anything", &[], &[], &["[".into()], &[]);
+        assert!(
+            !result.passed,
+            "invalid patterns must not pass even without validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn intent_assertion_accepts_observed_synonym_without_accepting_bare_keyword() {
+        let suite: toml::Value =
+            toml::from_str(include_str!("../../eval/suites/intent_authority.toml")).unwrap();
+        // This output was rejected by the original literal `product` check.
+        let correct = "High — total multiplies values instead of adding them (src/lib.rs:2). \
+            For [2, 3, 5], it returns 30, contradicting the expected 10 in tests/total.rs:5. \
+            Use summation rather than multiplication.";
+        assert!(!correct.contains("product"));
+        let root = Path::new(".");
+        for index in 0..3 {
+            let grader: GraderSpec = suite["tasks"][index]["graders"][2]
+                .clone()
+                .try_into()
+                .unwrap();
+            grader.validate(root, "intent").unwrap();
+            for (output, expected) in [
+                (correct, true),
+                ("product", false),
+                ("src/lib.rs uses product rather than sum", false),
+                ("src/lib.rs sums to 10, not 30", false),
+                ("product rather than sum returns 30 instead of 10", false),
+            ] {
+                let result = grader
+                    .grade(root, root, output, &EvalTaskEffects::default())
+                    .await;
+                assert_eq!(result.passed, expected, "{output}: {}", result.details);
+            }
+        }
     }
 
     #[test]
@@ -749,6 +945,7 @@ mod tests {
         let pass = grade_tool_effects(
             &observed,
             &observed,
+            &observed,
             &[EvalToolEffect::Inspection],
             &[EvalToolEffect::ExternalAccess],
             &[],
@@ -757,6 +954,7 @@ mod tests {
         assert!(pass.passed);
 
         let fail = grade_tool_effects(
+            &observed,
             &observed,
             &observed,
             &[],
@@ -769,6 +967,7 @@ mod tests {
         let attempted = [EvalToolEffect::Inspection, EvalToolEffect::Interaction];
         let failed_attempt = grade_tool_effects(
             &[EvalToolEffect::Inspection],
+            &[EvalToolEffect::Inspection],
             &attempted,
             &[EvalToolEffect::Inspection],
             &[],
@@ -777,6 +976,13 @@ mod tests {
         );
         assert!(!failed_attempt.passed);
         assert!(failed_attempt.details.contains("attempted"));
+
+        let reached = [EvalToolEffect::CommandExecution];
+        let forbidden_failed_command =
+            grade_tool_effects(&[], &reached, &reached, &[], &reached, &[], &[]);
+        assert!(!forbidden_failed_command.passed);
+        let required_success = grade_tool_effects(&[], &reached, &reached, &reached, &[], &[], &[]);
+        assert!(!required_success.passed);
     }
 
     #[test]
