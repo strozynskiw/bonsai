@@ -59,7 +59,8 @@ Mechanics:
 - **Concurrency** — up to 5 subagents run at once; read-only delegations in
   one turn batch in parallel. `run_in_background: true` detaches a
   delegation (`sub-N` in `/tasks`); the parent parks and wakes on
-  completion (TUI only — headless treats an unresolved wait as an error).
+  completion in the TUI and server. Headless runs the delegation synchronously
+  when background mode is requested and reports that fallback.
 - **Bounded** — built-ins use fixed compiled budgets; custom subagents
   default to 75 turns (cap 500 via `max_turns`) / 30 min. On exhaustion the
   subagent gets one tools-disabled "conclude now" turn, so even a timeout
@@ -90,6 +91,9 @@ Drop a markdown file with YAML frontmatter into an `agents/` directory
 `.bonsai/agents/` > `.claude/agents/` > `.agents/agents/` >
 `$BONSAI_HOME/agents/`; project files need workspace trust; built-in ids are
 reserved):
+
+Required string fields reject YAML null values (`null`, `~`, or an empty value).
+Quote `"null"` or `""` when that literal text is intended.
 
 ```markdown
 ---

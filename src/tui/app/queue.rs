@@ -56,6 +56,8 @@ impl AppState {
         summary: impl Into<String>,
     ) {
         self.current_session_id = Some(session_id);
+        self.session_goal = None;
+        self.goal_elapsed = std::time::Duration::ZERO;
         // A newly adopted session has not completed a run in this process yet.
         // AgentFinished replaces this with the typed run outcome.
         self.current_session_status = crate::storage::SessionStatus::Active;
@@ -66,6 +68,8 @@ impl AppState {
 
     pub(crate) fn clear_session_identity(&mut self) {
         self.current_session_id = None;
+        self.session_goal = None;
+        self.goal_elapsed = std::time::Duration::ZERO;
         self.current_session_name.clear();
         self.current_session_summary.clear();
     }
@@ -197,6 +201,16 @@ impl AppState {
 
     pub(super) fn mark_queued_user_message_sent(&mut self, id: u64, text: String) {
         self.queued_inputs.retain(|queued| queued.id != id);
+        if let Some(index) = self
+            .removed_queued_input_ids
+            .iter()
+            .position(|removed| *removed == id)
+        {
+            self.removed_queued_input_ids.remove(index);
+            self.set_session_toast(
+                "Message was already sent; cancellation arrived too late.".to_string(),
+            );
+        }
 
         // Index-precise (`position` + `get_mut`) so the layout cache
         // invalidates only the promoted item, not the whole transcript.
@@ -214,6 +228,13 @@ impl AppState {
         let queue_len = self.queued_inputs.len();
         self.queued_inputs.retain(|queued| queued.id != id);
         let queue_changed = self.queued_inputs.len() != queue_len;
+        if queue_changed {
+            const MAX_REMOVED_IDS: usize = 128;
+            if self.removed_queued_input_ids.len() == MAX_REMOVED_IDS {
+                self.removed_queued_input_ids.pop_front();
+            }
+            self.removed_queued_input_ids.push_back(id);
+        }
 
         let Some(index) = self.transcript.iter().position(|item| {
             matches!(item, TranscriptItem::QueuedUserMessage { id: item_id, .. } if *item_id == id)
@@ -483,6 +504,35 @@ mod tests {
             app.transcript.as_slice(),
             [TranscriptItem::QueuedUserMessage { id: 1, text, .. }] if text == "first"
         ));
+    }
+
+    #[test]
+    fn late_sent_acknowledgement_reports_that_withdrawal_lost_the_race() {
+        let mut app = app();
+        app.focus = Focus::Input;
+        app.reduce(AppAction::SteerInput {
+            id: 42,
+            text: "follow up".into(),
+            content: ComposerContent {
+                text: "follow up".into(),
+                chips: Vec::new(),
+            },
+            mode: AgentMode::Coding,
+        });
+        app.reduce(AppAction::WithdrawQueuedInput);
+        app.reduce(AppAction::Agent(UiEvent::QueuedUserMessageSent {
+            id: 42,
+            text: "follow up".into(),
+        }));
+        assert_eq!(app.input(), "follow up");
+        assert!(
+            matches!(app.transcript.as_slice(), [TranscriptItem::UserMessage { text }] if text == "follow up")
+        );
+        assert!(
+            app.session_toast
+                .as_ref()
+                .is_some_and(|toast| toast.text.contains("already sent"))
+        );
     }
 
     #[test]

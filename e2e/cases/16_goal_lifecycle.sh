@@ -25,19 +25,21 @@ tui_keys "/go" Tab
 expect_input "goal command completion" "/goal"
 tui_keys C-u "/goal Hold the original objective" Enter
 expect "goal starts" "Goal set: Hold the original objective"
-expect_meta "goal has a busy run" "Enter queue"
+expect "goal timer is visible" "goal active ·"
+expect_meta "goal has a busy run" "Enter send"
 tui_keys "/goal status" Enter
 expect "busy status preserves objective" "Hold the original objective"
 expect "busy status includes limits" "Limits:"
 tui_keys "/goal pause" Enter
 expect "pause remains responsive" "Goal paused."
 expect "foreground interruption settles" "Run interrupted."
+expect "paused goal timer is visible" "goal paused ·"
 tui_keys "/goal resume" Enter
 expect "resume is explicit" "Goal resumed."
-expect_meta "resume starts work" "Enter queue"
+expect_meta "resume starts work" "Enter send"
 tui_keys "Prioritize the export test" Enter
 tui_keys Escape
-expect_meta "Esc steering starts the replacement turn" "Enter queue"
+expect_meta "Esc steering starts the replacement turn" "Enter send"
 tui_keys "/goal status" Enter
 expect "Esc steering preserves the active objective" "Hold the original objective"
 expect "steered goal remains active" "· active"
@@ -45,10 +47,10 @@ tui_keys "Keep the regression test" Enter
 tui_keys "/goal pause" Enter
 expect_meta "pause holds queued steering" "● Coding"
 tui_keys "/goal resume" Enter
-expect_meta "resume continues with held steering" "Enter queue"
+expect_meta "resume continues with held steering" "Enter send"
 tui_keys "/goal Hold the replacement objective" Enter
 expect "replacement accepted mid-stream" "Goal set: Hold the replacement objective"
-expect_meta "replacement has one foreground run" "Enter queue"
+expect_meta "replacement has one foreground run" "Enter send"
 tui_keys "/goal pause" Enter
 expect_meta "pause leaves the app idle" "● Coding"
 
@@ -64,6 +66,7 @@ tui_start 150 45 || e2e_done
 tui_keys "/goal status" Enter
 expect "objective survives restart" "Hold the replacement objective"
 expect "restored goal stays paused" "· paused"
+expect "restored goal timer remains visible" "goal paused ·"
 expect_meta "restore does not start work" "● Coding"
 tui_keys "/questions" Enter
 expect "pending questions command exists" "No pending questions."

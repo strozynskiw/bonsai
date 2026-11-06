@@ -51,6 +51,83 @@ fn command_failure(diagnostic: &str) -> ToolOutput {
 }
 
 #[tokio::test]
+async fn rewritten_cargo_test_produces_truthful_observed_verification() {
+    for succeeds in [true, false] {
+        let fixture = TestFixture::new();
+        init_repo(&fixture.project_root);
+        commit_file(
+            &fixture.project_root,
+            "Cargo.toml",
+            "[package]\nname='verification-probe'\nversion='0.1.0'\nedition='2021'\n",
+            "manifest",
+        );
+        std::fs::create_dir_all(fixture.project_root.join("src")).unwrap();
+        commit_file(
+            &fixture.project_root,
+            "src/lib.rs",
+            if succeeds {
+                "#[test] fn passes() { assert!(true); }"
+            } else {
+                "#[test] fn fails() { assert!(false); }"
+            },
+            "test",
+        );
+        let bash = Arc::new(crate::tool::BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        ));
+        let mut registry = ToolRegistry::new();
+        registry.register(bash.clone());
+        let mut agent = Agent::builder(
+            MockProvider::empty(),
+            Arc::new(registry),
+            empty_registry(),
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .system_context(String::new())
+        .build()
+        .unwrap();
+        let args = serde_json::json!({"command": "cargo test --lib 2>&1 | tail -10"});
+        let call = crate::provider::ToolCall {
+            id: "real-cargo".into(),
+            name: "bash".into(),
+            arguments: args.to_string(),
+        };
+        agent
+            .capture_pending_verification_bindings(std::slice::from_ref(&call))
+            .await;
+        let output = bash.execute(args).await.unwrap();
+        let ToolOutput::Command { exit_code, .. } = &output else {
+            panic!("expected command output");
+        };
+        assert_eq!(*exit_code == Some(0), succeeds);
+        let status = if succeeds {
+            crate::output::ToolExecutionStatus::Succeeded
+        } else {
+            crate::output::ToolExecutionStatus::Failed
+        };
+        agent
+            .record_verification_tool_result(&call, &output, status)
+            .await;
+        let run = agent
+            .verification_runs()
+            .last()
+            .expect("check was recorded");
+        assert_eq!(
+            run.checks[0].status,
+            if succeeds {
+                VerificationCheckStatus::Passed
+            } else {
+                VerificationCheckStatus::Failed
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn foreground_profile_checks_feed_self_review_and_verification_evidence() {
     let fixture = TestFixture::new();
     std::fs::write(

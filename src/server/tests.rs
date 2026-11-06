@@ -18,7 +18,10 @@ struct Mock {
     calls: AtomicUsize,
     immediate: AtomicBool,
     ignore_cancel: AtomicBool,
+    late_tool_call: AtomicBool,
+    first_wait_task: std::sync::Mutex<Option<String>>,
     release: Notify,
+    requests: std::sync::Mutex<Vec<String>>,
 }
 
 struct MockProvider(Arc<Mock>);
@@ -27,12 +30,17 @@ struct MockProvider(Arc<Mock>);
 impl Provider for MockProvider {
     async fn chat_stream(
         &self,
-        _messages: &[async_openai::types::chat::ChatCompletionRequestMessage],
+        messages: &[async_openai::types::chat::ChatCompletionRequestMessage],
         _tools: &[async_openai::types::chat::ChatCompletionTool],
         cancel: CancellationToken,
         sink: SharedSink,
     ) -> crate::provider::ProviderResult<StreamedResponse> {
-        self.0.calls.fetch_add(1, Ordering::SeqCst);
+        self.0
+            .requests
+            .lock()
+            .unwrap()
+            .push(serde_json::to_string(messages).unwrap());
+        let call = self.0.calls.fetch_add(1, Ordering::SeqCst);
         if self.0.ignore_cancel.load(Ordering::SeqCst) {
             self.0.release.notified().await;
         } else if !self.0.immediate.load(Ordering::SeqCst) {
@@ -45,6 +53,22 @@ impl Provider for MockProvider {
         sink.assistant_done();
         Ok(StreamedResponse {
             content: "Test answer.".into(),
+            tool_calls: if call == 0 && self.0.first_wait_task.lock().unwrap().is_some() {
+                let task = self.0.first_wait_task.lock().unwrap().clone().unwrap();
+                vec![crate::provider::ToolCall {
+                    id: "wait-call".into(),
+                    name: "tasks".into(),
+                    arguments: serde_json::json!({"action":"wait", "task_id":task}).to_string(),
+                }]
+            } else if self.0.late_tool_call.load(Ordering::SeqCst) {
+                vec![crate::provider::ToolCall {
+                    id: "late-call".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"touch late-marker"}"#.into(),
+                }]
+            } else {
+                Vec::new()
+            },
             terminal: crate::provider::StreamTerminal::Completed(
                 crate::provider::FinishReason::Stop,
             ),
@@ -92,6 +116,7 @@ struct Handles {
     background: Option<Arc<crate::background::BackgroundTaskRegistry>>,
     plan: Option<crate::plan::SharedPlanStore>,
     todos: Option<crate::todo::SharedTodoStore>,
+    goal: Option<crate::goal::GoalService>,
 }
 
 struct Factory {
@@ -114,6 +139,7 @@ impl SessionFactory for Factory {
             background: Some(core.background_tasks.clone()),
             plan: Some(core.plan_store.clone()),
             todos: Some(core.todo_store.clone()),
+            goal: Some(core.agent.goal.clone()),
         };
         Ok(core)
     }
@@ -193,23 +219,23 @@ impl Fixture {
             .unwrap();
     }
     async fn wait_calls(&self, n: usize) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(15), async {
             while self.mock.calls.load(Ordering::SeqCst) < n {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .unwrap();
     }
     async fn wait_idle(&self) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let (snapshot, _) = self.controller.snapshot().await.unwrap();
                 assert!(snapshot.failure.is_none(), "{:?}", snapshot);
                 if snapshot.state == "idle" {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -229,6 +255,451 @@ async fn resume_does_not_run_model_and_live_claim_is_rejected() {
             .unwrap(),
         crate::storage::ResumeSessionOutcome::Live
     );
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_reattaches_and_pauses_durable_goal_without_running_it() {
+    let f = Fixture::new().await;
+    let goal = crate::goal::GoalService::default();
+    goal.bind(f.db.storage.clone(), f.id).await.unwrap();
+    let original = goal.set("Implement the requested feature").await.unwrap();
+
+    f.resume().await;
+    let restored = f.factory.handles.lock().await.goal.clone().unwrap();
+    let record = restored.snapshot().await.unwrap();
+    assert_eq!(record.id, original.id);
+    assert_eq!(record.objective, original.objective);
+    assert_eq!(record.state, crate::goal::GoalState::Paused);
+    assert!(!restored.automatic_work_allowed().await);
+    assert_eq!(f.mock.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        f.db.storage
+            .current_goal(f.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::goal::GoalState::Paused
+    );
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_snapshot_and_events_preserve_every_transition_in_order() {
+    let f = Fixture::new().await;
+    f.resume().await;
+    let service = f.factory.handles.lock().await.goal.clone().unwrap();
+    let (snapshot, mut events, sink) = f.controller.subscribe_stream().await.unwrap();
+    assert!(snapshot.goal.is_none());
+    let goal = service.set("First objective").await.unwrap();
+    service
+        .transition(
+            &goal.id,
+            crate::goal::GoalState::Paused,
+            Some("Paused by user"),
+        )
+        .await
+        .unwrap();
+    let replacement = service.set("Second objective").await.unwrap();
+    service.clear().await.unwrap();
+    let (after, _, _) = f.controller.subscribe_stream().await.unwrap();
+    assert!(after.goal.is_none());
+    let mut changes = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let super::sink::SessionEvent::Goal(goal) = event.event {
+            changes.push((event.sequence, goal));
+        }
+    }
+    assert_eq!(changes.len(), 4);
+    assert!(changes.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(changes[0].1.as_ref().unwrap().id, goal.id);
+    assert_eq!(
+        changes[1].1.as_ref().unwrap().state,
+        crate::goal::GoalState::Paused
+    );
+    assert_eq!(changes[2].1.as_ref().unwrap().id, replacement.id);
+    assert!(changes[3].1.is_none());
+    let replay = sink.replay(snapshot.watermark, after.watermark).unwrap();
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|event| matches!(event.event, super::sink::SessionEvent::Goal(_)))
+            .count(),
+        4
+    );
+    assert_eq!(f.mock.calls.load(Ordering::SeqCst), 0);
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn active_goal_owns_server_task_and_persists_run_timing() {
+    let f = Fixture::new().await;
+    f.resume().await;
+    let service = f.factory.handles.lock().await.goal.clone().unwrap();
+    let goal = service.set("Explain the implementation").await.unwrap();
+    f.controller
+        .message(f.id, "goal-message", "Explain the implementation")
+        .await
+        .unwrap();
+    f.wait_calls(1).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    f.mock.release.notify_one();
+    f.wait_idle().await;
+    let task = f.db.storage.latest_task_run(f.id).await.unwrap().unwrap();
+    assert_eq!(task.goal_id, goal.id);
+    assert_eq!(task.goal, goal.objective);
+    let timing =
+        f.db.storage
+            .task_run_timing(task.id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(timing.wall_ms > 0, "{timing:?}");
+    assert_eq!(
+        f.db.storage
+            .goal_elapsed_ms(f.id, &goal.id, None)
+            .await
+            .unwrap(),
+        timing.wall_ms as u64
+    );
+    assert_eq!(
+        service.snapshot().await.unwrap().state,
+        crate::goal::GoalState::Complete
+    );
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_server_goal_is_paused_after_the_run_settles() {
+    let f = Fixture::new().await;
+    f.resume().await;
+    let service = f.factory.handles.lock().await.goal.clone().unwrap();
+    service.set("Explain the implementation").await.unwrap();
+    f.controller
+        .message(f.id, "interrupt-goal", "Explain it")
+        .await
+        .unwrap();
+    f.wait_calls(1).await;
+    assert_eq!(
+        service.snapshot().await.unwrap().state,
+        crate::goal::GoalState::Active
+    );
+    f.controller.interrupt(f.id).await.unwrap();
+    f.wait_idle().await;
+    assert_eq!(
+        service.snapshot().await.unwrap().state,
+        crate::goal::GoalState::Paused
+    );
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn replacing_goal_cancels_old_run_and_preserves_its_identity() {
+    use super::controller::GoalControl;
+    let f = Fixture::new().await;
+    f.resume().await;
+    let old = f
+        .controller
+        .control_goal(f.id, GoalControl::Set("Explain the first feature".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    f.controller
+        .message(f.id, "first-goal-run", "Explain it")
+        .await
+        .unwrap();
+    f.wait_calls(1).await;
+    let next = f
+        .controller
+        .control_goal(f.id, GoalControl::Set("Explain the second feature".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(old.id, next.id);
+    f.wait_idle().await;
+    let task = f.db.storage.latest_task_run(f.id).await.unwrap().unwrap();
+    assert_eq!(task.goal_id, old.id);
+    assert_eq!(task.outcome, Some(crate::storage::TaskOutcome::Superseded));
+    let current = f.db.storage.current_goal(f.id).await.unwrap().unwrap();
+    assert_eq!(current.id, next.id);
+    assert_eq!(current.state, crate::goal::GoalState::Active);
+    assert_eq!(f.mock.calls.load(Ordering::SeqCst), 1);
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn replacement_does_not_reuse_a_slot_before_the_old_run_stops() {
+    use super::controller::GoalControl;
+    let f = Fixture::new().await;
+    f.mock.ignore_cancel.store(true, Ordering::SeqCst);
+    f.mock.late_tool_call.store(true, Ordering::SeqCst);
+    f.resume().await;
+    let first = f
+        .controller
+        .control_goal(f.id, GoalControl::Set("Explain the first feature".into()))
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, mut events) = f.controller.subscribe().await.unwrap();
+    f.controller
+        .message(f.id, "old-run", "Explain it")
+        .await
+        .unwrap();
+    f.wait_calls(1).await;
+    let replacement = tokio::time::timeout(
+        Duration::from_secs(2),
+        f.controller
+            .control_goal(f.id, GoalControl::Set("Explain the second feature".into())),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_ne!(first.id, replacement.id);
+    assert!(
+        f.controller
+            .message(f.id, "premature-run", "Continue")
+            .await
+            .is_err()
+    );
+    assert_eq!(f.mock.calls.load(Ordering::SeqCst), 1);
+    f.mock.release.notify_one();
+    f.wait_idle().await;
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event.event, super::sink::SessionEvent::ToolStarted(ref call) if call.id == "late-call"),
+            "late provider tool call executed after cancellation"
+        );
+    }
+    assert!(!f.db.project_path().join("late-marker").exists());
+    let old_task = f.db.storage.latest_task_run(f.id).await.unwrap().unwrap();
+    assert_eq!(old_task.goal_id, first.id);
+    assert_eq!(
+        old_task.outcome,
+        Some(crate::storage::TaskOutcome::Superseded)
+    );
+    let current = f.db.storage.current_goal(f.id).await.unwrap().unwrap();
+    assert_eq!(current.id, replacement.id);
+    assert_eq!(current.state, crate::goal::GoalState::Active);
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[test]
+fn server_goal_terminal_states_follow_the_classified_evidence() {
+    use crate::completion_report::CompletionStatus as C;
+    use crate::goal::GoalState as G;
+    use crate::run_budget::RunBudgetExhaustion as B;
+    assert_eq!(
+        crate::goal::terminal_from_completion(C::Interrupted, None)
+            .1
+            .as_deref(),
+        Some(crate::goal::FOREGROUND_INTERRUPTED)
+    );
+    assert_eq!(
+        crate::goal::terminal_from_completion(C::Unverified, None).0,
+        G::Blocked
+    );
+    assert_eq!(
+        crate::goal::terminal_from_completion(C::BudgetExhausted, Some(B::ProviderQuota)).0,
+        G::UsageLimited
+    );
+    assert_eq!(
+        crate::goal::terminal_from_completion(C::BudgetExhausted, Some(B::MaxTurns { limit: 1 })).0,
+        G::BudgetLimited
+    );
+}
+
+#[tokio::test]
+async fn goal_followups_are_delivered_once_and_recorded_in_order() {
+    use super::controller::GoalControl;
+    let f = Fixture::new().await;
+    f.resume().await;
+    f.controller
+        .control_goal(f.id, GoalControl::Set("Explain the feature".into()))
+        .await
+        .unwrap();
+    let (_, mut events) = f.controller.subscribe().await.unwrap();
+    let first = f
+        .controller
+        .message(f.id, "first", "Initial request")
+        .await
+        .unwrap();
+    f.wait_calls(1).await;
+    let second = f
+        .controller
+        .message(f.id, "second", "Include edge cases")
+        .await
+        .unwrap();
+    let third = f
+        .controller
+        .message(f.id, "third", "Keep it concise")
+        .await
+        .unwrap();
+    assert_eq!(first.run_id, second.run_id);
+    assert_eq!(first.run_id, third.run_id);
+    assert_eq!(
+        f.controller
+            .message(f.id, "second", "Include edge cases")
+            .await
+            .unwrap(),
+        second
+    );
+    assert!(
+        f.controller
+            .message(f.id, "second", "different")
+            .await
+            .is_err()
+    );
+    f.mock.release.notify_one();
+    f.wait_calls(2).await;
+    let requests = f.mock.requests.lock().unwrap().clone();
+    let second_request = &requests[1];
+    assert!(
+        second_request.find("Include edge cases").unwrap()
+            < second_request.find("Keep it concise").unwrap()
+    );
+    f.mock.release.notify_one();
+    f.wait_idle().await;
+    for (request, prompt) in [
+        ("second", "Include edge cases"),
+        ("third", "Keep it concise"),
+    ] {
+        assert_eq!(
+            f.db.storage
+                .server_command(f.id, request, prompt)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "finished"
+        );
+    }
+    let mut deliveries = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let super::sink::SessionEvent::MessageDelivery {
+            request_id, state, ..
+        } = event.event
+        {
+            deliveries.push((request_id, state));
+        }
+    }
+    assert_eq!(
+        deliveries,
+        vec![
+            ("second".into(), "delivered".into()),
+            ("third".into(), "delivered".into())
+        ]
+    );
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_followup_wakes_a_parked_background_wait() {
+    use super::controller::GoalControl;
+    let f = Fixture::new().await;
+    f.mock.immediate.store(true, Ordering::SeqCst);
+    f.resume().await;
+    f.controller
+        .control_goal(f.id, GoalControl::Set("Inspect the running task".into()))
+        .await
+        .unwrap();
+    let background = f.factory.handles.lock().await.background.clone().unwrap();
+    let child = background
+        .start("/bin/sh", "exec sleep 120", f.db.project_path(), 180)
+        .await
+        .unwrap();
+    *f.mock.first_wait_task.lock().unwrap() = Some(child.id.clone());
+    let (_, mut events) = f.controller.subscribe().await.unwrap();
+    f.controller
+        .message(f.id, "first", "Wait for the task")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(events.recv().await.unwrap().event, super::sink::SessionEvent::ToolResult { id, .. } if id == "wait-call") {
+                break;
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(f.mock.calls.load(Ordering::SeqCst), 1);
+    f.controller
+        .message(f.id, "followup", "Stop waiting and summarize now")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while f.mock.calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let requests = f.mock.requests.lock().unwrap().clone();
+    assert!(requests[1].contains("Stop waiting and summarize now"));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let (snapshot, _) = f.controller.snapshot().await.unwrap();
+            assert!(snapshot.failure.is_none(), "{snapshot:?}");
+            if snapshot.state == "idle" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        f.db.storage
+            .server_command(f.id, "followup", "Stop waiting and summarize now")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "finished"
+    );
+    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_followup_not_delivered_before_interrupt_is_interrupted() {
+    use super::controller::GoalControl;
+    let f = Fixture::new().await;
+    f.resume().await;
+    f.controller
+        .control_goal(f.id, GoalControl::Set("Explain the feature".into()))
+        .await
+        .unwrap();
+    let (_, mut events) = f.controller.subscribe().await.unwrap();
+    f.controller
+        .message(f.id, "first", "Initial request")
+        .await
+        .unwrap();
+    f.wait_calls(1).await;
+    f.controller
+        .message(f.id, "second", "Do not lose this")
+        .await
+        .unwrap();
+    f.controller.interrupt(f.id).await.unwrap();
+    f.wait_idle().await;
+    let command =
+        f.db.storage
+            .server_command(f.id, "second", "Do not lose this")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(command.state, "interrupted");
+    let (_, sink) = f.controller.snapshot().await.unwrap();
+    assert!(!format!("{:?}", sink.transcript()).contains("Do not lose this"));
+    let mut interrupted = false;
+    while let Ok(event) = events.try_recv() {
+        if let super::sink::SessionEvent::MessageDelivery {
+            request_id, state, ..
+        } = event.event
+        {
+            interrupted |= request_id == "second" && state == "interrupted";
+        }
+    }
+    assert!(interrupted);
     f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
 }
 
@@ -530,6 +1001,8 @@ async fn failed_terminal_bookkeeping_preserves_committed_report_without_publicat
     for table in ["task_runs", "server_commands"] {
         let f = Fixture::new().await;
         f.resume().await;
+        let goal = f.factory.handles.lock().await.goal.clone().unwrap();
+        goal.set("Explain the implementation").await.unwrap();
         let (_, mut events) = f.controller.subscribe().await.unwrap();
         f.controller.message(f.id, "one", "Hello").await.unwrap();
         f.wait_calls(1).await;
@@ -542,6 +1015,10 @@ async fn failed_terminal_bookkeeping_preserves_committed_report_without_publicat
             .execute(&pool).await.unwrap();
         f.mock.release.notify_one();
         wait_failed(&f).await;
+        assert_eq!(
+            goal.snapshot().await.unwrap().state,
+            crate::goal::GoalState::Blocked
+        );
         let before =
             f.db.storage
                 .load_runtime_session_snapshot(f.id)
@@ -561,6 +1038,10 @@ async fn failed_terminal_bookkeeping_preserves_committed_report_without_publicat
             assert!(
                 !matches!(event.event, super::sink::SessionEvent::Completion(_)),
                 "terminal evidence was published before bookkeeping committed"
+            );
+            assert!(
+                !matches!(event.event, super::sink::SessionEvent::Goal(Some(ref record)) if record.state == crate::goal::GoalState::Complete),
+                "goal completed before bookkeeping committed"
             );
         }
         assert!(f.controller.message(f.id, "two", "Again").await.is_err());

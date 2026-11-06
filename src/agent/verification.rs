@@ -429,6 +429,12 @@ impl Agent {
                     .then_some(VerificationKind::Build)
             })
             .or_else(|| observed_verification_kind(command))
+            .or_else(|| {
+                self.tool_registry
+                    .get("bash")?
+                    .verification_command_rewrite(command)
+                    .and_then(|rewritten| observed_verification_kind(&rewritten))
+            })
     }
 
     fn has_deterministic_failure(&self, command: &str, binding: &VerificationBinding) -> bool {
@@ -1399,29 +1405,40 @@ fn verification_nonexecution_reason(
 
 fn observed_verification_kind(command: &str) -> Option<VerificationKind> {
     let mut saw_build = false;
-    let analysis = crate::tool::analyze_bash_command(command);
-    for segment in analysis.permission_commands() {
-        let words = segment
-            .split_whitespace()
-            .map(|word| word.trim_matches(['(', ')', '\'', '"']))
-            .filter(|word| !word.is_empty())
-            .collect::<Vec<_>>();
-        let mut index = usize::from(words.first() == Some(&"env"));
-        while words
-            .get(index)
-            .is_some_and(|word| word.contains('=') && !word.starts_with('-'))
-        {
-            index += 1;
-        }
-        let Some(program) = words
-            .get(index)
+    let segments = crate::tool::normalize_verification_conjunction(command)?;
+    for segment in &segments {
+        let Some(program) = segment
+            .first()
             .and_then(|program| program.rsplit('/').next())
         else {
             continue;
         };
-        let args = &words[index + 1..];
+        let args = segment
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let args = args.as_slice();
+        // These options exit without running tests, even when the command
+        // exits successfully. They are not completion evidence.
+        if args.iter().any(|arg| {
+            matches!(
+                *arg,
+                "--help"
+                    | "-h"
+                    | "--version"
+                    | "-V"
+                    | "--list"
+                    | "--no-run"
+                    | "--collect-only"
+                    | "--collectonly"
+            )
+        }) {
+            break;
+        }
         let kind = match (program, args) {
-            ("cargo", ["test" | "nextest", ..])
+            ("cargo", ["test", ..])
+            | ("cargo", ["nextest", "run", ..])
             | ("go", ["test", ..])
             | ("pytest" | "py.test", _)
             | ("python" | "python3", ["-m", "pytest" | "unittest" | "doctest", ..])
@@ -1438,7 +1455,10 @@ fn observed_verification_kind(command: &str) -> Option<VerificationKind> {
             | ("deno", ["check" | "lint", ..])
             | ("python" | "python3", ["-m", "build" | "compileall", ..]) => VerificationKind::Build,
             ("cargo", ["fmt", args @ ..]) if args.contains(&"--check") => VerificationKind::Build,
-            _ => continue,
+            // An arbitrary shell command can terminate the shell before a
+            // later `&&` operand runs (for example `exit 0 && cargo test`).
+            // Only count the uninterrupted verification-command prefix.
+            _ => break,
         };
         if kind == VerificationKind::Test {
             return Some(kind);
@@ -1647,6 +1667,27 @@ mod tests {
             observed_verification_kind("echo 'skip && cargo test'"),
             None
         );
+        for command in [
+            "cargo test || true",
+            "true || cargo test",
+            "cargo test; true",
+            "cargo test | cat",
+            "cargo test && echo done || true",
+            "echo $(cargo test)",
+            "cargo test &",
+            "cargo test\necho done",
+            "exit 0 && cargo test",
+            "exec true && cargo test",
+            "echo skip # && cargo test",
+            "cargo fmt --check # && cargo test",
+            "cargo test --help",
+            "cargo test --no-run",
+            "cargo test -- --list",
+            "cargo nextest list",
+            "pytest --collect-only",
+        ] {
+            assert_eq!(observed_verification_kind(command), None, "{command}");
+        }
     }
 
     #[test]

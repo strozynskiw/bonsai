@@ -198,13 +198,24 @@ async fn billed_token_cap_rejects_background_agent_launch() {
 
 #[tokio::test]
 async fn background_without_wake_loop_runs_synchronously() {
+    #[derive(Default)]
+    struct StatusSink(std::sync::Mutex<Vec<String>>);
+    impl crate::output::OutputSink for StatusSink {
+        fn status(&self, text: &str) {
+            self.0.lock().unwrap().push(text.to_string());
+        }
+    }
     let tool = agent_tool();
+    let sink = Arc::new(StatusSink::default());
     let result = tool
-        .execute(serde_json::json!({
-            "agent": "explore",
-            "prompt": "where is main",
-            "run_in_background": true
-        }))
+        .execute_with_context(
+            serde_json::json!({
+                "agent": "explore",
+                "prompt": "where is main",
+                "run_in_background": true
+            }),
+            crate::tool::ToolExecutionContext::new("call-1".to_string(), sink.clone()),
+        )
         .await
         .unwrap();
 
@@ -221,6 +232,13 @@ async fn background_without_wake_loop_runs_synchronously() {
     assert_eq!(usage.prompt_tokens, 11);
     assert_eq!(usage.completion_tokens, 7);
     assert_eq!(usage_turns.len(), 1);
+    assert!(
+        sink.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|status| status.contains("running synchronously"))
+    );
 
     let runs = tool.runner.subagents().list();
     assert_eq!(runs.len(), 1);
@@ -422,12 +440,14 @@ async fn cancel_all_running_reaches_background_subagents() {
     );
 
     let subtask_id = runner.run_in_background(
-        "explore",
-        "read only",
-        "wait",
-        empty_sub_registry(),
-        SubagentModelChain::default(),
-        BuiltinSubagentBudget::Explore.limits(),
+        test_run_spec(
+            "explore",
+            "read only",
+            "wait",
+            empty_sub_registry(),
+            BuiltinSubagentBudget::Explore.limits(),
+        ),
+        None,
     );
 
     // Cancellation must see the run immediately, even before the spawned

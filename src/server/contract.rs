@@ -102,6 +102,13 @@ pub(crate) fn event(event: &SessionEvent) -> Value {
     match event {
         SessionEvent::ResyncRequired => json!({"kind":"reset","resync_required":true}),
         SessionEvent::UserMessage(text) => json!({"kind":"user_message","text":text}),
+        SessionEvent::MessageDelivery {
+            run_id,
+            request_id,
+            state,
+        } => {
+            json!({"kind":"message_delivery","run_id":run_id,"request_id":request_id,"state":state})
+        }
         SessionEvent::AssistantDelta(text) => json!({"kind":"assistant_delta","text":text}),
         SessionEvent::AssistantDone => json!({"kind":"assistant_done"}),
         SessionEvent::ReasoningDelta(text) => json!({"kind":"reasoning_delta","text":text}),
@@ -123,6 +130,7 @@ pub(crate) fn event(event: &SessionEvent) -> Value {
         }
         SessionEvent::Plan(plan) => json!({"kind":"plan","plan":plan}),
         SessionEvent::Todos(todos) => json!({"kind":"todos","todos":todos}),
+        SessionEvent::Goal(goal) => json!({"kind":"goal","goal":goal}),
         SessionEvent::Completion(report) => json!({"kind":"completion","report":report}),
         SessionEvent::Status(text) => json!({"kind":"status","text":text}),
         // Internal errors may contain paths, provider diagnostics, or credentials.
@@ -146,7 +154,7 @@ pub(crate) fn snapshot(
     json!({"session_id":s.control.session_id.as_i64(),"run_id":s.control.run_id,"state":s.control.state,
         "failure":s.control.failure.as_ref().map(|_|"execution_failed"),"pending":s.control.pending.iter().map(interaction).collect::<Vec<_>>(),
         "watermark":s.watermark,"transcript":s.transcript.iter().skip(offset).take(limit).collect::<Vec<_>>(),"total":s.transcript.len(),"offset":offset,
-        "plan":s.plan,"todos":s.todos,"budget":s.budget,"usage":{"prompt_tokens":s.usage.0,"completion_tokens":s.usage.1,"cost_micros":s.usage.2}})
+        "plan":s.plan,"todos":s.todos,"goal":s.goal,"goal_elapsed_ms":s.goal_elapsed_ms,"budget":s.budget,"usage":{"prompt_tokens":s.usage.0,"completion_tokens":s.usage.1,"cost_micros":s.usage.2}})
 }
 
 #[cfg(test)]

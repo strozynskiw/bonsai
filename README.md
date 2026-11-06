@@ -70,12 +70,25 @@ relevant checks.
 Use `Tab` to switch between coding and planning. Common commands include
 `/model`, `/review`, `/test`, `/settings`, `/resume`, and `/help`.
 
+Use `/goal <objective>` for a persistent objective. While it runs, press Enter
+to send follow-up questions or steering at the next model boundary; the goal
+stays in context. The header shows the goal's state and cumulative runtime
+across runs. `/goal pause` and `/goal resume` control pursuit; paused time is
+excluded from the timer.
+
 ## Examples
 
 Run one non-interactive task:
 
 ```sh
 bonsai -p "summarize this repository"
+```
+
+Refresh model metadata and listings for all authorized providers without
+running inference:
+
+```sh
+bonsai model-catalog refresh
 ```
 
 Return structured output:

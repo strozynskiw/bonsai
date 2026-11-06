@@ -612,7 +612,11 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Esc", " dismiss"),
         ]
     } else if matches!(app.task_state, crate::tui::event::TaskState::Running) {
-        let mut hints = vec![("Enter", " queue  ")];
+        let active_goal = app
+            .session_goal
+            .as_ref()
+            .is_some_and(|goal| goal.state == crate::goal::GoalState::Active);
+        let mut hints = vec![("Enter", if active_goal { " send  " } else { " queue  " })];
         if app.last_queued_input().is_some() {
             hints.push(("Esc", " steer"));
         }

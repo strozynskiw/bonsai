@@ -233,10 +233,6 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 self.agent.push_harness_note(&result);
             }
         }
-        if self.agent.take_read_only_conclusion_turn() {
-            self.tool_registry = Arc::new(ToolRegistry::new());
-            self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
-        }
         if self.cancellation_token.is_cancelled() {
             if self.detached_subagent_cancellation.is_cancelled() {
                 self.agent.cancel_running_subagents();
@@ -404,6 +400,33 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         }
 
         deferred_sink.flush();
+        // A human message may arrive while the provider is streaming. Preserve
+        // the complete assistant/tool-result group, but never execute calls
+        // that were planned before that steering was visible to the model.
+        let queued = next_queued_messages(
+            &mut self.queued_messages,
+            &mut self.pending_queued_messages,
+            &mut self.cancelled_queued_message_ids,
+        );
+        if !queued.is_empty() {
+            self.agent
+                .push_model_response_message(build_assistant_message(&response)?, response_id);
+            self.agent.log_response(&response, false);
+            self.agent
+                .drain_skipped_calls(
+                    response.tool_calls,
+                    "Tool skipped because a new queued user message took priority.",
+                    &self.sink,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                )
+                .await?;
+            self.agent.apply_queued_messages(queued, &self.sink).await?;
+            self.state.policies.reset_for_user_steering();
+            self.agent.set_planning_advisory(None);
+            self.refresh_tool_registry();
+            return Ok(TurnOutcome::Continue);
+        }
         self.execute_tool_turn(response, response_id).await
     }
 
@@ -413,6 +436,12 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         response_id: crate::provider::ResponseId,
         deferred_sink: &DeferredAssistantSink,
     ) -> Result<TurnOutcome> {
+        if self
+            .continue_for_queued_steering(&response, &response_id, deferred_sink)
+            .await?
+        {
+            return Ok(TurnOutcome::Continue);
+        }
         if self.agent.execution_lane.kind == ExecutionLaneKind::Parent
             && let Some(interaction) = self.agent.interaction.clone()
             && interaction.has_question_work().await
@@ -551,7 +580,22 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )));
         }
 
-        match self.agent.completion_guard_verdict(&response.content).await {
+        if self
+            .continue_for_queued_steering(&response, &response_id, deferred_sink)
+            .await?
+        {
+            return Ok(TurnOutcome::Continue);
+        }
+        let verdict = self.agent.completion_guard_verdict(&response.content).await;
+        // Evidence collection can await storage or shared task state. Input
+        // accepted during that wait must take precedence over this verdict.
+        if self
+            .continue_for_queued_steering(&response, &response_id, deferred_sink)
+            .await?
+        {
+            return Ok(TurnOutcome::Continue);
+        }
+        match verdict {
             CompletionGuardVerdict::Accept => {}
             CompletionGuardVerdict::Continue { note } => {
                 deferred_sink.discard();
@@ -594,6 +638,37 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         Ok(TurnOutcome::Finished(AgentRunResult::Completed(
             response.content,
         )))
+    }
+
+    /// A response cannot finish a run while newer human input is already queued.
+    async fn continue_for_queued_steering(
+        &mut self,
+        response: &StreamedResponse,
+        response_id: &crate::provider::ResponseId,
+        deferred_sink: &DeferredAssistantSink,
+    ) -> Result<bool> {
+        let queued = next_queued_messages(
+            &mut self.queued_messages,
+            &mut self.pending_queued_messages,
+            &mut self.cancelled_queued_message_ids,
+        );
+        if queued.is_empty() {
+            return Ok(false);
+        }
+        if !response.content.trim().is_empty() {
+            deferred_sink.flush();
+            self.agent.push_model_response_message(
+                assistant_text_message(&response.content),
+                response_id.clone(),
+            );
+        } else {
+            deferred_sink.discard();
+        }
+        self.agent.apply_queued_messages(queued, &self.sink).await?;
+        self.state.policies.reset_for_user_steering();
+        self.agent.set_planning_advisory(None);
+        self.refresh_tool_registry();
+        Ok(true)
     }
 
     async fn execute_tool_turn(
@@ -889,6 +964,83 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn steering_received_during_completion_evidence_prevents_terminal_success() {
+        struct UnusedProvider;
+
+        #[async_trait::async_trait]
+        impl crate::provider::Provider for UnusedProvider {
+            async fn chat_stream(
+                &self,
+                _messages: &[ChatCompletionRequestMessage],
+                _tools: &[async_openai::types::chat::ChatCompletionTool],
+                _cancellation: CancellationToken,
+                _sink: SharedSink,
+            ) -> crate::provider::ProviderResult<StreamedResponse> {
+                unreachable!("completion evidence must not call the model")
+            }
+
+            async fn list_models(&self) -> Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let registry = Arc::new(ToolRegistry::new());
+        let mut agent = Agent::builder(
+            Box::new(UnusedProvider) as Box<dyn crate::provider::Provider>,
+            registry.clone(),
+            registry,
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .system_context(String::new())
+        .build()
+        .unwrap();
+        agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+        agent.begin_inferred_completion_task("Explain the module");
+        let todos = Arc::new(tokio::sync::Mutex::new(crate::todo::TodoStore::new()));
+        agent.set_todo_store(todos.clone());
+        let todo_guard = todos.lock().await;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let sink: SharedSink = Arc::new(crate::output::StdoutSink);
+        let deferred = DeferredAssistantSink::new(sink.clone());
+        let mut coordinator = TurnCoordinator::new(
+            &mut agent,
+            RunCancellation::split(),
+            sink,
+            Some(&mut receiver),
+            SessionTitleRunPolicy::ContinuationOrAutomatic,
+        );
+        let mut finish = Box::pin(coordinator.finish_or_continue_without_tools(
+            StreamedResponse {
+                content: "Initial answer".into(),
+                ..StreamedResponse::default()
+            },
+            crate::provider::ResponseId::new(),
+            &deferred,
+        ));
+        // No provider or tool can suspend this path. The held todo lock makes
+        // the first poll stop inside completion evidence, after its queue check.
+        assert!(futures::poll!(finish.as_mut()).is_pending());
+        sender
+            .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+                id: 1,
+                display_text: "Also explain the edge cases".into(),
+                transcript_text: "Also explain the edge cases".into(),
+                input: UserInput::from_text("Also explain the edge cases"),
+            }))
+            .unwrap();
+        drop(todo_guard);
+        assert!(matches!(finish.await.unwrap(), TurnOutcome::Continue));
+        assert!(coordinator.agent.completion_guard_trace().is_none());
+        assert!(
+            coordinator.agent.messages.iter().any(|message| {
+                message_content_string(message) == "Also explain the edge cases"
+            })
+        );
+    }
 
     #[test]
     fn turn_state_counts_started_turns() {

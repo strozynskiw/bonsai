@@ -35,6 +35,42 @@ impl GoalState {
     }
 }
 
+/// Derive goal state from the surface's final, evidence-classified outcome.
+pub(crate) fn terminal_from_completion(
+    status: crate::completion_report::CompletionStatus,
+    exhaustion: Option<crate::run_budget::RunBudgetExhaustion>,
+) -> (GoalState, Option<String>) {
+    use crate::completion_report::CompletionStatus as C;
+    use crate::run_budget::RunBudgetExhaustion as B;
+    match status {
+        C::Completed => (GoalState::Complete, None),
+        C::Interrupted => (GoalState::Paused, Some(FOREGROUND_INTERRUPTED.into())),
+        C::BudgetExhausted => (
+            if matches!(
+                exhaustion,
+                Some(B::ProviderRateLimit { .. } | B::ProviderQuota)
+            ) {
+                GoalState::UsageLimited
+            } else {
+                GoalState::BudgetLimited
+            },
+            Some(exhaustion.map_or_else(
+                || "Run budget exhausted.".to_string(),
+                |reason| reason.to_string(),
+            )),
+        ),
+        C::Unverified => (
+            GoalState::Blocked,
+            Some("Work completed; verification not confirmed.".into()),
+        ),
+        C::Blocked => (
+            GoalState::Blocked,
+            Some("Run stopped with work blocked.".into()),
+        ),
+        C::Failed => (GoalState::Blocked, Some("Run failed.".into())),
+    }
+}
+
 /// Durable identity and intent. Usage and execution evidence remain in the
 /// existing session and task-run ledgers, linked by `id` (`task_runs.goal_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,11 +84,29 @@ pub(crate) struct GoalRecord {
     pub(crate) updated_at_ms: i64,
 }
 
+/// Identity of one active-goal generation, captured before a run starts.
+/// A pause, resume, replacement, or another terminal result invalidates it.
+#[derive(Debug, Clone)]
+pub(crate) struct GoalRunLease {
+    pub(crate) record: GoalRecord,
+    revision: u64,
+}
+
 #[derive(Default)]
 struct GoalData {
     record: Option<GoalRecord>,
+    revision: u64,
     binding: Option<(Storage, SessionId)>,
     automatic_work_suspended: bool,
+    change_listener: Option<Arc<dyn Fn(Option<GoalRecord>) + Send + Sync>>,
+}
+
+impl GoalData {
+    fn notify_change(&self) {
+        if let Some(listener) = &self.change_listener {
+            listener(self.record.clone());
+        }
+    }
 }
 
 /// A separately locked control plane, accessible while the agent owns its run
@@ -87,35 +141,14 @@ impl GoalService {
     /// Drop process-local attachment when the durable session changes.
     pub(crate) async fn detach(&self) {
         self.cancel_start();
-        *self.0.lock().await = GoalData::default();
+        let mut data = self.0.lock().await;
+        let revision = data.revision.wrapping_add(1);
+        *data = GoalData {
+            revision,
+            ..GoalData::default()
+        };
     }
 
-    /// Surface-level timeout/accounting gates can refine an engine terminal.
-    /// Explicit user pause and objective replacement always take precedence.
-    pub(crate) async fn reconcile_terminal(
-        &self,
-        id: &str,
-        state: GoalState,
-        reason: &str,
-    ) -> anyhow::Result<()> {
-        let mut data = self.0.lock().await;
-        let Some(mut record) = data.record.clone().filter(|goal| goal.id == id) else {
-            return Ok(());
-        };
-        if !matches!(record.state, GoalState::Active | GoalState::Complete)
-            && !(record.state == GoalState::Paused
-                && record.reason.as_deref() == Some(FOREGROUND_INTERRUPTED))
-        {
-            return Ok(());
-        }
-        record.state = state;
-        record.reason = Some(crate::redact::redact(reason).chars().take(2048).collect());
-        record.updated_at_ms = crate::util::time::now_ms();
-        Self::save(&data, Some(&record)).await?;
-        data.automatic_work_suspended = state != GoalState::Active;
-        data.record = Some(record);
-        Ok(())
-    }
     pub(crate) fn request_start(&self) {
         self.1.store(true, Ordering::Release);
     }
@@ -140,10 +173,48 @@ impl GoalService {
         self.0.lock().await.record.clone()
     }
 
+    /// Capture the active objective and its generation under the same lock.
+    pub(crate) async fn active_run_lease(&self) -> Option<GoalRunLease> {
+        let data = self.0.lock().await;
+        data.record
+            .as_ref()
+            .filter(|goal| goal.state == GoalState::Active)
+            .map(|record| GoalRunLease {
+                record: record.clone(),
+                revision: data.revision,
+            })
+    }
+
+    /// Run a synchronous projection while goal mutations are fenced.
+    pub(crate) async fn with_snapshot<R>(
+        &self,
+        project: impl FnOnce(Option<&GoalRecord>) -> R,
+    ) -> R {
+        let data = self.0.lock().await;
+        project(data.record.as_ref())
+    }
+
+    /// Install a synchronous observer and publish the current state under the
+    /// same fence used for durable changes.
+    pub(crate) async fn set_change_listener(
+        &self,
+        listener: Arc<dyn Fn(Option<GoalRecord>) + Send + Sync>,
+    ) {
+        let mut data = self.0.lock().await;
+        data.change_listener = Some(listener);
+        data.notify_change();
+    }
+
+    /// Render-only observation must never wait behind a durable control update.
+    pub(crate) fn try_snapshot(&self) -> Option<Option<GoalRecord>> {
+        self.0.try_lock().ok().map(|data| data.record.clone())
+    }
+
     /// Attach a durable session without starting work. Interrupted active work
     /// requires an explicit resume; budget and blocked states survive intact.
     pub(crate) async fn bind(&self, storage: Storage, session_id: SessionId) -> anyhow::Result<()> {
         let mut data = self.0.lock().await;
+        data.revision = data.revision.wrapping_add(1);
         self.cancel_start();
         // A failed target load must never leave a control handle attached to
         // the outgoing session after the UI has switched session identity.
@@ -161,6 +232,7 @@ impl GoalService {
         data.record = record;
         data.automatic_work_suspended = data.record.is_some();
         data.binding = Some((storage, session_id));
+        data.notify_change();
         Ok(())
     }
 
@@ -184,16 +256,20 @@ impl GoalService {
         };
         let mut data = self.0.lock().await;
         Self::save(&data, Some(&record)).await?;
+        data.revision = data.revision.wrapping_add(1);
         data.automatic_work_suspended = false;
         data.record = Some(record.clone());
+        data.notify_change();
         Ok(record)
     }
 
     pub(crate) async fn clear(&self) -> anyhow::Result<()> {
         let mut data = self.0.lock().await;
         Self::save(&data, None).await?;
+        data.revision = data.revision.wrapping_add(1);
         data.automatic_work_suspended = true;
         data.record = None;
+        data.notify_change();
         Ok(())
     }
 
@@ -205,10 +281,37 @@ impl GoalService {
         state: GoalState,
         reason: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.transition_inner(id, None, state, reason).await
+    }
+
+    /// Apply a run result only while its original active generation still owns
+    /// the goal. Explicit user controls use `transition` instead.
+    pub(crate) async fn transition_for_run(
+        &self,
+        lease: &GoalRunLease,
+        state: GoalState,
+        reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.transition_inner(&lease.record.id, Some(lease.revision), state, reason)
+            .await
+    }
+
+    async fn transition_inner(
+        &self,
+        id: &str,
+        expected_revision: Option<u64>,
+        state: GoalState,
+        reason: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mut data = self.0.lock().await;
         let Some(mut record) = data.record.clone().filter(|goal| goal.id == id) else {
             return Ok(());
         };
+        if expected_revision
+            .is_some_and(|revision| revision != data.revision || record.state != GoalState::Active)
+        {
+            return Ok(());
+        }
         if record.state != GoalState::Active && state != GoalState::Active {
             return Ok(());
         }
@@ -225,8 +328,10 @@ impl GoalService {
         record.reason = reason.map(|text| crate::redact::redact(text).chars().take(2048).collect());
         record.updated_at_ms = crate::util::time::now_ms();
         Self::save(&data, Some(&record)).await?;
+        data.revision = data.revision.wrapping_add(1);
         data.automatic_work_suspended = state != GoalState::Active;
         data.record = Some(record);
+        data.notify_change();
         Ok(())
     }
 
@@ -287,6 +392,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(service.snapshot().await.unwrap().state, GoalState::Paused);
+    }
+
+    #[tokio::test]
+    async fn late_wait_cannot_reactivate_a_user_paused_goal() {
+        let service = GoalService::default();
+        let record = service.set("Keep working").await.unwrap();
+        let lease = service.active_run_lease().await.unwrap();
+        service
+            .transition(&record.id, GoalState::Paused, Some("Paused by user."))
+            .await
+            .unwrap();
+        service
+            .transition_for_run(&lease, GoalState::Active, Some("Waiting for a child."))
+            .await
+            .unwrap();
+        let current = service.snapshot().await.unwrap();
+        assert_eq!(current.state, GoalState::Paused);
+        assert_eq!(current.reason.as_deref(), Some("Paused by user."));
+        assert!(!service.automatic_work_allowed().await);
+    }
+
+    #[tokio::test]
+    async fn old_run_cannot_finish_a_resumed_generation() {
+        let service = GoalService::default();
+        let record = service.set("Keep working").await.unwrap();
+        let old_run = service.active_run_lease().await.unwrap();
+        service
+            .transition(&record.id, GoalState::Paused, Some("Paused by user."))
+            .await
+            .unwrap();
+        service
+            .transition(&record.id, GoalState::Active, None)
+            .await
+            .unwrap();
+        let new_run = service.active_run_lease().await.unwrap();
+        service
+            .transition_for_run(&old_run, GoalState::Complete, None)
+            .await
+            .unwrap();
+        assert_eq!(service.snapshot().await.unwrap().state, GoalState::Active);
+        service
+            .transition_for_run(&old_run, GoalState::Blocked, Some("old failure"))
+            .await
+            .unwrap();
+        assert_eq!(service.snapshot().await.unwrap().state, GoalState::Active);
+        service
+            .transition_for_run(&new_run, GoalState::Complete, None)
+            .await
+            .unwrap();
+        assert_eq!(service.snapshot().await.unwrap().state, GoalState::Complete);
     }
 
     #[tokio::test]

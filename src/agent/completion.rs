@@ -359,7 +359,6 @@ impl TaskCompletionContract {
 pub(super) struct ReadOnlyTaskProgress {
     inspection_turns: usize,
     conclusion_nudge_sent: bool,
-    conclusion_turn: bool,
 }
 
 impl ReadOnlyTaskProgress {
@@ -381,16 +380,11 @@ impl ReadOnlyTaskProgress {
         self.inspection_turns = self.inspection_turns.saturating_add(1);
         if self.inspection_turns >= 8 && !self.conclusion_nudge_sent {
             self.conclusion_nudge_sent = true;
-            self.conclusion_turn = true;
             return Some(
-                "Read-only task evidence is sufficient after eight inspection turns. Do not run commands, emit tool-call syntax, or continue broad orientation; produce the requested explanation or review findings now using the evidence already collected.",
+                "Read-only inspection checkpoint: eight tool turns have elapsed. Check the evidence against the requested scope. If it is sufficient, update your todos to reflect actual progress and deliver the explanation or findings. Otherwise inspect the specific remaining gap. This checkpoint grants no authority for commands or mutations.",
             );
         }
         None
-    }
-
-    pub(super) fn take_conclusion_turn(&mut self) -> bool {
-        std::mem::take(&mut self.conclusion_turn)
     }
 }
 
@@ -812,10 +806,6 @@ impl Agent {
                     .observe_inspection_turn(tool_calls)
             })
             .flatten()
-    }
-
-    pub(super) fn take_read_only_conclusion_turn(&mut self) -> bool {
-        self.read_only_task_progress.take_conclusion_turn()
     }
 
     pub(super) fn note_completion_action(&mut self) {
@@ -1475,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_progress_bounds_inspection_and_resets_for_new_tasks() {
+    fn read_only_progress_advises_once_and_resets_for_new_tasks() {
         let inspection = || ToolCall {
             id: "read".to_string(),
             name: "read".to_string(),
@@ -1487,8 +1477,6 @@ mod tests {
             assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
         }
         assert!(progress.observe_inspection_turn(&[inspection()]).is_some());
-        assert!(progress.take_conclusion_turn());
-        assert!(!progress.take_conclusion_turn());
         assert!(progress.observe_inspection_turn(&[inspection()]).is_none());
 
         progress.reset();

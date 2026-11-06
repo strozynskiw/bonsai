@@ -450,6 +450,7 @@ impl Agent {
             cancellation_token.clone(),
             crate::tool::SelfReviewRunOptions {
                 model_override,
+                effect_observer: Some(sink.clone()),
                 remaining_billed_tokens: self.budget.max_session_billed_tokens.and_then(|limit| {
                     self.usage
                         .exact_session_billed_tokens()

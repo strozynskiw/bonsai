@@ -99,7 +99,9 @@ correlated to session/run/prompt and consumed once by the engine.
 | --- | --- | --- |
 | POST | `/sessions` | `{request_id}` → 201 + session_id |
 | GET | `/sessions?after=0&limit=50` | workspace/scope-filtered list; limit 1–100 |
-| GET | `/sessions/{id}?offset=0&limit=100` | paginated transcript, state, pending, usage; loaded sessions also plan/todo/budget |
+| GET | `/sessions/{id}?offset=0&limit=100` | paginated transcript, state, goal, pending, usage; loaded sessions also plan/todo/budget |
+| GET | `/sessions/{id}/goal` | current goal and elapsed milliseconds, or `null` when none exists |
+| POST | `/sessions/{id}/goal` | `{request_id,action,objective?}`; set, pause, resume, or clear the goal |
 | POST | `/sessions/{id}/resume` | `{request_id}`; claims/loads only |
 | POST | `/sessions/{id}/messages` | `{request_id,text}` → 202 + run_id, acceptance not completion |
 | POST | `/sessions/{id}/interrupt` | `{request_id}`; cancellation requested, not yet stopped |
@@ -109,9 +111,28 @@ correlated to session/run/prompt and consumed once by the engine.
 | GET | `/sessions/{id}/artifacts/{artifact_id}` | attachment, octet-stream, nosniff |
 
 Only one session may execute, including children/background tasks/terminals.
-Busy chat conflicts rather than queueing/steering. Switching sessions may release
-an idle runtime, never silently cancel an active runtime. Status, interrupt and
-interaction responses remain responsive during execution.
+During an active goal run, messages can be queued as follow-ups to that same
+run, with a limit of 64 per run. Other busy chat requests conflict. A queued
+message is accepted before it is delivered: the `message_delivery` event
+reports `delivered` when the agent receives it or `interrupted` if the run
+ends first. Retrying the same request ID returns its recorded state; after a
+crash, unresolved accepted requests are marked interrupted on resume. Switching
+sessions may release an idle runtime, never silently cancel an active runtime.
+Status, interrupt and interaction responses remain responsive during execution.
+
+The goal endpoint is a point-in-time read of the persisted record and requires
+the session's `read` scope. It works for unloaded sessions. Loaded-session
+snapshots include the goal, and the event stream publishes ordered `goal`
+events containing the current record or `null` after removal. `elapsed_ms` (and
+`goal_elapsed_ms` in session snapshots) combines recorded run time with the
+verified live run, excluding paused and unobserved crash gaps. Poll the endpoint
+for timer updates; goal events are emitted on state changes, not on each tick.
+Goal controls require `control` scope
+and a loaded session. `set` requires an objective; `pause`, `resume`, and
+`clear` do not accept one. Setting or replacing an objective never starts a
+model run. Replacing a goal or pausing an active goal requests cancellation
+of the current run; resume is available after that run settles. Clients must
+submit a separate message to start work and cannot set completion or usage.
 
 A pending prompt exposes its kind and allowed decisions. Permission/web/extension/
 hook prompts use `{"kind":"permission","decision":"allow_once"}` or `deny`;
@@ -189,7 +210,7 @@ request DTOs, decision decoding and event projections by normal `cargo test`; CI
 therefore rejects fixture drift. Breaking preview changes must be recorded in
 [server-changelog.md](server-changelog.md) with client migration guidance.
 
-No uploads, steer/queue, provider/credential management, goal mutation API, ACP,
+No uploads, steer/queue, provider/credential management, ACP,
 web UI, parallel workspaces/scheduler or stable v1 compatibility. Pending prompts
 and work are never automatically replayed on restart. After a hard crash, resume
 can return 409 until the conservative 15-second heartbeat fence expires; retry

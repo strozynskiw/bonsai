@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use ratatui::text::Line;
@@ -328,6 +328,8 @@ pub struct AppState {
     pub(crate) branch: Option<String>,
     pub(crate) run_started_at: Option<Instant>,
     pub(crate) completed_run_elapsed: Option<Duration>,
+    pub(crate) session_goal: Option<crate::goal::GoalRecord>,
+    pub(crate) goal_elapsed: Duration,
     pub(crate) current_phase: Option<String>,
     /// Tool calls currently executing in this turn, in `started_at` order.
     /// More than one entry means the agent is running concurrent tool calls.
@@ -437,6 +439,9 @@ pub struct AppState {
     pub(crate) authorize_provider_offset: std::cell::Cell<usize>,
     pub(crate) completion: CompletionState,
     pub(crate) queued_inputs: Vec<QueuedInput>,
+    /// Recently withdrawn queue IDs, retained long enough to detect a late
+    /// acknowledgement from the running agent.
+    pub(crate) removed_queued_input_ids: VecDeque<u64>,
     /// Peer messages that have arrived but await injection on the next turn
     /// (peers). Drives the composer "peers waiting" badge; self-heals to 0 once
     /// a turn drains the inbox.
@@ -594,6 +599,8 @@ impl AppState {
             branch,
             run_started_at: None,
             completed_run_elapsed: None,
+            session_goal: None,
+            goal_elapsed: Duration::ZERO,
             current_phase: None,
             active_tools: Vec::new(),
             latest_context_report: None,
@@ -642,6 +649,7 @@ impl AppState {
             authorize_provider_offset: std::cell::Cell::new(0),
             completion: CompletionState::default(),
             queued_inputs: Vec::new(),
+            removed_queued_input_ids: VecDeque::new(),
             pending_peer_inbox: 0,
             pending_peer_delivery_receipts: BTreeMap::new(),
             waiting_for_peer: None,
@@ -979,10 +987,12 @@ impl AppState {
         self.completed_run_elapsed = None;
     }
 
-    fn format_elapsed_label(elapsed: Duration) -> String {
+    pub(crate) fn format_elapsed_label(elapsed: Duration) -> String {
         let secs = elapsed.as_secs();
         if secs < 60 {
             format!("{secs}s")
+        } else if secs >= 3600 {
+            format!("{}h {}m {}s", secs / 3600, (secs / 60) % 60, secs % 60)
         } else {
             format!("{}m {}s", secs / 60, secs % 60)
         }

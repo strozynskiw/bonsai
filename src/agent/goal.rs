@@ -44,7 +44,7 @@ impl Agent {
 
     pub(crate) async fn finish_goal_run(
         &self,
-        id: &str,
+        lease: &crate::goal::GoalRunLease,
         result: &Result<AgentRunResult>,
     ) -> Result<()> {
         let (state, reason) = match result {
@@ -72,6 +72,8 @@ impl Agent {
                 (state, Some(format!("{error:#}")))
             }
         };
-        self.goal.transition(id, state, reason.as_deref()).await
+        self.goal
+            .transition_for_run(lease, state, reason.as_deref())
+            .await
     }
 }

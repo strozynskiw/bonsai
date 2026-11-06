@@ -1021,11 +1021,34 @@ impl Drop for SubagentRunGuard {
 pub(crate) struct RecordingSink {
     registry: Arc<SubagentRegistry>,
     id: String,
+    effect_observer: Option<crate::output::SharedSink>,
+    pending_tools: Mutex<HashMap<String, PendingChildTools>>,
+}
+
+#[derive(Default)]
+struct PendingChildTools {
+    names: HashSet<String>,
+    remaining: usize,
 }
 
 impl RecordingSink {
     pub(crate) fn new(registry: Arc<SubagentRegistry>, id: String) -> Self {
-        Self { registry, id }
+        Self {
+            registry,
+            id,
+            effect_observer: None,
+            pending_tools: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn observing(
+        registry: Arc<SubagentRegistry>,
+        id: String,
+        observer: Option<crate::output::SharedSink>,
+    ) -> Self {
+        let mut sink = Self::new(registry, id);
+        sink.effect_observer = observer;
+        sink
     }
 }
 
@@ -1042,11 +1065,89 @@ impl OutputSink for RecordingSink {
         self.registry.append_activity(&self.id, "\n");
     }
 
-    fn tool_started(&self, _id: &str, name: &str, arguments: &str) {
+    fn tool_started(&self, id: &str, name: &str, arguments: &str) {
+        if let Some(observer) = &self.effect_observer {
+            let mut pending = self
+                .pending_tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let calls = pending.entry(id.to_string()).or_default();
+            calls.names.insert(name.to_string());
+            calls.remaining = calls.remaining.saturating_add(1);
+            drop(pending);
+            observer.delegated_tool_phase(name, crate::output::DelegatedToolPhase::Attempted);
+        }
         self.registry.append_activity(
             &self.id,
             &format!("\n▸ {name} {}\n", compact(arguments, 120)),
         );
+    }
+
+    fn command_spawned(&self, _id: &str) {
+        if let Some(observer) = &self.effect_observer {
+            // Only Bash emits this spawn signal, so it stays unambiguous even
+            // if a provider reused an ID for another call in the same batch.
+            observer.delegated_tool_phase("bash", crate::output::DelegatedToolPhase::Reached);
+        }
+    }
+
+    fn tool_result(&self, id: &str, result: crate::protocol::ToolResult) {
+        if let Some(observer) = &self.effect_observer {
+            let name = {
+                let mut pending = self
+                    .pending_tools
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(calls) = pending.get_mut(id) {
+                    let name = if calls.names.len() == 1 {
+                        calls.names.iter().next().cloned()
+                    } else {
+                        None
+                    };
+                    calls.remaining = calls.remaining.saturating_sub(1);
+                    if calls.remaining == 0 {
+                        pending.remove(id);
+                    }
+                    name
+                } else {
+                    None
+                }
+            };
+            let name = if result.status != crate::output::ToolExecutionStatus::Skipped
+                && matches!(
+                    &result.content,
+                    crate::protocol::ToolResultContent::Command { .. }
+                ) {
+                Some("bash".to_string())
+            } else {
+                name
+            };
+            if let Some(name) = name {
+                let phase = if result.status.is_success() {
+                    Some(crate::output::DelegatedToolPhase::Succeeded)
+                } else if result.status == crate::output::ToolExecutionStatus::Started
+                    || (result.status.is_failure()
+                        && matches!(
+                            &result.content,
+                            crate::protocol::ToolResultContent::Command { .. }
+                        ))
+                {
+                    Some(crate::output::DelegatedToolPhase::Reached)
+                } else {
+                    None
+                };
+                if let Some(phase) = phase {
+                    observer.delegated_tool_phase(&name, phase);
+                }
+            }
+        }
+        if result.status == crate::output::ToolExecutionStatus::Started {
+            self.tool_output(id, &result.preview);
+        } else if let Some(diff) = result.diff() {
+            self.tool_finished_with_diff(id, &result.preview, result.status, diff.clone());
+        } else {
+            self.tool_finished(id, &result.preview, result.status);
+        }
     }
 
     fn tool_finished(&self, _id: &str, result: &str, status: crate::output::ToolExecutionStatus) {

@@ -438,7 +438,7 @@ pub(crate) fn build_tool_registries(
         // A separate project_info runtime, so a subagent's `project_info`
         // advertises its own read-only toolset rather than the parent's
         // (which includes write/edit/bash/agent the subagent does not have).
-        let subagent_info_runtime = Arc::new(ProjectInfoRuntime::new(None));
+        let subagent_info_runtime = Arc::new(project_info_runtime.fork(None));
         // Read-only tools that must bind the subagent's *own* read tracker /
         // project-info runtime (the rest are shared clones of the parent's).
         let sub_project_info: Arc<dyn Tool> = Arc::new(ProjectInfoTool::new(

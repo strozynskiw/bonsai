@@ -3216,6 +3216,201 @@ async fn queued_message_does_not_replace_self_review_baseline() {
 }
 
 #[tokio::test]
+async fn steering_arriving_during_provider_stream_skips_first_tool_batch() {
+    struct SteeringProvider {
+        sender: mpsc::UnboundedSender<QueuedUserMessageCommand>,
+        calls: AtomicUsize,
+        requests: Arc<Mutex<Vec<Vec<ChatCompletionRequestMessage>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SteeringProvider {
+        async fn chat_stream(
+            &self,
+            messages: &[ChatCompletionRequestMessage],
+            _tools: &[ChatCompletionTool],
+            _cancellation_token: CancellationToken,
+            sink: SharedSink,
+        ) -> crate::provider::ProviderResult<StreamedResponse> {
+            self.requests.lock().await.push(messages.to_vec());
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                sink.assistant_delta("Working on it.");
+                let text = "Stop the previous task. Say done.";
+                self.sender
+                    .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+                        id: 71,
+                        display_text: text.into(),
+                        transcript_text: text.into(),
+                        input: crate::agent::UserInput::from_text(text),
+                    }))
+                    .unwrap();
+                Ok(StreamedResponse {
+                    content: "Working on it.".into(),
+                    tool_calls: vec![test_tool_call("action-1", "serialized_action", "{}")],
+                    terminal: crate::provider::StreamTerminal::Completed(
+                        crate::provider::FinishReason::ToolCalls,
+                    ),
+                    ..StreamedResponse::default()
+                })
+            } else {
+                finished_response("done")
+            }
+        }
+
+        async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    let fixture = TestFixture::new();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SerializedRecordingTool {
+        calls: calls.clone(),
+    }));
+    let provider = SteeringProvider {
+        sender,
+        calls: AtomicUsize::new(0),
+        requests: requests.clone(),
+    };
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let sink = Arc::new(CaptureSink::default());
+    let result = agent
+        .run_with_queue(
+            crate::agent::UserInput::from_text("Start the task"),
+            CancellationToken::new(),
+            sink.clone(),
+            receiver,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("done".into()));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "stale tool must not run after queued steering"
+    );
+    assert!(
+        sink.tool_finishes()
+            .iter()
+            .any(|(id, message, status)| id == "action-1"
+                && message.contains("queued user message")
+                && !status.is_success())
+    );
+    let requests = requests.lock().await;
+    let second = &requests[1];
+    let call_index = second.iter().position(|message| matches!(message, ChatCompletionRequestMessage::Assistant(assistant) if assistant.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()))).unwrap();
+    assert!(matches!(
+        &second[call_index + 1],
+        ChatCompletionRequestMessage::Tool(_)
+    ));
+    assert_eq!(
+        user_message_content(&second[call_index + 2]),
+        "Stop the previous task. Say done."
+    );
+}
+
+#[tokio::test]
+async fn steering_arriving_during_tool_preflight_skips_batch() {
+    struct QueueDuringPreflight {
+        sender: mpsc::UnboundedSender<QueuedUserMessageCommand>,
+        root: PathBuf,
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for QueueDuringPreflight {
+        fn name(&self) -> &str {
+            "bash"
+        }
+        fn description(&self) -> &str {
+            "test command"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
+        }
+        async fn execution_cwd(&self, _args: &serde_json::Value) -> Option<PathBuf> {
+            let text = "Stop the previous task. Say done.";
+            let _ = self
+                .sender
+                .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+                    id: 72,
+                    display_text: text.into(),
+                    transcript_text: text.into(),
+                    input: crate::agent::UserInput::from_text(text),
+                }));
+            Some(self.root.clone())
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::Text("executed".into()))
+        }
+    }
+
+    let fixture = TestFixture::new();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(QueueDuringPreflight {
+        sender,
+        root: fixture.project_root.clone(),
+        executions: executions.clone(),
+    }));
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "action-1",
+                "bash",
+                r#"{"command":"echo stale"}"#,
+            )],
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::ToolCalls,
+            ),
+            ..StreamedResponse::default()
+        }),
+        finished_response("done"),
+    ]);
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let sink = Arc::new(CaptureSink::default());
+    let result = agent
+        .run_with_queue(
+            crate::agent::UserInput::from_text("Start the task"),
+            CancellationToken::new(),
+            sink.clone(),
+            receiver,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("done".into()));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(
+        sink.tool_finishes()
+            .iter()
+            .any(|(id, message, status)| id == "action-1"
+                && message.contains("queued user message")
+                && !status.is_success())
+    );
+}
+
+#[tokio::test]
 async fn queued_steering_skips_not_yet_started_batches() {
     let fixture = TestFixture::new();
     let (sender, receiver) = mpsc::unbounded_channel();

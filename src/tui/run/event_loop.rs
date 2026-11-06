@@ -1134,13 +1134,21 @@ async fn handle_toplevel_submit_command(
         {
             return true;
         }
-        enqueue_running_follow_up(
+        let queued = enqueue_running_follow_up(
             app,
             &*tasks,
             FollowUpDelivery::Queue,
             &deps.registry,
             Some(&deps.model_catalog),
         );
+        if queued
+            && goal
+                .snapshot()
+                .await
+                .is_some_and(|record| record.state == crate::goal::GoalState::Active)
+        {
+            super::goal::send_goal_follow_up(app, tasks);
+        }
         return true;
     }
     if matches!(
@@ -2886,6 +2894,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     let mut next_persistence_flush = Instant::now();
     let mut redraw_requested = true;
     let mut next_redraw_at = Instant::now();
+    let mut next_goal_refresh_at = Instant::now();
     let mut pending_selection_auto_scroll: Option<PendingSelectionAutoScroll> = None;
     let mut last_active_persona = app.active_persona.clone();
     let mut persisted_signatures = PersistedSnapshotSignatures {
@@ -3294,6 +3303,12 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         frame_needs_redraw |= apply_interaction_request(&mut app, &mut interaction_rx);
         frame_needs_redraw |=
             super::goal::maybe_start_goal(&mut app, &mut tasks, &goal_service, &agent, &sink).await;
+
+        if Instant::now() >= next_goal_refresh_at {
+            frame_needs_redraw |=
+                super::goal::sync_goal_snapshot(&mut app, &tasks, &goal_service, &storage).await;
+            next_goal_refresh_at = Instant::now() + Duration::from_secs(1);
+        }
 
         app.reduce(AppAction::Tick);
         // A growing bonsai animates at the poll cadence; without this the

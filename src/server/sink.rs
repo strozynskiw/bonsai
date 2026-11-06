@@ -11,6 +11,11 @@ use tokio::sync::broadcast;
 pub(crate) enum SessionEvent {
     ResyncRequired,
     UserMessage(String),
+    MessageDelivery {
+        run_id: String,
+        request_id: String,
+        state: String,
+    },
     AssistantDelta(String),
     AssistantDone,
     ReasoningDelta(String),
@@ -28,6 +33,7 @@ pub(crate) enum SessionEvent {
     },
     Plan(Box<crate::plan::PlanDoc>),
     Todos(Vec<crate::todo::TodoItem>),
+    Goal(Option<crate::goal::GoalRecord>),
     Completion(Box<crate::completion_report::CompletionReport>),
     ToolResult {
         id: String,
@@ -56,8 +62,17 @@ struct State {
     usage: (u64, u64, Option<u64>),
     plan_revision: Option<u64>,
     todos: Option<Vec<crate::todo::TodoItem>>,
+    goal: Option<Option<crate::goal::GoalRecord>>,
     replay: std::collections::VecDeque<(OrderedEvent, usize)>,
     replay_bytes: usize,
+    followups: Option<Followups>,
+}
+
+#[derive(Debug)]
+struct Followups {
+    run: String,
+    open: bool,
+    messages: std::collections::BTreeMap<u64, (String, bool)>,
 }
 
 impl State {
@@ -152,6 +167,17 @@ impl SessionSink {
         }
     }
 
+    pub(crate) fn goal_updated(&self, goal: Option<crate::goal::GoalRecord>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.goal.as_ref() != Some(&goal) {
+            state.goal = Some(goal.clone());
+            state.emit(&self.events, SessionEvent::Goal(goal));
+        }
+    }
+
     pub(crate) fn publish(&self, event: SessionEvent) {
         self.record(event, |_| {});
     }
@@ -160,6 +186,78 @@ impl SessionSink {
         self.record(SessionEvent::UserMessage(text.into()), |r| {
             r.user_message(text)
         });
+    }
+
+    pub(crate) fn begin_followups(&self, run: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.followups = Some(Followups {
+            run: run.into(),
+            open: true,
+            messages: Default::default(),
+        });
+    }
+
+    pub(crate) fn register_followup(&self, run: &str, id: u64, request: &str) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(queue) = state.followups.as_mut() else {
+            return false;
+        };
+        if !queue.open || queue.run != run || queue.messages.len() >= 64 {
+            return false;
+        }
+        queue.messages.insert(id, (request.into(), false));
+        true
+    }
+
+    pub(crate) fn has_pending_followups(&self, run: &str) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .followups
+            .as_ref()
+            .is_some_and(|q| q.run == run && q.messages.values().any(|(_, delivered)| !delivered))
+    }
+
+    pub(crate) fn close_followups(&self, run: &str) -> (Vec<String>, Vec<String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(queue) = state.followups.as_mut().filter(|q| q.run == run) else {
+            return (Vec::new(), Vec::new());
+        };
+        queue.open = false;
+        let (delivered, pending): (Vec<_>, Vec<_>) = queue
+            .messages
+            .values()
+            .cloned()
+            .partition(|(_, delivered)| *delivered);
+        (
+            delivered.into_iter().map(|(request, _)| request).collect(),
+            pending.into_iter().map(|(request, _)| request).collect(),
+        )
+    }
+
+    pub(crate) fn forget_followups(&self, run: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .followups
+            .as_ref()
+            .is_some_and(|queue| queue.run == run)
+        {
+            state.followups = None;
+        }
     }
 
     /// Snapshot and subscription are acquired under the publication fence.
@@ -221,6 +319,34 @@ impl SessionSink {
 }
 
 impl OutputSink for SessionSink {
+    fn queued_user_message_sent(&self, id: u64, text: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(queue) = state.followups.as_mut() else {
+            return;
+        };
+        let Some((request, delivered)) = queue.messages.get_mut(&id) else {
+            return;
+        };
+        if *delivered {
+            return;
+        }
+        *delivered = true;
+        let request = request.clone();
+        let run = queue.run.clone();
+        self.recorder.user_message(text);
+        state.emit(&self.events, SessionEvent::UserMessage(text.into()));
+        state.emit(
+            &self.events,
+            SessionEvent::MessageDelivery {
+                run_id: run,
+                request_id: request,
+                state: "delivered".into(),
+            },
+        );
+    }
     fn completion_evidence(&self) -> Option<CompletionEvidenceSnapshot> {
         Some(self.evidence.snapshot())
     }

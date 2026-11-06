@@ -73,7 +73,7 @@ use crate::tool::read_evidence::{
 };
 use crate::tool::{
     ParallelPolicy, ProjectInfoProviderState, ProjectInfoRuntime, ReadEvidence, ReadTracker,
-    SubagentRunner, ToolOutput, ToolRegistry, ToolRegistryCacheKey, diagnostic_excerpt_lines,
+    SubagentRunner, ToolOutput, ToolRegistry, ToolRegistryCacheKey,
 };
 use crate::util::tool_args::normalize_chat_message_tool_call_arguments;
 use crate::yolo::YoloMode;
@@ -451,6 +451,8 @@ type ProviderFallbackModelObserver = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct Agent {
     pub(crate) goal: crate::goal::GoalService,
     goal_run_id: Option<String>,
+    /// The server finalizes its goal only after its completion evidence is durable.
+    pub(crate) defer_goal_finalization: bool,
     provider: Box<dyn Provider>,
     tool_call_identities: crate::provider::ToolCallIdentityStore,
     native_replay: crate::provider::NativeReplayStore,

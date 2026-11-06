@@ -2,6 +2,36 @@ use super::*;
 use crate::goal::GoalRecord;
 
 impl Storage {
+    /// Recorded goal run time plus the elapsed portion of a verified live run.
+    /// Paused gaps and abandoned process intervals are never invented.
+    ///
+    /// # Errors
+    /// Returns an error if the task-run timing query fails.
+    pub(crate) async fn goal_elapsed_ms(
+        &self,
+        session_id: SessionId,
+        goal_id: &str,
+        live_run: Option<(TaskRunId, Duration)>,
+    ) -> Result<u64> {
+        let live_run_id = live_run.map(|(id, _)| id.as_i64());
+        let live_elapsed_ms = live_run.map_or(0, |(_, elapsed)| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        });
+        let elapsed: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(CASE WHEN id = ? AND outcome IS NULL \
+             THEN ? ELSE COALESCE(wall_ms, 0) END), 0) \
+             FROM task_runs WHERE session_id = ? AND goal_id = ?",
+        )
+        .bind(live_run_id)
+        .bind(live_elapsed_ms)
+        .bind(session_id.as_i64())
+        .bind(goal_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to load goal elapsed runtime")?;
+        Ok(u64::try_from(elapsed).unwrap_or(0))
+    }
+
     pub(crate) async fn current_goal(&self, session_id: SessionId) -> Result<Option<GoalRecord>> {
         let raw: Option<String> = sqlx::query_scalar(
             "SELECT record_json FROM session_goals WHERE session_id = ? AND is_current = 1",
@@ -114,5 +144,120 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn goal_timer_combines_recorded_runs_with_only_the_verified_live_run() {
+        let fixture = test_utils::TestStorage::new().await;
+        let session = fixture.start_session().await;
+        let first = fixture
+            .storage
+            .start_task_run_with_goal_id(session, None, "goal-a", "First run")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE task_runs SET wall_ms = 2500 WHERE id = ?")
+            .bind(first.id.as_i64())
+            .execute(&fixture.storage.pool)
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .finish_task_run(first.id, TaskOutcome::Succeeded, None)
+            .await
+            .unwrap();
+        let other = fixture
+            .storage
+            .start_task_run_with_goal_id(session, None, "goal-b", "Unrelated work")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE task_runs SET wall_ms = 99999 WHERE id = ?")
+            .bind(other.id.as_i64())
+            .execute(&fixture.storage.pool)
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .finish_task_run(other.id, TaskOutcome::Succeeded, None)
+            .await
+            .unwrap();
+        let live = fixture
+            .storage
+            .start_task_run_with_goal_id(session, None, "goal-a", "Resume")
+            .await
+            .unwrap();
+        // A partial checkpoint must not be counted again on top of live wall time.
+        sqlx::query("UPDATE task_runs SET started_at_ms = 10000, wall_ms = 500 WHERE id = ?")
+            .bind(live.id.as_i64())
+            .execute(&fixture.storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .storage
+                .goal_elapsed_ms(
+                    session,
+                    "goal-a",
+                    Some((live.id, Duration::from_millis(3000)))
+                )
+                .await
+                .unwrap(),
+            5500
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .goal_elapsed_ms(session, "goal-a", None)
+                .await
+                .unwrap(),
+            3000
+        );
+        assert_eq!(
+            fixture
+                .storage
+                .goal_elapsed_ms(
+                    session,
+                    "goal-b",
+                    Some((live.id, Duration::from_millis(3000)))
+                )
+                .await
+                .unwrap(),
+            99999
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_timer_does_not_charge_paused_or_crashed_time_after_restore() {
+        let fixture = test_utils::TestStorage::new().await;
+        let session = fixture.start_session().await;
+        let service = GoalService::default();
+        service
+            .bind(fixture.storage.clone(), session)
+            .await
+            .unwrap();
+        let goal = service.set("Deliver feature").await.unwrap();
+        let run = fixture
+            .storage
+            .start_task_run_with_goal_id(session, None, &goal.id, &goal.objective)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE task_runs SET started_at_ms = 1, wall_ms = 4000 WHERE id = ?")
+            .bind(run.id.as_i64())
+            .execute(&fixture.storage.pool)
+            .await
+            .unwrap();
+        let restored = GoalService::default();
+        restored
+            .bind(fixture.storage.clone(), session)
+            .await
+            .unwrap();
+        assert_eq!(restored.snapshot().await.unwrap().state, GoalState::Paused);
+        assert_eq!(
+            fixture
+                .storage
+                .goal_elapsed_ms(session, &goal.id, None)
+                .await
+                .unwrap(),
+            4000
+        );
     }
 }

@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::tool::todo_write::TodoWriteTool;
+
 use super::super::ExecutionLane;
 use super::super::run_loop::{
     IMPLEMENTATION_STALL_FIRST_NUDGE_TURNS, IMPLEMENTATION_STALL_TERMINAL_TURNS,
@@ -26,6 +28,86 @@ fn final_text_turn(content: &str) -> crate::provider::ProviderResult<StreamedRes
         tool_calls: vec![],
         ..StreamedResponse::default()
     })
+}
+
+#[tokio::test]
+async fn read_only_checkpoint_preserves_tools_for_remaining_evidence_and_todos() {
+    let fixture = TestFixture::new();
+    let read = Arc::new(MockTool::new("read", "evidence"));
+    let todos = Arc::new(Mutex::new(crate::todo::TodoStore::new()));
+    todos.lock().await.set_todos(vec![
+        crate::todo::TodoItem {
+            content: "Inspect the module".into(),
+            status: crate::todo::TodoStatus::InProgress,
+        },
+        crate::todo::TodoItem {
+            content: "Report findings".into(),
+            status: crate::todo::TodoStatus::Pending,
+        },
+    ]);
+    let mut registry = ToolRegistry::new();
+    registry.register(read.clone());
+    registry.register(Arc::new(TodoWriteTool::new(todos.clone())));
+    let finish_todos = Ok(StreamedResponse {
+        tool_calls: vec![
+            test_tool_call(
+                "last-read",
+                "read",
+                r#"{"title":"inspect final dependency"}"#,
+            ),
+            test_tool_call(
+                "finish-todos",
+                "todowrite",
+                r#"{"todos":[{"content":"Inspect the module","status":"completed"},{"content":"Report findings","status":"completed"}]}"#,
+            ),
+        ],
+        ..StreamedResponse::default()
+    });
+    let responses = (0..8)
+        .map(distinct_read_turn)
+        .chain([
+            finish_todos,
+            final_text_turn("Review complete."),
+            // Before the fix, the missing todowrite left pending work behind;
+            // the completion gate's recovery response must still reject it.
+            final_text_turn("Review complete."),
+        ])
+        .collect();
+    let provider = MockProvider::new(responses);
+    let schemas = provider.tool_names();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_todo_store(todos.clone());
+    agent.set_run_max_turns(14);
+    let result = agent
+        .run(
+            "Review the module using read-only tools. Do not modify files or run commands.",
+            CancellationToken::new(),
+            Arc::new(StdoutSink),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("Review complete.".into()));
+    assert_eq!(read.calls.lock().await.len(), 9);
+    assert!(
+        todos
+            .lock()
+            .await
+            .todos()
+            .iter()
+            .all(|todo| todo.status == crate::todo::TodoStatus::Completed)
+    );
+    for names in schemas.lock().await.iter().skip(8) {
+        assert!(names.iter().any(|name| name == "read"), "{names:?}");
+        assert!(names.iter().any(|name| name == "todowrite"), "{names:?}");
+    }
 }
 
 /// Minimal bash stand-in with the real `command` schema: MockTool's schema

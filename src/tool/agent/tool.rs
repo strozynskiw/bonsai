@@ -75,6 +75,7 @@ impl AgentTool {
         args: serde_json::Value,
         cancellation: CancellationToken,
         remaining_billed_tokens: Option<u64>,
+        effect_observer: Option<crate::output::SharedSink>,
     ) -> Result<ToolOutput> {
         let AgentToolArgs {
             agent,
@@ -92,6 +93,14 @@ impl AgentTool {
                 self.runner.project_root.display(),
             );
         }
+        if run_in_background
+            && !self.runner.has_background_wake()
+            && let Some(sink) = effect_observer.as_ref()
+        {
+            sink.status(
+                "Background subagents are unavailable in this session; running synchronously.",
+            );
+        }
         if run_in_background && self.runner.has_background_wake() {
             if remaining_billed_tokens.is_some() {
                 anyhow::bail!(
@@ -103,17 +112,13 @@ impl AgentTool {
                     "run_in_background is only supported for read-only subagents; run mutating subagents synchronously so permission prompts and edits stay in the active turn."
                 );
             }
-            let subtask_id = self.runner.run_in_background(
-                &resolved.name,
-                &resolved.instructions,
-                &prompt,
-                resolved.registry,
-                resolved.model_chain,
-                resolved.limits,
-            );
+            let name = resolved.name.clone();
+            let subtask_id = self
+                .runner
+                .run_in_background(resolved.into_run_spec(prompt), effect_observer);
             let message = format!(
                 "Started background subagent {subtask_id} ({}). I will resume when it finishes.",
-                resolved.name
+                name
             );
             return Ok(ToolOutput::SubagentStarted {
                 subtask_id,
@@ -126,6 +131,7 @@ impl AgentTool {
                 resolved.into_run_spec(prompt),
                 cancellation,
                 remaining_billed_tokens,
+                effect_observer,
             )
             .await;
         let (text, status) = match result {
@@ -380,9 +386,16 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate one scoped project task and return its conclusion. Names are in the \
+        if self.runner.has_background_wake() {
+            "Delegate one scoped project task and return its conclusion. Names are in the \
 Subagents index. Batch independent read-only calls in one turn; use background mode for broad \
 read-only scans. Custom agents receive only their declared tools. All paths must stay in-project."
+        } else {
+            "Delegate one scoped project task and return its conclusion. Names are in the \
+Subagents index. Batch independent read-only calls in one turn. Background mode is unavailable \
+in this session; delegations run synchronously. Custom agents receive only their declared tools. \
+All paths must stay in-project."
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -400,9 +413,11 @@ read-only scans. Custom agents receive only their declared tools. All paths must
                 ),
                 (
                     "run_in_background",
-                    boolean_property(
-                        "If true, start a read-only subagent in the background and return immediately.",
-                    ),
+                    boolean_property(if self.runner.has_background_wake() {
+                        "If true, start a read-only subagent in the background and return immediately."
+                    } else {
+                        "Background mode is unavailable in this session. Calls run synchronously even if true."
+                    }),
                 ),
             ],
             &["agent", "prompt"],
@@ -427,7 +442,7 @@ read-only scans. Custom agents receive only their declared tools. All paths must
         // No execution context here, so no parent token is available — fall back
         // to a detached one. The run loop always calls `execute_with_context`,
         // which forwards the real token.
-        self.run_delegation(args, CancellationToken::new(), None)
+        self.run_delegation(args, CancellationToken::new(), None, None)
             .await
     }
 
@@ -439,7 +454,12 @@ read-only scans. Custom agents receive only their declared tools. All paths must
         // Forward the parent's cancellation token so a user cancel reaches the
         // nested run's own cooperative checks, not only via future-drop.
         let cancellation = context.cancellation_token().unwrap_or_default();
-        self.run_delegation(args, cancellation, context.remaining_billed_tokens())
-            .await
+        self.run_delegation(
+            args,
+            cancellation,
+            context.remaining_billed_tokens(),
+            Some(context.sink().clone()),
+        )
+        .await
     }
 }

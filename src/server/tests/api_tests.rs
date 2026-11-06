@@ -16,6 +16,428 @@ struct HttpFixture {
     token: String,
     client: reqwest::Client,
 }
+
+#[tokio::test]
+async fn goal_mutations_are_scoped_idempotent_and_do_not_start_work() {
+    let h = HttpFixture::new().await;
+    h.resume().await;
+    let path = format!("/sessions/{}/goal", h.f.id);
+    let input = json!({"request_id":"goal-set", "action":"set", "objective":"Deliver the feature"});
+    let read_only = h.token(&["read"], vec![h.f.id.as_i64()], 3600).await;
+    assert_eq!(
+        h.client
+            .post(format!("{}{path}", h.url))
+            .bearer_auth(read_only)
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.post(&path, input.clone()).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let first: Value = h.get(&path).send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        h.post(
+            &path,
+            json!({"request_id":"fake-complete", "action":"complete"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.post(
+            &path,
+            json!({"request_id":"fake-usage", "action":"pause", "cost_micros":0})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let unchanged: Value = h.get(&path).send().await.unwrap().json().await.unwrap();
+    assert_eq!(unchanged["goal"], first["goal"]);
+    assert_eq!(
+        h.post(&path, input).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let repeated: Value = h.get(&path).send().await.unwrap().json().await.unwrap();
+    assert_eq!(first["goal"]["id"], repeated["goal"]["id"]);
+    assert_eq!(
+        h.post(
+            &path,
+            json!({"request_id":"goal-set", "action":"set", "objective":"Different"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        h.post(&path, json!({"request_id":"pause", "action":"pause"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.get(&path)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["goal"]["state"],
+        "paused"
+    );
+    assert_eq!(
+        h.post(
+            &path,
+            json!({"request_id":"resume-goal", "action":"resume"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.get(&path)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["goal"]["state"],
+        "active"
+    );
+    assert_eq!(
+        h.post(&path, json!({"request_id":"clear", "action":"clear"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(
+        h.get(&path)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["goal"]
+            .is_null()
+    );
+    assert_eq!(h.f.mock.calls.load(Ordering::SeqCst), 0);
+    h.api
+        .0
+        .controller
+        .shutdown(Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pausing_a_goal_over_http_cancels_the_active_run() {
+    let h = HttpFixture::new().await;
+    h.resume().await;
+    let goal_path = format!("/sessions/{}/goal", h.f.id);
+    assert_eq!(
+        h.post(
+            &goal_path,
+            json!({"request_id":"set-live", "action":"set", "objective":"Explain the feature"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.post(
+            &format!("/sessions/{}/messages", h.f.id),
+            json!({"request_id":"run-live", "text":"Explain it"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    h.f.wait_calls(1).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let live: Value = h
+        .get(&goal_path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(live["elapsed_ms"].as_u64().unwrap() >= 40);
+    assert_eq!(
+        h.post(
+            &goal_path,
+            json!({"request_id":"pause-live", "action":"pause"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = h.api.0.controller.snapshot().await.unwrap().0;
+            if snapshot.state == "idle" {
+                break;
+            }
+            assert_ne!(snapshot.state, "failed");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let goal: Value = h
+        .get(&goal_path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(goal["goal"]["state"], "paused");
+    let paused_ms = goal["elapsed_ms"].as_u64().unwrap();
+    assert!(paused_ms >= 40);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let still_paused: Value = h
+        .get(&goal_path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(still_paused["elapsed_ms"].as_u64().unwrap(), paused_ms);
+    assert_eq!(
+        h.post(
+            &goal_path,
+            json!({"request_id":"resume-live", "action":"resume"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.post(
+            &format!("/sessions/{}/messages", h.f.id),
+            json!({"request_id":"run-again", "text":"Continue"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    h.f.wait_calls(2).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let resumed: Value = h
+        .get(&goal_path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(resumed["elapsed_ms"].as_u64().unwrap() > paused_ms + 40);
+    let snapshot: Value = h
+        .get(&format!("/sessions/{}", h.f.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(snapshot["goal_elapsed_ms"].as_u64().unwrap() >= paused_ms);
+    assert_eq!(
+        h.post(
+            &goal_path,
+            json!({"request_id":"pause-again", "action":"pause"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = h.api.0.controller.snapshot().await.unwrap().0;
+            if snapshot.state == "idle" {
+                break;
+            }
+            assert_ne!(snapshot.state, "failed");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(h.f.mock.calls.load(Ordering::SeqCst), 2);
+    let final_goal: Value = h
+        .get(&goal_path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let final_ms = final_goal["elapsed_ms"].as_u64().unwrap();
+    h.api.0.controller.release_idle().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let unloaded: Value = h
+        .get(&goal_path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unloaded["elapsed_ms"].as_u64().unwrap(), final_ms);
+    assert_eq!(
+        h.post(
+            &format!("/sessions/{}/resume", h.f.id),
+            json!({"request_id":"restore-timer"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    let restored: Value = h
+        .get(&goal_path)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restored["elapsed_ms"].as_u64().unwrap(), final_ms);
+    assert_eq!(restored["goal"]["state"], "paused");
+    h.api
+        .0
+        .controller
+        .shutdown(Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn goal_read_is_scoped_and_survives_session_resume() {
+    let h = HttpFixture::new().await;
+    let path = format!("/sessions/{}/goal", h.f.id);
+    let empty: Value = h.get(&path).send().await.unwrap().json().await.unwrap();
+    assert!(empty["goal"].is_null());
+    let service = crate::goal::GoalService::default();
+    service.bind(h.f.db.storage.clone(), h.f.id).await.unwrap();
+    let goal = service.set("Deliver the feature").await.unwrap();
+    let before: Value = h.get(&path).send().await.unwrap().json().await.unwrap();
+    assert_eq!(before["goal"]["id"], goal.id);
+    assert_eq!(before["goal"]["state"], "active");
+    let unloaded: Value = h
+        .get(&format!("/sessions/{}", h.f.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unloaded["goal"]["id"], goal.id);
+    let denied = h.token(&["control"], vec![h.f.id.as_i64()], 3600).await;
+    assert_eq!(
+        h.client
+            .get(format!("{}{path}", h.url))
+            .bearer_auth(denied)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let other =
+        h.f.db
+            .start_session_with("opencode", &h.f.selection.model)
+            .await;
+    let wrong_session = h.token(&["read"], vec![other.as_i64()], 3600).await;
+    assert_eq!(
+        h.client
+            .get(format!("{}{path}", h.url))
+            .bearer_auth(wrong_session)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    h.resume().await;
+    let after: Value = h.get(&path).send().await.unwrap().json().await.unwrap();
+    assert_eq!(after["goal"]["id"], goal.id);
+    assert_eq!(after["goal"]["state"], "paused");
+    let loaded: Value = h
+        .get(&format!("/sessions/{}", h.f.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(loaded["goal"]["state"], "paused");
+    let mut events = h
+        .get(&format!("/sessions/{}/events", h.f.id))
+        .send()
+        .await
+        .unwrap();
+    let initial = String::from_utf8(events.chunk().await.unwrap().unwrap().to_vec()).unwrap();
+    assert!(
+        initial.contains("event: snapshot")
+            && initial.contains("Deliver the feature")
+            && initial.contains("paused"),
+        "{initial}"
+    );
+    let live_goal = h.f.factory.handles.lock().await.goal.clone().unwrap();
+    live_goal.clear().await.unwrap();
+    let change = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let chunk = String::from_utf8(events.chunk().await.unwrap().unwrap().to_vec()).unwrap();
+            if chunk.contains("\"kind\":\"goal\"") {
+                break chunk;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(change.contains("\"goal\":null"), "{change}");
+    drop(events);
+    assert_eq!(h.f.mock.calls.load(Ordering::SeqCst), 0);
+    h.api
+        .0
+        .controller
+        .shutdown(Duration::from_secs(5))
+        .await
+        .unwrap();
+}
 #[tokio::test]
 async fn scoped_listing_filters_before_pagination_and_idle_switch_is_safe() {
     let h = HttpFixture::new().await;
@@ -700,6 +1122,80 @@ async fn http_auth_matrix_host_origin_version_and_limits() {
         StatusCode::UNAUTHORIZED
     );
 }
+#[tokio::test]
+async fn http_goal_followup_reports_interruption_on_retry() {
+    let h = HttpFixture::new().await;
+    h.resume().await;
+    let goal_path = format!("/sessions/{}/goal", h.f.id);
+    assert_eq!(
+        h.post(
+            &goal_path,
+            json!({"request_id":"goal", "action":"set", "objective":"Explain the feature"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    let path = format!("/sessions/{}/messages", h.f.id);
+    let first: Value = h
+        .post(&path, json!({"request_id":"first", "text":"Start"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    h.f.wait_calls(1).await;
+    let body = json!({"request_id":"followup", "text":"Include details"});
+    let queued: Value = h
+        .post(&path, body.clone())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(queued["run_id"], first["run_id"]);
+    assert_eq!(queued["state"], "accepted");
+    assert_eq!(
+        h.post(
+            &format!("/sessions/{}/interrupt", h.f.id),
+            json!({"request_id":"stop"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let retry: Value = h
+                .post(&path, body.clone())
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if retry["state"] == "interrupted" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    h.api
+        .0
+        .controller
+        .shutdown(Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn http_sessions_dedup_conflicts_and_sensitive_scope() {
     let h = HttpFixture::new().await;

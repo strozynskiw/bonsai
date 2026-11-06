@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::context::{ProjectContextSnapshot, detect_project_ecosystems, project_context_snapshot};
+use crate::context::{
+    ProjectContextSnapshot, detect_project_ecosystems, isolated_project_context_snapshot,
+    project_context_snapshot,
+};
 use crate::tool::schema::{closed_object, parse_args};
 use crate::tool::{ParallelPolicy, Tool, ToolOutput};
 
@@ -45,6 +48,14 @@ pub(crate) struct ProjectInfoRuntimeSnapshot {
 #[derive(Debug, Default)]
 pub(crate) struct ProjectInfoRuntime {
     state: Mutex<ProjectInfoRuntimeSnapshot>,
+    context_scope: ProjectInfoContextScope,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+enum ProjectInfoContextScope {
+    #[default]
+    Inherited,
+    Isolated,
 }
 
 impl ProjectInfoRuntime {
@@ -54,6 +65,23 @@ impl ProjectInfoRuntime {
                 provider,
                 ..ProjectInfoRuntimeSnapshot::default()
             }),
+            context_scope: ProjectInfoContextScope::Inherited,
+        }
+    }
+
+    /// Keep orientation inside the fixture, just like the eval system context.
+    pub(crate) fn isolated(provider: Option<ProjectInfoProviderState>) -> Self {
+        Self {
+            context_scope: ProjectInfoContextScope::Isolated,
+            ..Self::new(provider)
+        }
+    }
+
+    /// Give a delegated run its own tool/provider state with the same boundary.
+    pub(crate) fn fork(&self, provider: Option<ProjectInfoProviderState>) -> Self {
+        Self {
+            context_scope: self.context_scope,
+            ..Self::new(provider)
         }
     }
 
@@ -175,7 +203,12 @@ impl Tool for ProjectInfoTool {
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let _args: ProjectInfoArgs = parse_args("project_info", args)?;
-        let context = project_context_snapshot(&self.project_root);
+        let context = match self.runtime.context_scope {
+            ProjectInfoContextScope::Inherited => project_context_snapshot(&self.project_root),
+            ProjectInfoContextScope::Isolated => {
+                isolated_project_context_snapshot(&self.project_root)
+            }
+        };
         let runtime = self.runtime.snapshot();
         let ecosystems = detect_project_ecosystems(&self.project_root)
             .into_iter()
@@ -369,6 +402,29 @@ async fn git(root: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn isolated_orientation_and_delegated_runtime_exclude_parent_steering() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "parent rules").unwrap();
+        let fixture = dir.path().join("fixture");
+        std::fs::create_dir(&fixture).unwrap();
+        std::fs::write(fixture.join("AGENTS.md"), "fixture rules").unwrap();
+        let runtime = ProjectInfoRuntime::isolated(None);
+        for runtime in [runtime.fork(None), runtime] {
+            let tool = ProjectInfoTool::new(fixture.clone(), Arc::new(runtime));
+            let ToolOutput::Text(text) = tool.execute(serde_json::json!({})).await.unwrap() else {
+                panic!("project_info should return text");
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let files = value["steering_files"].as_array().unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                files[0]["path"],
+                fixture.join("AGENTS.md").display().to_string()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn reports_project_orientation_without_steering_body() {

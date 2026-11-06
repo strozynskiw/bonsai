@@ -95,6 +95,14 @@ impl OutputSink for DeferredAssistantSink {
         self.inner.tool_started(id, name, arguments);
     }
 
+    fn command_spawned(&self, id: &str) {
+        self.inner.command_spawned(id);
+    }
+
+    fn delegated_tool_phase(&self, name: &str, phase: crate::output::DelegatedToolPhase) {
+        self.inner.delegated_tool_phase(name, phase);
+    }
+
     fn tool_output(&self, id: &str, output: &str) {
         self.inner.tool_output(id, output);
     }

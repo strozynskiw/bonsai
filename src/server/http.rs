@@ -394,6 +394,13 @@ struct Message {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct GoalMutation {
+    request_id: String,
+    action: String,
+    objective: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Answer {
     request_id: String,
     run_id: String,
@@ -528,8 +535,45 @@ async fn route(api: &Api, id: &Identity, req: Request) -> Result<Response> {
                 page.limit.unwrap_or(100),
             )));
         }
+        let goal = api
+            .0
+            .storage
+            .current_goal(sid)
+            .await
+            .map_err(|_| Failure::internal())?;
+        let goal_elapsed_ms = match &goal {
+            Some(goal) => Some(
+                api.0
+                    .controller
+                    .goal_elapsed_ms(sid, &goal.id)
+                    .await
+                    .map_err(|_| Failure::internal())?,
+            ),
+            None => None,
+        };
         return Ok(response(
-            json!({"session_id":session,"state":"unloaded","pending":[],"transcript":saved.transcript.iter().skip(page.offset.unwrap_or(0)).take(page.limit.unwrap_or(100)).collect::<Vec<_>>(),"total":saved.transcript.len(),"plan":saved.plan,"todos":saved.todos,"usage":{"prompt_tokens":saved.summary.prompt_token_count,"completion_tokens":saved.summary.completion_token_count,"cost_micros":saved.summary.cost_micros}}),
+            json!({"session_id":session,"state":"unloaded","pending":[],"transcript":saved.transcript.iter().skip(page.offset.unwrap_or(0)).take(page.limit.unwrap_or(100)).collect::<Vec<_>>(),"total":saved.transcript.len(),"plan":saved.plan,"todos":saved.todos,"goal":goal,"goal_elapsed_ms":goal_elapsed_ms,"usage":{"prompt_tokens":saved.summary.prompt_token_count,"completion_tokens":saved.summary.completion_token_count,"cost_micros":saved.summary.cost_micros}}),
+        ));
+    }
+    if parts.len() == 3 && parts[2] == "goal" && method == Method::GET {
+        let goal = api
+            .0
+            .storage
+            .current_goal(sid)
+            .await
+            .map_err(|_| Failure::internal())?;
+        let elapsed_ms = match &goal {
+            Some(goal) => Some(
+                api.0
+                    .controller
+                    .goal_elapsed_ms(sid, &goal.id)
+                    .await
+                    .map_err(|_| Failure::internal())?,
+            ),
+            None => None,
+        };
+        return Ok(response(
+            json!({"session_id": session, "goal": goal, "elapsed_ms": elapsed_ms}),
         ));
     }
     if parts.len() == 3 && parts[2] == "events" && method == Method::GET {
@@ -550,6 +594,37 @@ async fn route(api: &Api, id: &Identity, req: Request) -> Result<Response> {
     let _lock = api.0.mutations.lock().await;
     authorize(api, id, scope, Some(session)).await?;
     match parts.as_slice() {
+        [_, _, "goal"] => {
+            let input: GoalMutation = body(req).await?;
+            request_id(&input.request_id)?;
+            let action = match (input.action.as_str(), input.objective.as_deref()) {
+                ("set", Some(objective))
+                    if !objective.trim().is_empty()
+                        && objective.trim().chars().count() <= 16_384 =>
+                {
+                    super::controller::GoalControl::Set(objective.to_owned())
+                }
+                ("pause", None) => super::controller::GoalControl::Pause,
+                ("resume", None) => super::controller::GoalControl::Resume,
+                ("clear", None) => super::controller::GoalControl::Clear,
+                _ => return Err(Failure(StatusCode::BAD_REQUEST, "invalid_goal_action")),
+            };
+            let content = serde_json::to_string(&(&input.action, &input.objective))
+                .map_err(|_| Failure::internal())?;
+            if let Some(result) = prior(api, "goal", session, &input.request_id, &content).await? {
+                return Ok(response(result));
+            }
+            admit(api, id, "goal", session, &input.request_id, &content).await?;
+            authorize(api, id, "control", Some(session)).await?;
+            api.0
+                .controller
+                .control_goal(sid, action)
+                .await
+                .map_err(|_| Failure(StatusCode::CONFLICT, "goal_conflict"))?;
+            let result = json!({"session_id": session, "state": "updated"});
+            finish(api, "goal", session, &input.request_id, &result).await?;
+            Ok(response(result))
+        }
         [_, _, "messages"] => {
             let input: Message = body(req).await?;
             request_id(&input.request_id)?;

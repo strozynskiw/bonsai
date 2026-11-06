@@ -149,7 +149,17 @@ async fn listen(root: &Path, storage: Storage, config: Config) -> Result<()> {
     drop(owner);
     result.context("Server listener failed")
 }
-fn workspace_owner(home: &Path, root: &Path) -> Result<std::fs::File> {
+struct WorkspaceOwner(std::fs::File);
+
+impl Drop for WorkspaceOwner {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "failed to unlock server workspace owner");
+        }
+    }
+}
+
+fn workspace_owner(home: &Path, root: &Path) -> Result<WorkspaceOwner> {
     use std::os::unix::fs::OpenOptionsExt;
     let key = blake3::hash(root.as_os_str().as_encoded_bytes()).to_hex();
     let path = home.join(format!("serve-{key}.lock"));
@@ -164,5 +174,23 @@ fn workspace_owner(home: &Path, root: &Path) -> Result<std::fs::File> {
     ensure!(file.metadata()?.is_file(), "Invalid workspace lock");
     file.try_lock()
         .context("Another server owns this workspace")?;
-    Ok(file)
+    Ok(WorkspaceOwner(file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn released_workspace_owner_unlocks_with_duplicate_descriptor_open() {
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let guard = workspace_owner(home.path(), root.path()).unwrap();
+        let duplicate = guard.0.try_clone().unwrap();
+        assert!(workspace_owner(home.path(), root.path()).is_err());
+        drop(guard);
+        let next = workspace_owner(home.path(), root.path()).unwrap();
+        drop(next);
+        drop(duplicate);
+    }
 }

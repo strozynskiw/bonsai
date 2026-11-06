@@ -161,10 +161,21 @@ pub(super) struct SubagentRunSpec {
     pub(super) limits: SubagentRunLimits,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SelfReviewRunOptions {
     pub(crate) model_override: Option<crate::subagent::SubagentModelOverride>,
     pub(crate) remaining_billed_tokens: Option<u64>,
+    pub(crate) effect_observer: Option<SharedSink>,
+}
+
+impl std::fmt::Debug for SelfReviewRunOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelfReviewRunOptions")
+            .field("model_override", &self.model_override)
+            .field("remaining_billed_tokens", &self.remaining_billed_tokens)
+            .field("effect_observer", &self.effect_observer.is_some())
+            .finish()
+    }
 }
 
 impl SubagentRunner {
@@ -326,6 +337,7 @@ impl SubagentRunner {
                 cancellation,
                 true,
                 options.remaining_billed_tokens,
+                options.effect_observer,
             )
             .await;
         let status = self
@@ -346,7 +358,7 @@ impl SubagentRunner {
         Vec<UsageTurn>,
         Vec<DelegatedReadEvidence>,
     ) {
-        self.run_new_with_billed_token_budget(spec, cancellation, None)
+        self.run_new_with_billed_token_budget(spec, cancellation, None, None)
             .await
     }
 
@@ -355,6 +367,7 @@ impl SubagentRunner {
         spec: SubagentRunSpec,
         cancellation: CancellationToken,
         remaining_billed_tokens: Option<u64>,
+        effect_observer: Option<SharedSink>,
     ) -> (
         Result<String>,
         UsageTotals,
@@ -375,6 +388,7 @@ impl SubagentRunner {
             cancellation,
             true,
             remaining_billed_tokens,
+            effect_observer,
         )
         .await
     }
@@ -384,24 +398,11 @@ impl SubagentRunner {
     /// later through the background-context wake path.
     pub(super) fn run_in_background(
         &self,
-        label: &str,
-        instructions: &str,
-        task: &str,
-        registry: Arc<ToolRegistry>,
-        model_chain: SubagentModelChain,
-        limits: SubagentRunLimits,
+        spec: SubagentRunSpec,
+        effect_observer: Option<SharedSink>,
     ) -> String {
-        let subtask_id = self.subagents.register(label, task, true);
+        let subtask_id = self.subagents.register(&spec.label, &spec.task, true);
         let runner = self.clone();
-        let spec = SubagentRunSpec {
-            label: label.to_string(),
-            instructions: instructions.to_string(),
-            task: task.to_string(),
-            registry,
-            model_chain,
-            lane_kind: ExecutionLaneKind::Subagent,
-            limits,
-        };
         let token = CancellationToken::new();
         // Track the token before spawning. If Ctrl+C lands after this method
         // returns but before the spawned future is first polled, cancellation
@@ -413,7 +414,7 @@ impl SubagentRunner {
             async move {
                 let _active_run = active_run;
                 let (result, _totals, _turns, _evidence) = runner
-                    .run_registered(spec, subtask_id, token, false, None)
+                    .run_registered(spec, subtask_id, token, false, None, effect_observer)
                     .await;
                 if let Err(err) = result {
                     tracing::error!(%err, "subagent execution failed");
@@ -430,6 +431,7 @@ impl SubagentRunner {
         cancellation: CancellationToken,
         track_active: bool,
         remaining_billed_tokens: Option<u64>,
+        effect_observer: Option<SharedSink>,
     ) -> (
         Result<String>,
         UsageTotals,
@@ -600,9 +602,10 @@ impl SubagentRunner {
         let framed = format!("{}\n\n# Task\n{}", spec.instructions, spec.task);
         // Record the subagent's live activity so `/subagents` can show it while it
         // runs; only the final conclusion crosses back to the caller.
-        let sink: SharedSink = Arc::new(RecordingSink::new(
+        let sink: SharedSink = Arc::new(RecordingSink::observing(
             self.subagents.clone(),
             subtask_id.clone(),
+            effect_observer,
         ));
         let timeout = spec.limits.timeout;
         let initial_cancellation = run_cancellation.child_token();
@@ -764,9 +767,10 @@ impl SubagentRunner {
         registry: &ToolRegistry,
         read_tracker: ReadTracker,
     ) -> Result<(Arc<ToolRegistry>, Arc<ProjectInfoRuntime>)> {
-        let runtime = Arc::new(ProjectInfoRuntime::new(
-            self.project_info_runtime.provider_state(),
-        ));
+        let runtime = Arc::new(
+            self.project_info_runtime
+                .fork(self.project_info_runtime.provider_state()),
+        );
         let isolated = (self.registry_factory)(registry, runtime.clone(), read_tracker)?;
         Ok((isolated, runtime))
     }

@@ -40,9 +40,31 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) async fn finish_server_command(&self, session: SessionId, run: &str) -> Result<()> {
-        sqlx::query("UPDATE server_commands SET state = 'finished' WHERE session_id = ? AND run_id = ? AND state = 'accepted'")
-            .bind(session.as_i64()).bind(run).execute(&self.pool).await?;
+    pub(crate) async fn finish_server_commands(
+        &self,
+        session: SessionId,
+        run: &str,
+        delivered: &[String],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE server_commands SET state = 'interrupted' WHERE session_id = ? AND run_id = ? AND state = 'accepted'")
+            .bind(session.as_i64()).bind(run).execute(&mut *tx).await?;
+        for request in delivered {
+            sqlx::query("UPDATE server_commands SET state = 'finished' WHERE session_id = ? AND run_id = ? AND request_id = ? AND state = 'interrupted'")
+                .bind(session.as_i64()).bind(run).bind(request).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn interrupt_server_command(
+        &self,
+        session: SessionId,
+        request: &str,
+        run: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE server_commands SET state = 'interrupted' WHERE session_id = ? AND request_id = ? AND run_id = ? AND state = 'accepted'")
+            .bind(session.as_i64()).bind(request).bind(run).execute(&self.pool).await?;
         Ok(())
     }
 

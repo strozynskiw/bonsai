@@ -14,6 +14,33 @@ fn goal_agent(fixture: &TestFixture, responses: Vec<StreamedResponse>) -> Agent 
 }
 
 #[tokio::test]
+async fn deferred_goal_finalization_leaves_the_surface_to_classify_the_result() {
+    let fixture = TestFixture::new();
+    let responses = (0..2)
+        .map(|_| StreamedResponse {
+            content: "I will implement the feature next.".into(),
+            ..StreamedResponse::default()
+        })
+        .collect();
+    let mut agent = goal_agent(&fixture, responses);
+    agent
+        .goal
+        .set("Implement a tested authentication feature")
+        .await
+        .unwrap();
+    agent.defer_goal_finalization = true;
+    let result = agent
+        .run("Start", CancellationToken::new(), Arc::new(StdoutSink))
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentRunResult::Incomplete { .. }));
+    assert_eq!(
+        agent.goal.snapshot().await.unwrap().state,
+        GoalState::Active
+    );
+}
+
+#[tokio::test]
 async fn goal_rejects_progress_only_completion_and_stops_after_bounded_retry() {
     let fixture = TestFixture::new();
     let responses = (0..2)
@@ -110,17 +137,57 @@ async fn explicit_user_pause_wins_over_a_late_completion() {
     let fixture = TestFixture::new();
     let agent = goal_agent(&fixture, vec![]);
     let record = agent.goal.set("Ship it").await.unwrap();
+    let lease = agent.goal.active_run_lease().await.unwrap();
     agent
         .goal
         .transition(&record.id, GoalState::Paused, Some("Paused by user."))
         .await
         .unwrap();
     agent
-        .finish_goal_run(&record.id, &Ok(AgentRunResult::Completed("done".into())))
+        .finish_goal_run(&lease, &Ok(AgentRunResult::Completed("done".into())))
         .await
         .unwrap();
     assert_eq!(
         agent.goal.snapshot().await.unwrap().state,
         GoalState::Paused
+    );
+}
+
+#[tokio::test]
+async fn late_wait_and_completion_cannot_override_pause_or_resume() {
+    let fixture = TestFixture::new();
+    let agent = goal_agent(&fixture, vec![]);
+    let record = agent.goal.set("Ship it").await.unwrap();
+    let old_run = agent.goal.active_run_lease().await.unwrap();
+    agent
+        .goal
+        .transition(&record.id, GoalState::Paused, Some("Paused by user."))
+        .await
+        .unwrap();
+    agent
+        .finish_goal_run(
+            &old_run,
+            &Ok(AgentRunResult::Waiting(
+                crate::agent::WaitReason::Subagents(vec!["sub-1".into()]),
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.goal.snapshot().await.unwrap().state,
+        GoalState::Paused
+    );
+    agent
+        .goal
+        .transition(&record.id, GoalState::Active, None)
+        .await
+        .unwrap();
+    agent
+        .finish_goal_run(&old_run, &Ok(AgentRunResult::Completed("stale".into())))
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.goal.snapshot().await.unwrap().state,
+        GoalState::Active
     );
 }

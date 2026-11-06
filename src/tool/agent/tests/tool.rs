@@ -20,6 +20,33 @@ fn agent_tool_is_serialized_and_closed_schema() {
 }
 
 #[test]
+fn agent_description_reflects_background_wake_capability() {
+    let synchronous = agent_tool();
+    let background =
+        agent_tool_with_background_wake(empty_sub_registry(), Arc::new(AgentRegistry::empty()));
+    assert!(
+        synchronous
+            .description()
+            .contains("Background mode is unavailable")
+    );
+    assert!(background.description().contains("use background mode"));
+    let sync_schema = synchronous.parameters_schema();
+    let background_schema = background.parameters_schema();
+    assert!(
+        sync_schema["properties"]["run_in_background"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
+    );
+    assert!(
+        background_schema["properties"]["run_in_background"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("return immediately")
+    );
+}
+
+#[test]
 fn reserved_builtin_id_ignores_custom_prompt_tools_and_turn_budget() {
     let custom = custom_registry(&[(
         "explore",

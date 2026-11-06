@@ -17,8 +17,6 @@ const STRUCTURED_READ_REPEAT_TURN_LIMIT: usize = 3;
 /// as re-visiting a small set — not just byte-identical consecutive repeats
 ///.
 const INSPECTION_WINDOW: usize = 6;
-const REPAIR_ADVISORY_LINES: usize = 10;
-const REPAIR_ADVISORY_LINE_CHARS: usize = 220;
 /// Consecutive one-small-call turns before the batching advisory fires.
 /// Static prompt guidance alone is not enough: a gpt-5.5 run averaged
 /// 1.16 tool calls per turn across 86 turns with the batching rule already in
@@ -352,6 +350,39 @@ impl Agent {
         result
     }
 
+    pub(crate) async fn run_with_borrowed_queue(
+        &mut self,
+        input: UserInput,
+        cancellation: CancellationToken,
+        sink: SharedSink,
+        queued_messages: &mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
+    ) -> Result<AgentRunResult> {
+        let policy = self.begin_run(&input, &sink).await?;
+        let result = self
+            .run_current_context_inner(cancellation.into(), sink, Some(queued_messages), policy)
+            .await;
+        self.finish_verification_run(&result).await;
+        result
+    }
+
+    pub(crate) async fn continue_with_borrowed_queue(
+        &mut self,
+        cancellation: CancellationToken,
+        sink: SharedSink,
+        queued_messages: &mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>,
+    ) -> Result<AgentRunResult> {
+        let result = self
+            .run_current_context_inner(
+                cancellation.into(),
+                sink,
+                Some(queued_messages),
+                SessionTitleRunPolicy::ContinuationOrAutomatic,
+            )
+            .await;
+        self.finish_verification_run(&result).await;
+        result
+    }
+
     pub async fn run_current_context(
         &mut self,
         cancellation_token: CancellationToken,
@@ -394,12 +425,8 @@ impl Agent {
         queued_messages: Option<&mut mpsc::UnboundedReceiver<QueuedUserMessageCommand>>,
         session_title_policy: SessionTitleRunPolicy,
     ) -> Result<AgentRunResult> {
-        let goal = self
-            .goal
-            .snapshot()
-            .await
-            .filter(|goal| goal.state == crate::goal::GoalState::Active);
-        self.goal_run_id = goal.as_ref().map(|goal| goal.id.clone());
+        let goal = self.goal.active_run_lease().await;
+        self.goal_run_id = goal.as_ref().map(|goal| goal.record.id.clone());
         let result = coordinator::run(
             self,
             cancellation,
@@ -415,8 +442,10 @@ impl Agent {
             interaction.set_goal_question_timeout(None);
             interaction.cancel_questions().await;
         }
-        if let Some(goal) = goal {
-            self.finish_goal_run(&goal.id, &result).await?;
+        if let Some(goal) = goal
+            && !self.defer_goal_finalization
+        {
+            self.finish_goal_run(&goal, &result).await?;
         }
         // Every run variant funnels through here, so this is the one terminal
         // outcome line the support lifecycle log needs.
@@ -467,6 +496,15 @@ impl Agent {
         if queued.is_empty() {
             return Ok(false);
         }
+        self.apply_queued_messages(queued, sink).await?;
+        Ok(true)
+    }
+
+    async fn apply_queued_messages(
+        &mut self,
+        queued: Vec<QueuedUserMessage>,
+        sink: &SharedSink,
+    ) -> Result<()> {
         for message in queued {
             self.self_review.append_request(&message.input.text);
             self.merge_completion_steering(&message.input.text);
@@ -477,7 +515,7 @@ impl Agent {
             sink.queued_user_message_sent(message.id, &message.transcript_text);
         }
         self.emit_context_updated(sink);
-        Ok(true)
+        Ok(())
     }
 
     /// Prepare and send one model request: preflight context estimation
@@ -1061,6 +1099,27 @@ impl Agent {
                 && batch
                     .iter()
                     .all(|call| tools::is_delegation_call(tool_registry, call));
+            // Preflight above can await filesystem and tool work. Recheck the
+            // queue immediately before launching this batch as well as after
+            // each completed batch.
+            let queued = queued_messages.next();
+            if !queued.is_empty() {
+                let skipped_calls = batch
+                    .into_iter()
+                    .chain(batches.by_ref().flatten())
+                    .collect();
+                self.drain_skipped_calls(
+                    skipped_calls,
+                    "Tool skipped because a new queued user message took priority.",
+                    sink,
+                    &mut trusted_contexts,
+                    &mut image_messages,
+                )
+                .await?;
+                self.apply_queued_messages(queued, sink).await?;
+                outcome.reset_loop_guards = true;
+                break;
+            }
             let batch_owner = batch
                 .iter()
                 .map(|tool_call| tool_call.name.as_str())
@@ -1279,12 +1338,7 @@ impl Agent {
                         &mut image_messages,
                     )
                     .await?;
-                    for message in queued {
-                        self.self_review.append_request(&message.input.text);
-                        self.merge_completion_steering(&message.input.text);
-                        self.push_live_user_message(&message.input).await?;
-                        sink.queued_user_message_sent(message.id, &message.transcript_text);
-                    }
+                    self.apply_queued_messages(queued, sink).await?;
                     outcome.reset_loop_guards = true;
                     self.emit_context_updated(sink);
                     break;
@@ -1798,81 +1852,25 @@ fn repair_advisory_for_tool_result(
 ) -> Option<String> {
     match result {
         ToolOutput::Command {
-            rendered,
             exit_code,
             timed_out,
             ..
-        } if failed && (*timed_out || matches!(exit_code, Some(code) if *code != 0)) => Some(
-            format_command_repair_advisory(tool_call, rendered, *exit_code, *timed_out),
-        ),
-        ToolOutput::Text(text)
+        } if failed && (*timed_out || matches!(exit_code, Some(code) if *code != 0)) => {
+            Some(repair_advisory())
+        }
+        ToolOutput::Text(_)
             if failed && matches!(tool_call.name.as_str(), "edit" | "write" | "bash") =>
         {
-            Some(format_text_repair_advisory(tool_call, text))
+            Some(repair_advisory())
         }
         _ => None,
     }
 }
 
-fn format_command_repair_advisory(
-    tool_call: &ToolCall,
-    rendered: &str,
-    exit_code: Option<i32>,
-    timed_out: bool,
-) -> String {
-    let mut lines = vec![
-        "### Current repair target".to_string(),
-        format!("- Last failed tool: {}", tool_call.name),
-    ];
-    if let Some(command) = tool_argument_string(&tool_call.arguments, "command") {
-        lines.push(format!("- Command: {}", compact_repair_line(&command)));
-    }
-    lines.push(format!(
-        "- Exit: {}",
-        exit_code
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "none".to_string())
-    ));
-    lines.push(format!("- Timed out: {timed_out}"));
-    append_repair_excerpt(&mut lines, rendered);
-    lines.push("- Next action: fix this specific failure with edit/write or a targeted command, then rerun the check. Do not refresh unchanged reads first.".to_string());
-    lines.join("\n")
-}
-
-fn format_text_repair_advisory(tool_call: &ToolCall, text: &str) -> String {
-    let mut lines = vec![
-        "### Current repair target".to_string(),
-        format!("- Last failed tool: {}", tool_call.name),
-    ];
-    if let Some(path) = tool_argument_string(&tool_call.arguments, "path") {
-        lines.push(format!("- Path: {}", compact_repair_line(&path)));
-    }
-    append_repair_excerpt(&mut lines, text);
-    lines.push("- Next action: correct the failing edit/write call or provide the final answer if blocked. Do not refresh unchanged reads first.".to_string());
-    lines.join("\n")
-}
-
-fn append_repair_excerpt(lines: &mut Vec<String>, text: &str) {
-    let excerpt = diagnostic_excerpt_lines(text, REPAIR_ADVISORY_LINES, REPAIR_ADVISORY_LINE_CHARS);
-    if excerpt.is_empty() {
-        return;
-    }
-    lines.push("- Diagnostic:".to_string());
-    for line in excerpt {
-        lines.push(format!("  {line}"));
-    }
-}
-
-fn compact_repair_line(text: &str) -> String {
-    const MAX_CHARS: usize = 220;
-
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= MAX_CHARS {
-        return compact;
-    }
-    let mut truncated = compact.chars().take(MAX_CHARS).collect::<String>();
-    truncated.push_str("...");
-    truncated
+fn repair_advisory() -> String {
+    // Tool output and arguments are untrusted. They remain in the tool history;
+    // never copy them into the higher-authority project context.
+    "### Current repair target\nA tool failed. Review its result and choose the next step within the user's request and permissions. Read files when needed; avoid repeating unchanged inspections.".to_string()
 }
 
 fn tool_argument_string(arguments: &str, key: &str) -> Option<String> {

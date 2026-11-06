@@ -4,11 +4,19 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-/// Serializes startup snapshots and migrations across processes. Closing the
-/// handle releases the lock; the file must remain so waiters share one inode.
+/// Serializes startup snapshots and migrations across processes. The file must
+/// remain so waiters share one inode.
 #[derive(Debug)]
 pub(super) struct StartupLock {
     _file: File,
+}
+
+impl Drop for StartupLock {
+    fn drop(&mut self) {
+        if let Err(error) = self._file.unlock() {
+            tracing::warn!(%error, "failed to unlock SQLite startup guard");
+        }
+    }
 }
 
 impl StartupLock {
@@ -80,6 +88,25 @@ fn lock_path(database: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_lock_releases_with_duplicate_descriptor_open() {
+        let home = tempfile::tempdir().unwrap();
+        let database = home.path().join("state.db");
+        let guard = StartupLock::acquire(&database).await.unwrap();
+        let duplicate = guard._file.try_clone().unwrap();
+        assert!(
+            StartupLock::acquire_with_timeout(&database, Duration::from_millis(50))
+                .await
+                .is_err()
+        );
+        drop(guard);
+        let next = StartupLock::acquire_with_timeout(&database, Duration::from_secs(1))
+            .await
+            .unwrap();
+        drop(next);
+        drop(duplicate);
+    }
 
     #[tokio::test]
     async fn startup_lock_serializes_aliases_and_releases_on_drop() {

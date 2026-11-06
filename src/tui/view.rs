@@ -226,8 +226,17 @@ fn append_header_workspace_spans(spans: &mut Vec<Span<'static>>, app: &AppState,
     let mut remaining_width = width.saturating_sub(spans_width(spans));
     let cwd = header_cwd_label(&app.cwd);
     let branch = header_branch_label(app.branch.as_deref());
-    let elapsed = app.elapsed_label();
-    let elapsed_width = elapsed.chars().count().min(12);
+    let elapsed = app.session_goal.as_ref().map_or_else(
+        || app.elapsed_label(),
+        |goal| {
+            format!(
+                "goal {} · {}",
+                goal.state.label(),
+                AppState::format_elapsed_label(app.goal_elapsed)
+            )
+        },
+    );
+    let elapsed_width = elapsed.chars().count().min(40);
     let elapsed_badge_width = header_badge_width(elapsed_width);
 
     match (&cwd, &branch) {
@@ -601,6 +610,34 @@ mod tests {
 
     use super::*;
     use crate::tui::event::{AppAction, UiEvent};
+
+    #[tokio::test]
+    async fn header_shows_cumulative_goal_time_and_state_without_losing_context() {
+        let mut app = AppState::new("codex", "model".into(), "workspace".into(), None);
+        app.session_goal = Some(
+            crate::goal::GoalService::default()
+                .set("Build the feature")
+                .await
+                .unwrap(),
+        );
+        app.goal_elapsed = std::time::Duration::from_secs(3725);
+        let text = header_line(&app, true, 120)
+            .spans
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+        assert!(text.contains("goal active · 1h 2m 5s"), "{text}");
+        app.session_goal.as_mut().unwrap().state = crate::goal::GoalState::Paused;
+        let text = header_line(&app, false, 120)
+            .spans
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+        assert!(text.contains("goal paused · 1h 2m 5s"), "{text}");
+        app.clear_session_identity();
+        assert!(app.session_goal.is_none());
+        assert_eq!(app.goal_elapsed, std::time::Duration::ZERO);
+    }
 
     #[test]
     fn terminal_title_tracks_idle_and_consecutive_busy_frames() {

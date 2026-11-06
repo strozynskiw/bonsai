@@ -414,6 +414,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outgoing_goal_keeps_final_timing_checkpoint() {
+        for replace in [false, true] {
+            let fixture = TestStorage::new().await;
+            let session = fixture.start_session().await;
+            let service = crate::goal::GoalService::default();
+            service
+                .bind(fixture.storage.clone(), session)
+                .await
+                .unwrap();
+            let goal = service.set("First goal").await.unwrap();
+            let task = fixture
+                .storage
+                .start_task_run_with_goal_id(session, None, &goal.id, &goal.objective)
+                .await
+                .unwrap();
+            fixture
+                .storage
+                .checkpoint_task_run_timing(task.id, &checkpoint(vec![], 500, 300))
+                .await
+                .unwrap();
+
+            if replace {
+                service.set("Next goal").await.unwrap();
+            } else {
+                service.clear().await.unwrap();
+            }
+            assert!(
+                fixture
+                    .storage
+                    .task_run(task.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .outcome
+                    .is_some()
+            );
+            fixture
+                .storage
+                .checkpoint_task_run_timing(task.id, &checkpoint(vec![], 700, 400))
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .storage
+                    .goal_elapsed_ms(session, &goal.id, None)
+                    .await
+                    .unwrap(),
+                1200
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn checkpoints_add_increments_instead_of_overwriting_totals() {
         let fixture = TestStorage::new().await;
         let session = fixture.start_session().await;

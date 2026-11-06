@@ -1,6 +1,74 @@
 use super::*;
 use crate::goal::{GoalCommand, GoalService, GoalState};
 
+/// Refresh the render-only goal mirror without taking the running agent lock.
+pub(super) async fn sync_goal_snapshot(
+    app: &mut AppState,
+    tasks: &TaskController,
+    goal: &GoalService,
+    storage: &Storage,
+) -> bool {
+    let Some(record) = goal.try_snapshot() else {
+        return false;
+    };
+    let elapsed = match (&record, app.current_session_id) {
+        (Some(record), Some(session_id)) => {
+            let live_run = match tasks.live_task_runtime() {
+                crate::tui::task::LiveTaskRuntime::Inactive => None,
+                crate::tui::task::LiveTaskRuntime::PendingIdentity => {
+                    let same_goal = app
+                        .session_goal
+                        .as_ref()
+                        .is_some_and(|goal| goal.id == record.id);
+                    let changed = app.session_goal.as_ref() != Some(record)
+                        || (!same_goal && !app.goal_elapsed.is_zero());
+                    if !same_goal {
+                        app.goal_elapsed = std::time::Duration::ZERO;
+                    }
+                    app.session_goal = Some(record.clone());
+                    return changed;
+                }
+                crate::tui::task::LiveTaskRuntime::Running(id, elapsed) => Some((id, elapsed)),
+            };
+            match storage
+                .goal_elapsed_ms(session_id, &record.id, live_run)
+                .await
+            {
+                Ok(ms) => std::time::Duration::from_millis(ms),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to refresh goal timer");
+                    return false;
+                }
+            }
+        }
+        _ => std::time::Duration::ZERO,
+    };
+    let changed = app.session_goal != record || app.goal_elapsed.as_secs() != elapsed.as_secs();
+    app.session_goal = record;
+    app.goal_elapsed = elapsed;
+    changed
+}
+
+/// Deliver goal steering at the next normal model boundary, preserving the run.
+pub(super) fn send_goal_follow_up(app: &mut AppState, tasks: &TaskController) {
+    let Some(queued) = app.last_queued_input() else {
+        return;
+    };
+    let submission = queued.content.submission();
+    if let Err(error) = tasks.queue_agent_message(QueuedUserMessage {
+        id: queued.id,
+        display_text: queued.text.clone(),
+        transcript_text: submission.transcript_text,
+        input: submission.input,
+    }) {
+        // If completion won the race, retain the exact input for idle dispatch.
+        tracing::debug!(
+            ?error,
+            "goal follow-up retained for the next foreground run"
+        );
+    }
+}
+
 pub(super) fn command_input(submission: &crate::tui::app::ComposerSubmission) -> String {
     let display = submission.display_text.trim();
     if GoalCommand::parse(display).is_some() {
@@ -43,7 +111,7 @@ pub(super) async fn handle_goal_command(
                         limit(budget.max_session_cost_micros)
                     );
                     format!(
-                        "Goal {} · {}\n{}{}{}{}\nQuestion timeout: {}s; /questions reopens pending questions.",
+                        "Goal {} · {}\n{}{}{}{}\nPursuing: {}\nQuestion timeout: {}s; /questions reopens pending questions.",
                         record.id,
                         record.state.label(),
                         record.objective,
@@ -54,6 +122,7 @@ pub(super) async fn handle_goal_command(
                             .unwrap_or_default(),
                         progress,
                         limits,
+                        AppState::format_elapsed_label(app.goal_elapsed),
                         record.question_timeout_seconds,
                     )
                 }
@@ -118,6 +187,11 @@ pub(super) async fn handle_goal_command(
             push_command_message(app, CommandOutputKind::Status, "Goal resumed.");
         }
     }
+    let record = goal.snapshot().await;
+    if app.session_goal.as_ref().map(|goal| &goal.id) != record.as_ref().map(|goal| &goal.id) {
+        app.goal_elapsed = std::time::Duration::ZERO;
+    }
+    app.session_goal = record;
     Ok(())
 }
 
