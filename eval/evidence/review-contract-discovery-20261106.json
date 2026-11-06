@@ -1,0 +1,26 @@
+{
+  "purpose": "Test whether directing code reviews to inspect nearby documentation reduces unsupported claims that a contract is absent.",
+  "scope": "Prompt-only experiment; no permissions or tool access changed. The candidate was reverted.",
+  "suite": "target/review-quality-contract-suite/suite.toml",
+  "provider": "deepseek/deepseek-flash",
+  "effort": "low",
+  "baseline": {
+    "revision": "09803426",
+    "report": "target/review-quality-current/1793998463097-live-524/report.json",
+    "effect_compliance": "6/6 passed",
+    "read_readme": "3/6 runs",
+    "manual_review": "All three buggy reviews detected the product-versus-sum defect but split consequences into separate findings. Two of three correct reviews claimed overflow was unspecified without reading the README that specifies it."
+  },
+  "candidate": {
+    "instruction": "For a code review, inspect relevant nearby project documentation before claiming that behavior is unspecified; if the contract remains unknown, say so instead of inventing one.",
+    "reports": [
+      "target/review-quality-candidate-524/1793998728307-live-524/report.json",
+      "target/review-quality-candidate-525/1793998728308-live-525/report.json"
+    ],
+    "effect_compliance": "11/12 passed; one buggy-code review attempted and ran a prohibited read-only shell command",
+    "read_readme": "9/12 runs",
+    "manual_review": "All six buggy reviews found the defect, but several duplicated its consequences. One of six correct-code reviews claimed the documented overflow contract was absent after not reading the README. Optional coverage and documentation suggestions remained common."
+  },
+  "decision": "Reject and revert the candidate: the unsupported claim and command violation remain, and the small samples do not establish a causal improvement.",
+  "limitations": "These are nonrandom samples from one model and one small fixture. The suite's automated pass count checks effects, not factual precision or deduplication. Raw reports and transcripts are local target artifacts."
+}
