@@ -6152,13 +6152,10 @@ async fn peer_claims_lifecycle_upsert_release_and_terminal_cleanup() {
         .add_peer_claim(fixture.project_path(), session, "owns src/tui/")
         .await
         .unwrap();
-    assert_eq!(
-        storage.peer_claims_for_session(session).await.unwrap(),
-        vec![
-            "running full test suite".to_string(),
-            "owns src/tui/".to_string()
-        ]
-    );
+    // Claims created in the same millisecond have no defined relative order.
+    let mut claims = storage.peer_claims_for_session(session).await.unwrap();
+    claims.sort();
+    assert_eq!(claims, vec!["owns src/tui/", "running full test suite"]);
 
     // Explicit release drops one claim; releasing again reports nothing live.
     assert!(
