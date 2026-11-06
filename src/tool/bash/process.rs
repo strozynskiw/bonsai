@@ -274,6 +274,9 @@ impl BashTool {
 
         let started = std::time::Instant::now();
         let mut child = cmd.spawn().context("Failed to execute command")?;
+        if let Some(context) = &context {
+            context.sink().command_spawned(context.tool_call_id());
+        }
         let pid = child.id();
         let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
         let mut stderr_pipe = child.stderr.take().expect("stderr is piped");

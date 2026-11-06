@@ -92,7 +92,7 @@ fn render_rule_lines(row: &PermissionRuleRow, selected: bool, width: usize) -> V
 
     // The wrappable remainder: the pattern, then the dim/coloured metadata tag.
     let mut body_spans = vec![Span::styled(
-        row.pattern.clone(),
+        crate::permissions::display_permission_pattern(&row.pattern).into_owned(),
         theme::body(theme::palette().text),
     )];
     body_spans.push(Span::styled("  ", theme::dim()));

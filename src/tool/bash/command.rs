@@ -461,6 +461,25 @@ pub(crate) fn normalize_verification_command(command: &str) -> Option<Vec<String
     (index < tokens.len()).then(|| tokens[index..].to_vec())
 }
 
+/// Recognize simple commands joined only by `&&`, for which an overall zero
+/// exit status implies that every command ran successfully. Any other shell
+/// syntax remains unclassified rather than being treated as test evidence.
+pub(crate) fn normalize_verification_conjunction(command: &str) -> Option<Vec<Vec<String>>> {
+    // A shell comment can hide later operands; reject it conservatively even
+    // inside quotes rather than treating text after `#` as executed commands.
+    if command.contains('#') {
+        return None;
+    }
+    let mut remaining = command;
+    let mut segments = Vec::new();
+    while let Some(separator) = top_level_and_separator(remaining) {
+        segments.push(normalize_verification_command(&remaining[..separator])?);
+        remaining = &remaining[separator + 2..];
+    }
+    segments.push(normalize_verification_command(remaining)?);
+    Some(segments)
+}
+
 fn strip_env_prefix(tokens: &[String]) -> Option<Vec<String>> {
     let mut index = 0;
     while let Some(token) = tokens.get(index).filter(|token| is_env_assignment(token)) {

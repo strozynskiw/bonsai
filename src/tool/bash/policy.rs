@@ -17,7 +17,9 @@ use crate::interaction::{
     SandboxEscalationKind,
 };
 use crate::permissions::{Permission, PermissionMatch, PermissionMatchSource};
-use crate::tool::risk::{ApprovalLevel, RiskTier, classify_bash};
+use crate::tool::risk::{
+    ApprovalLevel, RiskTier, classify_bash, segment_structural_tier, segment_tier,
+};
 use crate::tool::{
     ActionEffect, ActionPlan, AuthorizationVerdict, ToolExecutionContext, authorization_verdict,
 };
@@ -27,25 +29,102 @@ pub(super) type GateVerdict = AuthorizationVerdict;
 
 /// Whether the ordinary command gate should absorb a sandbox-escalation prompt
 /// into the same user decision.
-pub(super) enum CommandApprovalRequest<'a> {
+pub(super) enum CommandApprovalRequest {
     CommandOnly,
-    CommandAndSandbox { cwd: &'a Path },
+    CommandAndSandbox,
 }
 
 /// Decide how the permission/risk gate treats a command, purely from the
 /// permission lookup, the risk analysis, and the autonomy level — no I/O, so
 /// the policy matrix is unit-testable.
 ///
-/// Permission rules select which actions are eligible for approval; the active
-/// autonomy level remains the final decision maker. In particular, a persisted
-/// Only a remembered user `Allow` can bypass the autonomy ceiling; built-in
-/// allows still obey it, and the destructive floor remains.
+/// Each rule is evaluated against its own command's risk before decisions are
+/// combined. Otherwise an allow for a harmless sibling could waive the ceiling
+/// for an unrelated command. A deny dominates a prompt, which dominates allow.
 pub(super) fn permission_gate(
-    permission: PermissionMatch,
+    permissions: &[PermissionMatch],
     analysis: &CommandAnalysis,
+    exact_approval: Option<PermissionMatch>,
     level: ApprovalLevel,
-) -> GateVerdict {
-    authorization_verdict(permission, classify_bash(analysis), level)
+) -> (PermissionMatch, GateVerdict) {
+    let fallback = PermissionMatch {
+        permission: Permission::Ask,
+        source: PermissionMatchSource::Fallback,
+    };
+    if permissions.len() != analysis.permission_commands().len() {
+        return (
+            PermissionMatch {
+                permission: Permission::Deny,
+                source: PermissionMatchSource::Unavailable,
+            },
+            GateVerdict::Deny,
+        );
+    }
+    if permissions.is_empty() {
+        return (
+            fallback,
+            authorization_verdict(fallback, classify_bash(analysis), level),
+        );
+    }
+    if let Some(denied) = exact_approval.filter(|approval| approval.permission == Permission::Deny)
+    {
+        return (denied, GateVerdict::Deny);
+    }
+    let request_allow = exact_approval.filter(|approval| {
+        approval.permission == Permission::Allow && approval.source.is_remembered()
+    });
+    let mut prompt = exact_approval.filter(|approval| {
+        approval.permission == Permission::Ask
+            && authorization_verdict(*approval, classify_bash(analysis), level)
+                == GateVerdict::NeedsPrompt
+    });
+    let mut remembered_allow = None;
+    let mut ordinary_permission = fallback;
+    let mut tier = RiskTier::ReadOnly;
+    for (command, permission) in analysis.permission_commands().iter().zip(permissions) {
+        let command_tier = segment_tier(command);
+        tier = tier.max(command_tier);
+        // A whole-request approval covers only these exact bytes in this cwd.
+        // It cannot suppress a deny, an explicit ask, or the destructive floor.
+        let permission = if permission.permission != Permission::Deny
+            && !(permission.permission == Permission::Ask && permission.source.is_remembered())
+        {
+            request_allow.unwrap_or(*permission)
+        } else {
+            *permission
+        };
+        let verdict = authorization_verdict(permission, command_tier, level);
+        if matches!(verdict, GateVerdict::AutoApproved { .. })
+            && request_allow.is_none()
+            && segment_structural_tier(command).is_some_and(|tier| !level.auto_approves(tier))
+        {
+            prompt.get_or_insert(permission);
+            continue;
+        }
+        match verdict {
+            GateVerdict::Deny => return (permission, GateVerdict::Deny),
+            GateVerdict::NeedsPrompt => {
+                prompt.get_or_insert(permission);
+            }
+            GateVerdict::AutoApproved {
+                matched_allow_rule: true,
+                ..
+            } => {
+                remembered_allow = Some(permission);
+            }
+            GateVerdict::AutoApproved { .. } => ordinary_permission = permission,
+        }
+    }
+    if let Some(permission) = prompt {
+        return (permission, GateVerdict::NeedsPrompt);
+    }
+    (
+        remembered_allow.unwrap_or(ordinary_permission),
+        GateVerdict::AutoApproved {
+            tier,
+            matched_allow_rule: remembered_allow.is_some(),
+        },
+    )
 }
 
 /// A hook execution warning is visible but never fatal. Routed to the caller's
@@ -68,19 +147,20 @@ impl BashTool {
     /// log line, and the interactive prompt.
     pub(super) async fn authorize_command(
         &self,
+        cwd: &Path,
         command: &str,
         analysis: &CommandAnalysis,
         origin: Option<&str>,
-        request: CommandApprovalRequest<'_>,
+        request: CommandApprovalRequest,
     ) -> Result<EscapeApproval> {
         let tier = classify_bash(analysis);
         let plan =
             ActionPlan::new("bash", command, [ActionEffect::CodeExecution]).with_risk_tier(tier);
-        let permission = self
-            .permissions
-            .check_all_detailed(analysis.permission_commands());
         let configured_level = self.yolo_mode.level();
         if self.yolo_mode.is_enabled() {
+            let permission = self
+                .permissions
+                .check_all_detailed(analysis.permission_commands());
             self.authorization_ledger
                 .record(&plan, permission, configured_level, "allow", "yolo bypass")
                 .await;
@@ -99,7 +179,15 @@ impl BashTool {
         } else {
             configured_level
         };
-        match permission_gate(permission, analysis, level) {
+        let (permission, verdict) = match self.permissions.check_command_detailed(
+            cwd,
+            command,
+            analysis.permission_commands(),
+        ) {
+            Ok(check) => permission_gate(&check.permissions, analysis, check.exact_approval, level),
+            Err(denied) => (denied, GateVerdict::Deny),
+        };
+        match verdict {
             GateVerdict::Deny => {
                 self.authorization_ledger
                     .record(&plan, permission, level, "deny", "matching deny rule")
@@ -137,13 +225,15 @@ impl BashTool {
             }
             GateVerdict::NeedsPrompt => match request {
                 CommandApprovalRequest::CommandOnly => {
-                    self.prompt_for_permission(command, analysis, origin, &plan, permission, level)
-                        .await?;
+                    self.prompt_for_permission(
+                        cwd, command, analysis, origin, &plan, permission, level,
+                    )
+                    .await?;
                     Ok(EscapeApproval::None)
                 }
-                CommandApprovalRequest::CommandAndSandbox { cwd } => {
+                CommandApprovalRequest::CommandAndSandbox => {
                     self.prompt_for_command_and_escape(
-                        cwd, command, analysis, origin, &plan, permission, level,
+                        cwd, command, origin, &plan, permission, level,
                     )
                     .await
                 }
@@ -157,6 +247,7 @@ impl BashTool {
     /// Balanced without an interaction prompt.
     pub(super) async fn authorize_planning_command(
         &self,
+        cwd: &Path,
         command: &str,
         analysis: &CommandAnalysis,
         planning: &PlanningCommand,
@@ -180,6 +271,7 @@ impl BashTool {
         }
         if self.yolo_mode.level() < ApprovalLevel::Balanced {
             self.authorize_command(
+                cwd,
                 command,
                 analysis,
                 origin,
@@ -205,8 +297,13 @@ impl BashTool {
     /// level didn't auto-approve, including a destructive command an allow rule
     /// would otherwise have run). Returns `Ok(())` when the command may proceed
     /// and an error when the user — or noninteractive mode — declines.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the command, directory, plan, and permission provenance bound through the prompt"
+    )]
     async fn prompt_for_permission(
         &self,
+        cwd: &Path,
         command: &str,
         analysis: &CommandAnalysis,
         origin: Option<&str>,
@@ -234,8 +331,9 @@ impl BashTool {
                 Ok(())
             }
             Ok(InteractionOutcome::Permission(PermissionDecision::AllowMatching)) => {
-                self.permissions
-                    .allow_for_session(analysis.permission_command());
+                if let Err(error) = self.permissions.allow_command_for_session(cwd, command) {
+                    tracing::warn!(%error, "command approved once but session approval could not be remembered");
+                }
                 self.authorization_ledger
                     .record(plan, permission, level, "allow", "user allowed for session")
                     .await;
@@ -244,7 +342,7 @@ impl BashTool {
             Ok(InteractionOutcome::Permission(PermissionDecision::AllowForProject)) => {
                 if let Err(err) = self
                     .permissions
-                    .allow_for_project(analysis.permission_command())
+                    .allow_command_for_project(cwd, command)
                     .await
                 {
                     tracing::warn!(
@@ -315,12 +413,10 @@ impl BashTool {
     /// Ask once for both command authorization and a sandbox bypass. The
     /// sandbox prompt's narrower once/session scopes win: combined approvals
     /// are never persisted to the project.
-    #[allow(clippy::too_many_arguments)]
     async fn prompt_for_command_and_escape(
         &self,
         cwd: &Path,
         command: &str,
-        analysis: &CommandAnalysis,
         origin: Option<&str>,
         command_plan: &ActionPlan,
         permission: PermissionMatch,
@@ -363,8 +459,9 @@ impl BashTool {
                 Ok(EscapeApproval::Once)
             }
             Ok(InteractionOutcome::SandboxEscalation(EscalationDecision::AllowForSession)) => {
-                self.permissions
-                    .allow_for_session(analysis.permission_command());
+                if let Err(error) = self.permissions.allow_command_for_session(cwd, command) {
+                    tracing::warn!(%error, "command approved once but session approval could not be remembered");
+                }
                 self.escape_grants.grant(cwd, command);
                 self.authorization_ledger
                     .record(

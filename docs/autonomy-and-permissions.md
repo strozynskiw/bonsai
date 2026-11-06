@@ -111,6 +111,16 @@ When an action prompts, you choose:
 | `D` / Esc | Deny once | the action fails; no rule recorded |
 | `N` | Never for this project | persisted **deny** rule; refused automatically next time, no re-prompt |
 
+For Bash, `S` and `P` remember the exact command text in its resolved working
+directory, including a whole compound command. A different command, quoted
+argument, environment assignment, or directory cannot reuse that approval;
+it is evaluated normally against the active rules and autonomy level. Explicit
+deny and ask rules, and the destructive floor, still apply to a remembered command.
+`/permissions` describes these approvals as **exact command in …**, and can
+remove them like other rules. Stored descriptions are redacted; matching uses
+a fingerprint of the original request. Existing operator-authored glob rules
+keep their pattern semantics.
+
 `N` ("Never") is the mirror of `P`: where `P` remembers a "yes", `N` remembers a
 "no", so a request you keep rejecting stops asking. It is offered on every prompt
 that offers `P` (bash, domain, MCP, hook) but never on the sandbox-escape prompt —
@@ -143,8 +153,12 @@ Evaluation order, first match wins:
    `make *`, `docker*`.
 5. Fallback: ask.
 
-For multi-segment commands the verdict is the most restrictive across
-segments: any deny → deny; else any ask → ask; else allow.
+For multi-segment commands, each parsed command's matching rule is evaluated
+against that command's risk and the active autonomy level. The resulting
+decisions are combined: any deny → deny; else any required prompt → prompt;
+else allow. Remembering an allow for one segment does not approve a neighboring
+segment or its redirects. Routine segments can still run alongside an explicitly
+approved higher-risk command when each independently clears its gate.
 
 Two floors bound even an explicit allow:
 
@@ -153,7 +167,8 @@ Two floors bound even an explicit allow:
   action outside yolo. Built-in default allows do *not* bypass the ceiling.
 - The **structural floor**: an allowlisted program can't carry a dangerous
   redirect or a pipe-into-shell past the ceiling; structure is re-checked on
-  the allow path.
+  the allow path. An approval for the exact command and working directory can
+  remember that specific non-destructive action; the destructive floor remains.
 
 ### Managing rules
 

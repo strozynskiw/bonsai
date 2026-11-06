@@ -229,8 +229,7 @@ pub(crate) fn structural_floor(analysis: &CommandAnalysis) -> Option<RiskTier> {
 /// The structural-only tier of a single segment: pipe-into-shell, a
 /// write-redirect target, or a known file-writing helper, with the base
 /// program's own risk deliberately ignored.
-#[cfg(test)]
-fn segment_structural_tier(command: &str) -> Option<RiskTier> {
+pub(super) fn segment_structural_tier(command: &str) -> Option<RiskTier> {
     let lower = command.trim().to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
     if pipes_into_shell(&words) {
@@ -244,7 +243,9 @@ fn segment_structural_tier(command: &str) -> Option<RiskTier> {
     redirect.into_iter().chain(write_target).max()
 }
 
-fn segment_tier(command: &str) -> RiskTier {
+/// Classify one already-extracted permission string, including its structural
+/// risk. The authorization gate must pair this risk with this string's rule.
+pub(super) fn segment_tier(command: &str) -> RiskTier {
     let trimmed = command.trim();
     let lower = trimmed.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();

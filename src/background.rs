@@ -280,12 +280,25 @@ impl BackgroundTaskRegistry {
         self.events.subscribe()
     }
 
+    #[cfg(test)]
     pub async fn start(
         self: &Arc<Self>,
         shell: &str,
         command: &str,
         cwd: &Path,
         timeout_secs: u64,
+    ) -> Result<BackgroundTaskSnapshot> {
+        self.start_observed(shell, command, cwd, timeout_secs, None)
+            .await
+    }
+
+    pub(crate) async fn start_observed(
+        self: &Arc<Self>,
+        shell: &str,
+        command: &str,
+        cwd: &Path,
+        timeout_secs: u64,
+        on_spawn: Option<&(dyn Fn() + Send + Sync)>,
     ) -> Result<BackgroundTaskSnapshot> {
         let task_id = {
             let mut inner = self.inner.lock().await;
@@ -314,6 +327,9 @@ impl BackgroundTaskRegistry {
                 command
             )
         })?;
+        if let Some(on_spawn) = on_spawn {
+            on_spawn();
+        }
         let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();

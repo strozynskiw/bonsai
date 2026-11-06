@@ -18,6 +18,14 @@ pub struct ToolCallStart {
     pub arguments: String,
 }
 
+/// Metadata about a delegated tool call, without its arguments or output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegatedToolPhase {
+    Attempted,
+    Reached,
+    Succeeded,
+}
+
 /// A one-shot fence proving that every output event queued before it reached
 /// the display reducer. Most sinks are synchronous and do not need one; the TUI
 /// uses this to keep terminal tool state ordered before a parent run can wake or
@@ -131,6 +139,10 @@ pub trait OutputSink: Send + Sync {
         }
     }
     fn tool_started(&self, _id: &str, _name: &str, _arguments: &str) {}
+    /// A shell process was successfully spawned for this tool call.
+    fn command_spawned(&self, _id: &str) {}
+    /// Observe a child tool's effect without forwarding its conversation.
+    fn delegated_tool_phase(&self, _name: &str, _phase: DelegatedToolPhase) {}
     fn tool_output(&self, _id: &str, _output: &str) {}
     /// Deliver a complete structured payload; legacy sinks retain their display callbacks.
     fn tool_result(&self, id: &str, result: crate::protocol::ToolResult) {

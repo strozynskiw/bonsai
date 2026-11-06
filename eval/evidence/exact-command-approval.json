@@ -1,0 +1,88 @@
+{
+  "status": "qualified and retained; focused and full tests, Clippy, formatting, warning-free release and terminal checks passed",
+  "problem": "Always-for-session stored a whole compound command as a glob, but subsequent authorization checked its individual parts and prompted again for an identical request.",
+  "confirmed_before": {
+    "case": "e2e/cases/23_approval_replay.sh",
+    "log": "target/approval-replay-before.log",
+    "evidence": "target/tui-verification/e2e/case.ApxzJb",
+    "exit_code": 1,
+    "observation": "After approving the first compound command for the session, its identical repeat remained at the approval prompt instead of advancing to the changed command."
+  },
+  "change": [
+    "Store exact command approvals as a distinct rule type, separate from operator-authored globs.",
+    "Bind approvals to original command bytes and the resolved working directory using a versioned, length-framed BLAKE3 fingerprint.",
+    "Persist redacted descriptions; match the original request fingerprint rather than a redacted or unquoted command.",
+    "Read exact and per-part permissions under one rules lock; preserve denies, explicit Ask rules and the destructive floor.",
+    "Use the same exact scope for ordinary and combined sandbox session approvals; sandbox escape grants remain separately scoped.",
+    "Render and search readable command scopes in /permissions while preserving underlying identities for revocation.",
+    "Keep command records confined to Bash; domain and extension rules retain literal glob semantics."
+  ],
+  "verification": {
+    "focused_tests": {
+      "log": "target/approval-replay-focused-final.log",
+      "passed": 8,
+      "covers": [
+        "original bytes, quoting, wildcard arguments, environment assignments and working-directory isolation",
+        "redacted storage without loss of exact identity",
+        "invalid and future record rejection",
+        "session deduplication and removal",
+        "project reload and removal",
+        "namespace isolation",
+        "readable permission search and revocation identity",
+        "deny, explicit Ask and destructive-floor precedence"
+      ]
+    },
+    "clippy": "Passed: all-targets, all-features, locked, -D warnings; target/approval-replay-clippy-final.log",
+    "release": {
+      "log": "target/approval-replay-release.log",
+      "flags": "RUSTFLAGS=-D warnings cargo build --release --locked",
+      "binary_sha256": "80649ea061f70362c88b75123f1ea5e6ade5b91bb9ab34e3551c2e97e423c858",
+      "source_note": "Only a test helper's missing working-directory argument was corrected after this production release build."
+    },
+    "terminal_replay": {
+      "case": "e2e/cases/23_approval_replay.sh",
+      "log": "target/approval-replay-tui-final.log",
+      "evidence": "target/tui-verification/e2e/case.XZc4EH",
+      "exit_code": 0,
+      "ledger": [
+        {"command": "echo EXACT_APPROVAL_A && echo EXACT_APPROVAL_B", "decision": "allow", "source": "built-in-default", "reason": "user allowed for session"},
+        {"command": "echo EXACT_APPROVAL_A && echo EXACT_APPROVAL_B", "decision": "allow", "source": "session", "reason": "matching allow rule"},
+        {"command": "echo EXACT_APPROVAL_A && echo EXACT_APPROVAL_CHANGED", "decision": "deny", "source": "built-in-default", "reason": "user denied"}
+      ],
+      "manager_checks": "Readable scope, displayed-label search and session revocation passed."
+    },
+    "terminal_scope_regression": {
+      "case": "e2e/cases/22_compound_permissions.sh",
+      "log": "target/approval-replay-scope-tui.log",
+      "evidence": "target/tui-verification/e2e/case.NLDoaC",
+      "exit_code": 0,
+      "observation": "Approving an echo did not approve a later unrelated redirect; the redirect prompted, was denied and created no marker."
+    },
+    "full_tests": {
+      "log": "target/approval-replay-full.log",
+      "exit_code": 0,
+      "unit_passed": 4563,
+      "integration_passed": 21,
+      "existing_ignored": 6
+    },
+    "format": "cargo fmt --all -- --check and git diff --check passed"
+  },
+  "live_fixture_correction": {
+    "task": "full_extend_established_parser",
+    "model": "deepseek/deepseek-flash",
+    "reasoning": "high",
+    "before_report": "target/eval-live/approval-replay-deepseek/1793915081090-live-405/report.json",
+    "before_score": "0/3",
+    "before_observation": "All three runs passed tool-effect, implementation-state and fixture test graders. Changed-files grading counted 133 generated target paths alongside src/lib.rs; one run reported completed and two blocked.",
+    "fix": "Add /target/ to the engineering_judgment fixture's .gitignore, matching the existing arithmetic Rust fixture.",
+    "after_report": "target/eval-live/approval-replay-deepseek-fixture-fixed/1793915199417-live-405/report.json",
+    "after_score": "3/3",
+    "after_observation": "All runs completed, changed only src/lib.rs and passed all four graders.",
+    "interpretation": "Fixture measurement correction, not evidence of improved model instruction following. No graders, prompts or tool visibility were relaxed."
+  },
+  "limits": [
+    "Does not complete the broader GitHub 153 permission-cohort qualification.",
+    "Natural-language no-command compliance and review precision remain unresolved.",
+    "Intentional Yolo behavior and existing operator glob semantics are unchanged."
+  ]
+}

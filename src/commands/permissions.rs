@@ -97,7 +97,7 @@ fn append_rule_line(out: &mut String, rule: &RuleView) {
     out.push_str(&format!(
         "\n  {id}[{}] {} → {}",
         rule.source.label(),
-        rule.pattern,
+        crate::permissions::display_permission_pattern(&rule.pattern),
         rule.permission.as_db_str(),
     ));
 }

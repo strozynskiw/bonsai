@@ -576,6 +576,14 @@ fn workspace_fingerprint(root: &Path) -> u64 {
 
 #[async_trait]
 impl Tool for BashTool {
+    fn verification_command_rewrite(&self, command: &str) -> Option<String> {
+        if self.capability != BashCapability::Coding {
+            return None;
+        }
+        canonical_check_command(command)
+            .or_else(|| verification_command_without_output_filter(command))
+    }
+
     fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {
         crate::tool::ToolEffectPolicy::SelfAuthorized
     }
@@ -742,18 +750,18 @@ impl BashTool {
         let escape_needed = escape_requested && !escape_auto_declined;
         let command_approval_request =
             if escape_needed && self.escape_requires_prompt(&cwd, &command, &analysis) {
-                CommandApprovalRequest::CommandAndSandbox { cwd: &cwd }
+                CommandApprovalRequest::CommandAndSandbox
             } else {
                 CommandApprovalRequest::CommandOnly
             };
 
         let origin = context.as_ref().and_then(|ctx| ctx.origin());
         let combined_escape = if let Some(planning_command) = &planning_command {
-            self.authorize_planning_command(&command, &analysis, planning_command, origin)
+            self.authorize_planning_command(&cwd, &command, &analysis, planning_command, origin)
                 .await?;
             EscapeApproval::None
         } else {
-            self.authorize_command(&command, &analysis, origin, command_approval_request)
+            self.authorize_command(&cwd, &command, &analysis, origin, command_approval_request)
                 .await?
         };
 
@@ -815,10 +823,15 @@ impl BashTool {
             EscapeApproval::None
         };
 
+        let notify_spawn = || {
+            if let Some(context) = &context {
+                context.sink().command_spawned(context.tool_call_id());
+            }
+        };
         if interactive {
             let terminal = self
                 .terminals
-                .start(
+                .start_observed(
                     &self.shell,
                     &command,
                     &cwd,
@@ -826,6 +839,7 @@ impl BashTool {
                     context
                         .as_ref()
                         .map(|context| context.tool_call_id().to_string()),
+                    Some(&notify_spawn),
                 )
                 .await?;
             let message = format!(
@@ -843,7 +857,13 @@ impl BashTool {
         if run_in_background {
             let task = self
                 .background_tasks
-                .start(&self.shell, &command, &cwd, timeout_secs)
+                .start_observed(
+                    &self.shell,
+                    &command,
+                    &cwd,
+                    timeout_secs,
+                    Some(&notify_spawn),
+                )
                 .await?;
             if let Some(key) = verification_cache_key {
                 self.cache_background_verification(task.id.clone(), key, timeout_secs);
@@ -1332,7 +1352,7 @@ fn effective_timeout_secs(timeout: Option<u64>, run_in_background: bool) -> u64 
 #[cfg(test)]
 mod tests {
     use super::output::{MAX_OUTPUT_CHARS, SMOL_MAX_OUTPUT_CHARS};
-    use super::policy::{GateVerdict, permission_gate};
+    use super::policy::GateVerdict;
     use super::*;
     use crate::config::{
         Config, ConfigSource, FailureBehavior, HookAction, HookDef, HookEvent, HookMatcher,
@@ -1456,6 +1476,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn verification_rewrite_reports_only_commands_bash_really_rewrites() {
+        let fixture = TestFixture::new();
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            fixture.interaction.clone(),
+        );
+        assert_eq!(
+            tool.verification_command_rewrite("cargo test --locked 2>&1 | tail -40")
+                .as_deref(),
+            Some("cargo test --locked")
+        );
+        assert_eq!(
+            tool.verification_command_rewrite("cargo test || true"),
+            None
+        );
+        assert_eq!(
+            tool.verification_command_rewrite("exit 0 && cargo test"),
+            None
+        );
+    }
+
     #[test]
     fn verification_fingerprint_changes_with_workspace_sources() {
         let root = tempfile::tempdir().expect("temp project");
@@ -1539,6 +1583,15 @@ mod tests {
         PermissionMatch { permission, source }
     }
 
+    fn permission_gate(
+        permission: PermissionMatch,
+        analysis: &CommandAnalysis,
+        level: ApprovalLevel,
+    ) -> GateVerdict {
+        let permissions = vec![permission; analysis.permission_commands().len()];
+        super::policy::permission_gate(&permissions, analysis, None, level).1
+    }
+
     #[test]
     fn permission_gate_covers_deny_allow_and_ask() {
         let plain = analyze_command("echo hi");
@@ -1571,30 +1624,23 @@ mod tests {
             }
         ));
 
-        // A remembered allow covers mutations too, but never the destructive
-        // floor below Yolo.
-        assert!(matches!(
+        // Broad rules do not waive structural risk above the active ceiling.
+        assert_eq!(
             permission_gate(
                 permission_match(Permission::Allow, PermissionMatchSource::Project),
                 &relative_redirect,
                 ApprovalLevel::Conservative
             ),
-            GateVerdict::AutoApproved {
-                tier: RiskTier::Medium,
-                matched_allow_rule: true,
-            }
-        ));
-        assert!(matches!(
+            GateVerdict::NeedsPrompt
+        );
+        assert_eq!(
             permission_gate(
                 permission_match(Permission::Allow, PermissionMatchSource::Project),
                 &out_of_tree_redirect,
                 ApprovalLevel::Ask,
             ),
-            GateVerdict::AutoApproved {
-                tier: RiskTier::High,
-                matched_allow_rule: true,
-            }
-        ));
+            GateVerdict::NeedsPrompt
+        );
 
         // The destructive floor holds for an allow rule below yolo.
         assert_eq!(
@@ -1900,7 +1946,7 @@ mod tests {
         let command = "printf planning-network-ok";
         let analysis = analyze_command(command);
 
-        tool.authorize_planning_command(command, &analysis, &planning, None)
+        tool.authorize_planning_command(&fixture.project_root, command, &analysis, &planning, None)
             .await
             .expect("disabled sandbox should not block planning collaboration authorization");
         let result = tool
@@ -3304,6 +3350,197 @@ mod tests {
 
         assert!(err.to_string().contains("noninteractive mode"));
         assert!(!fixture.project_root.join(".pwned").exists());
+    }
+
+    #[tokio::test]
+    async fn compound_allow_does_not_approve_an_unapproved_inspection() {
+        let fixture = TestFixture::new();
+        fixture.permissions.allow_for_session("echo permitted");
+        let tool = BashTool::with_background_tasks_and_yolo_mode(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(InteractionService::noninteractive()),
+            Arc::new(BackgroundTaskRegistry::new()),
+            YoloMode::with_level(ApprovalLevel::Ask),
+            CommandSandbox::disabled(),
+        );
+        let error = tool
+            .execute(json!({"command": "ls . && echo permitted"}))
+            .await
+            .expect_err("approving echo must not approve the separate ls command");
+        assert!(error.to_string().contains("noninteractive mode"), "{error}");
+    }
+
+    #[test]
+    fn approval_replay_does_not_cross_request_directory_or_policy_boundaries() {
+        let manager = crate::permissions::PermissionManager::memory_only();
+        let cwd = Path::new("/project");
+        let command = "echo first && echo second";
+        manager.allow_command_for_session(cwd, command).unwrap();
+        let gate = |directory: &Path, text: &str| {
+            let analysis = analyze_command(text);
+            let check = manager
+                .check_command_detailed(directory, text, analysis.permission_commands())
+                .unwrap();
+            super::policy::permission_gate(
+                &check.permissions,
+                &analysis,
+                check.exact_approval,
+                ApprovalLevel::Ask,
+            )
+            .1
+        };
+        assert!(matches!(
+            gate(cwd, command),
+            GateVerdict::AutoApproved { .. }
+        ));
+        assert_eq!(
+            gate(cwd, "echo first && echo different"),
+            GateVerdict::NeedsPrompt
+        );
+        assert_eq!(
+            gate(Path::new("/other-directory"), command),
+            GateVerdict::NeedsPrompt
+        );
+        manager.add_session_rule("echo second", Permission::Ask);
+        assert_eq!(gate(cwd, command), GateVerdict::NeedsPrompt);
+        manager.add_session_rule("echo second", Permission::Deny);
+        assert_eq!(gate(cwd, command), GateVerdict::Deny);
+        let destructive = "git branch -D unused-test-branch";
+        manager.allow_command_for_session(cwd, destructive).unwrap();
+        assert_eq!(gate(cwd, destructive), GateVerdict::NeedsPrompt);
+        let redirect = "echo first > /outside/file";
+        manager.allow_command_for_session(cwd, redirect).unwrap();
+        assert!(matches!(
+            gate(cwd, redirect),
+            GateVerdict::AutoApproved { .. }
+        ));
+        assert_eq!(
+            gate(cwd, "echo first > /outside/other"),
+            GateVerdict::NeedsPrompt
+        );
+    }
+
+    #[tokio::test]
+    async fn compound_allow_does_not_approve_an_unapproved_external_write() {
+        let fixture = TestFixture::new();
+        let outside = tempfile::TempDir::new().unwrap();
+        let marker = outside.path().join("unapproved-write");
+        fixture.permissions.allow_for_session("echo permitted");
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(InteractionService::noninteractive()),
+        );
+        let quoted_marker = format!("'{}'", marker.display().to_string().replace('\'', "'\\''"));
+        let result = tool
+            .execute(json!({"command": format!("ls . > {quoted_marker} && echo permitted")}))
+            .await;
+        assert!(
+            result.is_err() && !marker.exists(),
+            "echo's approval must not authorize the unrelated redirect: marker={}, result={result:?}",
+            marker.exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn remembered_glob_does_not_approve_external_redirect() {
+        let fixture = TestFixture::new();
+        let outside = tempfile::TempDir::new().unwrap();
+        let marker = outside.path().join("unapproved-write");
+        fixture.permissions.allow_for_session("echo *");
+        let tool = BashTool::new(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(InteractionService::noninteractive()),
+        );
+        let quoted_marker = format!("'{}'", marker.display().to_string().replace('\'', "'\\''"));
+        let result = tool
+            .execute(json!({"command": format!("echo permitted > {quoted_marker}")}))
+            .await;
+        assert!(
+            result.is_err() && !marker.exists(),
+            "result={result:?}, marker={}",
+            marker.exists()
+        );
+    }
+
+    #[test]
+    fn compound_allow_decisions_pair_each_rule_with_its_own_risk() {
+        let permissions = crate::permissions::PermissionManager::memory_only();
+        permissions.allow_for_session("echo permitted");
+        permissions.allow_for_session("git push *");
+        for (command, level, approved) in [
+            ("ls . && echo permitted", ApprovalLevel::Ask, false),
+            ("ls . && echo permitted", ApprovalLevel::Balanced, true),
+            ("echo permitted && ls .", ApprovalLevel::Ask, false),
+            (
+                "ls . > /outside/file && echo permitted",
+                ApprovalLevel::Balanced,
+                false,
+            ),
+            (
+                "ls . > /outside/file; echo permitted",
+                ApprovalLevel::Balanced,
+                false,
+            ),
+            (
+                "echo permitted; ls . > /outside/file",
+                ApprovalLevel::Balanced,
+                false,
+            ),
+            (
+                "echo permitted $(ls . > /outside/file)",
+                ApprovalLevel::Balanced,
+                false,
+            ),
+            (
+                "ls . && git push origin main",
+                ApprovalLevel::Balanced,
+                true,
+            ),
+            (
+                "git push origin main && ls .",
+                ApprovalLevel::Balanced,
+                true,
+            ),
+            (
+                "echo permitted && git reset --hard HEAD",
+                ApprovalLevel::AutoAccept,
+                false,
+            ),
+        ] {
+            let analysis = analyze_command(command);
+            let matches = permissions
+                .check_each_detailed(analysis.permission_commands())
+                .unwrap();
+            let (_, verdict) = super::policy::permission_gate(&matches, &analysis, None, level);
+            assert_eq!(
+                matches!(verdict, GateVerdict::AutoApproved { .. }),
+                approved,
+                "{command}: {verdict:?}"
+            );
+        }
+        let analysis = analyze_command("ls . && echo permitted");
+        permissions.allow_for_session("ls *");
+        let matches = permissions
+            .check_each_detailed(analysis.permission_commands())
+            .unwrap();
+        assert!(matches!(
+            super::policy::permission_gate(&matches, &analysis, None, ApprovalLevel::Ask).1,
+            GateVerdict::AutoApproved { .. }
+        ));
+        permissions.add_session_rule("ls *", Permission::Deny);
+        let matches = permissions
+            .check_each_detailed(analysis.permission_commands())
+            .unwrap();
+        assert_eq!(
+            super::policy::permission_gate(&matches, &analysis, None, ApprovalLevel::Balanced).1,
+            GateVerdict::Deny
+        );
     }
 
     #[tokio::test]

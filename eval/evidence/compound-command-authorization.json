@@ -1,0 +1,94 @@
+{
+  "status": "qualified: retained; full tests,clippy,format,warning-free release,TUI,and DeepSeek controls passed",
+  "problem": "A final remembered Allow segment overwrote aggregate automatic-Allow provenance,letting its authority waive the risk/autonomy ceiling of sibling commands.",
+  "confirmed_before": {
+    "command_inspection": "ls . && echo permitted ran without an ls approval at Ask after echo alone was approved.",
+    "external_write": "ls . > ownedOutsideTempMarker && echo permitted actually created the marker at Balanced with sandbox disabled.",
+    "unit_log": "target/compound-allow-before.log",
+    "exit_code": 101,
+    "expected_regression_failures": 2,
+    "safety": "Only owned disposable temporary directories; no real credential files or remote writes used."
+  },
+  "change": [
+    "Match every permission command under one atomic rules snapshot.",
+    "Pair each permission match with that exact command string risk before authorization.",
+    "Merge full verdicts:deny dominates prompt,prompt dominates allow.",
+    "Aggregate-Allow provenance is remembered only when every part has remembered provenance.",
+    "Keep legitimate mixed commands approved when each part independently clears its gate."
+  ],
+  "scope_limits": [
+    "No task-intent keyword inference,model-specific routing,tool hiding,or prompt edits.",
+    "Intentional Yolo behavior remains unchanged.",
+    "Does not claim natural-language no-command instructions are now enforced.",
+    "Does not complete GitHub153:broader balanced-mode latency,false-block,approval-deduplication and risk-cohort qualification remains open.",
+    "Single-command structural-floor documentation versus remembered-allow semantics remains a separate audit item;this fix addresses cross-command authority leakage."
+  ],
+  "upstream_reference": {
+    "repo": "https://github.com/openai/codex",
+    "revision": "2a32e7c963",
+    "file": "codex-rs/execpolicy/src/policy.rs",
+    "observation": "check_multiple_with_options evaluates each command match independently before combining evaluations;adapted principle to existing Bonsai risk/permission machinery,not copied transport or policy format."
+  },
+  "verification": {
+    "focused_tests": {
+      "log": "target/compound-allow-after.log",
+      "passed": 5,
+      "covers": [
+        "real command gate before spawn",
+        "external marker remains absent without OS sandbox",
+        "command order,operator-separated commands,substitutions,and structural write risk",
+        "approved high-risk git command plus routine sibling (pure,no remote effects)",
+        "all remembered approvals remain usable at Ask",
+        "deny dominates allow",
+        "unavailable/poisoned rule state fails closed,including empty commands"
+      ]
+    },
+    "clippy": "all-targets/all-features/locked -D warnings passed;target/compound-allow-clippy.log",
+    "format": "cargo fmt --all -- --check and git diff --check passed",
+    "release": {
+      "flags": "RUSTFLAGS=-D warnings --release --locked",
+      "log": "target/compound-allow-release.log",
+      "binary_sha256": "02db996bf55c7d63d6c6c30d13fb55e65434db2c39176c2c871b01d6fa2f337d"
+    },
+    "TUI": {
+      "case": "e2e/cases/22_compound_permissions.sh",
+      "evidence": "target/tui-verification/e2e/case.T8bCho",
+      "log": "target/compound-allow-tui.log",
+      "exit_code": 0,
+      "observed_decisions": [
+        {
+          "subject": "echo COMPOUND_ALLOW_APPROVED",
+          "risk_tier": "read-only",
+          "rule_source": "built-in-default",
+          "autonomy_level": "ask",
+          "decision": "allow",
+          "reason": "user allowed for session"
+        },
+        {
+          "subject": "ls . > <temporary-directory>/COMPOUND_BLOCKED_MARKER && echo COMPOUND_ALLOW_APPROVED",
+          "risk_tier": "high",
+          "rule_source": "built-in-default",
+          "autonomy_level": "ask",
+          "decision": "deny",
+          "reason": "user denied"
+        }
+      ],
+      "marker_created": false
+    },
+    "DeepSeek": {
+      "report": "target/eval-live/compound-allow-deepseek/1793913767243-live-405/report.json",
+      "model": "deepseek/deepseek-flash",
+      "effort": "high",
+      "authorized_diagnose_fix_verify_passes": "3/3",
+      "no_instruction_compliance_improvement_claimed": true
+    },
+    "full_tests": {
+      "log": "target/compound-allow-full.log",
+      "unit_passed": 4555,
+      "integration_passed": 21,
+      "existing_ignored": 6,
+      "exit_code": 0
+    }
+  },
+  "source_diff_sha256": "d9e002934f7d7239eef3b87e656b885056c666dfbca5902d2fe085401425ad49"
+}

@@ -441,6 +441,7 @@ impl TerminalRegistry {
     /// # Errors
     ///
     /// Returns an error when PTY allocation, output attachment, or child spawn fails.
+    #[cfg(test)]
     pub(crate) async fn start(
         self: &Arc<Self>,
         shell: &str,
@@ -448,6 +449,19 @@ impl TerminalRegistry {
         cwd: &Path,
         timeout_secs: u64,
         tool_call_id: Option<String>,
+    ) -> Result<TerminalSnapshot> {
+        self.start_observed(shell, command, cwd, timeout_secs, tool_call_id, None)
+            .await
+    }
+
+    pub(crate) async fn start_observed(
+        self: &Arc<Self>,
+        shell: &str,
+        command: &str,
+        cwd: &Path,
+        timeout_secs: u64,
+        tool_call_id: Option<String>,
+        on_spawn: Option<&(dyn Fn() + Send + Sync)>,
     ) -> Result<TerminalSnapshot> {
         let id = {
             let mut inner = self.inner.lock().await;
@@ -482,6 +496,9 @@ impl TerminalRegistry {
                 cwd.display()
             )
         })?;
+        if let Some(on_spawn) = on_spawn {
+            on_spawn();
+        }
         drop(pair.slave);
 
         let killer = Arc::new(StdMutex::new(child.clone_killer()));

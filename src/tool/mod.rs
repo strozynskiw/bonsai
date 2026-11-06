@@ -60,8 +60,10 @@ pub(crate) use agent::{
 pub(crate) use apply_patch::{patch_target_paths_from_arguments, patched_paths_from_arguments};
 pub use bash::BashTool;
 pub(crate) use bash::command::analyze_command as analyze_bash_command;
-pub(crate) use bash::command::normalize_verification_command;
 pub(crate) use bash::command::single_read_path;
+pub(crate) use bash::command::{
+    normalize_verification_command, normalize_verification_conjunction,
+};
 pub(crate) use bash::direct_verification_is_cacheable;
 pub(crate) use bash::{BashExecutionPolicy, BashOutputBudget, BashRuntimeDeps};
 pub use edit::EditTool;
@@ -1158,6 +1160,11 @@ pub trait Tool: Send + Sync {
     /// executing it. Stateful command tools override this so pre-execution
     /// evidence can bind to the same directory as the eventual process.
     async fn execution_cwd(&self, _args: &serde_json::Value) -> Option<PathBuf> {
+        None
+    }
+    /// A command rewrite this tool guarantees before execution, if any.
+    /// Used to classify verification evidence, never to authorize a command.
+    fn verification_command_rewrite(&self, _command: &str) -> Option<String> {
         None
     }
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput>;

@@ -1,10 +1,12 @@
 //! Persistent permission rules and command authorization matching.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use glob::Pattern;
 
+use super::command_approval::CommandApproval;
 use crate::storage::{PermissionScope, RuleKind, Storage, StoredPermissionRule};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,12 @@ pub(crate) enum PermissionMatchSource {
 }
 
 impl PermissionMatchSource {
+    /// Whether this source represents a remembered human rule rather than an
+    /// automatic default. The rule's allow/ask/deny decision is separate.
+    pub(crate) fn is_remembered(self) -> bool {
+        matches!(self, Self::Session | Self::Project | Self::Global)
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::HardDeny => "hard-deny",
@@ -75,6 +83,39 @@ pub(crate) struct PermissionMatch {
     pub(crate) source: PermissionMatchSource,
 }
 
+/// One atomic rules snapshot for a command and its extracted subcommands.
+#[derive(Debug)]
+pub(crate) struct CommandPermissionCheck {
+    pub(crate) permissions: Vec<PermissionMatch>,
+    pub(crate) exact_approval: Option<PermissionMatch>,
+}
+
+#[derive(Debug, Clone)]
+enum UserRulePattern {
+    Glob(Pattern),
+    Command(CommandApproval),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleSyntax {
+    Shell,
+    Glob,
+}
+
+impl UserRulePattern {
+    fn from_stored(raw: &str) -> Option<Self> {
+        if CommandApproval::is_reserved(raw) {
+            CommandApproval::decode(raw).map(Self::Command)
+        } else {
+            Pattern::new(raw).ok().map(Self::Glob)
+        }
+    }
+
+    fn matches(&self, candidate: &str) -> bool {
+        matches!(self, Self::Glob(pattern) if pattern.matches(candidate))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CompiledRule {
     pattern: Pattern,
@@ -85,11 +126,24 @@ struct CompiledRule {
 /// db id so `/permissions` can list and remove it.
 #[derive(Debug, Clone)]
 struct UserRule {
-    pattern: Pattern,
+    pattern: UserRulePattern,
     raw: String,
     permission: Permission,
     source: RuleSource,
     id: Option<i64>,
+}
+
+impl UserRule {
+    fn permission_match(&self) -> PermissionMatch {
+        PermissionMatch {
+            permission: self.permission,
+            source: match self.source {
+                RuleSource::Session => PermissionMatchSource::Session,
+                RuleSource::Project => PermissionMatchSource::Project,
+                RuleSource::Global => PermissionMatchSource::Global,
+            },
+        }
+    }
 }
 
 /// A flattened, display-ready view of one user rule for `/permissions`.
@@ -112,6 +166,7 @@ pub struct RuleView {
 /// 3. `default_rules` — built-in allow/ask defaults.
 /// 4. `default_permission` (`Ask`) when nothing matches.
 pub struct PermissionService {
+    syntax: RuleSyntax,
     deny_floor: Vec<CompiledRule>,
     session_rules: Vec<UserRule>,
     persisted_rules: Vec<UserRule>,
@@ -122,6 +177,7 @@ pub struct PermissionService {
 impl PermissionService {
     pub fn new() -> Self {
         Self {
+            syntax: RuleSyntax::Shell,
             deny_floor: deny_floor_rules(),
             session_rules: Vec::new(),
             persisted_rules: Vec::new(),
@@ -136,6 +192,7 @@ impl PermissionService {
     /// command-shaped deny floor (`sudo *`, `rm -rf /`) or allow defaults.
     pub fn empty() -> Self {
         Self {
+            syntax: RuleSyntax::Glob,
             deny_floor: Vec::new(),
             session_rules: Vec::new(),
             persisted_rules: Vec::new(),
@@ -159,14 +216,7 @@ impl PermissionService {
         }
         for rule in self.session_rules.iter().chain(&self.persisted_rules) {
             if rule.pattern.matches(command) {
-                return PermissionMatch {
-                    permission: rule.permission,
-                    source: match rule.source {
-                        RuleSource::Session => PermissionMatchSource::Session,
-                        RuleSource::Project => PermissionMatchSource::Project,
-                        RuleSource::Global => PermissionMatchSource::Global,
-                    },
-                };
+                return rule.permission_match();
             }
         }
         for rule in &self.default_rules {
@@ -201,12 +251,20 @@ impl PermissionService {
             permission: Permission::Allow,
             source: PermissionMatchSource::Fallback,
         };
-        for command in commands {
+        for (index, command) in commands.iter().enumerate() {
             let matched = self.check_match(command);
             match matched.permission {
                 Permission::Deny => return matched,
                 Permission::Ask => result = matched,
-                Permission::Allow if result.permission == Permission::Allow => result = matched,
+                Permission::Allow
+                    if result.permission == Permission::Allow
+                        && (index == 0 || !matched.source.is_remembered()) =>
+                {
+                    // An aggregate allow is remembered only when every part
+                    // was remembered. Never lend one part's authority to a
+                    // sibling that only matched an automatic default.
+                    result = matched;
+                }
                 Permission::Allow => {}
             }
         }
@@ -227,7 +285,7 @@ impl PermissionService {
         self.session_rules.insert(
             0,
             UserRule {
-                pattern: compiled,
+                pattern: UserRulePattern::Glob(compiled),
                 raw: pattern.to_string(),
                 permission,
                 source: RuleSource::Session,
@@ -254,7 +312,10 @@ impl PermissionService {
         self.persisted_rules = rules
             .iter()
             .filter_map(|row| {
-                let pattern = Pattern::new(&row.pattern).ok()?;
+                let pattern = match self.syntax {
+                    RuleSyntax::Shell => UserRulePattern::from_stored(&row.pattern)?,
+                    RuleSyntax::Glob => UserRulePattern::Glob(Pattern::new(&row.pattern).ok()?),
+                };
                 Some(UserRule {
                     pattern,
                     raw: row.pattern.clone(),
@@ -281,6 +342,19 @@ impl PermissionService {
                 id: rule.id,
             })
             .collect()
+    }
+
+    fn command_approval(&self, cwd: &Path, command: &str) -> Option<PermissionMatch> {
+        let fingerprint = super::command_approval::fingerprint(cwd, command);
+        self.session_rules
+            .iter()
+            .chain(&self.persisted_rules)
+            .find_map(|rule| match &rule.pattern {
+                UserRulePattern::Command(approval) if approval.matches(&fingerprint) => {
+                    Some(rule.permission_match())
+                }
+                _ => None,
+            })
     }
 
     pub fn deny_floor_len(&self) -> usize {
@@ -658,6 +732,92 @@ impl PermissionManager {
             })
     }
 
+    /// Match each command under one rules snapshot, retaining its provenance
+    /// so callers can pair the decision with that command's risk.
+    ///
+    /// # Errors
+    /// Returns an explicit deny when the rules lock is unavailable, including
+    /// for an empty command list.
+    #[cfg(test)]
+    pub(crate) fn check_each_detailed(
+        &self,
+        commands: &[String],
+    ) -> std::result::Result<Vec<PermissionMatch>, PermissionMatch> {
+        self.check_command_detailed(Path::new(""), "", commands)
+            .map(|check| check.permissions)
+    }
+
+    /// Match a complete request and its parts under one rules snapshot.
+    ///
+    /// # Errors
+    /// Returns a deny if the rules lock is unavailable.
+    pub(crate) fn check_command_detailed(
+        &self,
+        cwd: &Path,
+        command: &str,
+        commands: &[String],
+    ) -> std::result::Result<CommandPermissionCheck, PermissionMatch> {
+        let service = self.service.lock().map_err(|_| PermissionMatch {
+            permission: Permission::Deny,
+            source: PermissionMatchSource::Unavailable,
+        })?;
+        Ok(CommandPermissionCheck {
+            permissions: commands
+                .iter()
+                .map(|part| service.check_match(part))
+                .collect(),
+            exact_approval: service.command_approval(cwd, command),
+        })
+    }
+
+    /// Remember only this command's exact bytes in this resolved directory.
+    /// It is not a glob and cannot authorize the command as part of a different
+    /// request. Descriptions are redacted before entering rule storage.
+    ///
+    /// # Errors
+    /// Returns an error outside the Bash namespace, or if encoding or acquiring
+    /// the rules lock fails.
+    pub(crate) fn allow_command_for_session(&self, cwd: &Path, command: &str) -> Result<()> {
+        let approval = CommandApproval::new(cwd, command);
+        let raw = approval.encode()?;
+        let mut service = self
+            .service
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Permission rules unavailable"))?;
+        if service.syntax != RuleSyntax::Shell {
+            anyhow::bail!("Exact command approvals require the Bash namespace");
+        }
+        service.session_rules.retain(|rule| rule.raw != raw);
+        service.session_rules.insert(
+            0,
+            UserRule {
+                pattern: UserRulePattern::Command(approval),
+                raw,
+                permission: Permission::Allow,
+                source: RuleSource::Session,
+                id: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Persist an exact command approval in the Bash namespace. A manager
+    /// without storage retains it for the session instead.
+    ///
+    /// # Errors
+    /// Returns an error for another namespace, unavailable rules, or storage
+    /// and encoding failures.
+    pub(crate) async fn allow_command_for_project(&self, cwd: &Path, command: &str) -> Result<()> {
+        let Some(persistence) = &self.persistence else {
+            return self.allow_command_for_session(cwd, command);
+        };
+        if persistence.kind != RuleKind::Bash {
+            anyhow::bail!("Exact command approvals require the Bash namespace");
+        }
+        let raw = CommandApproval::new(cwd, command).encode()?;
+        self.set_for_project(&raw, Permission::Allow).await
+    }
+
     /// Evaluate a single value (e.g. a WebFetch host) against the rules. Fails
     /// closed to `Deny` on a poisoned lock, like [`Self::check_all`].
     pub fn check_one(&self, value: &str) -> Permission {
@@ -835,6 +995,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn approval_replay_metadata_is_not_interpreted_in_other_namespaces() {
+        let mut service = PermissionService::empty();
+        let host = "bonsai-exact-command-example.com";
+        service.load_persisted(&[StoredPermissionRule {
+            id: 1,
+            pattern: host.into(),
+            decision: Permission::Deny,
+            scope: PermissionScope::Project,
+        }]);
+        assert_eq!(service.check(host), Permission::Deny);
+        let domains = PermissionManager::memory_only_domains();
+        assert!(
+            domains
+                .allow_command_for_session(Path::new("/project"), "echo x")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn approval_replay_preserves_operator_globs_with_similar_command_names() {
+        let mut service = PermissionService::new();
+        service.load_persisted(&[StoredPermissionRule {
+            id: 1,
+            pattern: "bonsai-exact-command-example *".into(),
+            decision: Permission::Deny,
+            scope: PermissionScope::Project,
+        }]);
+        assert_eq!(
+            service.check("bonsai-exact-command-example run"),
+            Permission::Deny
+        );
+        assert_eq!(service.user_rules().len(), 1);
+    }
+
+    #[test]
+    fn approval_replay_is_exact_deduplicated_and_removable() {
+        let manager = PermissionManager::memory_only();
+        let cwd = Path::new("/project");
+        let command = "echo first && echo second";
+        for _ in 0..2 {
+            manager.allow_command_for_session(cwd, command).unwrap();
+        }
+        let check = manager
+            .check_command_detailed(cwd, command, &[command.into()])
+            .unwrap();
+        assert_eq!(
+            check.exact_approval.unwrap().source,
+            PermissionMatchSource::Session
+        );
+        assert_eq!(
+            check.permissions[0].source,
+            PermissionMatchSource::BuiltInDefault
+        );
+        for (directory, changed) in [
+            (cwd, "echo first"),
+            (cwd, "echo first && echo changed"),
+            (Path::new("/other-project"), command),
+        ] {
+            assert!(
+                manager
+                    .check_command_detailed(directory, changed, &[])
+                    .unwrap()
+                    .exact_approval
+                    .is_none()
+            );
+        }
+        let rules = manager.user_rules();
+        assert_eq!(rules.len(), 1);
+        assert!(manager.remove_session_rule(&rules[0].pattern));
+        assert!(
+            manager
+                .check_command_detailed(cwd, command, &[])
+                .unwrap()
+                .exact_approval
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_replay_project_rule_survives_reload_and_can_be_removed() {
+        let ts = crate::storage::test_utils::TestStorage::new().await;
+        let project_id = ts.storage.ensure_project(ts.project_path()).await.unwrap();
+        let manager = PermissionManager::load(ts.storage.clone(), project_id)
+            .await
+            .unwrap();
+        let command = "echo '*.rs' && echo done";
+        manager
+            .allow_command_for_project(ts.project_path(), command)
+            .await
+            .unwrap();
+        let restored = PermissionManager::load(ts.storage.clone(), project_id)
+            .await
+            .unwrap();
+        let check = restored
+            .check_command_detailed(ts.project_path(), command, &[])
+            .unwrap();
+        assert_eq!(
+            check.exact_approval.unwrap().source,
+            PermissionMatchSource::Project
+        );
+        assert!(
+            restored
+                .check_command_detailed(ts.project_path(), "echo other.rs && echo done", &[])
+                .unwrap()
+                .exact_approval
+                .is_none()
+        );
+        let rules = restored.user_rules();
+        assert_eq!(rules.len(), 1);
+        assert!(restored.remove(rules[0].id.unwrap()).await.unwrap());
+        assert!(
+            restored
+                .check_command_detailed(ts.project_path(), command, &[])
+                .unwrap()
+                .exact_approval
+                .is_none()
+        );
+        let domain_manager = PermissionManager::load_domains(ts.storage.clone(), project_id)
+            .await
+            .unwrap();
+        assert!(
+            domain_manager
+                .allow_command_for_project(ts.project_path(), command)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_deny_dangerous_commands() {
         let service = PermissionService::new();
 
@@ -880,6 +1169,58 @@ mod tests {
 
         assert_eq!(matched.permission, Permission::Allow);
         assert_eq!(matched.source, PermissionMatchSource::BuiltInDefault);
+    }
+
+    #[test]
+    fn compound_allow_provenance_requires_every_part_to_be_remembered() {
+        let mut service = PermissionService::new();
+        service
+            .add_session_rule("echo permitted", Permission::Allow)
+            .unwrap();
+        for commands in [
+            vec!["ls .".to_string(), "echo permitted".to_string()],
+            vec!["echo permitted".to_string(), "ls .".to_string()],
+        ] {
+            assert_eq!(
+                service.check_all_match(&commands),
+                PermissionMatch {
+                    permission: Permission::Allow,
+                    source: PermissionMatchSource::BuiltInDefault,
+                }
+            );
+        }
+        service.add_session_rule("ls *", Permission::Allow).unwrap();
+        assert_eq!(
+            service
+                .check_all_match(&["ls .".into(), "echo permitted".into()])
+                .source,
+            PermissionMatchSource::Session
+        );
+    }
+
+    #[test]
+    fn compound_allow_matching_retains_each_source_and_fails_closed_on_poison() {
+        let manager = PermissionManager::memory_only();
+        manager.allow_for_session("echo permitted");
+        let commands = vec!["ls .".into(), "echo permitted".into()];
+        let matches = manager.check_each_detailed(&commands).unwrap();
+        assert_eq!(matches[0].source, PermissionMatchSource::BuiltInDefault);
+        assert_eq!(matches[1].source, PermissionMatchSource::Session);
+        let service = manager.service.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = service.lock().unwrap();
+            panic!("poison test rules");
+        })
+        .join();
+        for commands in [commands, Vec::new()] {
+            assert_eq!(
+                manager.check_each_detailed(&commands),
+                Err(PermissionMatch {
+                    permission: Permission::Deny,
+                    source: PermissionMatchSource::Unavailable,
+                })
+            );
+        }
     }
 
     #[test]

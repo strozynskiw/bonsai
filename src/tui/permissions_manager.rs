@@ -45,7 +45,9 @@ impl PermissionRuleRow {
     pub(crate) fn matches_filter(&self, query: &str) -> bool {
         let query = query.trim().to_lowercase();
         query.is_empty()
-            || self.pattern.to_lowercase().contains(&query)
+            || crate::permissions::display_permission_pattern(&self.pattern)
+                .to_lowercase()
+                .contains(&query)
             || self.lane.label().contains(&query)
             || self.source.label().contains(&query)
             || self.permission.as_db_str().contains(&query)
@@ -89,6 +91,23 @@ pub(crate) fn permission_manager_filtered<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_replay_filter_uses_the_displayed_scope_and_keeps_removal_identity() {
+        let manager = crate::permissions::PermissionManager::memory_only();
+        manager
+            .allow_command_for_session(
+                std::path::Path::new("/project"),
+                "echo first && echo second",
+            )
+            .unwrap();
+        let rules = manager.user_rules();
+        let rows = permission_manager_rows(&rules, &[]);
+        let filtered = permission_manager_filtered(&rows, "exact command in /project");
+        assert_eq!(filtered.len(), 1);
+        assert!(manager.remove_session_rule(&filtered[0].pattern));
+        assert!(manager.user_rules().is_empty());
+    }
 
     fn view(
         source: RuleSource,
