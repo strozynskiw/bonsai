@@ -10,14 +10,14 @@ max_duration_ms = 15000
 [[tasks]]
 id = "additive_steering_extends_original_work"
 fixture = "fixtures/tiny_project"
-prompt = "Update README.md with the release qualification result."
-queued_messages = ["Also update docs/cli.md with the same qualification result; preserve the original README work."]
+prompt = "Add the line `intent continuity: release qualified` to README.md."
+queued_messages = ["Also add the same line to docs/cli.md; preserve the original README work."]
 
 [tasks.mock]
 final_response = "Updated both requested documents without dropping the original task."
 final_request_contains = [
-  "Update README.md with the release qualification result.",
-  "Also update docs/cli.md with the same qualification result",
+  "Add the line `intent continuity: release qualified` to README.md.",
+  "Also add the same line to docs/cli.md",
 ]
 [[tasks.mock.tool_turns]]
 [[tasks.mock.tool_turns.calls]]
@@ -29,11 +29,11 @@ arguments = '{"path":"docs/cli.md"}'
 [[tasks.mock.tool_turns]]
 [[tasks.mock.tool_turns.calls]]
 name = "write"
-arguments = '''{"path":"README.md","content":"# Tiny Project\n\nintent continuity: release qualified\n"}'''
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nThis fixture is intentionally small. Eval tasks mutate it in isolated copies.\n\nintent continuity: release qualified\n"}'''
 [[tasks.mock.tool_turns]]
 [[tasks.mock.tool_turns.calls]]
 name = "write"
-arguments = '''{"path":"docs/cli.md","content":"# CLI\n\nintent continuity: release qualified\n"}'''
+arguments = '''{"path":"docs/cli.md","content":"# CLI\n\nRun `bonsai --help` to inspect supported commands.\n\nintent continuity: release qualified\n"}'''
 
 [[tasks.graders]]
 type = "changed-files"
@@ -46,8 +46,14 @@ forbidden = ["interaction", "external-access"]
 forbidden_attempts = ["interaction", "external-access"]
 
 [[tasks.graders]]
-type = "assertion"
-contains = ["without dropping the original task"]
+type = "file-state"
+path = "README.md"
+contains = ["# Tiny Project", "This fixture is intentionally small. Eval tasks mutate it in isolated copies.", "intent continuity: release qualified"]
+
+[[tasks.graders]]
+type = "file-state"
+path = "docs/cli.md"
+contains = ["# CLI", "Run `bonsai --help` to inspect supported commands.", "intent continuity: release qualified"]
 
 [[tasks]]
 id = "superseding_steering_prevents_old_mutation"
@@ -88,13 +94,13 @@ matches = [
 [[tasks]]
 id = "status_request_updates_then_continues"
 fixture = "fixtures/tiny_project"
-prompt = "Add a continuity result to README.md and finish the edit."
+prompt = "Add the line `status steering preserved the original task` to README.md and finish the edit."
 queued_messages = ["Give a concise status update, then continue and finish the original README task."]
 
 [tasks.mock]
 final_response = "Status: inspected the file. Then I continued and finished the original README task."
 final_request_contains = [
-  "Add a continuity result to README.md",
+  "Add the line `status steering preserved the original task` to README.md",
   "Give a concise status update, then continue",
 ]
 [[tasks.mock.tool_turns]]
@@ -104,7 +110,7 @@ arguments = '{"path":"README.md"}'
 [[tasks.mock.tool_turns]]
 [[tasks.mock.tool_turns.calls]]
 name = "write"
-arguments = '''{"path":"README.md","content":"# Tiny Project\n\nstatus steering preserved the original task\n"}'''
+arguments = '''{"path":"README.md","content":"# Tiny Project\n\nThis fixture is intentionally small. Eval tasks mutate it in isolated copies.\n\nstatus steering preserved the original task\n"}'''
 
 [[tasks.graders]]
 type = "changed-files"
@@ -119,7 +125,7 @@ forbidden_attempts = ["interaction", "external-access"]
 [[tasks.graders]]
 type = "file-state"
 path = "README.md"
-contains = ["status steering preserved the original task"]
+contains = ["# Tiny Project", "This fixture is intentionally small. Eval tasks mutate it in isolated copies.", "status steering preserved the original task"]
 
 [[tasks]]
 id = "compaction_preserves_steered_intent"

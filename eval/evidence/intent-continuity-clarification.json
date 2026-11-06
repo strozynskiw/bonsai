@@ -1,0 +1,32 @@
+{
+  "scope": "Make fixture instructions explicit and check preservation of the original contents; no harness or model behavior change is claimed.",
+  "suite": "eval/suites/intent_continuity.toml",
+  "original_live_runs": [
+    {
+      "task": "status_request_updates_then_continues",
+      "report": "target/eval-status-steering-437/1793972315585-live-437/report.json",
+      "observation": "The model provided a status update and added a continuity section; the file-state grader failed because it expected text absent from the prompt."
+    },
+    {
+      "task": "additive_steering_extends_original_work",
+      "report": "target/eval-additive-steering-437/1793972315585-live-437/report.json",
+      "observation": "The run exceeded its 15-second budget after repeated inspection and before either requested edit."
+    }
+  ],
+  "clarified_live_runs": [
+    {
+      "task": "status_request_updates_then_continues",
+      "report": "target/eval-status-clear-438/1793972397420-live-438/report.json",
+      "private_transcript": "target/deepseek-status-clear-438.log",
+      "observation": "All graders passed and the trace showed a status update before the final response."
+    },
+    {
+      "task": "additive_steering_extends_original_work",
+      "report": "target/eval-additive-clear-438/1793972397415-live-438/report.json",
+      "observation": "All graders passed and both requested files were changed."
+    }
+  ],
+  "preservation_recheck": "The saved worktrees from both clarified runs contained the original fixture lines and the requested additions. The updated deterministic mock cases also pass the preservation checks.",
+  "negative_control": "A temporary mock variant that removed the original README sentence failed the file-state grader and exited nonzero.",
+  "limitations": "The prompt and grader changed between runs, and each live scenario has one stochastic sample, so scores are not evidence of model improvement. File substring checks cannot prove complete preservation. The current automated status scenario does not verify the timing or existence of an intermediate status update."
+}
