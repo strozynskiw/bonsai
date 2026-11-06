@@ -33,6 +33,11 @@ pub(crate) enum ProviderAuthMutationWarning {
         /// Backend error detail suitable for the command transcript.
         detail: String,
     },
+    /// Credential storage could not be inspected; authorization used a safe fallback.
+    CredentialStorageFallback {
+        /// Explanation suitable for the command transcript.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ProviderAuthMutationWarning {
@@ -46,6 +51,7 @@ impl std::fmt::Display for ProviderAuthMutationWarning {
                 formatter,
                 "Provider auth was cleared, but stored credential cleanup is incomplete: {detail}. Remove the credential manually from the reported store."
             ),
+            Self::CredentialStorageFallback { detail } => write!(formatter, "{detail}"),
         }
     }
 }
@@ -195,6 +201,14 @@ where
         } => persistence.source(),
     };
     let outcome = factory.authorize(input).await?;
+    let requested_credential_source = if outcome.api_key.trim().is_empty() {
+        CredentialSource::None
+    } else {
+        requested_credential_source
+    };
+    let mut credential_backup = session_store
+        .backup_provider_credentials(id, &requested_credential_source)
+        .await?;
     let save_auth_policy = if outcome.clear_existing_api_key {
         SaveAuthPolicy::AllowClear
     } else {
@@ -206,8 +220,15 @@ where
     // from the committed snapshot returned here.
     let mut staged_session_store = session_store.clone();
     staged_session_store.ensure_provider(id);
+    if credential_backup.preserve_previous {
+        staged_session_store.session_mut(id).credential_source = CredentialSource::None;
+    }
     staged_session_store
-        .set_provider_credential(id, outcome.api_key, requested_credential_source)
+        .set_provider_credential(
+            id,
+            outcome.api_key,
+            credential_backup.effective_source.clone(),
+        )
         .await;
     let session = staged_session_store.session_mut(id);
     if let Some(base_url) = outcome.base_url {
@@ -226,7 +247,17 @@ where
     }
     session.authorized_at = Some(std::time::SystemTime::now());
     staged_session_store.set_current_kind_id(id);
-    save.save(&staged_session_store, save_auth_policy).await?;
+    if let Err(save_error) = save.save(&staged_session_store, save_auth_policy).await {
+        if let Err(rollback_error) = session_store
+            .restore_provider_credentials(id, credential_backup)
+            .await
+        {
+            anyhow::bail!(
+                "Failed to save provider authorization: {save_error:#}; credential restoration also failed: {rollback_error:#}. Check the credential stores before retrying"
+            );
+        }
+        return Err(save_error);
+    }
     *session_store = staged_session_store;
     let session = session_store.session(id);
     tracing::info!(
@@ -240,6 +271,11 @@ where
 
     let mut mutation =
         ProviderAuthMutationOutcome::committed(ProviderAuthorizationState::Authorized);
+    mutation.warnings.extend(
+        std::mem::take(&mut credential_backup.warnings)
+            .into_iter()
+            .map(|detail| ProviderAuthMutationWarning::CredentialStorageFallback { detail }),
+    );
     if let (Some(catalog), Some(connection_id)) = (catalog, live_cache_connection_id) {
         let model_session = session_store.session(id).clone();
         match factory.list_available_models(&model_session).await {
@@ -722,6 +758,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_authorization_save_preserves_the_persistent_credential() {
+        use crate::session::{CredentialSource, CredentialStore};
+
+        let home = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::open_at(home.path().join("bonsai.db"))
+            .await
+            .unwrap();
+        let credentials = CredentialStore::memory();
+        let mut store =
+            SessionStore::load_with_storage_and_credential_store(&storage, credentials.clone())
+                .await
+                .unwrap();
+        store
+            .set_provider_credential(
+                "test-provider",
+                "old-secret".to_string(),
+                CredentialSource::Keyring,
+            )
+            .await;
+        store.save_async().await.unwrap();
+        let registry = ProviderRegistry::new(vec![Arc::new(TestProviderFactory(
+            TestCatalogBehavior::Available,
+        ))]);
+
+        let result = authorize_provider_with_input_as_current_using_save(
+            &registry,
+            "test-provider",
+            AuthInput::ApiKey {
+                api_key: "new-secret".to_string(),
+                persistence: crate::session::CredentialPersistence::Keyring,
+                base_url: None,
+            },
+            &mut store,
+            None,
+            |_store, _policy| anyhow::bail!("injected save failure"),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let reloaded = SessionStore::load_with_storage_and_credential_store(&storage, credentials)
+            .await
+            .unwrap();
+        assert_eq!(reloaded.session("test-provider").api_key, "old-secret");
+    }
+
+    #[tokio::test]
+    async fn failed_authorization_restores_both_stores_when_switching() {
+        use crate::session::{CredentialPersistence, CredentialSource, CredentialStore};
+
+        let home = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::open_at(home.path().join("bonsai.db"))
+            .await
+            .unwrap();
+        let credentials = CredentialStore::memory();
+        let mut store =
+            SessionStore::load_with_storage_and_credential_store(&storage, credentials.clone())
+                .await
+                .unwrap();
+        store
+            .set_provider_credential(
+                "test-provider",
+                "old-secret".into(),
+                CredentialSource::Keyring,
+            )
+            .await;
+        credentials
+            .set(
+                &CredentialSource::File,
+                "test-provider",
+                "existing-file-secret",
+            )
+            .await
+            .unwrap();
+        store.save_async().await.unwrap();
+        let registry = ProviderRegistry::new(vec![Arc::new(TestProviderFactory(
+            TestCatalogBehavior::Available,
+        ))]);
+
+        let result = authorize_provider_with_input_as_current_using_save(
+            &registry,
+            "test-provider",
+            AuthInput::ApiKey {
+                api_key: "new-secret".into(),
+                persistence: CredentialPersistence::File,
+                base_url: None,
+            },
+            &mut store,
+            None,
+            |_store, _policy| anyhow::bail!("injected save failure"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            credentials
+                .get(&CredentialSource::File, "test-provider")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("existing-file-secret")
+        );
+        let reloaded = SessionStore::load_with_storage_and_credential_store(&storage, credentials)
+            .await
+            .unwrap();
+        assert_eq!(reloaded.session("test-provider").api_key, "old-secret");
+    }
+
+    #[tokio::test]
+    async fn unavailable_keyring_allows_session_only_authorization() {
+        use crate::session::{CredentialPersistence, CredentialSource, CredentialStore};
+
+        for has_previous in [false, true] {
+            let home = tempfile::TempDir::new().unwrap();
+            let storage = crate::storage::Storage::open_at(home.path().join("bonsai.db"))
+                .await
+                .unwrap();
+            let mut store = SessionStore::load_with_storage_and_credential_store(
+                &storage,
+                CredentialStore::memory_with_keyring_disabled(),
+            )
+            .await
+            .unwrap();
+            if has_previous {
+                store.ensure_provider("test-provider");
+                store.session_mut("test-provider").credential_source = CredentialSource::Keyring;
+                store.save_async().await.unwrap();
+            }
+            let registry = ProviderRegistry::new(vec![Arc::new(TestProviderFactory(
+                TestCatalogBehavior::Available,
+            ))]);
+            let outcome = super::authorize_provider_with_input_as_current(
+                &registry,
+                "test-provider",
+                AuthInput::ApiKey {
+                    api_key: "session-secret".into(),
+                    persistence: CredentialPersistence::Keyring,
+                    base_url: None,
+                },
+                &mut store,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                store.session("test-provider").credential_source,
+                CredentialSource::Session
+            );
+            assert_eq!(store.session("test-provider").api_key, "session-secret");
+            let reloaded = SessionStore::load_with_storage_and_credential_store(
+                &storage,
+                CredentialStore::memory_with_keyring_disabled(),
+            )
+            .await
+            .unwrap();
+            assert!(reloaded.session("test-provider").api_key.is_empty());
+            assert_ne!(
+                reloaded.session("test-provider").credential_source,
+                CredentialSource::Keyring
+            );
+            assert!(
+                outcome
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.to_string().contains("only for this session"))
+            );
+            if has_previous {
+                assert!(
+                    outcome
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.to_string().contains("may remain stored"))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn failed_authorization_save_does_not_replace_live_session_snapshot() {
         let registry = ProviderRegistry::new(vec![Arc::new(TestProviderFactory(
             TestCatalogBehavior::Available,
@@ -777,6 +989,41 @@ mod tests {
         let catalog = crate::model_catalog::load_catalog_from_home(home.path()).unwrap();
         let registry = ProviderRegistry::from_catalog(&catalog);
         (home, registry)
+    }
+
+    #[tokio::test]
+    async fn blank_key_does_not_consult_unavailable_destination_store() {
+        use crate::session::{CredentialPersistence, CredentialStore};
+
+        let (_home, registry) = endpoint_registry();
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::open_at(temp.path().join("bonsai.db"))
+            .await
+            .unwrap();
+        let mut store = SessionStore::load_with_storage_and_credential_store(
+            &storage,
+            CredentialStore::memory_with_keyring_disabled(),
+        )
+        .await
+        .unwrap();
+        let outcome = authorize_provider_with_input_as_current_using_save(
+            &registry,
+            "local-endpoint",
+            AuthInput::OpenAiCompatible {
+                base_url: "localhost:11434/v1".into(),
+                api_key: None,
+                model: Some("llama-local".into()),
+                context_window: None,
+                credential_persistence: CredentialPersistence::Keyring,
+            },
+            &mut store,
+            None,
+            |_store, _policy| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.warnings.is_empty());
+        assert!(store.session("local-endpoint").api_key.is_empty());
     }
 
     #[tokio::test]

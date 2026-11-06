@@ -187,6 +187,15 @@ pub(crate) struct CredentialStore {
     keyring_read_timeout: Duration,
 }
 
+/// Previous contents of the credential stores touched by an authorization.
+/// This contains secrets and must not be logged or formatted.
+pub(crate) struct CredentialBackup {
+    entries: Vec<(CredentialSource, Option<String>)>,
+    pub(crate) effective_source: CredentialSource,
+    pub(crate) preserve_previous: bool,
+    pub(crate) warnings: Vec<String>,
+}
+
 /// Held by the native read thread until it finishes, including after timeout.
 struct KeyringReadGuard(Arc<AtomicBool>);
 
@@ -197,6 +206,80 @@ impl Drop for KeyringReadGuard {
 }
 
 impl super::SessionStore {
+    pub(crate) async fn backup_provider_credentials(
+        &self,
+        provider_id: &str,
+        requested_source: &CredentialSource,
+    ) -> Result<CredentialBackup> {
+        let previous_source = self
+            .providers
+            .get(provider_id)
+            .map(|s| &s.credential_source);
+        let mut sources = Vec::new();
+        for source in previous_source
+            .into_iter()
+            .chain(std::iter::once(requested_source))
+        {
+            if matches!(source, CredentialSource::File | CredentialSource::Keyring)
+                && !sources.contains(source)
+            {
+                sources.push(source.clone());
+            }
+        }
+        let mut backup = Vec::new();
+        let mut effective_source = requested_source.clone();
+        let mut preserve_previous = false;
+        let mut warnings = Vec::new();
+        for source in sources {
+            match self.credential_store.get(&source, provider_id).await {
+                Ok(secret) => backup.push((source, secret)),
+                Err(error) => {
+                    if previous_source == Some(&source) {
+                        preserve_previous = true;
+                        warnings.push(format!("The previous {} credential could not be accessed and may remain stored: {error:#}", source.label()));
+                    }
+                    if *requested_source == source {
+                        effective_source = CredentialSource::Session;
+                        warnings.push(format!("The {} credential store is unavailable; the new credential is available only for this session: {error:#}", source.label()));
+                    }
+                }
+            }
+        }
+        Ok(CredentialBackup {
+            entries: backup,
+            effective_source,
+            preserve_previous,
+            warnings,
+        })
+    }
+
+    pub(crate) async fn restore_provider_credentials(
+        &self,
+        provider_id: &str,
+        backup: CredentialBackup,
+    ) -> Result<()> {
+        let mut errors = Vec::new();
+        for (source, secret) in backup.entries {
+            let result = match secret {
+                Some(secret) => {
+                    self.credential_store
+                        .set(&source, provider_id, &secret)
+                        .await
+                }
+                None => self
+                    .credential_store
+                    .delete(&source, provider_id)
+                    .await
+                    .map(|_| ()),
+            };
+            if let Err(error) = result {
+                errors.push(format!("{}: {error:#}", source.label()));
+            }
+        }
+        anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+        Ok(())
+    }
+
     /// Resolve persisted references and migrate legacy plaintext values into
     /// the OS credential store when possible. Returns whether plaintext was
     /// observed and therefore requires an immediate database scrub.
@@ -566,6 +649,16 @@ impl CredentialStore {
         Self {
             file: Arc::new(MemoryCredentialBackend::default()),
             keyring: Arc::new(MemoryCredentialBackend::failing_delete()),
+            keyring_read_active: Arc::new(AtomicBool::new(false)),
+            keyring_read_timeout: KEYRING_READ_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn memory_with_keyring_disabled() -> Self {
+        Self {
+            file: Arc::new(MemoryCredentialBackend::default()),
+            keyring: Arc::new(DisabledCredentialBackend),
             keyring_read_active: Arc::new(AtomicBool::new(false)),
             keyring_read_timeout: KEYRING_READ_TIMEOUT,
         }
