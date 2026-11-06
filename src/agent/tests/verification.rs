@@ -307,7 +307,7 @@ async fn requested_check_is_not_inferred_for_different_workdir_or_new_task() {
     );
     assert_eq!(
         agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
-        None
+        Some(VerificationKind::Test)
     );
     agent.begin_inferred_completion_task("Fix the feature and run sh check_task.sh and cargo test");
     agent.begin_requested_shell_checks(
@@ -316,7 +316,7 @@ async fn requested_check_is_not_inferred_for_different_workdir_or_new_task() {
     );
     assert_eq!(
         agent.verification_kind_for_call("sh check_task.sh", r#"{}"#),
-        None
+        Some(VerificationKind::Test)
     );
 }
 
@@ -382,6 +382,142 @@ async fn task_accepts_a_successful_directly_requested_check() {
         VerificationRunStatus::Passed,
         "records: {:#?}",
         agent.verification_runs()
+    );
+}
+
+#[tokio::test]
+async fn completion_requires_every_requested_script_and_separate_test_evidence() {
+    use crate::agent::completion::CompletionCheckEvidence;
+
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(&fixture.project_root, "source.rs", "source\n", "source");
+    commit_file(&fixture.project_root, "check_task.sh", "exit 0\n", "check");
+    let mut agent = verification_agent(&fixture);
+    let prompt = "Fix the feature, run cargo test and run sh check_task.sh.";
+    agent.begin_inferred_completion_task(prompt);
+    agent.begin_requested_shell_checks(prompt, None);
+
+    let test = test_tool_call("test", "bash", r#"{"command":"cargo test"}"#);
+    agent
+        .capture_pending_verification_bindings(std::slice::from_ref(&test))
+        .await;
+    agent
+        .record_verification_tool_result(
+            &test,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    agent.revalidate_verification_for_delivery(0).await;
+    assert_eq!(
+        agent.completion_verification_evidence(),
+        CompletionCheckEvidence::Missing
+    );
+
+    let script = test_tool_call("script", "bash", r#"{"command":"sh check_task.sh"}"#);
+    let mut script_only = verification_agent(&fixture);
+    script_only.begin_inferred_completion_task(prompt);
+    script_only.begin_requested_shell_checks(prompt, None);
+    script_only
+        .capture_pending_verification_bindings(std::slice::from_ref(&script))
+        .await;
+    script_only
+        .record_verification_tool_result(
+            &script,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    script_only.revalidate_verification_for_delivery(0).await;
+    assert_eq!(
+        script_only.completion_verification_evidence(),
+        CompletionCheckEvidence::Missing
+    );
+    agent
+        .capture_pending_verification_bindings(std::slice::from_ref(&script))
+        .await;
+    agent
+        .record_verification_tool_result(
+            &script,
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    agent.revalidate_verification_for_delivery(0).await;
+    assert_eq!(
+        agent.completion_verification_evidence(),
+        CompletionCheckEvidence::Satisfied
+    );
+
+    std::fs::write(fixture.project_root.join("source.rs"), "changed later\n").unwrap();
+    agent.revalidate_verification_for_delivery(0).await;
+    assert_eq!(
+        agent.completion_verification_evidence(),
+        CompletionCheckEvidence::Stale
+    );
+}
+
+#[tokio::test]
+async fn completion_rejects_missing_or_failed_requested_script() {
+    use crate::agent::completion::CompletionCheckEvidence;
+
+    let fixture = TestFixture::new();
+    init_repo(&fixture.project_root);
+    commit_file(&fixture.project_root, "check_one.sh", "exit 0\n", "one");
+    commit_file(&fixture.project_root, "check_two.sh", "exit 1\n", "two");
+    let mut agent = verification_agent(&fixture);
+    let prompt = "Implement the feature and run sh check_one.sh and run sh check_two.sh.";
+    agent.begin_inferred_completion_task(prompt);
+    agent.begin_requested_shell_checks(prompt, None);
+    for (id, command, exit_code) in [("one", "sh check_one.sh", 0), ("two", "sh check_two.sh", 1)] {
+        let call = test_tool_call(
+            id,
+            "bash",
+            &serde_json::json!({"command": command}).to_string(),
+        );
+        agent
+            .capture_pending_verification_bindings(std::slice::from_ref(&call))
+            .await;
+        let status = if exit_code == 0 {
+            crate::output::ToolExecutionStatus::Succeeded
+        } else {
+            crate::output::ToolExecutionStatus::Failed
+        };
+        agent
+            .record_verification_tool_result(&call, &command_result(exit_code), status)
+            .await;
+        agent.revalidate_verification_for_delivery(0).await;
+        let evidence = agent.completion_verification_evidence();
+        if exit_code == 0 {
+            assert_eq!(evidence, CompletionCheckEvidence::Missing);
+        } else {
+            assert!(
+                matches!(evidence, CompletionCheckEvidence::Blocked(_)),
+                "{evidence:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_requested_checks_explain_how_to_produce_evidence() {
+    let fixture = TestFixture::new();
+    let mut agent = verification_agent(&fixture);
+    let prompt = "Fix the feature, run cargo test and run sh check_task.sh.";
+    agent.begin_inferred_completion_task(prompt);
+    agent.begin_requested_shell_checks(prompt, None);
+    let verdict = agent.completion_guard_verdict("Done.").await;
+    let crate::agent::completion::CompletionGuardVerdict::Continue { note } = verdict else {
+        panic!("expected a continuation for missing checks");
+    };
+    assert!(
+        note.contains("separately or join them only with &&"),
+        "{note}"
+    );
+    assert!(
+        note.contains("preserve the requested arguments and permissions"),
+        "{note}"
     );
 }
 

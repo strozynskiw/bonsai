@@ -1,0 +1,24 @@
+{
+  "problem": "A task requested both cargo test and a shell check, but the completion guard accepted a run that only executed cargo test.",
+  "baseline": {
+    "report": "target/eval-multiple-check-before/1793980228746-mock-469/report.json",
+    "result": "The guard accepted completion even though the requested script's marker was absent."
+  },
+  "controls": {
+    "omitted_check": "target/eval-multiple-check-negative-final/1793982599252-mock-469/report.json",
+    "separate_checks": "target/eval-multiple-check-final-positive/1793982176722-mock-470/report.json",
+    "combined_checks": "target/eval-multiple-check-combined-final/1793982599252-mock-472/report.json",
+    "result": "The omitted-check run was unverified; separate checks and a safe && chain completed."
+  },
+  "deepseek": {
+    "provider": "deepseek",
+    "model": "deepseek/deepseek-flash",
+    "effort": "low",
+    "seed": 473,
+    "before_recovery_guidance": "target/eval-multiple-check-final-deepseek/1793982176722-live-473/report.json",
+    "after_recovery_guidance": "target/eval-multiple-check-deepseek-final/1793982599252-live-473/report.json",
+    "result": "The first sample used a semicolon chain and was unverified. In the second sample, the continuation guidance was delivered and the agent reran the checks with &&; the guard accepted the final result. These are small stochastic samples, not proof of a general reliability rate."
+  },
+  "limitations": "Tracking is conservative and covers directly recognized Cargo test/check/build requests and conventionally named shell checks. It does not prove arbitrary natural-language requirements, exact Cargo arguments, or all equivalent shell forms. Failed, skipped, or stale evidence does not satisfy a recognized requested check; user task supersession clears the old requirements.",
+  "terminal_control": "target/tui-verification/e2e/20261106T163419Z-4205: verifier isolation, unverified completion, goal conversation, and stream steering passed."
+}

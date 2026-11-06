@@ -887,9 +887,21 @@ impl Agent {
                 .map(CompletionGap::label)
                 .collect::<Vec<_>>()
                 .join("; ");
+            let check_guidance = if gaps.iter().any(|gap| {
+                matches!(
+                    gap,
+                    CompletionGap::VerificationMissing | CompletionGap::VerificationStale
+                )
+            }) && (!self.verification.requested_shell_checks.is_empty()
+                || !self.verification.requested_cargo_checks.is_empty())
+            {
+                " Each directly requested check needs a successful result on the delivered workspace. Run checks separately or join them only with && so failures cannot be masked; preserve the requested arguments and permissions."
+            } else {
+                ""
+            };
             return CompletionGuardVerdict::Continue {
                 note: format!(
-                    "Completion gate: structured work remains ({detail}). Continue now in this same run. Resolve the listed state with tools or explicit typed skip/block evidence, update every todo to completed/cancelled, and then give the final answer. This is the only automatic completion retry."
+                    "Completion gate: structured work remains ({detail}). Continue now in this same run. Resolve the listed state with tools or explicit typed skip/block evidence, update every todo to completed/cancelled, and then give the final answer.{check_guidance} This is the only automatic completion retry."
                 ),
             };
         }
@@ -973,20 +985,120 @@ impl Agent {
         }
     }
 
-    fn completion_verification_evidence(&self) -> CompletionCheckEvidence {
-        let required =
-            self.completion.contract.verification_required || self.completion.workspace_mutated;
+    pub(super) fn completion_verification_evidence(&self) -> CompletionCheckEvidence {
+        let requested = &self.verification.requested_shell_checks;
+        let requested_cargo = &self.verification.requested_cargo_checks;
+        let required = self.completion.contract.verification_required
+            || self.completion.workspace_mutated
+            || !requested.is_empty()
+            || !requested_cargo.is_empty();
         if !required {
             return CompletionCheckEvidence::NotRequired;
         }
-        let Some(run) = self
+        let Some(runs) = self
             .verification
             .verification_runs
             .get(self.completion.verification_baseline..)
-            .and_then(|runs| runs.last())
         else {
             return CompletionCheckEvidence::Missing;
         };
+        let root = self.project_root.canonicalize().ok();
+        for requested_check in requested {
+            if !root.as_ref().is_some_and(|root| {
+                root.join(&requested_check.1)
+                    .canonicalize()
+                    .is_ok_and(|script| script.starts_with(root) && script.is_file())
+            }) {
+                return CompletionCheckEvidence::Missing;
+            }
+            let run = runs.iter().rev().find(|run| {
+                run.checks.iter().any(|check| {
+                    super::verification::command_has_shell_check(&check.command, requested_check)
+                        && match check.binding.as_ref() {
+                            Some(crate::verification::VerificationBinding::Bound {
+                                identity,
+                                ..
+                            }) => {
+                                root.as_deref() == Some(std::path::Path::new(&identity.command_cwd))
+                            }
+                            _ => true,
+                        }
+                })
+            });
+            match run.map(Self::verification_run_evidence) {
+                Some(CompletionCheckEvidence::Satisfied) => {}
+                Some(CompletionCheckEvidence::Stale) => return CompletionCheckEvidence::Stale,
+                Some(CompletionCheckEvidence::Blocked(reason)) => {
+                    return CompletionCheckEvidence::Blocked(reason);
+                }
+                _ => return CompletionCheckEvidence::Missing,
+            }
+        }
+        for requested_check in requested_cargo {
+            let run = runs.iter().rev().find(|run| {
+                run.checks.iter().any(|check| {
+                    self.command_matches_requested_cargo(&check.command, requested_check)
+                        && match check.binding.as_ref() {
+                            Some(crate::verification::VerificationBinding::Bound {
+                                identity,
+                                ..
+                            }) => {
+                                root.as_deref() == Some(std::path::Path::new(&identity.command_cwd))
+                            }
+                            _ => true,
+                        }
+                })
+            });
+            match run.map(Self::verification_run_evidence) {
+                Some(CompletionCheckEvidence::Satisfied) => {}
+                Some(CompletionCheckEvidence::Stale) => return CompletionCheckEvidence::Stale,
+                Some(CompletionCheckEvidence::Blocked(reason)) => {
+                    return CompletionCheckEvidence::Blocked(reason);
+                }
+                _ => return CompletionCheckEvidence::Missing,
+            }
+        }
+        let run = if self.completion.contract.verification_required && !requested.is_empty() {
+            runs.iter().rev().find(|run| {
+                run.checks.iter().any(|check| {
+                    !requested.iter().any(|script| {
+                        super::verification::command_has_shell_check(&check.command, script)
+                    }) || requested_cargo
+                        .iter()
+                        .any(|cargo| self.command_matches_requested_cargo(&check.command, cargo))
+                })
+            })
+        } else {
+            runs.last()
+        };
+        let evidence = run.map_or(
+            CompletionCheckEvidence::Missing,
+            Self::verification_run_evidence,
+        );
+        if self.completion.contract.verification_required
+            && !requested.is_empty()
+            && matches!(evidence, CompletionCheckEvidence::Skipped(_))
+        {
+            CompletionCheckEvidence::Missing
+        } else {
+            evidence
+        }
+    }
+
+    fn command_matches_requested_cargo(&self, command: &str, requested: &str) -> bool {
+        super::verification::command_has_cargo_check(command, requested)
+            || self
+                .tool_registry
+                .get("bash")
+                .and_then(|tool| tool.verification_command_rewrite(command))
+                .is_some_and(|rewritten| {
+                    super::verification::command_has_cargo_check(&rewritten, requested)
+                })
+    }
+
+    fn verification_run_evidence(
+        run: &crate::verification::VerificationRunRecord,
+    ) -> CompletionCheckEvidence {
         use crate::verification::{VerificationBinding, VerificationRunStatus};
         let bindings_fresh = !run.checks.is_empty()
             && run.checks.iter().all(|check| {
@@ -1256,7 +1368,7 @@ fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(phrase))
 }
 
-fn supersedes_goal(prompt: &str) -> bool {
+pub(super) fn supersedes_goal(prompt: &str) -> bool {
     let normalized = normalized_words(prompt);
     let directive = action_directive(&normalized);
     if directive.starts_with("stop the previous task from ") {

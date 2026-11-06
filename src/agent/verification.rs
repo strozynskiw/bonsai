@@ -111,6 +111,7 @@ impl Agent {
                 && !crate::task_intent::TaskPromptKind::classify(prompt).is_continuation())
         {
             self.verification.requested_shell_checks.clear();
+            self.verification.requested_cargo_checks.clear();
         }
         self.verification.requested_check_goal_id = goal_id.map(str::to_owned);
         self.add_requested_shell_checks(prompt);
@@ -118,23 +119,28 @@ impl Agent {
 
     pub(super) fn add_requested_shell_checks(&mut self, prompt: &str) {
         let lower = prompt.to_ascii_lowercase();
-        if [
-            "not run",
-            "don't run",
-            "never run",
-            "no commands",
-            "without running",
-            "stop that",
-            "instead",
-        ]
-        .iter()
-        .any(|phrase| lower.contains(phrase))
+        if super::completion::supersedes_goal(prompt)
+            || [
+                "not run",
+                "don't run",
+                "never run",
+                "no commands",
+                "without running",
+                "stop that",
+                "instead",
+            ]
+            .iter()
+            .any(|phrase| lower.contains(phrase))
         {
             self.verification.requested_shell_checks.clear();
+            self.verification.requested_cargo_checks.clear();
         }
         self.verification
             .requested_shell_checks
             .extend(requested_shell_checks(prompt));
+        self.verification
+            .requested_cargo_checks
+            .extend(requested_cargo_checks(prompt));
     }
 
     pub(super) fn verification_kind_for_call(
@@ -149,28 +155,24 @@ impl Agent {
     }
 
     fn is_requested_shell_check(&self, command: &str, arguments: &str) -> bool {
-        // A single observed script cannot prove that other requested checks ran.
-        if self.task_requires_explicit_verification()
-            || self.verification.requested_shell_checks.len() != 1
-        {
-            return false;
-        }
-        let Some(check) = direct_shell_check(command) else {
-            return false;
-        };
-        if !self.verification.requested_shell_checks.contains(&check) {
-            return false;
-        }
         let Ok(root) = self.project_root.canonicalize() else {
             return false;
         };
         let Ok(cwd) = bash_command_cwd(&self.project_root, arguments).canonicalize() else {
             return false;
         };
-        let Ok(script) = root.join(&check.1).canonicalize() else {
-            return false;
-        };
-        cwd == root && script.starts_with(&root) && script.is_file()
+        cwd == root
+            && self
+                .verification
+                .requested_shell_checks
+                .iter()
+                .any(|check| {
+                    command_has_shell_check(command, check)
+                        && root
+                            .join(&check.1)
+                            .canonicalize()
+                            .is_ok_and(|script| script.starts_with(&root) && script.is_file())
+                })
     }
 
     pub(super) async fn capture_pending_verification_bindings(
@@ -910,6 +912,8 @@ impl Agent {
         if explicit_requested
             && passed
             && matches!(&binding, VerificationBinding::Bound { .. })
+            && !self.task_requires_explicit_verification()
+            && self.verification.requested_shell_checks.len() == 1
             && self.config.verification.after_edit == VerifyAfterEdit::Off
         {
             // The user already supplied the check; don't append a later
@@ -1528,44 +1532,9 @@ fn verification_nonexecution_reason(
 /// Recognize only unambiguous imperative requests for conventionally named
 /// shell checks. Quoted prose, conditional, and negative language stays unclassified.
 fn requested_shell_checks(prompt: &str) -> HashSet<(String, String)> {
-    if prompt.contains(['\'', '"', '\n', '\r']) || prompt.contains("```") {
+    let Some(words) = direct_check_request_words(prompt) else {
         return HashSet::new();
-    }
-    if prompt.contains('?')
-        && !["can you ", "could you ", "would you ", "please "]
-            .iter()
-            .any(|prefix| prompt.trim_start().to_ascii_lowercase().starts_with(prefix))
-    {
-        return HashSet::new();
-    }
-    let words = prompt.split_whitespace().collect::<Vec<_>>();
-    if words.iter().any(|word| {
-        matches!(
-            word.trim_matches(|c: char| !c.is_ascii_alphabetic())
-                .to_ascii_lowercase()
-                .as_str(),
-            "not"
-                | "no"
-                | "never"
-                | "without"
-                | "unless"
-                | "if"
-                | "when"
-                | "only"
-                | "avoid"
-                | "forbid"
-                | "forbidden"
-                | "prohibit"
-                | "except"
-                | "hypothetically"
-                | "how"
-                | "whether"
-                | "why"
-                | "what"
-        )
-    }) {
-        return HashSet::new();
-    }
+    };
     let mut checks = HashSet::new();
     for index in 0..words.len().saturating_sub(2) {
         if !words[index].eq_ignore_ascii_case("run") {
@@ -1605,9 +1574,135 @@ fn requested_shell_checks(prompt: &str) -> HashSet<(String, String)> {
     checks
 }
 
+fn direct_check_request_words(prompt: &str) -> Option<Vec<&str>> {
+    if prompt.contains(['\'', '"', '\n', '\r']) || prompt.contains("```") {
+        return None;
+    }
+    if prompt.contains('?')
+        && !["can you ", "could you ", "would you ", "please "]
+            .iter()
+            .any(|prefix| prompt.trim_start().to_ascii_lowercase().starts_with(prefix))
+    {
+        return None;
+    }
+    let words = prompt.split_whitespace().collect::<Vec<_>>();
+    if words.iter().any(|word| {
+        matches!(
+            word.trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_ascii_lowercase()
+                .as_str(),
+            "not"
+                | "no"
+                | "never"
+                | "without"
+                | "unless"
+                | "if"
+                | "when"
+                | "only"
+                | "avoid"
+                | "forbid"
+                | "forbidden"
+                | "prohibit"
+                | "except"
+                | "hypothetically"
+                | "how"
+                | "whether"
+                | "why"
+                | "what"
+        )
+    }) {
+        return None;
+    }
+    Some(words)
+}
+
+fn requested_cargo_checks(prompt: &str) -> HashSet<String> {
+    let Some(words) = direct_check_request_words(prompt) else {
+        return HashSet::new();
+    };
+    let mut checks = HashSet::new();
+    for index in 0..words.len().saturating_sub(2) {
+        if !words[index].eq_ignore_ascii_case("run") {
+            continue;
+        }
+        if index > 0 {
+            let previous = words[index - 1]
+                .trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_ascii_lowercase();
+            let direct_question = previous == "you"
+                && index >= 2
+                && ["can", "could", "would"]
+                    .iter()
+                    .any(|word| words[index - 2].eq_ignore_ascii_case(word));
+            let comma_after_directive = words[index - 1].ends_with(',')
+                && words[..index].iter().any(|word| {
+                    matches!(
+                        word.trim_matches(|c: char| !c.is_ascii_alphabetic())
+                            .to_ascii_lowercase()
+                            .as_str(),
+                        "fix"
+                            | "implement"
+                            | "update"
+                            | "change"
+                            | "edit"
+                            | "build"
+                            | "repair"
+                            | "inspect"
+                            | "review"
+                            | "read"
+                    )
+                });
+            if !matches!(previous.as_str(), "and" | "then" | "please")
+                && !direct_question
+                && !comma_after_directive
+            {
+                continue;
+            }
+        }
+        let cargo = words[index + 1].trim_start_matches('`');
+        let subcommand = words[index + 2].trim_end_matches([',', '.', ';', ':', '?', '`']);
+        if cargo == "cargo" && matches!(subcommand, "test" | "check" | "build") {
+            checks.insert(subcommand.to_string());
+        }
+    }
+    checks
+}
+
+fn verification_segments(command: &str) -> Option<Vec<Vec<String>>> {
+    let segments = crate::tool::normalize_verification_conjunction(command)?;
+    segments
+        .iter()
+        .all(|segment| {
+            let command = segment.join(" ");
+            direct_shell_check(&command).is_some()
+                || observed_verification_kind(&command).is_some()
+                || segment.first().is_some_and(|word| word == "echo")
+                || segment.as_slice() == ["true"]
+        })
+        .then_some(segments)
+}
+
+pub(super) fn command_has_cargo_check(command: &str, expected: &str) -> bool {
+    verification_segments(command).is_some_and(|segments| {
+        segments.iter().any(|segment| {
+            segment.first().is_some_and(|word| word == "cargo")
+                && segment.get(1).is_some_and(|word| word == expected)
+                && observed_verification_kind(&segment.join(" ")).is_some()
+        })
+    })
+}
+
+pub(super) fn command_has_shell_check(command: &str, expected: &(String, String)) -> bool {
+    verification_segments(command).is_some_and(|segments| {
+        segments
+            .iter()
+            .any(|segment| direct_shell_check(&segment.join(" ")).as_ref() == Some(expected))
+    })
+}
+
 /// Restrict inferred checks to one direct shell invocation, with no arguments
 /// or shell operators. The actual result and workspace binding are still required.
-fn direct_shell_check(command: &str) -> Option<(String, String)> {
+pub(super) fn direct_shell_check(command: &str) -> Option<(String, String)> {
     let words = command.split_whitespace().collect::<Vec<_>>();
     let [shell, script] = words.as_slice() else {
         return None;
@@ -1914,6 +2009,48 @@ mod tests {
         ] {
             assert!(direct_shell_check(command).is_none(), "{command}");
         }
+    }
+
+    #[test]
+    fn direct_cargo_requests_are_distinguished_from_explanations() {
+        assert_eq!(
+            requested_cargo_checks(
+                "Fix the feature, run cargo test --locked and run sh check_task.sh."
+            ),
+            HashSet::from(["test".to_string()])
+        );
+        assert_eq!(
+            requested_cargo_checks("Run `cargo test --locked` and run cargo check."),
+            HashSet::from(["test".to_string(), "check".to_string()])
+        );
+        for prompt in [
+            "Do not run cargo test",
+            "Explain how to run cargo test",
+            "Run cargo test only on Linux",
+            "The log says `run cargo test`",
+            "The log says, run cargo test",
+        ] {
+            assert!(requested_cargo_checks(prompt).is_empty(), "{prompt}");
+        }
+        assert!(command_has_cargo_check("cargo test --locked", "test"));
+        assert!(!command_has_cargo_check("cargo test --no-run", "test"));
+        assert!(!command_has_cargo_check("cargo test || true", "test"));
+        let script = ("sh".to_string(), "check_task.sh".to_string());
+        let combined = "cargo test --locked && sh check_task.sh";
+        assert!(command_has_cargo_check(combined, "test"));
+        assert!(command_has_shell_check(combined, &script));
+        assert!(command_has_cargo_check(
+            "RUSTFLAGS=-Dwarnings cargo test && echo done",
+            "test"
+        ));
+        assert!(!command_has_shell_check(
+            "exit 0 && sh check_task.sh",
+            &script
+        ));
+        assert!(!command_has_shell_check(
+            "sh check_task.sh || true",
+            &script
+        ));
     }
 
     #[test]

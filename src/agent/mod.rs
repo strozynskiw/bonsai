@@ -407,6 +407,8 @@ pub(crate) struct VerificationState {
     pub(crate) observed_verification_run_indices: HashMap<String, usize>,
     /// Direct, unambiguous human requests for shell check scripts in this task.
     pub(crate) requested_shell_checks: HashSet<(String, String)>,
+    /// Direct human requests for Cargo verification subcommands in this task.
+    pub(crate) requested_cargo_checks: HashSet<String>,
     pub(crate) requested_check_goal_id: Option<String>,
     pub(crate) background_verification_bindings: HashMap<String, BackgroundVerificationCapture>,
     pub(crate) after_edit_verification_pending: bool,

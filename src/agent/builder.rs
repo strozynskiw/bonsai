@@ -322,6 +322,7 @@ impl Agent {
                 suppressed_verification_calls: HashSet::new(),
                 observed_verification_run_indices: HashMap::new(),
                 requested_shell_checks: HashSet::new(),
+                requested_cargo_checks: HashSet::new(),
                 requested_check_goal_id: None,
                 background_verification_bindings: HashMap::new(),
                 after_edit_verification_pending: false,
