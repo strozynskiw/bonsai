@@ -134,9 +134,18 @@ async fn rewritten_cargo_test_produces_truthful_observed_verification() {
             .capture_pending_verification_bindings(std::slice::from_ref(&call))
             .await;
         let output = bash.execute(args).await.unwrap();
-        let ToolOutput::Command { exit_code, .. } = &output else {
+        let ToolOutput::Command {
+            exit_code,
+            rendered,
+            ..
+        } = &output
+        else {
             panic!("expected command output");
         };
+        assert!(
+            rendered.contains("[Executed command: cargo test --lib]"),
+            "{rendered}"
+        );
         assert_eq!(*exit_code == Some(0), succeeds);
         let status = if succeeds {
             crate::output::ToolExecutionStatus::Succeeded

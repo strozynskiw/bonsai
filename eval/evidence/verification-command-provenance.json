@@ -1,0 +1,23 @@
+{
+  "provider": "deepseek/deepseek-flash",
+  "effort": "low",
+  "coding_trials": [
+    {
+      "task": "full_extend_established_parser",
+      "report": "target/parser-intent-live/1793997555701-live-521/report.json",
+      "result": "3/3 passed"
+    },
+    {
+      "task": "full_diagnose_then_fix",
+      "report": "target/diagnose-fix-live/1793997591616-live-522/report.json",
+      "result": "3/3 passed"
+    }
+  ],
+  "observation": "One diagnose-and-fix run requested cargo test --locked 2>&1 | tail -30. Bonsai removed the filter before execution, preserving the test exit status, but its command summary showed only the original request.",
+  "change": "Command output now identifies a rewritten execution, and a verification cache hit identifies the current request and labels the retained result as an earlier execution.",
+  "candidate": {
+    "report": "target/verification-provenance-candidate/1793998205150-live-522/report.json",
+    "result": "3/3 diagnose-and-fix trials passed; targeted tests cover rewritten failing checks and cache provenance"
+  },
+  "limitations": "The live sample found a provenance issue, not an incorrectly passing test. Three trials per task do not establish a general success rate."
+}

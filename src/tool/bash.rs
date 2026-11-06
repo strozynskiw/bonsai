@@ -800,7 +800,8 @@ impl BashTool {
         {
             return Ok(ToolOutput::Command {
                 rendered: format!(
-                    "[verification cache hit: workspace fingerprint unchanged]\n\n{}",
+                    "[verification cache hit: workspace fingerprint unchanged]\nCurrent request: {}\nNo command ran for this request; the earlier execution result follows.\n\n{}",
+                    compact_summary_line(&requested_command),
                     cached.rendered
                 ),
                 stdout: cached.stdout,
@@ -973,6 +974,12 @@ impl BashTool {
             escape_auto_declined,
             &summary,
         );
+        if command != requested_command {
+            rendered = format!(
+                "[Executed command: {}]\nThe requested command was adjusted before execution.\n\n{rendered}",
+                compact_summary_line(&command)
+            );
+        }
 
         self.mark_read_files(&cwd, &analysis, &stdout).await;
         // Parallel-mode calls do not update the persistent shell `cwd` —
@@ -2545,6 +2552,11 @@ mod tests {
                 .unwrap(),
         );
         assert!(first.contains("No diagnostics found."), "{first}");
+        assert!(
+            first.contains("[Executed command: cargo check --offline"),
+            "{first}"
+        );
+        assert_summary_value(&first, "command", "cargo check --offline 2>&1 | head -30");
 
         let cached = rendered_command_output(
             tool.execute(json!({"command": "cargo check --offline | head -80"}))
@@ -2552,6 +2564,15 @@ mod tests {
                 .unwrap(),
         );
         assert!(cached.contains("verification cache hit"), "{cached}");
+        assert!(
+            cached.contains("Current request: cargo check --offline | head -80"),
+            "{cached}"
+        );
+        assert!(
+            cached.contains("No command ran for this request"),
+            "{cached}"
+        );
+        assert_summary_value(&cached, "command", "cargo check --offline 2>&1 | head -30");
 
         std::fs::write(&source, "pub fn value() -> u8 { missing }\n").unwrap();
         let invalidated = rendered_command_output(
