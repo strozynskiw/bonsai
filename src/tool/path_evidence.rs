@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::Metadata;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -311,7 +312,7 @@ fn nearest_existing_ancestor(path: &Path) -> Option<(PathBuf, Metadata)> {
 }
 
 fn git_fingerprint(root: &Path) -> GitFingerprint {
-    let output = Command::new("git")
+    let output = crate::util::git::inspection_command(root)
         .args([
             "rev-parse",
             "--show-toplevel",
@@ -319,7 +320,6 @@ fn git_fingerprint(root: &Path) -> GitFingerprint {
             "--verify",
             "HEAD",
         ])
-        .current_dir(root)
         .output();
     let Ok(output) = output else {
         return GitFingerprint {
@@ -351,7 +351,7 @@ fn git_fingerprint(root: &Path) -> GitFingerprint {
 }
 
 fn git_worktree_state_digest(root: &Path) -> Option<blake3::Hash> {
-    let output = Command::new("git")
+    let output = crate::util::git::inspection_command(root)
         .args([
             "status",
             "--porcelain=v1",
@@ -359,7 +359,6 @@ fn git_worktree_state_digest(root: &Path) -> Option<blake3::Hash> {
             "--untracked-files=all",
             "--ignore-submodules=none",
         ])
-        .current_dir(root)
         .output()
         .ok()?;
     output
@@ -555,6 +554,16 @@ mod tests {
         )
         .unwrap();
         assert!(cache.reused_missing("missing.md", false).is_none());
+    }
+
+    #[test]
+    fn missing_path_observation_does_not_run_fsmonitor() {
+        let project = TempDir::new().unwrap();
+        crate::util::git::setup_test_fsmonitor(project.path());
+        let cache = evidence(project.path());
+        miss(&cache, "missing.md");
+        assert!(cache.reused_missing("missing.md", false).is_some());
+        assert!(!project.path().join("fsmonitor-ran").exists());
     }
 
     #[test]

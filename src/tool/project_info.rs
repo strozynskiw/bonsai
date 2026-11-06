@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 use crate::context::{
     ProjectContextSnapshot, detect_project_ecosystems, isolated_project_context_snapshot,
@@ -385,10 +384,7 @@ fn known_commands(root: &Path, ecosystems: &[String]) -> Vec<KnownCommand> {
 }
 
 async fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("--no-optional-locks")
-        .arg("-C")
-        .arg(root)
+    let output = crate::util::git::async_inspection_command(root)
         .args(args)
         .output()
         .await
@@ -402,6 +398,15 @@ async fn git(root: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn project_info_git_summary_does_not_run_fsmonitor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::util::git::setup_test_fsmonitor(dir.path());
+        let info = GitInfo::collect(dir.path()).await;
+        assert!(info.repository);
+        assert!(!dir.path().join("fsmonitor-ran").exists());
+    }
 
     #[tokio::test]
     async fn isolated_orientation_and_delegated_runtime_exclude_parent_steering() {

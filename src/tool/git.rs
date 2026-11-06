@@ -68,21 +68,8 @@ fn default_limit() -> usize {
 async fn run_git(args: &[&str], cwd: &Path) -> Result<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(GIT_TIMEOUT_SECS),
-        tokio::process::Command::new("git")
-            // Inspection must not run repository-configured helpers or write
-            // optional index locks. In particular, status can invoke fsmonitor.
-            .args([
-                "--no-pager",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "log.showSignature=false",
-            ])
+        crate::util::git::async_inspection_command(cwd)
             .args(args)
-            .current_dir(cwd)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .kill_on_drop(true)
             .output(),
     )
     .await

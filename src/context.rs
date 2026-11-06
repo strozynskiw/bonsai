@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 use pulldown_cmark::{Event, Parser, Tag};
@@ -964,9 +965,7 @@ fn uncommitted_changes_line(dirty_paths: &[String], baseline: Option<&BTreeSet<S
 
 /// Run a git subcommand in `root`, returning trimmed stdout on success.
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = crate::util::git::inspection_command(root)
         .args(args)
         .output()
         .ok()?;
@@ -1042,6 +1041,13 @@ fn truncate_chars(text: &str, max_chars: usize, marker: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_context_git_status_does_not_run_fsmonitor() {
+        let project = tempfile::TempDir::new().unwrap();
+        crate::util::git::setup_test_fsmonitor(project.path());
+        assert!(super::git(project.path(), &["status", "--porcelain"]).is_some());
+        assert!(!project.path().join("fsmonitor-ran").exists());
+    }
     use super::*;
 
     #[test]
