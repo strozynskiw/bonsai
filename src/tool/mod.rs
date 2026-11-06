@@ -1136,6 +1136,11 @@ pub trait Tool: Send + Sync {
     fn delegation_is_read_only(&self, _args: &serde_json::Value) -> Option<bool> {
         None
     }
+    /// Freeze any mutable scheduling inputs for one tool-call batch. The
+    /// returned tool must be used both for classification and execution.
+    fn snapshot_for_batch(&self) -> Option<Arc<dyn Tool>> {
+        None
+    }
     /// The name a hook's `matcher.tool` glob matches against. Defaults
     /// to [`Self::name`] — the provider-wire name — which is also the
     /// human-readable name for every built-in tool. `McpTool` overrides this
@@ -1415,6 +1420,34 @@ impl ToolRegistry {
         Arc::new(projected)
     }
 
+    /// Freeze tools with mutable scheduling inputs for one dispatch. Preserve
+    /// the authorization ledger and order; return the original when no tool
+    /// needs a snapshot.
+    pub(crate) fn snapshot_for_batch<'a>(
+        self: &Arc<Self>,
+        tool_names: impl IntoIterator<Item = &'a str>,
+    ) -> Arc<Self> {
+        let replacements = tool_names
+            .into_iter()
+            .filter_map(|name| {
+                let tool = self.get(name)?;
+                let snapshot = tool.snapshot_for_batch()?;
+                Some((tool.name().to_string(), snapshot))
+            })
+            .collect::<HashMap<_, _>>();
+        if replacements.is_empty() {
+            return self.clone();
+        }
+        let mut projected = Self::new();
+        projected.set_authorization_ledger(self.authorization_ledger.clone());
+        for name in &self.order {
+            if let Some(tool) = replacements.get(name).or_else(|| self.tools.get(name)) {
+                projected.register(tool.clone());
+            }
+        }
+        Arc::new(projected)
+    }
+
     /// Build the error for a tool name we don't have. Lists the tools that *are*
     /// available — so a model that reached for one missing in the current mode
     /// (e.g. `bash` while planning, where the registry is read-only) can pick a
@@ -1544,6 +1577,13 @@ mod registry_tests {
         assert!(projected.get("set_session_title").is_none());
         assert!(projected.get("read").is_some());
         assert!(projected.get("bash").is_some());
+    }
+
+    #[test]
+    fn batch_snapshot_reuses_registry_when_selected_tools_need_no_snapshot() {
+        let registry = Arc::new(sample_registry());
+        let snapshot = registry.snapshot_for_batch(["read", "unknown"]);
+        assert!(Arc::ptr_eq(&registry, &snapshot));
     }
 
     #[test]

@@ -325,6 +325,176 @@ fn mcp_granted_delegations_serialize() {
 }
 
 #[test]
+fn terminal_grants_serialize_but_question_only_remains_read_only() {
+    let custom = custom_registry(&[
+        (
+            "shell",
+            "---\nname: shell\ndescription: d\ntools: [terminal]\n---\nprompt",
+        ),
+        (
+            "asker",
+            "---\nname: asker\ndescription: d\ntools: [question]\n---\nprompt",
+        ),
+    ]);
+    let runner = test_runner_with_full_registry(
+        sub_registry_with(&["read"]),
+        sub_registry_with(&["read", "terminal", "question"]),
+    );
+    let tool = AgentTool::new(runner, crate::resource::agent::shared_registry(custom));
+    assert_eq!(
+        tool.delegation_is_read_only(&serde_json::json!({ "agent": "shell" })),
+        Some(false)
+    );
+    assert_eq!(
+        tool.delegation_is_read_only(&serde_json::json!({ "agent": "asker" })),
+        Some(true)
+    );
+    assert_eq!(
+        tool.delegation_is_read_only(&serde_json::json!({ "agent": "explore" })),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn batch_snapshot_rejects_definition_changes_before_launch() {
+    let reader = custom_registry(&[(
+        "helper",
+        "---\nname: helper\ndescription: d\ntools: [read]\n---\nprompt",
+    )]);
+    let terminal = custom_registry(&[(
+        "helper",
+        "---\nname: helper\ndescription: d\ntools: [terminal]\n---\nprompt",
+    )]);
+    let shared = crate::resource::agent::shared_registry(reader);
+    let runner = test_runner_with_full_registry(
+        sub_registry_with(&["read"]),
+        sub_registry_with(&["read", "terminal"]),
+    );
+    let agent = Arc::new(AgentTool::new(runner, shared.clone()));
+    let mut registry = ToolRegistry::new();
+    registry.register(agent.clone());
+    let registry = Arc::new(registry);
+    let frozen = registry.snapshot_for_batch(["agent"]);
+    let alias_frozen = registry.snapshot_for_batch(["task"]);
+    let scheduled = frozen.get("agent").unwrap();
+    let alias_scheduled = alias_frozen.get("task").unwrap();
+    let args = serde_json::json!({"agent":"helper", "prompt":"inspect"});
+    assert_eq!(scheduled.delegation_is_read_only(&args), Some(true));
+    assert_eq!(alias_scheduled.delegation_is_read_only(&args), Some(true));
+
+    crate::resource::agent::replace_for_tests(&shared, terminal);
+    assert_eq!(
+        scheduled.delegation_is_read_only(&args),
+        Some(true),
+        "classification stays pinned"
+    );
+    assert_eq!(
+        agent.delegation_is_read_only(&args),
+        Some(false),
+        "a fresh plan sees the new grant"
+    );
+    let error = scheduled
+        .execute(args.clone())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("definitions changed"), "{error}");
+    let error = alias_scheduled.execute(args).await.unwrap_err().to_string();
+    assert!(error.contains("definitions changed"), "{error}");
+    assert!(
+        agent.runner.subagents().list().is_empty(),
+        "stale plan must not launch a child"
+    );
+}
+
+#[tokio::test]
+async fn unrelated_definition_reload_does_not_reject_a_pinned_child() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agents = dir.path().join(".bonsai/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("helper.md"),
+        "---\nname: helper\ndescription: d\ntools: [read]\n---\nprompt",
+    )
+    .unwrap();
+    std::fs::write(
+        agents.join("other.md"),
+        "---\nname: other\ndescription: old\n---\nprompt",
+    )
+    .unwrap();
+    let load = || {
+        Arc::new(AgentRegistry::load_from(
+            dir.path(),
+            &dir.path().join("home"),
+        ))
+    };
+    let shared = crate::resource::agent::shared_registry(load());
+    let agent = Arc::new(AgentTool::new(
+        test_runner(sub_registry_with(&["read"])),
+        shared.clone(),
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(agent);
+    let frozen = Arc::new(registry).snapshot_for_batch(["agent"]);
+    std::fs::write(
+        agents.join("other.md"),
+        "---\nname: other\ndescription: new\n---\nprompt",
+    )
+    .unwrap();
+    crate::resource::agent::replace_for_tests(&shared, load());
+    let result = frozen
+        .get("agent")
+        .unwrap()
+        .execute(serde_json::json!({"agent":"helper","prompt":"inspect"}))
+        .await
+        .unwrap();
+    assert!(matches!(result, ToolOutput::TextWithUsage { .. }));
+}
+
+#[tokio::test]
+async fn terminal_only_delegation_reports_unscoped_workspace_effect() {
+    let custom = custom_registry(&[(
+        "shell",
+        "---\nname: shell\ndescription: d\ntools: [terminal]\n---\nprompt",
+    )]);
+    let tool = agent_tool_with(sub_registry_with(&["read", "terminal"]), custom);
+    let output = tool
+        .execute(serde_json::json!({"agent":"shell", "prompt":"inspect the terminal"}))
+        .await
+        .unwrap();
+    let ToolOutput::TextWithUsage {
+        workspace_effect, ..
+    } = output
+    else {
+        panic!("expected foreground delegation result");
+    };
+    assert_eq!(workspace_effect, crate::tool::ToolWorkspaceEffect::Unscoped);
+}
+
+#[tokio::test]
+async fn question_only_delegation_does_not_claim_workspace_mutation() {
+    let custom = custom_registry(&[(
+        "asker",
+        "---\nname: asker\ndescription: d\ntools: [question]\n---\nprompt",
+    )]);
+    let tool = agent_tool_with(sub_registry_with(&["read", "question"]), custom);
+    let output = tool
+        .execute(serde_json::json!({"agent":"asker", "prompt":"ask for clarification"}))
+        .await
+        .unwrap();
+    let ToolOutput::TextWithUsage {
+        workspace_effect, ..
+    } = output
+    else {
+        panic!("expected foreground delegation result");
+    };
+    assert_eq!(
+        workspace_effect,
+        crate::tool::ToolWorkspaceEffect::NoMutation
+    );
+}
+
+#[test]
 fn custom_agent_unknown_tool_is_skipped_not_fatal() {
     // An unrecognized tool name is dropped (surfaced separately by `/agents`),
     // not a hard error that would sink the whole delegation.

@@ -922,17 +922,28 @@ impl Agent {
         cancellation_token: CancellationToken,
         mut queued_messages: QueuedMessageState<'_, '_>,
     ) -> Result<ToolExecutionOutcome> {
+        // The batcher and executor must see the same capabilities even when
+        // a custom-agent definition changes while a turn is in flight.
+        let frozen_registry =
+            tool_registry.snapshot_for_batch(tool_calls.iter().map(|call| call.name.as_str()));
+        let tool_registry = &frozen_registry;
         let mut interrupted_mid_tools = false;
         let mut outcome = ToolExecutionOutcome::default();
-        let serialized_tool_names = self.hooks.serialized_tool_names();
-        let serialized_tool_names = if self.budget.max_session_billed_tokens.is_some() {
-            let mut names = serialized_tool_names;
-            names.insert("agent".to_string());
-            names.insert("task".to_string());
-            names
-        } else {
-            serialized_tool_names
-        };
+        let mut serialized_tool_names = tool_calls
+            .iter()
+            .filter(|call| {
+                let tool = tool_registry.get(&call.name);
+                let name = tool
+                    .as_ref()
+                    .map_or(call.name.as_str(), |t| t.hook_match_name());
+                self.hooks.tool_may_rewrite(name)
+            })
+            .map(|call| call.name.clone())
+            .collect::<HashSet<_>>();
+        if self.budget.max_session_billed_tokens.is_some() {
+            serialized_tool_names.insert("agent".to_string());
+            serialized_tool_names.insert("task".to_string());
+        }
         let planned_batches = tool_call_batches_with_yolo(
             tool_calls,
             tool_registry,
@@ -3987,6 +3998,71 @@ mod tests {
 
     struct BackgroundModeProbeTool;
 
+    #[tokio::test]
+    async fn parallel_batch_rejects_arguments_rewritten_after_planning() {
+        use crate::config::{
+            Config, ConfigSource, FailureBehavior, HookAction, HookDef, HookMatcher,
+        };
+        use crate::hooks::{HookEngine, HookEvent};
+
+        let config = Config {
+            hooks: vec![(
+                HookDef {
+                    name: "rewrite".to_string(),
+                    event: HookEvent::PreToolUse,
+                    matcher: HookMatcher::default(),
+                    action: HookAction::Shell {
+                        command: r#"echo '{"decision":"modify","tool_args":{"changed":true}}'"#
+                            .to_string(),
+                    },
+                    timeout_secs: 5,
+                    blocking: true,
+                    on_failure: FailureBehavior::Warn,
+                    capabilities: Vec::new(),
+                    enabled: true,
+                },
+                ConfigSource::Global,
+            )],
+            ..Config::default()
+        };
+        let hooks = Arc::new(
+            HookEngine::build(
+                &config,
+                std::env::temp_dir(),
+                crate::permissions::PermissionManager::memory_only_hooks(),
+                Arc::new(crate::interaction::InteractionService::noninteractive()),
+                Arc::new(crate::extension::status::ExtensionRegistry::new()),
+                None,
+            )
+            .await,
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ReadyTool));
+        let (_, output, status) = Agent::execute_single_tool_call(
+            None,
+            call("ready", "{}"),
+            Arc::new(registry),
+            ToolRejections::default(),
+            Arc::new(crate::output::StdoutSink),
+            CancellationToken::new(),
+            hooks,
+            None,
+            None,
+            None,
+            Arc::new(crate::timing::TimingLedger::system(
+                crate::timing::TimingPolicy::ActiveCompute,
+            )),
+            true,
+        )
+        .await;
+        assert_eq!(status, crate::output::ToolExecutionStatus::Skipped);
+        assert!(
+            output
+                .rendered_summary()
+                .contains("retry so the batch can be replanned")
+        );
+    }
+
     #[async_trait]
     impl crate::tool::Tool for ReadyTool {
         fn name(&self) -> &str {
@@ -4115,6 +4191,7 @@ mod tests {
             std::sync::Arc::new(crate::timing::TimingLedger::system(
                 crate::timing::TimingPolicy::ActiveCompute,
             )),
+            false,
         )
         .await;
 
@@ -4149,6 +4226,7 @@ mod tests {
             std::sync::Arc::new(crate::timing::TimingLedger::system(
                 crate::timing::TimingPolicy::ActiveCompute,
             )),
+            false,
         )
         .await;
 
@@ -5652,6 +5730,7 @@ mod tests {
                 std::sync::Arc::new(crate::timing::TimingLedger::system(
                     crate::timing::TimingPolicy::ActiveCompute,
                 )),
+                false,
             )
             .await;
             results.push((output, status));

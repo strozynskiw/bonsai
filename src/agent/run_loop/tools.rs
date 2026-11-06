@@ -38,6 +38,7 @@ impl Agent {
         // `cloned()` is required, not redundant: each `tool_call` is moved into
         // its async closure while `batch` itself is still moved into
         // `interrupted_tool_results(batch)` on the cancel arm below.
+        let batch_is_parallel = batch.len() > 1;
         let pending = join_all(batch.iter().cloned().map(|tool_call| {
             let authorization_context =
                 crate::tool::AuthorizationCallContext::new(tool_call.id.clone(), sink.clone());
@@ -55,6 +56,7 @@ impl Agent {
                     max_tool_duration,
                     remaining_billed_tokens,
                     timing.clone(),
+                    batch_is_parallel,
                 ),
             )
         }));
@@ -85,6 +87,7 @@ impl Agent {
         max_tool_duration: Option<Duration>,
         remaining_billed_tokens: Option<u64>,
         timing: crate::timing::SharedTimingLedger,
+        batch_is_parallel: bool,
     ) -> (ToolCall, ToolOutput, crate::output::ToolExecutionStatus) {
         sink.thinking(&format!("Running {}", tool_call.name));
 
@@ -194,6 +197,12 @@ impl Agent {
                     );
                 }
                 crate::hooks::HookDecision::ModifyArgs { args: rewritten } => {
+                    if batch_is_parallel && rewritten != args {
+                        break 'call (
+                            ToolOutput::Text("Tool arguments changed after parallel scheduling; retry so the batch can be replanned under the current hook.".to_string()),
+                            crate::output::ToolExecutionStatus::Skipped,
+                        );
+                    }
                     sink.status(&format!(
                         "[hooks] rewrote arguments for '{}'",
                         tool_call.name

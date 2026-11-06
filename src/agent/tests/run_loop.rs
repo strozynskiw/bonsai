@@ -3411,6 +3411,134 @@ async fn steering_arriving_during_tool_preflight_skips_batch() {
 }
 
 #[tokio::test]
+async fn changed_agent_grant_is_rejected_after_batch_planning() {
+    struct SwapAgentRegistryTool {
+        handle: crate::resource::agent::SharedAgentRegistry,
+        replacement: Arc<crate::resource::agent::AgentRegistry>,
+    }
+    #[async_trait::async_trait]
+    impl Tool for SwapAgentRegistryTool {
+        fn name(&self) -> &str {
+            "swap_agent_registry"
+        }
+        fn description(&self) -> &str {
+            "simulate a concurrent agent editor"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {
+            crate::tool::ToolEffectPolicy::LocalState
+        }
+        fn parallel_policy(&self) -> crate::tool::ParallelPolicy {
+            crate::tool::ParallelPolicy::Serialized
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+            crate::resource::agent::replace_for_tests(&self.handle, self.replacement.clone());
+            Ok(ToolOutput::Text("agent definition changed".into()))
+        }
+    }
+
+    let fixture = TestFixture::new();
+    let agents = fixture.project_root.join(".bonsai/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let path = agents.join("helper.md");
+    std::fs::write(
+        &path,
+        "---\nname: helper\ndescription: d\ntools: [read]\n---\nprompt",
+    )
+    .unwrap();
+    let load = || {
+        Arc::new(crate::resource::agent::AgentRegistry::load_from(
+            &fixture.project_root,
+            &fixture.project_root.join("home"),
+        ))
+    };
+    let handle = crate::resource::agent::shared_registry(load());
+    std::fs::write(
+        &path,
+        "---\nname: helper\ndescription: d\ntools: [terminal]\n---\nprompt",
+    )
+    .unwrap();
+    let replacement = load();
+    let children = Arc::new(crate::subagent::SubagentRegistry::new());
+    let factory: crate::tool::SubagentProviderFactory = Arc::new(|_, _| {
+        Box::pin(async {
+            crate::tool::SubagentProviderConfig::new(
+                MockProvider::empty(),
+                8_000,
+                PromptEstimator::default(),
+                "test-model".into(),
+            )
+        })
+    });
+    let mut full = ToolRegistry::new();
+    full.register(Arc::new(MockTool::new("read", "read")));
+    full.register(Arc::new(MockTool::new("terminal", "terminal")));
+    let runner = crate::tool::SubagentRunner::new(
+        factory,
+        empty_registry(),
+        Arc::new(full),
+        fixture.read_tracker.clone(),
+        Arc::new(crate::tool::ProjectInfoRuntime::new(None)),
+        children.clone(),
+        fixture.project_root.clone(),
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SwapAgentRegistryTool {
+        handle: handle.clone(),
+        replacement,
+    }));
+    registry.register(Arc::new(crate::tool::AgentTool::new(runner, handle)));
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![
+                test_tool_call("swap", "swap_agent_registry", "{}"),
+                test_tool_call(
+                    "delegate",
+                    "agent",
+                    r#"{"agent":"helper","prompt":"inspect"}"#,
+                ),
+            ],
+            terminal: crate::provider::StreamTerminal::Completed(
+                crate::provider::FinishReason::ToolCalls,
+            ),
+            ..StreamedResponse::default()
+        }),
+        finished_response("done"),
+    ]);
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    let sink = Arc::new(CaptureSink::default());
+    agent
+        .run(
+            "Inspect the project",
+            CancellationToken::new(),
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        children.list().is_empty(),
+        "stale grant must not launch a child"
+    );
+    assert!(
+        sink.tool_finishes()
+            .iter()
+            .any(|(id, result, status)| id == "delegate"
+                && result.contains("definitions changed")
+                && !status.is_success())
+    );
+}
+
+#[tokio::test]
 async fn queued_steering_skips_not_yet_started_batches() {
     let fixture = TestFixture::new();
     let (sender, receiver) = mpsc::unbounded_channel();

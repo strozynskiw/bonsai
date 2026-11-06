@@ -257,6 +257,16 @@ struct DummyTool(&'static str);
 
 #[async_trait]
 impl Tool for DummyTool {
+    fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {
+        match self.0 {
+            "write" | "edit" | "bash" | "rename_symbol" | "future_effect" => {
+                crate::tool::ToolEffectPolicy::SelfAuthorized
+            }
+            "future_delegate" => crate::tool::ToolEffectPolicy::Delegated,
+            "terminal" | "question" => crate::tool::ToolEffectPolicy::LocalState,
+            _ => crate::tool::ToolEffectPolicy::ReadOnly,
+        }
+    }
     fn name(&self) -> &str {
         self.0
     }

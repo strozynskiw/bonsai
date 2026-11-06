@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn delegated_capabilities_default_to_serializing_external_and_internal_effects() {
+    let read_only = sub_registry_with(&["read"]);
+    assert!(!registry_grants_mutation(&read_only));
+    assert!(registry_allows_background(&read_only));
+    for name in [
+        "terminal",
+        "future_effect",
+        "future_delegate",
+        "mcp__server__tool",
+    ] {
+        let registry = sub_registry_with(&[name]);
+        assert!(registry_grants_mutation(&registry), "{name}");
+        assert!(!registry_allows_background(&registry), "{name}");
+    }
+    let question = sub_registry_with(&["question"]);
+    assert!(!registry_grants_mutation(&question));
+    assert!(registry_allows_background(&question));
+}
+
+#[test]
 fn grantable_agent_tool_resolves_builtins_and_mcp_names_only() {
     let registry = sub_registry_with(&["read", "set_session_title", "mcp__github__create_issue"]);
 

@@ -17,7 +17,6 @@ mod trust;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -714,21 +713,17 @@ impl HookEngine {
         }
     }
 
-    /// Literal tool names matched by any blocking `PreToolUse` hook, for the
-    /// batcher's serialization override (`src/agent/batching.rs`). Only
-    /// literal matchers contribute: a glob like `mcp.github.*` can't be
-    /// expanded into concrete names without the tool registry, which the
-    /// engine doesn't hold — a hook that needs to serialize a whole namespace
-    /// of tools should list them individually today.
-    pub(crate) fn serialized_tool_names(&self) -> HashSet<String> {
+    /// Whether a blocking pre-tool hook could rewrite this tool's arguments.
+    pub(crate) fn tool_may_rewrite(&self, name: &str) -> bool {
         self.hooks
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|hook| hook.def.event == HookEvent::PreToolUse && hook.def.blocking)
-            .filter_map(|hook| hook.def.matcher.tool.clone())
-            .filter(|pattern| !pattern.contains(['*', '?', '[']))
-            .collect()
+            .any(|hook| {
+                hook.def.event == HookEvent::PreToolUse
+                    && hook.def.blocking
+                    && hook.tool_matcher.as_ref().is_none_or(|p| p.matches(name))
+            })
     }
 
     /// Names of hooks that loaded successfully (compiled matchers, passed

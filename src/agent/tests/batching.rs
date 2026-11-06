@@ -129,6 +129,65 @@ fn write_capable_agent_serializes_but_read_only_peers_still_batch() {
     );
 }
 
+#[tokio::test]
+async fn terminal_granted_agent_serializes_with_read_only_agents() {
+    let fixture = TestFixture::new();
+    let agents = fixture.project_root.join(".bonsai/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("terminal-helper.md"),
+        "---\nname: terminal-helper\ndescription: controls terminals\ntools: [terminal]\n---\nprompt",
+    ).unwrap();
+    let custom = crate::resource::agent::AgentRegistry::load_from(
+        &fixture.project_root,
+        &fixture.project_root.join("home"),
+    );
+    let mut full = ToolRegistry::new();
+    full.register(Arc::new(PolicyStub {
+        name: "terminal",
+        policy: crate::tool::ParallelPolicy::Serialized,
+        read_only_agents: None,
+    }));
+    let factory: crate::tool::SubagentProviderFactory = Arc::new(|_, _| {
+        Box::pin(async {
+            crate::tool::SubagentProviderConfig::new(
+                MockProvider::empty(),
+                8_000,
+                PromptEstimator::default(),
+                "test-model".into(),
+            )
+        })
+    });
+    let runner = crate::tool::SubagentRunner::new(
+        factory,
+        empty_registry(),
+        Arc::new(full),
+        fixture.read_tracker.clone(),
+        Arc::new(crate::tool::ProjectInfoRuntime::new(None)),
+        Arc::new(crate::subagent::SubagentRegistry::new()),
+        fixture.project_root.clone(),
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(crate::tool::AgentTool::new(
+        runner,
+        crate::resource::agent::shared_registry(Arc::new(custom)),
+    )));
+    let calls = vec![
+        test_tool_call("first", "agent", r#"{"agent":"explore","prompt":"a"}"#),
+        test_tool_call(
+            "terminal",
+            "agent",
+            r#"{"agent":"terminal-helper","prompt":"b"}"#,
+        ),
+        test_tool_call("last", "agent", r#"{"agent":"explore","prompt":"c"}"#),
+    ];
+    let batches = super::tool_call_batches(&calls, &registry, &fixture.project_root);
+    assert_eq!(
+        batch_ids(&batches),
+        vec![vec!["first"], vec!["terminal"], vec!["last"]]
+    );
+}
+
 #[test]
 fn read_only_agent_serializes_against_a_concurrent_write() {
     // A read-only delegation is a whole-tree read, so it must not run alongside

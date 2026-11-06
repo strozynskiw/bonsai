@@ -541,6 +541,25 @@ async fn stdout_json_modifies_tool_args() {
 }
 
 #[tokio::test]
+async fn blocking_pre_tool_matchers_identify_tools_requiring_serialization() {
+    let mut glob = hook_def("glob", HookEvent::PreToolUse, shell("true"));
+    glob.matcher.tool = Some("mcp.github.*".to_string());
+    let mut nonblocking = hook_def("nonblocking", HookEvent::PreToolUse, shell("true"));
+    nonblocking.blocking = false;
+    let engine = build_engine(&config_with(vec![
+        (glob, ConfigSource::Global),
+        (nonblocking, ConfigSource::Global),
+    ]))
+    .await;
+    assert!(engine.tool_may_rewrite("mcp.github.read"));
+    assert!(!engine.tool_may_rewrite("agent"));
+
+    let wildcard = hook_def("all", HookEvent::PreToolUse, shell("true"));
+    let engine = build_engine(&config_with(vec![(wildcard, ConfigSource::Global)])).await;
+    assert!(engine.tool_may_rewrite("agent"));
+}
+
+#[tokio::test]
 async fn stdout_json_add_context_on_post_tool_use() {
     let config = config_with(vec![(
         hook_def(
@@ -898,7 +917,7 @@ async fn tool_name_glob_matcher_filters_by_tool() {
 
     // The hook that ran left an Enabled status; only assert on decisions
     // here — both are Continue since the action itself is a no-op, so the
-    // matcher's effect is verified in `serialized_tool_names` and via the
+    // matcher's effect is verified in `tool_may_rewrite` and via the
     // blocking test below instead.
     assert!(matches!(matching.decision, HookDecision::Continue));
     assert!(matches!(not_matching.decision, HookDecision::Continue));
@@ -1264,6 +1283,6 @@ async fn disabled_engine_never_fires() {
         .await;
     assert!(matches!(outcome.decision, HookDecision::Continue));
     assert!(outcome.warnings.is_empty());
-    assert!(engine.serialized_tool_names().is_empty());
+    assert!(!engine.tool_may_rewrite("agent"));
     assert!(engine.hook_names().is_empty());
 }

@@ -198,6 +198,14 @@ pub(crate) fn snapshot(handle: &SharedAgentRegistry) -> Arc<AgentRegistry> {
         .clone()
 }
 
+#[cfg(test)]
+pub(crate) fn replace_for_tests(handle: &SharedAgentRegistry, registry: Arc<AgentRegistry>) {
+    *handle
+        .registry
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner()) = registry;
+}
+
 /// Reload the registry from disk and swap it into the shared handle in place.
 pub(crate) fn reload_into(handle: &SharedAgentRegistry, project_root: &Path) {
     let reloaded = if handle.include_project_resources {

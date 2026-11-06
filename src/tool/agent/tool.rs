@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::catalog::{
     SubagentRunLimits, builtin_agent, builtin_settings_model_chain, custom_subagent_limits,
-    frontmatter_model_chain, grantable_agent_tool, merged_agent_entries, registry_grants_mutation,
+    frontmatter_model_chain, grantable_agent_tool, merged_agent_entries,
+    registry_allows_background, registry_grants_mutation,
 };
 use super::runner::{SubagentRunSpec, SubagentRunner};
 use crate::agent::ExecutionLaneKind;
@@ -23,6 +24,7 @@ pub struct AgentTool {
     /// every other name is read from this hot-swappable registry so the TUI can
     /// add or remove definitions mid-session.
     custom_agents: crate::resource::agent::SharedAgentRegistry,
+    batch_agents: Option<Arc<crate::resource::agent::AgentRegistry>>,
     builtin_settings: crate::subagent::SharedBuiltinSubagentSettings,
 }
 
@@ -63,6 +65,7 @@ impl AgentTool {
             name,
             runner,
             custom_agents,
+            batch_agents: None,
             builtin_settings,
         }
     }
@@ -82,6 +85,16 @@ impl AgentTool {
             prompt,
             run_in_background,
         } = parse_args(self.name, args)?;
+        if let Some(batch_agents) = &self.batch_agents {
+            let current = crate::resource::agent::snapshot(&self.custom_agents);
+            if !Arc::ptr_eq(batch_agents, &current)
+                && batch_agents.get(&agent) != current.get(&agent)
+            {
+                anyhow::bail!(
+                    "Subagent definitions changed after this batch was planned. Retry the delegation using the current definitions."
+                );
+            }
+        }
         // Resolve and build the scoped registry before delegating, so a bad name
         // or tool list fails fast.
         let resolved = self.resolve(&agent)?;
@@ -107,7 +120,7 @@ impl AgentTool {
                     "run_in_background is unavailable while a cumulative billed-token hard limit is configured; run the subagent synchronously so its allowance can be enforced and absorbed before more work starts."
                 );
             }
-            if grants_mutation {
+            if !registry_allows_background(&resolved.registry) {
                 anyhow::bail!(
                     "run_in_background is only supported for read-only subagents; run mutating subagents synchronously so permission prompts and edits stay in the active turn."
                 );
@@ -160,7 +173,10 @@ impl AgentTool {
     /// settings, but cannot replace the compiled prompt, tools, or run limits.
     pub(super) fn resolve(&self, name: &str) -> Result<ResolvedAgent> {
         // Snapshot the live registry (the composer may swap it mid-session).
-        let custom_agents = crate::resource::agent::snapshot(&self.custom_agents);
+        let custom_agents = self
+            .batch_agents
+            .clone()
+            .unwrap_or_else(|| crate::resource::agent::snapshot(&self.custom_agents));
         if let Some(spec) = builtin_agent(name) {
             let settings = self.builtin_settings.get(spec.id);
             // Pre-DB releases stored built-in model/enable edits in a same-name
@@ -377,6 +393,15 @@ struct AgentToolArgs {
 
 #[async_trait]
 impl Tool for AgentTool {
+    fn snapshot_for_batch(&self) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self {
+            name: self.name,
+            runner: self.runner.clone(),
+            custom_agents: self.custom_agents.clone(),
+            batch_agents: Some(crate::resource::agent::snapshot(&self.custom_agents)),
+            builtin_settings: self.builtin_settings.clone(),
+        }))
+    }
     fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {
         crate::tool::ToolEffectPolicy::Delegated
     }
@@ -435,7 +460,7 @@ All paths must stay in-project."
         let name = args.get("agent").and_then(|value| value.as_str())?;
         // An unresolvable target yields `None`, so the batcher serializes it.
         let resolved = self.resolve(name).ok()?;
-        Some(!registry_grants_mutation(&resolved.registry))
+        Some(registry_allows_background(&resolved.registry))
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {

@@ -334,15 +334,35 @@ fn render_agents_index_section(entries: &[(String, String)], hidden_custom: usiz
 /// workspace, shell, or remote state. A delegation to such an agent must
 /// serialize; a read-only one (nothing here) can fan out in parallel.
 pub(super) fn registry_grants_mutation(registry: &ToolRegistry) -> bool {
-    const MUTATING: [&str; 5] = ["write", "edit", "apply_patch", "bash", "rename_symbol"];
-    if MUTATING.iter().any(|name| registry.get(name).is_some()) {
-        return true;
-    }
-    // An MCP tool's effects belong to the server; the declared capabilities are
-    // the user's best guess, not an enforced contract. Default to serialized
-    // for any extension-namespace grant, like every other unknown external tool,
-    // until a narrower per-capability policy is proven.
-    registry.names().any(crate::extension::is_mcp_wire_name)
+    registry.names().any(|name| {
+        // Terminal control can send commands to an existing shell even without
+        // a Bash grant. Named guards also protect against a misdeclared tool.
+        matches!(
+            name,
+            "write" | "edit" | "apply_patch" | "bash" | "terminal" | "rename_symbol"
+        ) || crate::extension::is_mcp_wire_name(name)
+            || registry.get(name).is_none_or(|tool| {
+                matches!(
+                    tool.effect_policy(),
+                    crate::tool::ToolEffectPolicy::SelfAuthorized
+                        | crate::tool::ToolEffectPolicy::Delegated
+                )
+            })
+    })
+}
+
+/// A detached or parallel child must not be able to change external state.
+/// The question tool is a known non-mutating interaction and keeps its
+/// existing support for asking the user from a background child.
+pub(super) fn registry_allows_background(registry: &ToolRegistry) -> bool {
+    !registry_grants_mutation(registry)
+        && registry.names().all(|name| {
+            registry.get(name).is_some_and(|tool| {
+                tool.effect_policy() == crate::tool::ToolEffectPolicy::ReadOnly
+                    || (name == "question"
+                        && tool.effect_policy() == crate::tool::ToolEffectPolicy::LocalState)
+            })
+        })
 }
 
 /// The model/effort a custom agent declares in frontmatter. `model:` is a

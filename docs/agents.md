@@ -61,6 +61,8 @@ Mechanics:
   delegation (`sub-N` in `/tasks`); the parent parks and wakes on
   completion in the TUI and server. Headless runs the delegation synchronously
   when background mode is requested and reports that fallback.
+  Agents granted terminal control or external-effect tools
+  run in the foreground and serialize against other work.
 - **Bounded** — built-ins use fixed compiled budgets; custom subagents
   default to 75 turns (cap 500 via `max_turns`) / 30 min. On exhaustion the
   subagent gets one tools-disabled "conclude now" turn, so even a timeout

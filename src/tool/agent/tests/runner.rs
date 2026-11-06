@@ -278,6 +278,68 @@ async fn mutating_agent_cannot_run_in_background() {
 }
 
 #[tokio::test]
+async fn terminal_agent_cannot_be_detached() {
+    let custom = custom_registry(&[(
+        "shell",
+        "---\nname: shell\ndescription: d\ntools: [terminal]\n---\nprompt",
+    )]);
+    let runner = test_runner_with_full_registry(
+        sub_registry_with(&["read"]),
+        sub_registry_with(&["read", "terminal", "question"]),
+    )
+    .with_background_wake();
+    let tool = AgentTool::new(runner, crate::resource::agent::shared_registry(custom));
+    let error = tool
+        .execute(serde_json::json!({"agent":"shell","prompt":"work","run_in_background":true}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("only supported for read-only subagents"),
+        "{error}"
+    );
+    assert!(tool.runner.subagents().list().is_empty());
+}
+
+#[tokio::test]
+async fn question_only_agent_can_still_run_in_background() {
+    let custom = custom_registry(&[(
+        "asker",
+        "---\nname: asker\ndescription: d\ntools: [question]\n---\nprompt",
+    )]);
+    let runner = test_runner_with_full_registry(
+        sub_registry_with(&["read"]),
+        sub_registry_with(&["read", "question"]),
+    )
+    .with_background_wake();
+    let tool = AgentTool::new(runner, crate::resource::agent::shared_registry(custom));
+    let output = tool
+        .execute(serde_json::json!({
+            "agent":"asker", "prompt":"ask for clarification", "run_in_background":true
+        }))
+        .await
+        .unwrap();
+    let ToolOutput::SubagentStarted { subtask_id, .. } = output else {
+        panic!("expected a background child");
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if tool
+                .runner
+                .subagents()
+                .snapshot(&subtask_id)
+                .is_some_and(|snapshot| snapshot.status.is_finished())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn dropping_subagent_run_cancels_provider_token() {
     let started = Arc::new(tokio::sync::Notify::new());
     let cancelled = Arc::new(tokio::sync::Notify::new());

@@ -55,7 +55,7 @@ pub(super) fn tool_call_batches_with_yolo(
     for tool_call in tool_calls {
         let accesses = if serialized_tool_names.contains(&tool_call.name) {
             // A blocking `PreToolUse` hook matched this tool name
-            // (`src/hooks/mod.rs::serialized_tool_names`): force it into the
+            // (`HookEngine::tool_may_rewrite`): force it into the
             // same serialized bucket as an unparseable/unknown call,
             // regardless of the tool's own declared parallel policy, so a
             // hook that vetoes/rewrites a call never races another call to
