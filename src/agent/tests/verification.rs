@@ -532,9 +532,13 @@ async fn requested_compile_only_check_is_build_evidence_not_a_test_pass() {
     let prompt = "Run cargo test --no-run and report the result; do not run the tests.";
     agent.begin_inferred_completion_task(prompt);
     agent.begin_requested_shell_checks(prompt, None);
-    let call = test_tool_call("compile", "bash", r#"{"command":"cargo test --no-run"}"#);
+    let call = test_tool_call(
+        "compile",
+        "bash",
+        r#"{"command":"cargo test --no-run 2>&1"}"#,
+    );
     assert_eq!(
-        agent.verification_kind_for_call("cargo test --no-run", &call.arguments),
+        agent.verification_kind_for_call("cargo test --no-run 2>&1", &call.arguments),
         Some(VerificationKind::Build)
     );
     agent

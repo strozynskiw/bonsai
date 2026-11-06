@@ -473,11 +473,24 @@ pub(crate) fn normalize_verification_conjunction(command: &str) -> Option<Vec<Ve
     let mut remaining = command;
     let mut segments = Vec::new();
     while let Some(separator) = top_level_and_separator(remaining) {
-        segments.push(normalize_verification_command(&remaining[..separator])?);
+        segments.push(normalize_verification_segment(&remaining[..separator])?);
         remaining = &remaining[separator + 2..];
     }
-    segments.push(normalize_verification_command(remaining)?);
+    segments.push(normalize_verification_segment(remaining)?);
     Some(segments)
+}
+
+fn normalize_verification_segment(segment: &str) -> Option<Vec<String>> {
+    let trimmed = segment.trim_end();
+    let command = if let Some(prefix) = trimmed.strip_suffix("2>&1")
+        && prefix.ends_with(char::is_whitespace)
+        && !prefix.trim_end().ends_with('\\')
+    {
+        prefix
+    } else {
+        trimmed
+    };
+    normalize_verification_command(command)
 }
 
 fn strip_env_prefix(tokens: &[String]) -> Option<Vec<String>> {
@@ -880,6 +893,29 @@ mod tests {
             "cargo test \\",
         ] {
             assert_eq!(normalize_verification_command(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn verification_conjunction_accepts_stderr_duplication_without_masking_failures() {
+        let expected = Some(vec![vec!["cargo".to_string(), "test".to_string()]]);
+        assert_eq!(
+            normalize_verification_conjunction("cargo test 2>&1"),
+            expected
+        );
+        assert!(normalize_verification_conjunction("cargo test 2>&1 && cargo check").is_some());
+        for command in [
+            "cargo test 2>&1 | tail -40",
+            "cargo test > result.txt 2>&1",
+            "cargo test 2>&1; true",
+            "cargo test \\ 2>&1",
+            "cargo test 'unclosed 2>&1",
+        ] {
+            assert_eq!(
+                normalize_verification_conjunction(command),
+                None,
+                "{command}"
+            );
         }
     }
 

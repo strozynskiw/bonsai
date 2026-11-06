@@ -2197,6 +2197,14 @@ mod tests {
             "cargo test --no-run",
             "test--no-run"
         ));
+        assert!(command_has_cargo_check(
+            "cargo test --no-run 2>&1",
+            "test--no-run"
+        ));
+        assert!(!command_has_cargo_check(
+            "cargo test --no-run 2>&1 | tail -40",
+            "test--no-run"
+        ));
         assert!(!command_has_cargo_check("cargo test --no-run", "test"));
         assert!(!command_has_cargo_check(
             "cargo test -- --no-run",
