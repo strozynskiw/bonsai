@@ -11,6 +11,8 @@ use std::path::Path;
 #[cfg(not(test))]
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -25,6 +27,7 @@ mod file;
 use file::FileCredentialBackend;
 
 const KEYRING_SERVICE: &str = "dev.bonsai.provider";
+const KEYRING_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where a runtime provider secret came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +183,17 @@ trait CredentialBackend: Send + Sync {
 pub(crate) struct CredentialStore {
     file: Arc<dyn CredentialBackend>,
     keyring: Arc<dyn CredentialBackend>,
+    keyring_read_active: Arc<AtomicBool>,
+    keyring_read_timeout: Duration,
+}
+
+/// Held by the native read thread until it finishes, including after timeout.
+struct KeyringReadGuard(Arc<AtomicBool>);
+
+impl Drop for KeyringReadGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl super::SessionStore {
@@ -454,6 +468,8 @@ impl CredentialStore {
             } else {
                 native_credential_backend()
             },
+            keyring_read_active: Arc::new(AtomicBool::new(false)),
+            keyring_read_timeout: KEYRING_READ_TIMEOUT,
         }
     }
 
@@ -491,6 +507,33 @@ impl CredentialStore {
     ) -> Result<Option<String>> {
         let backend = self.backend(source)?;
         let provider_id = provider_id.to_string();
+        if matches!(source, CredentialSource::Keyring) {
+            anyhow::ensure!(
+                self.keyring_read_active
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok(),
+                "An OS credential store read is still pending; unlock the store and retry"
+            );
+            let guard = KeyringReadGuard(self.keyring_read_active.clone());
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            // A native keyring may block indefinitely. A detached OS thread
+            // avoids keeping Tokio's blocking pool alive during shutdown.
+            std::thread::Builder::new()
+                .name("bonsai-keyring-read".into())
+                .spawn(move || {
+                    let result = backend.get(&provider_id);
+                    drop(guard);
+                    let _ = sender.send(result);
+                })
+                .context("failed to start OS credential store read")?;
+            return match tokio::time::timeout(self.keyring_read_timeout, receiver).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => anyhow::bail!("OS credential store read failed unexpectedly"),
+                Err(_) => anyhow::bail!(
+                    "OS credential store did not respond; unlock it and retry. The stored credential was not removed"
+                ),
+            };
+        }
         tokio::task::spawn_blocking(move || backend.get(&provider_id))
             .await
             .context("credential-store task failed")?
@@ -513,6 +556,8 @@ impl CredentialStore {
         Self {
             file: Arc::new(MemoryCredentialBackend::default()),
             keyring: Arc::new(MemoryCredentialBackend::default()),
+            keyring_read_active: Arc::new(AtomicBool::new(false)),
+            keyring_read_timeout: KEYRING_READ_TIMEOUT,
         }
     }
 
@@ -521,6 +566,8 @@ impl CredentialStore {
         Self {
             file: Arc::new(MemoryCredentialBackend::default()),
             keyring: Arc::new(MemoryCredentialBackend::failing_delete()),
+            keyring_read_active: Arc::new(AtomicBool::new(false)),
+            keyring_read_timeout: KEYRING_READ_TIMEOUT,
         }
     }
 }
@@ -672,6 +719,115 @@ impl CredentialBackend for MemoryCredentialBackend {
 mod tests {
     use super::*;
     use crate::session::SessionStore;
+
+    type ReleaseGate = Arc<(Mutex<bool>, std::sync::Condvar)>;
+    type CallCount = Arc<std::sync::atomic::AtomicUsize>;
+
+    struct BlockingReadBackend {
+        released: ReleaseGate,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CredentialBackend for BlockingReadBackend {
+        fn set(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (lock, wake) = &*self.released;
+            let released = lock.lock().unwrap();
+            drop(wake.wait_while(released, |released| !*released).unwrap());
+            Ok(Some("synthetic-secret".into()))
+        }
+        fn delete(&self, _: &str) -> Result<CredentialDeleteOutcome> {
+            Ok(CredentialDeleteOutcome::NotFound)
+        }
+    }
+
+    fn blocked_store() -> (CredentialStore, ReleaseGate, CallCount) {
+        let released = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store = CredentialStore {
+            file: Arc::new(MemoryCredentialBackend::default()),
+            keyring: Arc::new(BlockingReadBackend {
+                released: released.clone(),
+                calls: calls.clone(),
+            }),
+            keyring_read_active: Arc::new(AtomicBool::new(false)),
+            keyring_read_timeout: Duration::from_millis(50),
+        };
+        (store, released, calls)
+    }
+
+    fn release_backend(released: &ReleaseGate) {
+        let (lock, wake) = &**released;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+    }
+
+    #[tokio::test]
+    async fn blocked_keyring_read_is_bounded_and_preserves_credential_reference() {
+        let (store, released, calls) = blocked_store();
+        let mut session = SessionStore {
+            credential_store: store.clone(),
+            ..SessionStore::default()
+        };
+        session.ensure_provider("anthropic");
+        session.session_mut("anthropic").credential_source = CredentialSource::Keyring;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            session.resolve_persisted_credentials(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            session.session("anthropic").credential_source,
+            CredentialSource::Keyring
+        );
+        assert!(session.session("anthropic").api_key.is_empty());
+        let error = store
+            .get(&CredentialSource::Keyring, "other")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("still pending"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release_backend(&released);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store.keyring_read_active.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .get(&CredentialSource::Keyring, "anthropic")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-secret")
+        );
+    }
+
+    #[test]
+    fn blocked_keyring_read_does_not_hold_tokio_runtime_shutdown() {
+        let (store, released, _) = blocked_store();
+        let (finished, received) = std::sync::mpsc::channel();
+        let runtime_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(store.get(&CredentialSource::Keyring, "anthropic"));
+            assert!(result.unwrap_err().to_string().contains("did not respond"));
+            drop(runtime);
+            finished.send(()).unwrap();
+        });
+        let result = received.recv_timeout(Duration::from_secs(5));
+        release_backend(&released);
+        runtime_thread.join().unwrap();
+        assert!(result.is_ok(), "keyring read held runtime shutdown");
+    }
 
     #[tokio::test]
     async fn isolated_verifier_disables_all_native_credential_operations() {

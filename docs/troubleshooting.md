@@ -34,6 +34,11 @@ order:
 
 ## Common problems
 
+**A provider stored in the OS credential store is unavailable after startup.**
+Unlock the OS credential store and restart Bonsai. Native credential reads stop
+waiting after 10 seconds; a timed-out read leaves the stored credential reference
+intact. Check the Bonsai log for credential-store errors if the problem persists.
+
 **Config edits don't apply.** Run `/config validate` — it re-parses both
 layers from disk and prints diagnostics naming the entry and field. One
 malformed entry never hides healthy ones. Most config changes take effect on
