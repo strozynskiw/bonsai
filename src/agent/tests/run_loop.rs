@@ -3290,6 +3290,103 @@ async fn queued_message_does_not_replace_self_review_baseline() {
     assert!(reviewer_task.contains("lib.rs"), "{reviewer_task}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn steering_interrupts_pending_review_baseline_before_stale_write() {
+    let fixture = TestFixture::new();
+    let root = &fixture.project_root;
+    crate::util::git::setup_test_clean_filter(root);
+    std::fs::write(
+        root.join("probe.sh"),
+        "touch baseline-started\nwhile [ ! -e baseline-release ]; do sleep 0.05; done\ntouch baseline-child-finished\ncat\n",
+    )
+    .unwrap();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteFileTool {
+        root: root.to_path_buf(),
+    }));
+    let arguments = serde_json::json!({"path": "lib.rs", "content": REVIEWABLE_RUST_CHANGE});
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "stale-write",
+                "write",
+                &arguments.to_string(),
+            )],
+            ..StreamedResponse::default()
+        }),
+        finished_response("done"),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Arc::new(registry),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        root.to_path_buf(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+    let sink = Arc::new(CaptureSink::default());
+    let run = agent.run_with_queue(
+        crate::agent::UserInput::from_text("Make the change"),
+        CancellationToken::new(),
+        sink.clone(),
+        receiver,
+    );
+    tokio::pin!(run);
+
+    let started = async {
+        while !root.join("baseline-started").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result = tokio::time::timeout(std::time::Duration::from_secs(5), started) => {
+            if result.is_err() {
+                std::fs::write(root.join("baseline-release"), "").unwrap();
+                panic!("baseline did not start");
+            }
+        }
+        result = &mut run => panic!("run finished before baseline started: {result:?}"),
+    }
+    assert!(root.join("baseline-started").exists());
+    let text = "Stop the previous task. Say done.";
+    sender
+        .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+            id: 91,
+            display_text: text.into(),
+            transcript_text: text.into(),
+            input: crate::agent::UserInput::from_text(text),
+        }))
+        .unwrap();
+    let prompt_result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut run).await;
+    // Release the fixture even if prompt delivery timed out.
+    std::fs::write(root.join("baseline-release"), "").unwrap();
+    let result = match prompt_result {
+        Ok(result) => result.unwrap(),
+        Err(error) => {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), &mut run).await;
+            panic!("steering waited for the blocked baseline: {error}");
+        }
+    };
+    assert_eq!(result, AgentRunResult::Completed("done".into()));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!root.join("baseline-child-finished").exists());
+    assert!(!root.join("lib.rs").exists());
+    assert!(sink.tool_finishes().iter().any(|(id, message, status)| {
+        id == "stale-write" && message.contains("queued user message") && !status.is_success()
+    }));
+    let requests = requests.lock().await;
+    assert!(
+        requests[1]
+            .iter()
+            .any(|message| user_message_content(message) == text)
+    );
+}
+
 #[tokio::test]
 async fn steering_arriving_during_provider_stream_skips_first_tool_batch() {
     struct SteeringProvider {

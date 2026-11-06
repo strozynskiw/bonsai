@@ -166,6 +166,25 @@ impl QueuedMessageState<'_, '_> {
     fn next(&mut self) -> Vec<QueuedUserMessage> {
         next_queued_messages(self.receiver, self.pending, self.cancelled_ids)
     }
+
+    async fn wait_for_message(&mut self) -> Vec<QueuedUserMessage> {
+        loop {
+            let Some(receiver) = self.receiver.as_deref_mut() else {
+                return std::future::pending().await;
+            };
+            match receiver.recv().await {
+                Some(QueuedUserMessageCommand::Send(message)) => self.pending.push_back(message),
+                Some(QueuedUserMessageCommand::Cancel(id)) => {
+                    self.cancelled_ids.insert(id);
+                }
+                None => *self.receiver = None,
+            }
+            let ready = self.next();
+            if !ready.is_empty() {
+                return ready;
+            }
+        }
+    }
 }
 
 struct SubagentCancelWatcher {
@@ -1098,12 +1117,32 @@ impl Agent {
                     outcome.reset_loop_guards = true;
                     break;
                 }
-                let baseline = tokio::select! {
+                let (baseline, steering) = tokio::select! {
                     biased;
-                    _ = cancellation_token.cancelled() => None,
-                    baseline = capture_review_baseline(&self.project_root) => baseline,
+                    _ = cancellation_token.cancelled() => (None, None),
+                    steering = queued_messages.wait_for_message() => (None, Some(steering)),
+                    baseline = capture_review_baseline(&self.project_root) => (Some(baseline), None),
                 };
-                self.self_review.set_deferred_baseline(baseline);
+                if let Some(steering) = steering {
+                    let skipped_calls = batch
+                        .into_iter()
+                        .chain(batches.by_ref().flatten())
+                        .collect();
+                    self.drain_skipped_calls(
+                        skipped_calls,
+                        "Tool skipped because a new queued user message took priority.",
+                        sink,
+                        &mut trusted_contexts,
+                        &mut image_messages,
+                    )
+                    .await?;
+                    self.apply_queued_messages(steering, sink).await?;
+                    outcome.reset_loop_guards = true;
+                    break;
+                }
+                if let Some(baseline) = baseline {
+                    self.self_review.set_deferred_baseline(baseline);
+                }
                 if cancellation_token.is_cancelled() {
                     let skipped_calls = batch
                         .into_iter()
@@ -3968,6 +4007,38 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[tokio::test]
+    async fn waiting_for_steering_ignores_cancelled_messages() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let message = |id| QueuedUserMessage {
+            id,
+            display_text: format!("message {id}"),
+            transcript_text: format!("message {id}"),
+            input: UserInput::from_text(format!("message {id}")),
+        };
+        sender
+            .send(QueuedUserMessageCommand::Send(message(1)))
+            .unwrap();
+        sender.send(QueuedUserMessageCommand::Cancel(1)).unwrap();
+        sender
+            .send(QueuedUserMessageCommand::Send(message(2)))
+            .unwrap();
+        let mut source = Some(&mut receiver);
+        let mut pending = VecDeque::new();
+        let mut cancelled = HashSet::new();
+        let mut state = QueuedMessageState {
+            receiver: &mut source,
+            pending: &mut pending,
+            cancelled_ids: &mut cancelled,
+        };
+
+        let ready = state.wait_for_message().await;
+        assert_eq!(
+            ready.iter().map(|message| message.id).collect::<Vec<_>>(),
+            [2]
+        );
+    }
 
     struct SchemaRecordingProvider {
         tools: Arc<StdMutex<Vec<Vec<String>>>>,

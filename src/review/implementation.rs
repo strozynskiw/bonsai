@@ -760,14 +760,20 @@ async fn git_outputs(root: &Path, commands: &[Vec<String>]) -> Option<String> {
 }
 
 async fn git_output(root: &Path, args: &[String]) -> Option<String> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .kill_on_drop(true)
         .arg("-C")
         .arg(root)
         .args(args)
-        .output()
-        .await
-        .ok()?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::process_group::configure(&mut command);
+    let child = command.spawn().ok()?;
+    let mut guard = crate::process_group::ProcessGroupGuard::new(child.id());
+    let output = child.wait_with_output().await.ok()?;
+    guard.disarm();
     if !output.status.success() {
         return None;
     }
