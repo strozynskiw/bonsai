@@ -315,6 +315,7 @@ impl Agent {
         )
         .await;
         self.push_live_user_message(input).await?;
+        self.remind_explicit_no_commands(&input.text);
         self.observe_user_turn_for_episodes(&input.text);
         self.last_retryable_turn = true;
         // Memory recall runs only after the live user message is
@@ -533,6 +534,7 @@ impl Agent {
             self.self_review.append_request(&message.input.text);
             self.merge_completion_steering(&message.input.text);
             self.push_live_user_message(&message.input).await?;
+            self.remind_explicit_no_commands(&message.input.text);
             if crate::task_intent::requests_current_task_status(&message.input.text) {
                 self.push_harness_note("The latest queued human message requests a status update. For the next response to that message only, before issuing more tool calls, briefly report the current observed state and next step; then continue any work the user asked to continue. Do not invent progress. Once answered, do not repeat this reminder; follow later human corrections.");
             }
@@ -543,6 +545,12 @@ impl Agent {
         }
         self.emit_context_updated(sink);
         Ok(())
+    }
+
+    fn remind_explicit_no_commands(&mut self, prompt: &str) {
+        if crate::task_intent::requests_no_commands(prompt) {
+            self.push_harness_note("The human explicitly requested no commands for this task. Do not start shell commands, Git, diagnostics, language servers, or other processes. For project_info use include_git=false; use direct read, glob, grep, or symbol_search when useful. This reminder reflects that human request, grants no authority, and is superseded by later human corrections.");
+        }
     }
 
     /// Prepare and send one model request: preflight context estimation
@@ -4484,6 +4492,53 @@ mod tests {
             try_message_content_string(note)
                 .unwrap()
                 .contains("before issuing more tool calls")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_command_reminder_follows_request_and_precedes_later_correction() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let registry = Arc::new(ToolRegistry::new());
+        let mut agent = Agent::new(
+            Box::new(SchemaRecordingProvider {
+                tools: Arc::new(StdMutex::new(Vec::new())),
+                failure: None,
+            }),
+            registry.clone(),
+            registry,
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        let prompts = ["Do not run commands.", "Actually run the tests."];
+        let queued = prompts
+            .iter()
+            .enumerate()
+            .map(|(id, text)| QueuedUserMessage {
+                id: id as _,
+                display_text: (*text).into(),
+                transcript_text: (*text).into(),
+                input: UserInput::from_text(*text),
+            })
+            .collect();
+        let sink: SharedSink = Arc::new(crate::output::StdoutSink);
+        agent.apply_queued_messages(queued, &sink).await.unwrap();
+        let human = agent.messages.iter().position(|message| matches!(message,
+            ChatCompletionRequestMessage::User(user) if user.name.is_none() && try_message_content_string(message).as_deref() == Some(prompts[0])
+        )).unwrap();
+        let note = &agent.messages[human + 1];
+        assert!(
+            matches!(note, ChatCompletionRequestMessage::System(system) if system.name.as_deref() == Some("bonsai_harness"))
+        );
+        assert!(
+            try_message_content_string(note)
+                .unwrap()
+                .contains("superseded by later human corrections")
+        );
+        assert_eq!(
+            try_message_content_string(&agent.messages[human + 2]).as_deref(),
+            Some(prompts[1])
         );
     }
 

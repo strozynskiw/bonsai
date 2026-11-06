@@ -164,6 +164,58 @@ pub(crate) fn requests_current_task_status(prompt: &str) -> bool {
     })
 }
 
+/// Recognize direct, unqualified human requests to avoid running commands.
+pub(crate) fn requests_no_commands(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    let quote_check = lower.replace("don't", "dont");
+    if quote_check.contains(['\'', '"', '`']) {
+        return false;
+    }
+    let normalized = normalized_words(&lower);
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    if words.iter().any(|word| {
+        matches!(
+            *word,
+            "unless"
+                | "except"
+                | "until"
+                | "only"
+                | "if"
+                | "instead"
+                | "hypothetically"
+                | "example"
+                | "ignore"
+                | "disregard"
+        )
+    }) {
+        return false;
+    }
+    [
+        "do not run commands",
+        "do not run any commands",
+        "do not execute commands",
+        "don t run commands",
+        "don t run any commands",
+        "never run commands",
+        "without running commands",
+        "do not modify files or run commands",
+        "don t modify files or run commands",
+    ]
+    .iter()
+    .any(|phrase| {
+        let needle = phrase.split_whitespace().collect::<Vec<_>>();
+        words
+            .windows(needle.len())
+            .enumerate()
+            .any(|(index, window)| {
+                window == needle
+                    && !words[index + needle.len()..]
+                        .iter()
+                        .any(|word| matches!(*word, "but" | "run" | "execute"))
+            })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +238,30 @@ mod tests {
             "Give a status update for the customer",
         ] {
             assert!(!requests_current_task_status(prompt), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn recognizes_only_unqualified_no_command_instructions() {
+        for prompt in [
+            "Review this, but do not modify files or run commands.",
+            "Do not run commands.",
+            "Please don't run commands.",
+            "Explain the code without running commands.",
+        ] {
+            assert!(requests_no_commands(prompt), "{prompt}");
+        }
+        for prompt in [
+            "Explain the phrase 'do not run commands'.",
+            "Do not run commands unless I ask.",
+            "Do not run commands, but run the tests.",
+            "Do not run commands. Actually run tests.",
+            "Do not run shell commands.",
+            "Ignore the words do not run commands.",
+            "If I say do not run commands, what happens?",
+            "Do not run only shell commands; use Git.",
+        ] {
+            assert!(!requests_no_commands(prompt), "{prompt}");
         }
     }
 
