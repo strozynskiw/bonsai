@@ -108,6 +108,7 @@ final_request_contains = [
 name = "read"
 arguments = '{"path":"README.md"}'
 [[tasks.mock.tool_turns]]
+content = "Status: inspected README; I will add the requested line."
 [[tasks.mock.tool_turns.calls]]
 name = "write"
 arguments = '''{"path":"README.md","content":"# Tiny Project\n\nThis fixture is intentionally small. Eval tasks mutate it in isolated copies.\n\nstatus steering preserved the original task\n"}'''
@@ -126,6 +127,11 @@ forbidden_attempts = ["interaction", "external-access"]
 type = "file-state"
 path = "README.md"
 contains = ["# Tiny Project", "This fixture is intentionally small. Eval tasks mutate it in isolated copies.", "status steering preserved the original task"]
+
+[[tasks.graders]]
+type = "visible-before-effect"
+effect = "workspace-mutation"
+matches = ['(?i)\b(status|progress|currently|now)\b', '(?i)\b(read|inspect\w*|working|edit\w*|add\w*|append\w*)\b']
 
 [[tasks]]
 id = "compaction_preserves_steered_intent"

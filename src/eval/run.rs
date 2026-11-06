@@ -1310,6 +1310,11 @@ async fn run_task(
     let provider_stats = harness.provider_stats.clone();
     let background_tasks = harness.background_tasks.clone();
     let eval_sink = harness.sink.clone();
+    eval_sink.set_capture_visible(
+        task.graders
+            .iter()
+            .any(|grader| matches!(grader, GraderSpec::VisibleBeforeEffect { .. })),
+    );
     let agent = &mut harness.agent;
     let sink: SharedSink = eval_sink.clone();
     let cancellation_token = CancellationToken::new();
@@ -2083,6 +2088,17 @@ impl EvalTask {
         {
             anyhow::bail!("Task '{}' queued_messages must not contain blanks", self.id);
         }
+        if self.queued_messages.is_empty()
+            && self
+                .graders
+                .iter()
+                .any(|grader| matches!(grader, GraderSpec::VisibleBeforeEffect { .. }))
+        {
+            anyhow::bail!(
+                "Task '{}' visible-before-effect requires queued_messages",
+                self.id
+            );
+        }
         if self.mock_context_window_tokens == Some(0) {
             anyhow::bail!(
                 "Task '{}' mock_context_window_tokens must be greater than zero",
@@ -2497,6 +2513,9 @@ struct EvalSinkState {
     read_calls: HashMap<String, EvalReadCall>,
     path_generations: HashMap<String, usize>,
     global_generation: usize,
+    visible_events: Vec<EvalVisibleEvent>,
+    attempt_event_floor: usize,
+    capture_visible: bool,
 }
 
 #[derive(Debug)]
@@ -2524,6 +2543,14 @@ enum EvalReadOutcome {
 }
 
 impl EvalSink {
+    fn set_capture_visible(&self, enabled: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.capture_visible = enabled;
+    }
+
     fn task_effects(&self) -> EvalTaskEffects {
         let state = self
             .state
@@ -2561,6 +2588,7 @@ impl EvalSink {
             reached_tool_effects,
             attempted_tool_effects,
             delegated_tool_effects,
+            visible_events: state.visible_events.clone(),
         }
     }
 
@@ -2708,6 +2736,95 @@ impl OutputSink for EvalSink {
         false
     }
 
+    fn attempt_started(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.capture_visible {
+            return;
+        }
+        state.attempt_event_floor = state.visible_events.len();
+        state.visible_events.push(EvalVisibleEvent::Boundary);
+    }
+
+    fn attempt_discarded(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.capture_visible {
+            return;
+        }
+        let floor = state.attempt_event_floor;
+        let mut index = 0usize;
+        state.visible_events.retain(|event| {
+            let keep = index < floor
+                || !matches!(
+                    event,
+                    EvalVisibleEvent::Assistant(_) | EvalVisibleEvent::Boundary
+                );
+            index += 1;
+            keep
+        });
+    }
+
+    fn assistant_delta(&self, text: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.capture_visible
+            || !state
+                .visible_events
+                .iter()
+                .any(|event| matches!(event, EvalVisibleEvent::Steering))
+        {
+            return;
+        }
+        if !matches!(
+            state.visible_events.last(),
+            Some(EvalVisibleEvent::Assistant(_))
+        ) {
+            state
+                .visible_events
+                .push(EvalVisibleEvent::Assistant(String::new()));
+        }
+        if let Some(EvalVisibleEvent::Assistant(current)) = state.visible_events.last_mut() {
+            const MAX_VISIBLE_BYTES: usize = 65_536;
+            let mut remaining = MAX_VISIBLE_BYTES.saturating_sub(current.len());
+            for character in text.chars() {
+                if character.len_utf8() > remaining {
+                    break;
+                }
+                current.push(character);
+                remaining -= character.len_utf8();
+            }
+        }
+    }
+
+    fn assistant_done(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.capture_visible {
+            return;
+        }
+        state.visible_events.push(EvalVisibleEvent::Boundary);
+    }
+
+    fn queued_user_message_sent(&self, _id: u64, _text: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.capture_visible {
+            return;
+        }
+        state.visible_events.push(EvalVisibleEvent::Steering);
+    }
+
     fn delegated_tool_phase(&self, name: &str, phase: crate::output::DelegatedToolPhase) {
         use crate::output::DelegatedToolPhase;
         let effect = EvalToolEffect::for_tool_name(name);
@@ -2772,6 +2889,11 @@ impl OutputSink for EvalSink {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for call in calls {
             let effect = EvalToolEffect::for_tool_name(&call.name);
+            if state.capture_visible {
+                state
+                    .visible_events
+                    .push(EvalVisibleEvent::ToolAttempt(effect));
+            }
             state.attempted_tool_effects.insert(effect);
             state.pending_effects.insert(call.id.clone(), effect);
             let arguments = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
@@ -2960,6 +3082,31 @@ mod tests {
 
     fn tool_start(id: &str, name: &str, path: &str) -> ToolCallStart {
         ToolCallStart::new(id, name, serde_json::json!({ "path": path }).to_string())
+    }
+
+    #[test]
+    fn visible_eval_events_discard_failed_attempt_text() {
+        let sink = EvalSink::default();
+        sink.set_capture_visible(true);
+        sink.queued_user_message_sent(1, "status request");
+        sink.attempt_started();
+        sink.assistant_delta("discarded status");
+        sink.attempt_discarded();
+        sink.attempt_started();
+        sink.assistant_delta("visible ");
+        sink.assistant_delta("status");
+        sink.assistant_done();
+        sink.tool_calls_started(&[tool_start("write-1", "write", "README.md")]);
+        let events = sink.task_effects().visible_events;
+        assert!(!events.iter().any(
+            |event| matches!(event, EvalVisibleEvent::Assistant(text) if text.contains("discarded"))
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, EvalVisibleEvent::Assistant(text) if text == "visible status")
+        ));
+        assert!(events.contains(&EvalVisibleEvent::ToolAttempt(
+            EvalToolEffect::WorkspaceMutation
+        )));
     }
 
     #[tokio::test]

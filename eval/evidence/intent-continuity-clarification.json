@@ -28,5 +28,18 @@
   ],
   "preservation_recheck": "The saved worktrees from both clarified runs contained the original fixture lines and the requested additions. The updated deterministic mock cases also pass the preservation checks.",
   "negative_control": "A temporary mock variant that removed the original README sentence failed the file-state grader and exited nonzero.",
-  "limitations": "The prompt and grader changed between runs, and each live scenario has one stochastic sample, so scores are not evidence of model improvement. File substring checks cannot prove complete preservation. The current automated status scenario does not verify the timing or existence of an intermediate status update."
+  "limitations": "The prompt and grader changed between runs, and each live scenario has one stochastic sample, so scores are not evidence of model improvement. File substring checks cannot prove complete preservation. The runs above did not automatically grade an intermediate status update.",
+  "visible_order_followup": {
+    "scope": "An opt-in ordering grader checks a visible update after queued steering and before the first workspace-mutation tool attempt. It is a lexical check, not a semantic assessment.",
+    "negative_control": "Removing the mock's intermediate update caused only visible-before-effect to fail, while the file and effect graders passed. The positive mock report did not contain its intermediate message text.",
+    "initial_live_runs": [
+      "target/eval-visible-order-439/1793973250036-live-439/report.json",
+      "target/eval-visible-order-440/1793973280369-live-440/report.json",
+      "target/eval-visible-order-441/1793973280378-live-441/report.json"
+    ],
+    "initial_observation": "All three initially failed the wording check. Traces for 439 and 440 had no intermediate assistant text; 441 said it was appending the line now, so the patterns were broadened to accept that form. Historical reports remain unchanged.",
+    "final_live_run": "target/eval-visible-order-442/1793973333320-live-442/report.json",
+    "final_observation": "The final-pattern run passed and its trace showed a status message before the edit.",
+    "limitations": "Small stochastic samples do not establish a compliance rate. The grader recognizes only configured phrases and tool-name effects; Bash file mutations are not classified as workspace-mutation attempts."
+  }
 }

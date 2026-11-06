@@ -58,6 +58,16 @@ pub(crate) struct EvalTaskEffects {
     pub(crate) reached_tool_effects: Vec<EvalToolEffect>,
     pub(crate) attempted_tool_effects: Vec<EvalToolEffect>,
     pub(crate) delegated_tool_effects: Vec<EvalToolEffect>,
+    pub(crate) visible_events: Vec<EvalVisibleEvent>,
+}
+
+/// Ephemeral ordering evidence; assistant text is never added to the report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvalVisibleEvent {
+    Steering,
+    Assistant(String),
+    Boundary,
+    ToolAttempt(EvalToolEffect),
 }
 
 /// A single grader declaration parsed from a suite's `[[tasks.graders]]` table.
@@ -94,6 +104,11 @@ pub(crate) enum GraderSpec {
         /// No pattern may match.
         #[serde(default)]
         not_matches: Vec<String>,
+    },
+    /// Require a visible assistant update after steering and before an effect.
+    VisibleBeforeEffect {
+        effect: EvalToolEffect,
+        matches: Vec<String>,
     },
     /// Assert the exact, required, or forbidden paths changed by the task.
     ChangedFiles {
@@ -176,6 +191,23 @@ impl GraderSpec {
                             format!("Task '{task_id}' assertion {field}[{index}] is invalid")
                         })?;
                     }
+                }
+            }
+            Self::VisibleBeforeEffect { matches, .. } => {
+                if matches.is_empty() {
+                    anyhow::bail!("Task '{task_id}' visible-before-effect grader has no patterns");
+                }
+                for (index, pattern) in matches.iter().enumerate() {
+                    if pattern.trim().is_empty() {
+                        anyhow::bail!(
+                            "Task '{task_id}' visible-before-effect matches[{index}] is empty"
+                        );
+                    }
+                    Regex::new(pattern).with_context(|| {
+                        format!(
+                            "Task '{task_id}' visible-before-effect matches[{index}] is invalid"
+                        )
+                    })?;
                 }
             }
             Self::ChangedFiles {
@@ -285,6 +317,10 @@ impl GraderSpec {
                     not_matches,
                 );
                 ("assertion", result.passed, result.details)
+            }
+            Self::VisibleBeforeEffect { effect, matches } => {
+                let result = grade_visible_before_effect(&effects.visible_events, *effect, matches);
+                ("visible-before-effect", result.passed, result.details)
             }
             Self::ChangedFiles {
                 exact,
@@ -397,6 +433,51 @@ pub(crate) fn validate_id(id: &str) -> Result<()> {
 struct GradeOutcome {
     passed: bool,
     details: String,
+}
+
+fn grade_visible_before_effect(
+    events: &[EvalVisibleEvent],
+    effect: EvalToolEffect,
+    patterns: &[String],
+) -> GradeOutcome {
+    let Ok(patterns) = patterns
+        .iter()
+        .map(|pattern| Regex::new(pattern))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return GradeOutcome::fail("invalid visible-before-effect pattern".to_string());
+    };
+    let mut steering_seen = false;
+    let mut text = String::new();
+    let mut matching_update = false;
+    for event in events {
+        match event {
+            EvalVisibleEvent::Steering => {
+                steering_seen = true;
+                text.clear();
+                matching_update = false;
+            }
+            EvalVisibleEvent::Assistant(delta) if steering_seen => text.push_str(delta),
+            EvalVisibleEvent::Boundary if steering_seen => {
+                matching_update |= patterns.iter().all(|pattern| pattern.is_match(&text));
+                text.clear();
+            }
+            EvalVisibleEvent::ToolAttempt(observed) if *observed == effect => {
+                matching_update |=
+                    steering_seen && patterns.iter().all(|pattern| pattern.is_match(&text));
+                return if steering_seen && matching_update {
+                    GradeOutcome::pass("visible update preceded the requested effect".to_string())
+                } else {
+                    GradeOutcome::fail(
+                        "no matching visible update after steering and before the effect"
+                            .to_string(),
+                    )
+                };
+            }
+            _ => {}
+        }
+    }
+    GradeOutcome::fail("requested effect was not attempted".to_string())
 }
 
 impl GradeOutcome {
@@ -703,6 +784,47 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn visible_update_must_follow_latest_steering_and_precede_effect() {
+        use EvalVisibleEvent::{Assistant, Boundary, Steering, ToolAttempt};
+        let patterns = vec!["(?i)status".to_string(), "(?i)read".to_string()];
+        let edit = ToolAttempt(EvalToolEffect::WorkspaceMutation);
+        let update = || {
+            vec![
+                Assistant("Sta".into()),
+                Assistant("tus: read README".into()),
+                Boundary,
+            ]
+        };
+        let check = |events: &[EvalVisibleEvent]| {
+            grade_visible_before_effect(events, EvalToolEffect::WorkspaceMutation, &patterns).passed
+        };
+        let mut valid = vec![Steering];
+        valid.extend(update());
+        valid.push(edit.clone());
+        assert!(check(&valid));
+        assert!(!check(&[
+            Steering,
+            edit.clone(),
+            Assistant("status: read".into())
+        ]));
+        let mut too_early = update();
+        too_early.extend([Steering, edit.clone()]);
+        assert!(!check(&too_early));
+        let mut superseded = vec![Steering];
+        superseded.extend(update());
+        superseded.extend([Steering, edit.clone()]);
+        assert!(!check(&superseded));
+        assert!(!check(&[Steering, Assistant("status: read".into())]));
+        assert!(!check(&[
+            Steering,
+            Assistant("status".into()),
+            Boundary,
+            Assistant("read".into()),
+            edit
+        ]));
     }
 
     #[test]

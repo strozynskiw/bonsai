@@ -287,6 +287,8 @@ The mock provider emits normal model responses:
 For release scenarios, `[[tasks.mock.tool_turns]]` replaces the read/write
 shorthand. Each nested call has `name`, raw string `arguments`, and an optional
 `id`; calls in the same turn are offered to the real batching policy together.
+An optional `content` on a tool turn streams an assistant message before that
+turn's calls, allowing ordering checks to exercise real delivery behavior.
 
 Because those are ordinary tool calls, read-before-write guards, diffs, token
 accounting, and batching still run through the real agent path.
@@ -428,6 +430,26 @@ claim is supported. Pair them with worktree and tool-effect checks, and retain
 transcripts for manual review. Changing a suite's assertions changes its
 measurement: report old and new results separately instead of treating an
 improved grade as an agent improvement.
+
+`visible-before-effect` checks that one delivered assistant message after the
+latest queued user message matches every listed regex before the first attempt
+of the specified tool-effect class. It requires `queued_messages`, fails when
+the effect is never attempted, and excludes text retracted after failed provider
+attempts. Matching uses at most 65,536 bytes per message; intermediate text is
+kept in memory for grading and is not included in the report.
+
+```toml
+[[tasks.graders]]
+type = "visible-before-effect"
+effect = "workspace-mutation"
+matches = ['(?i)\bstatus\b', '(?i)\b(read|inspect\w*)\b']
+```
+
+This is an ordering and lexical check, not a judgment of whether the update is
+accurate or useful. Effects are classified by tool name: a shell call that
+edits a file is classified as `command-execution`, so it cannot satisfy a
+`workspace-mutation` ordering check. A tool attempt can be rejected before it
+executes; use file and tool-effect graders alongside this check.
 
 `changed-files` checks the paths Bonsai observed the agent mutate. `exact = []`
 is an explicit no-mutation assertion; `required` and `forbidden` provide subset

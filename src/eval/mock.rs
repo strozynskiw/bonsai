@@ -51,6 +51,8 @@ pub(crate) struct MockToolCall {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MockToolTurn {
+    #[serde(default)]
+    pub(crate) content: String,
     pub(crate) calls: Vec<MockToolCall>,
 }
 
@@ -319,7 +321,17 @@ impl Provider for MockEvalProvider {
                 ..StreamedResponse::default()
             })
         } else {
-            let content = if self.script.tool_turn_content_chars == 0 {
+            let explicit_content = self
+                .script
+                .tool_turns
+                .get(step)
+                .map(|turn| turn.content.as_str())
+                .unwrap_or_default();
+            let content = if !explicit_content.is_empty() {
+                sink.assistant_delta(explicit_content);
+                sink.assistant_done();
+                explicit_content.to_string()
+            } else if self.script.tool_turn_content_chars == 0 {
                 String::new()
             } else {
                 format!(
@@ -402,6 +414,7 @@ mod tests {
     async fn final_request_forbidden_text_is_checked_only_on_the_final_request() {
         let mut scripted = script(0);
         scripted.tool_turns = vec![MockToolTurn {
+            content: String::new(),
             calls: vec![MockToolCall {
                 id: None,
                 name: "read".to_string(),
@@ -439,6 +452,7 @@ mod tests {
     async fn hidden_episode_card_call_answers_without_consuming_script_steps() {
         let mut scripted = script(0);
         scripted.tool_turns = vec![MockToolTurn {
+            content: String::new(),
             calls: vec![MockToolCall {
                 id: None,
                 name: "read".to_string(),
