@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn empty_wikilink_labels_do_not_amplify_transcript_output() {
+    // RUSTSEC-2026-0414: the old parser expanded this 112-byte input into
+    // more than 327,000 events when wikilinks were enabled by Options::all().
+    let body = "[[a|]] ".repeat(16);
+    let events = Parser::new_ext(&body, Options::all()).count();
+    assert!(
+        events <= body.len(),
+        "amplified parser output: {events} events"
+    );
+    let rendered = rendered_text(render_markdown(&body, 80));
+    let rendered_bytes: usize = rendered.iter().map(String::len).sum();
+    assert!(
+        rendered_bytes <= body.len() * 4,
+        "amplified transcript: {rendered_bytes} bytes"
+    );
+}
+
+#[test]
 fn preserves_fenced_code_blocks() {
     let lines = render_markdown("```rust\nfn main() {}\n```", 40);
     let rendered: Vec<String> = lines

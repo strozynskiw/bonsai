@@ -35,7 +35,7 @@ pub(crate) enum FrontmatterError {
     #[error("unterminated frontmatter block")]
     Unterminated,
     #[error("invalid frontmatter: {0}")]
-    Yaml(#[from] serde_yaml_ng::Error),
+    Yaml(#[source] Box<serde_saphyr::Error>),
 }
 
 /// Split a leading `---`-delimited YAML frontmatter block from the markdown body
@@ -57,7 +57,8 @@ pub(crate) fn parse_frontmatter<T: serde::de::DeserializeOwned>(
 
     let (yaml, body) = split_on_closing_delim(rest).ok_or(FrontmatterError::Unterminated)?;
 
-    let frontmatter = serde_yaml_ng::from_str(yaml)?;
+    let frontmatter =
+        serde_saphyr::from_str(yaml).map_err(|error| FrontmatterError::Yaml(Box::new(error)))?;
     Ok(Parsed {
         frontmatter,
         body: body.to_string(),
@@ -217,6 +218,54 @@ impl FrontmatterValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folded_description_and_duplicate_keys_are_handled() {
+        let src = "---\nname: a\ndescription: >-\n  line one\n  line two\n---\nbody";
+        let parsed: Parsed<SkillFrontmatter> = parse_frontmatter(src).unwrap();
+        assert_eq!(parsed.frontmatter.description, "line one line two");
+        let duplicate = "---\nname: a\nname: b\ndescription: d\n---\nbody";
+        assert!(matches!(
+            parse_frontmatter::<SkillFrontmatter>(duplicate),
+            Err(FrontmatterError::Yaml(_))
+        ));
+    }
+
+    #[test]
+    fn required_string_fields_reject_yaml_null_but_accept_quoted_text() {
+        for scalar in ["", "~", "null", "NULL"] {
+            let input = format!("---\nname: a\ndescription: {scalar}\n---\nbody");
+            assert!(
+                matches!(
+                    parse_frontmatter::<SkillFrontmatter>(&input),
+                    Err(FrontmatterError::Yaml(_))
+                ),
+                "{scalar:?}"
+            );
+            assert!(
+                matches!(
+                    parse_frontmatter::<AgentFrontmatter>(&input),
+                    Err(FrontmatterError::Yaml(_))
+                ),
+                "{scalar:?}"
+            );
+        }
+        let input = "---\nname: a\ndescription: 'null'\n---\nbody";
+        assert_eq!(
+            parse_frontmatter::<SkillFrontmatter>(input)
+                .unwrap()
+                .frontmatter
+                .description,
+            "null"
+        );
+        assert_eq!(
+            parse_frontmatter::<AgentFrontmatter>(input)
+                .unwrap()
+                .frontmatter
+                .description,
+            "null"
+        );
+    }
 
     #[test]
     fn parses_name_description_and_body() {

@@ -88,7 +88,7 @@ tree-sitter-javascript = "0.25.0"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
-pulldown-cmark = "0.13.4"
+pulldown-cmark = "0.13.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2.2"
@@ -96,7 +96,6 @@ unicode-segmentation = "1.13.3"
 vt100 = "0.16.2"
 arboard = "3.6.1"
 strsim = "0.11.1"
-serde_yaml_ng = "0.10.0"
 # Static embeddings for memory retrieval (M4.8). default-features = false is
 # load-bearing: defaults pull the C oniguruma regex backend AND a second HTTP
 # stack (hf-hub/ureq) — we use tokenizers' pure-Rust fancy-regex and download
@@ -117,6 +116,7 @@ axum = { version = "0.8.9", features = ["json", "query", "tokio", "http1"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 tower = { version = "0.5.3", features = ["limit", "util"] }
 tower-http = { version = "0.7.1", features = ["limit"] }
+serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

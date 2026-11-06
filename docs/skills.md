@@ -28,6 +28,8 @@ authorized by the current permission policy.
 
 Bodies are capped at 16 KiB. Unknown frontmatter keys are ignored
 (cross-tool compatibility).
+Required string fields reject YAML null values (`null`, `~`, or an empty value).
+Quote `"null"` or `""` when that literal text is intended.
 
 ## Discovery and precedence
 

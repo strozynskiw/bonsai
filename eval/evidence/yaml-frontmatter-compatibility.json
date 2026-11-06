@@ -1,0 +1,19 @@
+{
+  "purpose": "Compare the former serde_yaml_ng parser with serde-saphyr for Bonsai resource frontmatter.",
+  "scope": "Typed skill and agent fields, not arbitrary YAML or executable instructions.",
+  "corpus": {
+    "local_skills": {"files": 35, "identical_valid": 33, "both_invalid": 2, "differences": 0},
+    "installed_plugin_skills": {"files": 38, "identical_valid": 38, "both_invalid": 0, "differences": 0},
+    "local_agents": {"files": 120, "identical_valid": 105, "both_invalid": 15, "differences": 0},
+    "synthetic_skill_edges": {"files": 14, "identical_valid": 10, "both_invalid": 3, "old_only": 1}
+  },
+  "known_difference": "Unquoted YAML null values in required String fields were previously converted to their literal scalar text; the replacement rejects them. Quote the literal or provide a value. The behavior is documented and tested for skills and agents.",
+  "privacy": "Only aggregate counts are retained here. Local resource bodies were read by an offline probe and were not sent to a provider.",
+  "limits": "This corpus cannot prove complete YAML compatibility. Duplicate keys and null string values are rejected deliberately; diagnostics may differ.",
+  "verification": {
+    "focused": "target/yaml-null-focused.log",
+    "clippy": "target/yaml-null-clippy.log",
+    "full": "target/yaml-null-full.log: 4574 unit and 21 integration tests passed; 6 existing tests ignored",
+    "release": "target/yaml-saphyr-release.log: warning-free release build before these test and documentation changes"
+  }
+}
