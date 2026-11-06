@@ -1089,14 +1089,20 @@ impl Agent {
             } else {
                 self.lsp_diagnostic_baseline_for_batch(&batch).await
             };
-            let bash_baseline = if foreground_bash {
+            // Git-based snapshots can execute repository-configured clean
+            // filters. Never run them before workspace trust, even when a
+            // tool call will later be denied or a child is read-only.
+            let allow_git_snapshot =
+                self.workspace_trust == crate::workspace_trust::WorkspaceTrust::Trusted;
+            let bash_baseline = if foreground_bash && allow_git_snapshot {
                 capture_worktree_snapshot(&self.project_root).await
             } else {
                 None
             };
-            let delegated_baseline = if batch
-                .iter()
-                .any(|call| tools::is_delegation_call(tool_registry, call))
+            let delegated_baseline = if allow_git_snapshot
+                && batch
+                    .iter()
+                    .any(|call| tools::is_delegation_call(tool_registry, call))
             {
                 capture_worktree_snapshot(&self.project_root).await
             } else {

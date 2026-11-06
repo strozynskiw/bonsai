@@ -400,11 +400,15 @@ impl RuntimeBuilder {
                 storage.clone(),
                 active_session_id.clone(),
             ),
-            verification_scheduler: crate::tool::VerificationSchedulerContext::new(
-                project_root.clone(),
-                storage.clone(),
-                active_session_id.clone(),
-            ),
+            verification_scheduler: if workspace_trusted {
+                crate::tool::VerificationSchedulerContext::new(
+                    project_root.clone(),
+                    storage.clone(),
+                    active_session_id.clone(),
+                )
+            } else {
+                crate::tool::VerificationSchedulerContext::disabled()
+            },
             session_title: crate::bootstrap::SessionTitleToolDeps {
                 storage: storage.clone(),
                 active_session_id: active_session_id.clone(),

@@ -51,6 +51,40 @@ fn command_failure(diagnostic: &str) -> ToolOutput {
 }
 
 #[tokio::test]
+async fn restricted_verification_binding_never_runs_repository_filters() {
+    let fixture = TestFixture::new();
+    crate::util::git::setup_test_clean_filter(&fixture.project_root);
+    std::fs::write(
+        fixture.project_root.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    let mut agent = verification_agent(&fixture);
+    agent.workspace_trust = crate::workspace_trust::WorkspaceTrust::Restricted;
+    let binding = agent
+        .verification_workspace_binding(&fixture.project_root, "cargo test --locked")
+        .await;
+    assert!(matches!(
+        binding,
+        VerificationBinding::Blocked {
+            reason: VerificationTerminalReason::EnvironmentBlocked
+        }
+    ));
+    let call = test_tool_call("verify-1", "bash", r#"{"command":"cargo test --locked"}"#);
+    agent.capture_pending_verification_bindings(&[call]).await;
+    assert!(matches!(
+        agent
+            .verification
+            .pending_verification_bindings
+            .get("verify-1"),
+        Some(VerificationBinding::Blocked {
+            reason: VerificationTerminalReason::EnvironmentBlocked
+        })
+    ));
+    assert!(!fixture.project_root.join("clean-filter-ran").exists());
+}
+
+#[tokio::test]
 async fn rewritten_cargo_test_produces_truthful_observed_verification() {
     for succeeds in [true, false] {
         let fixture = TestFixture::new();

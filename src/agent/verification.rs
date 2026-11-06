@@ -67,6 +67,21 @@ impl VerificationRecoveryEvent {
 }
 
 impl Agent {
+    pub(super) async fn verification_workspace_binding(
+        &self,
+        command_cwd: &Path,
+        command: &str,
+    ) -> VerificationBinding {
+        if self.workspace_trust == crate::workspace_trust::WorkspaceTrust::Restricted {
+            // Git-based identity capture may invoke repository clean filters.
+            // Without a safe binding, verification must remain unconfirmed.
+            return VerificationBinding::Blocked {
+                reason: VerificationTerminalReason::EnvironmentBlocked,
+            };
+        }
+        capture_verification_workspace_binding(&self.project_root, command_cwd, command).await
+    }
+
     pub(super) fn verification_is_active(&self) -> bool {
         self.verification.active_verification.is_some()
     }
@@ -109,9 +124,9 @@ impl Agent {
                 },
                 Err(_) => fallback_cwd,
             };
-            let binding =
-                capture_verification_workspace_binding(&self.project_root, &command_cwd, &command)
-                    .await;
+            let binding = self
+                .verification_workspace_binding(&command_cwd, &command)
+                .await;
             self.verification
                 .pending_verification_bindings
                 .insert(call.id.clone(), binding.clone());
@@ -486,12 +501,9 @@ impl Agent {
                     .and_then(binding_command_cwd)
                     .map(PathBuf::from)
                     .unwrap_or_else(|| self.project_root.clone());
-                let current = capture_verification_workspace_binding(
-                    &self.project_root,
-                    &command_cwd,
-                    &command,
-                )
-                .await;
+                let current = self
+                    .verification_workspace_binding(&command_cwd, &command)
+                    .await;
                 stale |= !bindings_are_fresh(recorded_binding.as_ref(), &current);
                 if let VerificationBinding::Blocked { reason } = &current {
                     blocked_reason.get_or_insert(*reason);
@@ -700,12 +712,8 @@ impl Agent {
                 let binding = match pending_binding {
                     Some(binding) => binding,
                     None => {
-                        capture_verification_workspace_binding(
-                            &self.project_root,
-                            &command_cwd,
-                            &command,
-                        )
-                        .await
+                        self.verification_workspace_binding(&command_cwd, &command)
+                            .await
                     }
                 };
                 self.record_nonexecuted_verification(
@@ -721,7 +729,7 @@ impl Agent {
         let binding = match pending_binding {
             Some(binding) => binding,
             None => {
-                capture_verification_workspace_binding(&self.project_root, &command_cwd, &command)
+                self.verification_workspace_binding(&command_cwd, &command)
                     .await
             }
         };

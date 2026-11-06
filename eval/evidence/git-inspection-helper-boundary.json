@@ -20,6 +20,11 @@
     ],
     "decision": "Research only. Do not substitute this projection for authoritative Git output until format, linked worktree, attributes, configuration, filter semantics, portability, and concurrency behavior have explicit coverage and an honest user-facing contract."
   },
+  "restricted_preflight_followup": {
+    "reproduction": "In a restricted workspace with a configured clean filter, a read-only agent call invoked git diff while preparing delegated-workspace attribution, before the child ran.",
+    "mitigation": "Restricted runs skip Git-based Bash and delegation snapshots, return an environment-blocked verification binding without Git, and disable the Git-backed verification scheduler. Verification remains unconfirmed when a safe binding is unavailable.",
+    "coverage": "The real-binary adversarial fixture exercises a completed read-only child and a denied cargo-test call; a unit test checks the blocked verification binding. Both first verify that raw Git executes the fixture filter."
+  },
   "mitigation": "The Git tool, project context, project info, and missing-path evidence disable fsmonitor and signature display, avoid optional locks and lazy fetching, and terminate async Git processes on cancellation. The Git tool also disables external diff and textconv for diff/show. Restricted workspaces skip automatic Git status and self-review baselines, disable Git-backed missing-path caching, and reject Git inspection and Git-based review. Real headless and TUI tests use a clean-filter fixture, including ask and yolo modes.",
   "remaining_limitations": "In trusted workspaces a configured clean or process filter can still execute during working-tree inspection, including through .git/info/attributes and automatic status calls. This mitigation is not a general no-command or untrusted-repository sandbox. Natural-language restrictions are not enforced by this change."
 }

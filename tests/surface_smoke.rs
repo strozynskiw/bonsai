@@ -362,6 +362,10 @@ async fn restricted_startup_and_inspection_do_not_run_git_clean_filters() -> Res
     )?;
     std::fs::write(project.path().join("tracked.txt"), "before\n")?;
     std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"restricted-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    std::fs::write(
         project.path().join("probe.sh"),
         "ps -o args= -p \"$PPID\" > git-invocation\ntouch clean-filter-ran\ncat\n",
     )?;
@@ -408,6 +412,16 @@ async fn restricted_startup_and_inspection_do_not_run_git_clean_filters() -> Res
     for (name, args, autonomy) in [
         ("project_info", serde_json::json!({}), "ask"),
         ("read", serde_json::json!({"path": "missing.txt"}), "ask"),
+        (
+            "agent",
+            serde_json::json!({"agent": "explore", "prompt": "Inspect tracked.txt"}),
+            "ask",
+        ),
+        (
+            "bash",
+            serde_json::json!({"command": "cargo test --locked"}),
+            "ask",
+        ),
         ("git", serde_json::json!({"op": "status"}), "ask"),
         ("git", serde_json::json!({"op": "status"}), "yolo"),
     ] {
@@ -422,6 +436,15 @@ async fn restricted_startup_and_inspection_do_not_run_git_clean_filters() -> Res
                 feedback(&requests)
                     .iter()
                     .any(|message| message.contains("untrusted workspace"))
+            );
+        }
+        if name == "agent" {
+            assert!(
+                feedback(&requests)
+                    .iter()
+                    .any(|message| message.contains("fixture complete")),
+                "read-only child did not finish: {:?}",
+                feedback(&requests)
             );
         }
         assert!(
