@@ -270,6 +270,12 @@ impl MissingPathEvidence {
 
 impl MissingEntry {
     fn is_still_valid(&self, canonical_root: &Path) -> bool {
+        // A repository whose status could not be collected has no worktree
+        // evidence to compare. Two failed observations are not proof that the
+        // worktree stayed unchanged.
+        if self.git_fingerprint.git_dir.is_some() && self.git_fingerprint.state_digest.is_none() {
+            return false;
+        }
         matches!(
             std::fs::symlink_metadata(&self.target_path),
             Err(error) if error.kind() == ErrorKind::NotFound
@@ -553,6 +559,27 @@ mod tests {
             "changed without moving HEAD",
         )
         .unwrap();
+        assert!(cache.reused_missing("missing.md", false).is_none());
+    }
+
+    #[test]
+    fn failed_git_status_does_not_validate_missing_path_evidence() {
+        let project = TempDir::new().unwrap();
+        git(project.path(), &["init"]);
+        git(
+            project.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(project.path(), &["config", "user.name", "Test"]);
+        std::fs::write(project.path().join("tracked"), "one").unwrap();
+        git(project.path(), &["add", "tracked"]);
+        git(project.path(), &["commit", "-m", "initial"]);
+
+        std::fs::write(project.path().join(".git/index"), "invalid index").unwrap();
+        assert!(git_worktree_state_digest(project.path()).is_none());
+        let cache = evidence(project.path());
+        miss(&cache, "missing.md");
+        std::fs::write(project.path().join("tracked"), "changed").unwrap();
         assert!(cache.reused_missing("missing.md", false).is_none());
     }
 
