@@ -3387,6 +3387,87 @@ async fn steering_interrupts_pending_review_baseline_before_stale_write() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn steering_interrupts_verification_binding_before_stale_command() {
+    let fixture = TestFixture::new();
+    let root = &fixture.project_root;
+    crate::util::git::setup_test_clean_filter(root);
+    std::fs::write(
+        root.join("probe.sh"),
+        "touch binding-started\nwhile [ ! -e binding-release ]; do sleep 0.05; done\ncat\n",
+    )
+    .unwrap();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let provider = MockProvider::new(vec![
+        Ok(StreamedResponse {
+            tool_calls: vec![test_tool_call(
+                "stale-check",
+                "bash",
+                r#"{"command":"cargo test"}"#,
+            )],
+            ..StreamedResponse::default()
+        }),
+        finished_response("done"),
+    ]);
+    let requests = provider.requests();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        root.to_path_buf(),
+    )
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::Off);
+    let sink = Arc::new(CaptureSink::default());
+    let run = agent.run_with_queue(
+        crate::agent::UserInput::from_text("Inspect the project"),
+        CancellationToken::new(),
+        sink.clone(),
+        receiver,
+    );
+    tokio::pin!(run);
+    let started = async {
+        while !root.join("binding-started").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result = tokio::time::timeout(std::time::Duration::from_secs(5), started) => {
+            if result.is_err() {
+                std::fs::write(root.join("binding-release"), "").unwrap();
+                panic!("verification binding did not start");
+            }
+        }
+        result = &mut run => panic!("run finished before binding started: {result:?}"),
+    }
+    let text = "Stop that. Say done.";
+    sender
+        .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+            id: 92,
+            display_text: text.into(),
+            transcript_text: text.into(),
+            input: crate::agent::UserInput::from_text(text),
+        }))
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut run).await;
+    std::fs::write(root.join("binding-release"), "").unwrap();
+    let result = result
+        .expect("steering waited for verification binding")
+        .unwrap();
+    assert_eq!(result, AgentRunResult::Completed("done".into()));
+    assert!(sink.tool_finishes().iter().any(|(id, message, status)| {
+        id == "stale-check" && message.contains("queued user message") && !status.is_success()
+    }));
+    assert!(
+        requests.lock().await[1]
+            .iter()
+            .any(|message| user_message_content(message) == text)
+    );
+}
+
 #[tokio::test]
 async fn steering_arriving_during_provider_stream_skips_first_tool_batch() {
     struct SteeringProvider {

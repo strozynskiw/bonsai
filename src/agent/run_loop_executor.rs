@@ -718,6 +718,7 @@ async fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, std::io::Error
     let output = tokio::process::Command::new("git")
         .args(args)
         .current_dir(root)
+        .kill_on_drop(true)
         .output()
         .await?;
     if output.status.success() {

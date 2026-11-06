@@ -1173,10 +1173,49 @@ impl Agent {
                 .filter(|call| tool_rejections.message_for(call).is_none())
                 .cloned()
                 .collect::<Vec<_>>();
-            tool_rejections.repeated_failure.extend(
-                self.capture_pending_verification_bindings(&eligible_calls)
-                    .await,
-            );
+            let (verification_rejections, steering) = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => (None, None),
+                steering = queued_messages.wait_for_message() => (None, Some(steering)),
+                rejections = self.capture_pending_verification_bindings(&eligible_calls) => (Some(rejections), None),
+            };
+            if verification_rejections.is_none() {
+                for call in &eligible_calls {
+                    self.verification
+                        .pending_verification_bindings
+                        .remove(&call.id);
+                    self.verification
+                        .suppressed_verification_calls
+                        .remove(&call.id);
+                }
+                let skipped_calls = batch
+                    .into_iter()
+                    .chain(batches.by_ref().flatten())
+                    .collect();
+                let message = if steering.is_some() {
+                    "Tool skipped because a new queued user message took priority."
+                } else {
+                    "Tool skipped because the run was interrupted."
+                };
+                self.drain_skipped_calls(
+                    skipped_calls,
+                    message,
+                    sink,
+                    &mut trusted_contexts,
+                    &mut image_messages,
+                )
+                .await?;
+                if let Some(steering) = steering {
+                    self.apply_queued_messages(steering, sink).await?;
+                    outcome.reset_loop_guards = true;
+                } else {
+                    interrupted_mid_tools = true;
+                }
+                break;
+            }
+            tool_rejections
+                .repeated_failure
+                .extend(verification_rejections.unwrap_or_default());
             let eligible_calls = eligible_calls
                 .into_iter()
                 .filter(|call| tool_rejections.message_for(call).is_none())
