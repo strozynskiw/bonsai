@@ -3391,6 +3391,41 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compiler_wrapper_override_requires_approval_before_execution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = TestFixture::new();
+        let script = fixture.project_root.join("wrapper");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf reached > wrapper-marker\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tool = BashTool::with_background_tasks_and_yolo_mode(
+            fixture.project_root.clone(),
+            fixture.permissions.clone(),
+            fixture.read_tracker.clone(),
+            Arc::new(InteractionService::noninteractive()),
+            Arc::new(BackgroundTaskRegistry::new()),
+            YoloMode::with_level(ApprovalLevel::Balanced),
+            CommandSandbox::disabled(),
+        );
+        for command in [
+            "RUSTC_WRAPPER=./wrapper cargo check --offline",
+            "env RUSTC_WRAPPER=./wrapper cargo check --offline",
+        ] {
+            let error = tool
+                .execute(json!({"command": command}))
+                .await
+                .expect_err("an execution-changing environment override must require approval");
+            assert!(error.to_string().contains("noninteractive mode"), "{error}");
+            assert!(!fixture.project_root.join("wrapper-marker").exists());
+        }
+    }
+
     #[tokio::test]
     async fn compound_allow_does_not_approve_an_unapproved_inspection() {
         let fixture = TestFixture::new();

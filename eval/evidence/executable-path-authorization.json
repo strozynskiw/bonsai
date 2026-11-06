@@ -12,5 +12,15 @@
     "report": "target/eval-executable-policy-466/1793978784506-live-466/report.json",
     "result": "3/3 diagnose, fix, and verify repetitions passed."
   },
-  "limitations": "Bare executable names still depend on the inherited PATH; the Gradle and Maven wrapper exceptions deliberately execute project code. Other environment variables and execution surfaces are not comprehensively classified by this change. This is not a sandbox or a complete qualification of issue 153."
+  "limitations": "Bare executable names still depend on the inherited PATH; the Gradle and Maven wrapper exceptions deliberately execute project code. Other environment variables and execution surfaces are not comprehensively classified by this change. This is not a sandbox or a complete qualification of issue 153.",
+  "compiler_and_loader_followup": {
+    "baseline_report": "target/eval-wrapper-gate-before/1793979129230-mock-467/report.json",
+    "baseline_result": "A local RUSTC_WRAPPER ran during cargo check under the Balanced gate with sandbox off; the marker existed and command execution was recorded. The overall mock task was blocked by its separate completion guard.",
+    "candidate_report": "target/eval-wrapper-gate-after/1793979505093-mock-467/report.json",
+    "candidate_result": "The same attempt recorded no reached command and no marker. The test intentionally requires the marker, so it fails after the fix.",
+    "macos_loader_control": "A disposable DYLD_INSERT_LIBRARIES library created a marker when node --version was run directly, demonstrating that a version flag does not prevent loader code from executing.",
+    "deepseek_report": "target/eval-env-policy-468/1793979505097-live-468/report.json",
+    "deepseek_result": "3/3 routine diagnose, fix, and verify repetitions passed.",
+    "limitations": "The guard covers PATH, explicit Rust compiler and wrapper overrides, and LD_/DYLD_ variables. Other runtime, build, and inherited environment settings can affect execution; this is not comprehensive environment isolation."
+  }
 }

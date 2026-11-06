@@ -2250,6 +2250,7 @@ mod tests {
         }
         // The short forms stay per-tool: `sh -v` opens a verbose shell.
         assert_eq!(tier("sh -v"), RiskTier::Destructive);
+        assert_eq!(tier("RUSTFLAGS=-Dwarnings cargo check"), RiskTier::ReadOnly);
         for command in [
             "./version-probe --version",
             "version-probe --version",
@@ -2263,6 +2264,10 @@ mod tests {
             "/tmp/gradlew test",
             "PATH=.:$PATH cargo test",
             "env PATH=.:$PATH cargo test",
+            "RUSTC_WRAPPER=./wrapper cargo check --offline",
+            "env RUSTC_WRAPPER=./wrapper cargo check --offline",
+            "DYLD_INSERT_LIBRARIES=./probe.dylib node --version",
+            "env LD_PRELOAD=./probe.so node --version",
         ] {
             assert_eq!(tier(command), RiskTier::Destructive, "{command}");
         }

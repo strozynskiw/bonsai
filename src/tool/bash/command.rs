@@ -522,8 +522,21 @@ pub(crate) fn is_safe_env_assignment(token: &str) -> bool {
     let Some((name, value)) = token.split_once('=') else {
         return false;
     };
-    // PATH changes which executable a bare command name resolves to.
-    !name.eq_ignore_ascii_case("PATH") && !env_assignment_value_may_execute(value)
+    // These overrides can change which executable or library runs, even when
+    // the command itself looks like a routine version check or Cargo build.
+    let name = name.to_ascii_uppercase();
+    let changes_execution = matches!(
+        name.as_str(),
+        "PATH"
+            | "RUSTC"
+            | "RUSTC_WRAPPER"
+            | "RUSTC_WORKSPACE_WRAPPER"
+            | "CARGO_BUILD_RUSTC"
+            | "CARGO_BUILD_RUSTC_WRAPPER"
+            | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+    ) || name.starts_with("LD_")
+        || name.starts_with("DYLD_");
+    !changes_execution && !env_assignment_value_may_execute(value)
 }
 
 fn env_assignment_value_may_execute(value: &str) -> bool {
