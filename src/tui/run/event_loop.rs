@@ -56,6 +56,24 @@ const BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// (one shift later, as before).
 const REPO_MAP_FIRST_TURN_WAIT: Duration = Duration::from_millis(750);
 
+fn keyring_recovery_notice(registry: &ProviderRegistry, sessions: &SessionStore) -> Option<String> {
+    let mut providers = registry
+        .all()
+        .iter()
+        .filter_map(|factory| {
+            let id = factory.metadata().id.as_ref();
+            let session = sessions.session_if_present(id)?;
+            (!factory.is_authorized(session) && session.unavailable_keyring_credential())
+                .then(|| id.to_string())
+        })
+        .collect::<Vec<_>>();
+    providers.sort();
+    (!providers.is_empty()).then(|| format!(
+        "Could not read the OS credential store for {}. Unlock it or restore access, then restart Bonsai; saved credential references were retained.",
+        providers.join(", ")
+    ))
+}
+
 /// Wake authority is attached to durable message identities, never to sticky
 /// aggregate booleans. The current durable agent inbox is re-read at decision
 /// time, which removes authority as soon as the exact message is acknowledged.
@@ -2956,6 +2974,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             // a persisted transcript row so it can't pile up across resumes.
             app.set_session_hint(format_interrupted_sessions(&interrupted_sessions));
         }
+    }
+
+    if let Some(notice) = keyring_recovery_notice(&registry, &*session_store.lock().await) {
+        push_command_message(&mut app, CommandOutputKind::Status, &notice);
     }
 
     // Config diagnostics: a broken `.bonsai/config.toml` entry never

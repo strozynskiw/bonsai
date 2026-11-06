@@ -17,6 +17,20 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
+fn keyring_recovery_notice_only_names_unresolved_unauthorized_providers() {
+    let registry = ProviderRegistry::default_registry();
+    let mut sessions = SessionStore::default();
+    sessions.ensure_provider("anthropic");
+    sessions.session_mut("anthropic").credential_source = crate::session::CredentialSource::Keyring;
+    let notice = keyring_recovery_notice(&registry, &sessions).expect("missing recovery notice");
+    assert!(notice.contains("anthropic"));
+    assert!(notice.contains("Unlock"));
+    assert!(notice.contains("retained"));
+    sessions.session_mut("anthropic").api_key = "synthetic-secret".into();
+    assert!(keyring_recovery_notice(&registry, &sessions).is_none());
+}
+
+#[test]
 fn budget_alert_classification_covers_model_dispatches_only() {
     for input in [
         "continue the work",

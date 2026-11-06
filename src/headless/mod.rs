@@ -1507,7 +1507,7 @@ fn select_resumed_provider(
         return Err(HeadlessError::AuthConfig(format!(
             "Provider '{}' is not authorized; {}",
             summary.provider_id,
-            authorization_hint(metadata)
+            authorization_hint(metadata, session_store.session(&summary.provider_id))
         )));
     }
     // Resume owns the provider/model binding. Per-mode selections belong to
@@ -1574,7 +1574,7 @@ pub(crate) fn select_provider(
         return Err(HeadlessError::AuthConfig(format!(
             "Provider '{}' is not authorized; {}",
             metadata.id,
-            authorization_hint(metadata)
+            authorization_hint(metadata, session)
         )));
     }
 
@@ -1639,7 +1639,13 @@ fn apply_reasoning_override(
     Ok(())
 }
 
-fn authorization_hint(metadata: &crate::provider::ProviderMetadata) -> String {
+fn authorization_hint(
+    metadata: &crate::provider::ProviderMetadata,
+    session: &crate::session::ProviderSession,
+) -> String {
+    if session.unavailable_keyring_credential() {
+        return "the OS credential store could not be read; unlock it or restore access, then restart Bonsai (the saved credential reference was retained)".to_string();
+    }
     if let Some(var) = metadata.env_var_api_key.as_deref() {
         return format!("set {var} or run /authorize {}", metadata.id);
     }
@@ -2127,6 +2133,20 @@ mod tests {
 
         assert_eq!(err.exit_code(), 3);
         assert!(err.to_string().contains("not authorized"));
+    }
+
+    #[test]
+    fn unavailable_keyring_credential_has_actionable_headless_error() {
+        let registry = test_registry();
+        let mut store = test_store();
+        let session = store.session_mut("provider-b");
+        session.api_key.clear();
+        session.credential_source = crate::session::CredentialSource::Keyring;
+
+        let error = select_provider(&registry, &mut store, Some("provider-b")).unwrap_err();
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.to_string().contains("unlock"));
+        assert!(error.to_string().contains("reference was retained"));
     }
 
     #[tokio::test]

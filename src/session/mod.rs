@@ -45,6 +45,12 @@ pub struct ProviderSession {
 }
 
 impl ProviderSession {
+    /// Whether a saved native-store reference could not be resolved this run.
+    pub(crate) fn unavailable_keyring_credential(&self) -> bool {
+        matches!(self.credential_source, CredentialSource::Keyring)
+            && self.api_key.trim().is_empty()
+    }
+
     pub fn new(api_key: String, base_url: String, model: String) -> Self {
         let credential_source = if api_key.trim().is_empty() {
             CredentialSource::None
@@ -265,6 +271,10 @@ impl SessionStore {
         self.providers
             .get(id)
             .expect("requested provider session must exist after normalize")
+    }
+
+    pub(crate) fn session_if_present(&self, id: &str) -> Option<&ProviderSession> {
+        self.providers.get(id)
     }
 
     pub fn session_mut(&mut self, id: &str) -> &mut ProviderSession {
