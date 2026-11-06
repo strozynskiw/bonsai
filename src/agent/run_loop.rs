@@ -1165,9 +1165,22 @@ impl Agent {
                     break;
                 }
             }
-            tool_rejections
-                .repeated_failure
-                .extend(self.capture_pending_verification_bindings(&batch).await);
+            // Reject before any verification or workspace capture: those
+            // captures can run Git and repository-configured filters even when
+            // the tool itself never executes.
+            let eligible_calls = batch
+                .iter()
+                .filter(|call| tool_rejections.message_for(call).is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            tool_rejections.repeated_failure.extend(
+                self.capture_pending_verification_bindings(&eligible_calls)
+                    .await,
+            );
+            let eligible_calls = eligible_calls
+                .into_iter()
+                .filter(|call| tool_rejections.message_for(call).is_none())
+                .collect::<Vec<_>>();
             tool_rejections.bound_verification_calls.clear();
             tool_rejections.bound_verification_calls.extend(
                 batch
@@ -1187,11 +1200,12 @@ impl Agent {
             } else {
                 None
             };
-            let foreground_bash = batch.iter().any(foreground_bash_call);
+            let foreground_bash = eligible_calls.iter().any(foreground_bash_call);
             let diagnostic_baseline = if foreground_bash && self.lsp_hub.is_some() {
                 Some(crate::lsp::DiagnosticSnapshot::default())
             } else {
-                self.lsp_diagnostic_baseline_for_batch(&batch).await
+                self.lsp_diagnostic_baseline_for_batch(&eligible_calls)
+                    .await
             };
             // Git-based snapshots can execute repository-configured clean
             // filters. Never run them before workspace trust, even when a
@@ -1204,7 +1218,7 @@ impl Agent {
                 None
             };
             let delegated_baseline = if allow_git_snapshot
-                && batch
+                && eligible_calls
                     .iter()
                     .any(|call| tools::is_delegation_call(tool_registry, call))
             {
@@ -4342,6 +4356,56 @@ mod tests {
             name: name.to_string(),
             arguments: arguments.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_verification_does_not_capture_git_or_run_filters() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        crate::util::git::setup_test_clean_filter(&fixture.project_root);
+        let registry = Arc::new(ToolRegistry::new());
+        let mut agent = Agent::new(
+            Box::new(SchemaRecordingProvider {
+                tools: Arc::new(StdMutex::new(Vec::new())),
+                failure: None,
+            }),
+            registry.clone(),
+            registry.clone(),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        let tool_call = call("bash", r#"{"command":"cargo test"}"#);
+        let mut rejections = ToolRejections::default();
+        rejections
+            .repeated_failure
+            .insert(tool_call.id.clone(), "blocked before execution".to_string());
+        let mut receiver = None;
+        let mut pending = VecDeque::new();
+        let mut cancelled_ids = HashSet::new();
+        let sink: SharedSink = Arc::new(crate::output::StdoutSink);
+        let outcome = agent
+            .execute_tool_calls(
+                std::slice::from_ref(&tool_call),
+                &registry,
+                rejections,
+                &sink,
+                CancellationToken::new(),
+                QueuedMessageState {
+                    receiver: &mut receiver,
+                    pending: &mut pending,
+                    cancelled_ids: &mut cancelled_ids,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.tool_observations[0].status,
+            crate::output::ToolExecutionStatus::Skipped
+        );
+        assert!(!fixture.project_root.join("clean-filter-ran").exists());
+        assert!(agent.verification.pending_verification_bindings.is_empty());
     }
 
     #[tokio::test]

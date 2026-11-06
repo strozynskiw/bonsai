@@ -806,6 +806,19 @@ impl Agent {
         }
         let binding = match pending_binding {
             Some(binding) => binding,
+            None if matches!(
+                status,
+                ToolExecutionStatus::Skipped | ToolExecutionStatus::Interrupted
+            ) =>
+            {
+                VerificationBinding::Blocked {
+                    reason: if status == ToolExecutionStatus::Interrupted {
+                        VerificationTerminalReason::Interrupted
+                    } else {
+                        verification_nonexecution_reason(result, status)
+                    },
+                }
+            }
             None => {
                 self.verification_workspace_binding(&command_cwd, &command)
                     .await
