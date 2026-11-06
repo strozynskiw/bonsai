@@ -72,6 +72,8 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, column: u16, row: u16) -> Optio
             row_in_item,
             column,
             area,
+            !app.screen_reader_mode && !app.serenity_mode,
+            app.screen_reader_mode,
         ))),
     }
 }
@@ -170,6 +172,8 @@ pub(crate) fn position_at(
         row_in_item,
         column,
         area,
+        !app.screen_reader_mode && !app.serenity_mode,
+        app.screen_reader_mode,
     ))
 }
 

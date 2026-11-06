@@ -41,7 +41,11 @@ pub(super) fn item_selection_state(
         Some(item) => item,
         None => return ItemSelection::None,
     };
-    let selection_width = content_width.saturating_sub(4).max(8);
+    let selection_width = if app.screen_reader_mode {
+        content_width
+    } else {
+        content_width.saturating_sub(4).max(8)
+    };
     let total = selection_graphemes(item, selection_width);
 
     if !crate::copy::is_text_item(item) {
@@ -97,9 +101,16 @@ pub(super) fn resolve_position_in_item(
     row_in_item: usize,
     column: u16,
     area: Rect,
+    reasoning_preview: bool,
+    linear_output: bool,
 ) -> TranscriptPosition {
     let content_width = area.width.saturating_sub(4).max(20) as usize;
-    let inner_width = content_width.saturating_sub(4).max(8);
+    let inner_width = if linear_output {
+        content_width
+    } else {
+        content_width.saturating_sub(4).max(8)
+    };
+    let body_col_offset = if linear_output { 2 } else { BODY_COL_OFFSET };
     if matches!(
         item,
         TranscriptItem::ToolActivity(_) | TranscriptItem::ExecutionGroup(_)
@@ -119,6 +130,28 @@ pub(super) fn resolve_position_in_item(
         };
     }
     let body = crate::copy::body_text_for(item);
+    let body = if matches!(item, TranscriptItem::ReasoningSummary { .. }) {
+        std::borrow::Cow::Owned(strip_html_comments(&body))
+    } else {
+        body
+    };
+    if reasoning_preview && matches!(item, TranscriptItem::ReasoningSummary { .. }) {
+        let rows = reasoning_preview_rows(&body, inner_width);
+        if let Some((line, offset)) = rows.get(row_in_item.saturating_sub(2)) {
+            let local_col =
+                (column as i32 - area.x as i32 - body_col_offset as i32).max(0) as usize;
+            return TranscriptPosition {
+                item: item_index,
+                grapheme: offset + cells_to_grapheme_index(line, local_col),
+                width: inner_width,
+            };
+        }
+        return TranscriptPosition {
+            item: item_index,
+            grapheme: selection_graphemes(item, inner_width),
+            width: inner_width,
+        };
+    }
     // Walk lines (post-wrap). Each line is at most `inner_width` cells.
     // Item rows: 0=spacer, 1=title, 2+=body lines.
     let body_lines = render_markdown(&body, inner_width);
@@ -140,7 +173,7 @@ pub(super) fn resolve_position_in_item(
                 // `card_line` prefixes a 2-cell `┃ ` rail. Subtract all four so
                 // a click lands on the grapheme actually drawn under it.
                 let local_col =
-                    (column as i32 - area.x as i32 - BODY_COL_OFFSET as i32).max(0) as usize;
+                    (column as i32 - area.x as i32 - body_col_offset as i32).max(0) as usize;
                 let grapheme_in_sub = cells_to_grapheme_index(sub, local_col);
                 return TranscriptPosition {
                     item: item_index,
@@ -166,6 +199,11 @@ pub(super) fn resolve_position_in_item(
 /// while visible block boundaries remain newlines.
 pub(crate) fn selection_text_for(item: &TranscriptItem, width: usize) -> String {
     let body = crate::copy::body_text_for(item);
+    let body = if matches!(item, TranscriptItem::ReasoningSummary { .. }) {
+        std::borrow::Cow::Owned(strip_html_comments(&body))
+    } else {
+        body
+    };
     render_markdown(&body, width.max(8))
         .iter()
         .map(line_text)
@@ -220,4 +258,70 @@ pub(super) fn cells_to_grapheme_index(line: &Line<'static>, column: usize) -> us
         }
     }
     graphemes
+}
+
+#[cfg(test)]
+mod reasoning_preview_tests {
+    use super::*;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn reasoning_selection_ignores_provider_comment_placeholders() {
+        let item = TranscriptItem::ReasoningSummary {
+            text: "first <!-- hidden --> second".into(),
+        };
+        let area = Rect::new(0, 0, 80, 20);
+        let position = resolve_position_in_item(&item, 0, 2, 11, area, false, false);
+        let body = selection_text_for(&item, position.width);
+        assert_eq!(
+            body.graphemes(true)
+                .skip(position.grapheme)
+                .collect::<String>(),
+            "second"
+        );
+    }
+
+    #[test]
+    fn visible_reasoning_click_maps_to_full_body_after_folding_and_wrapping() {
+        let item = TranscriptItem::ReasoningSummary {
+            text: "hidden beginning\n\nabcdefghijklmnopqrstuvwx\n\nvisible ending".into(),
+        };
+        let area = Rect::new(0, 0, 28, 20);
+        let width = 20;
+        let body = selection_text_for(&item, width);
+        let rows = reasoning_preview_rows(&crate::copy::body_text_for(&item), width);
+        assert_eq!(rows.len(), 3);
+        for (row, (line, expected_offset)) in rows.iter().enumerate() {
+            let position = resolve_position_in_item(&item, 0, row + 2, 4, area, true, false);
+            assert_eq!(position.grapheme, *expected_offset);
+            let expected: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            let actual: String = body
+                .graphemes(true)
+                .skip(position.grapheme)
+                .take(expected.graphemes(true).count())
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn linear_selection_uses_full_width_and_no_card_rail() {
+        let item = TranscriptItem::ReasoningSummary {
+            text: "abcdefghijklmnopqrstuvwx".into(),
+        };
+        let area = Rect::new(0, 0, 28, 20);
+        let position = resolve_position_in_item(&item, 0, 2, 23, area, false, true);
+        assert_eq!(position.width, 24);
+        let body = selection_text_for(&item, position.width);
+        assert_eq!(
+            body.graphemes(true)
+                .skip(position.grapheme)
+                .collect::<String>(),
+            "vwx"
+        );
+    }
 }

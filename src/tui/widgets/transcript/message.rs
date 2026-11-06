@@ -50,16 +50,7 @@ pub(super) fn render_transcript_item(
                 // `<!-- -->` lines, so strip them and keep just the clean
                 // section titles.
                 let cleaned = strip_html_comments(text);
-                render_block(
-                    "✦ thinking",
-                    &cleaned,
-                    theme::palette().progress,
-                    theme::block(theme::palette().dim, theme::palette().thinking_block),
-                    theme::palette().thinking_block,
-                    width,
-                    options.selected,
-                    options.focused,
-                )
+                render_reasoning_preview(&cleaned, width, options.selected, options.focused)
             }
         }
         TranscriptItem::ToolActivity(activity) => render_tool_activity(
@@ -196,6 +187,72 @@ pub(super) fn render_transcript_item(
             options.focused,
         ),
     }
+}
+
+const REASONING_PREVIEW_ROWS: usize = 3;
+
+/// Visible wrapped rows and their grapheme offsets in the full rendered body.
+pub(super) fn reasoning_preview_rows(text: &str, width: usize) -> Vec<(Line<'static>, usize)> {
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    for (index, line) in render_markdown(text, width).into_iter().enumerate() {
+        if index > 0 {
+            offset += 1;
+        }
+        for wrapped in wrap_card_line(&line, width) {
+            let length = line_grapheme_count(&wrapped);
+            rows.push((wrapped, offset));
+            offset += length;
+        }
+    }
+    let skip = rows.len().saturating_sub(REASONING_PREVIEW_ROWS);
+    rows.drain(..skip);
+    rows
+}
+
+fn render_reasoning_preview(
+    text: &str,
+    width: usize,
+    selected: ItemSelection,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let inner_width = width.saturating_sub(4).max(8);
+    let accent = theme::palette().progress;
+    let bg = theme::palette().thinking_block;
+    let mut lines = render_block_lines(
+        "✦ thinking",
+        Vec::new(),
+        accent,
+        theme::block(theme::palette().dim, bg),
+        bg,
+        width,
+        selected,
+        true,
+        focused,
+    );
+    let whole = matches!(selected, ItemSelection::Whole);
+    let body_bg = if whole {
+        theme::palette().selection_bg
+    } else {
+        bg
+    };
+    let style = if whole {
+        theme::selection_block(theme::palette().text)
+    } else {
+        theme::block(theme::palette().dim, bg)
+    };
+    for (line, offset) in reasoning_preview_rows(text, inner_width) {
+        let line = apply_range_selection(&line, selected, offset);
+        lines.push(card_line(
+            &line,
+            inner_width,
+            style,
+            body_bg,
+            accent,
+            focused,
+        ));
+    }
+    lines
 }
 
 fn render_linear_transcript_item(
@@ -463,7 +520,7 @@ fn serenity_shimmer_style(distance: usize) -> Style {
 /// render as literal `<!-- -->` lines in the thinking block. An unterminated
 /// `<!--` (never closed before end of text) drops the remainder — a truncated
 /// comment tail is noise, not content.
-fn strip_html_comments(text: &str) -> String {
+pub(super) fn strip_html_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<!--") {
@@ -931,6 +988,29 @@ pub(super) fn card_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_preview_keeps_last_wrapped_rows_and_full_text_offsets() {
+        let text = "first\n\nsecond\n\nthird\n\nfourth";
+        let rows = reasoning_preview_rows(text, 40);
+        assert_eq!(rows.len(), 3);
+        let item = TranscriptItem::ReasoningSummary { text: text.into() };
+        let full = super::super::selection::selection_text_for(&item, 40);
+        let (last, offset) = rows.last().unwrap();
+        let visible: String = last
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(visible, "fourth");
+        use unicode_segmentation::UnicodeSegmentation;
+        assert_eq!(
+            full.graphemes(true).skip(*offset).collect::<String>(),
+            "fourth"
+        );
+        let wrapped = reasoning_preview_rows("abcdefghijklmnopqrst", 8);
+        assert!(wrapped.len() <= 3);
+    }
 
     #[test]
     fn strip_html_comments_removes_reasoning_placeholders() {
