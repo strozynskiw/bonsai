@@ -181,7 +181,28 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
         self.tool_schema = self.agent.tool_schema_for_registry(&self.tool_registry);
     }
 
+    async fn accept_queued_steering(&mut self) -> Result<()> {
+        if self
+            .agent
+            .drain_queued_messages(
+                &mut self.queued_messages,
+                &mut self.pending_queued_messages,
+                &mut self.cancelled_queued_message_ids,
+                &self.sink,
+            )
+            .await?
+        {
+            self.state.policies.reset_for_user_steering();
+            self.agent.set_planning_advisory(None);
+            self.refresh_tool_registry();
+        }
+        Ok(())
+    }
+
     async fn run(mut self) -> Result<AgentRunResult> {
+        if !self.cancellation_token.is_cancelled() {
+            self.accept_queued_steering().await?;
+        }
         self.snapshot_run_start_dirty_paths().await;
         let _subagent_cancel_watcher = SubagentCancelWatcher::spawn(
             self.agent.subagent_runner.clone(),
@@ -242,6 +263,9 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
             )));
         }
 
+        // Deliver already queued messages before potentially slow refresh work.
+        self.accept_queued_steering().await?;
+
         // Keep the volatile git state honest across round-trips: writes and
         // concurrent edits land mid-run and must be visible on the next turn.
         let volatile_changed = self.agent.refresh_volatile_project_state().await;
@@ -261,20 +285,8 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
                 .policies
                 .reset_implementation_stall_for_external_progress(reason);
         }
-        let user_steered = self
-            .agent
-            .drain_queued_messages(
-                &mut self.queued_messages,
-                &mut self.pending_queued_messages,
-                &mut self.cancelled_queued_message_ids,
-                &self.sink,
-            )
-            .await?;
-        if user_steered {
-            self.state.policies.reset_for_user_steering();
-            self.agent.set_planning_advisory(None);
-            self.refresh_tool_registry();
-        }
+        // Messages may have arrived while either refresh was awaiting work.
+        self.accept_queued_steering().await?;
 
         if !self.agent.budget.unlimited_turns
             && let Some(note) = self
@@ -964,6 +976,89 @@ impl<'agent, 'receiver> TurnCoordinator<'agent, 'receiver> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_steering_is_delivered_before_workspace_refresh() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct FinishedProvider;
+        #[async_trait::async_trait]
+        impl crate::provider::Provider for FinishedProvider {
+            async fn chat_stream(
+                &self,
+                _messages: &[ChatCompletionRequestMessage],
+                _tools: &[async_openai::types::chat::ChatCompletionTool],
+                _cancellation: CancellationToken,
+                _sink: SharedSink,
+            ) -> crate::provider::ProviderResult<StreamedResponse> {
+                Ok(StreamedResponse {
+                    content: "Done".to_string(),
+                    ..StreamedResponse::default()
+                })
+            }
+
+            async fn list_models(&self) -> Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+        }
+
+        struct QueueSink {
+            marker: std::path::PathBuf,
+            delivered_before_refresh: AtomicBool,
+        }
+        impl crate::output::OutputSink for QueueSink {
+            fn queued_user_message_sent(&self, _id: u64, _text: &str) {
+                self.delivered_before_refresh
+                    .store(!self.marker.exists(), Ordering::SeqCst);
+            }
+        }
+
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        crate::util::git::setup_test_clean_filter(&fixture.project_root);
+        let marker = fixture.project_root.join("clean-filter-ran");
+        let project_context = crate::context::project_context_snapshot(&fixture.project_root);
+        let _ = std::fs::remove_file(&marker);
+        let registry = Arc::new(ToolRegistry::new());
+        let mut agent = Agent::builder(
+            Box::new(FinishedProvider),
+            registry.clone(),
+            registry,
+            fixture.read_tracker.clone(),
+            fixture.project_root.clone(),
+        )
+        .project_context_snapshot(project_context)
+        .build()
+        .unwrap();
+        agent.set_refresh_volatile(true);
+        agent.begin_inferred_completion_task("Explain the module");
+        let sink = Arc::new(QueueSink {
+            marker: marker.clone(),
+            delivered_before_refresh: AtomicBool::new(false),
+        });
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        sender
+            .send(QueuedUserMessageCommand::Send(QueuedUserMessage {
+                id: 1,
+                display_text: "Also explain the edge cases".into(),
+                transcript_text: "Also explain the edge cases".into(),
+                input: UserInput::from_text("Also explain the edge cases"),
+            }))
+            .unwrap();
+        let mut coordinator = TurnCoordinator::new(
+            &mut agent,
+            RunCancellation::split(),
+            sink.clone(),
+            Some(&mut receiver),
+            SessionTitleRunPolicy::ContinuationOrAutomatic,
+        );
+        let _ = coordinator.advance_turn().await.unwrap();
+
+        assert!(sink.delivered_before_refresh.load(Ordering::SeqCst));
+        assert!(
+            marker.exists(),
+            "workspace refresh should have run after delivery"
+        );
+    }
 
     #[tokio::test]
     async fn steering_received_during_completion_evidence_prevents_terminal_success() {
