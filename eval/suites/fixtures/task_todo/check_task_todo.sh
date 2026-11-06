@@ -107,6 +107,14 @@ done = today - dt.timedelta(days=2)
 [Backlog]
 - [ ] T-9 Broken due date @low due:not-a-date
 """)
+(root / "unpadded_date.tasklog").write_text("""# Project: Bad Date
+[Backlog]
+- [ ] T-9 Broken due date @low due:2026-1-1
+""")
+(root / "unicode_column.tasklog").write_text("""# Project: Unicode
+[Backlog]
+- [ ] T-1 café @urgent
+""")
 (root / "bad_priority.tasklog").write_text(f"""# Project: Bad Priority
 [Backlog]
 - [ ] T-10 Wrong priority @urgent due:{future.isoformat()}
@@ -202,9 +210,28 @@ pass "deterministic JSON export contains project data"
 
 assert_fails_with "duplicate id validation" duplicate "$bin" validate "$tmp_dir/duplicate.tasklog"
 assert_fails_with "bad date validation" date "$bin" validate "$tmp_dir/bad_date.tasklog"
+assert_fails_with "date format validation" date "$bin" validate "$tmp_dir/unpadded_date.tasklog"
 assert_fails_with "bad priority validation" priority "$bin" validate "$tmp_dir/bad_priority.tasklog"
 assert_fails_with "task outside section validation" section "$bin" validate "$tmp_dir/outside_section.tasklog"
 assert_fails_with "bad section validation" section "$bin" validate "$tmp_dir/bad_section.tasklog"
+
+# If a diagnostic provides a column, it must point to the character in the
+# original text, not its UTF-8 byte offset. Implementations may report only a
+# line when a precise column is unavailable.
+python3 - "$bin" "$tmp_dir/unicode_column.tasklog" <<'PY'
+import re
+import subprocess
+import sys
+
+result = subprocess.run([sys.argv[1], "validate", sys.argv[2]], capture_output=True, text=True)
+message = result.stdout + result.stderr
+if result.returncode == 0 or "priority" not in message.lower():
+    raise SystemExit(f"Unicode priority validation failed: {message}")
+column = re.search(r"\b(?:column|col)\s*[: ]+\s*(\d+)", message, re.IGNORECASE)
+if column and int(column.group(1)) != 16:
+    raise SystemExit(f"Unicode diagnostic column should be 16: {message}")
+PY
+pass "Unicode diagnostic column"
 
 [ -f README.md ] || fail "README.md is required"
 readme="$(cat README.md)"

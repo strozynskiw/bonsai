@@ -72,6 +72,15 @@
     "existing_coverage": "src/agent/tests/stall_guard.rs::recovery_advisory_reaches_model_without_extending_turn_limit",
     "conclusion": "The runtime supplied the warning and enforced the configured limit; the model chose another edit. The evidence does not establish that adding or rewording an advisory would improve completion."
   },
+  "fixture_quality_followup": {
+    "baseline": "target/eval-tasklog-458/1793976121314-live-458/report.json",
+    "baseline_result": "Completed in 22 turns within budget and passed the old fixture, but manually accepted 2026-1-1 and reported column 17 for @urgent at character column 16 after café.",
+    "change": "The fixture now rejects unpadded dates and checks reported Unicode diagnostic columns. A diagnostic without a column is still permitted.",
+    "negative_controls": "The original output fails the date check; a temporary date-only correction fails the Unicode column check.",
+    "positive_control": "A temporary correction of both defects passes the expanded checker.",
+    "fresh_live_report": "target/eval-tasklog-459/1793976367553-live-459/report.json",
+    "fresh_live_result": "Completed in 27 turns and passed all expanded checks within budget. One sample does not establish overall reliability."
+  },
   "low_effort_experiment": {
     "model": "deepseek/deepseek-flash",
     "provider": "deepseek",
