@@ -651,12 +651,201 @@ pub(crate) fn token_count_u32(value: Option<u64>) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// A process-wide shared HTTP client. `reqwest::Client` is `Arc`-backed, so
-/// cloning is cheap and every clone shares one connection pool — avoiding a
-/// fresh pool and TLS configuration per provider instance or catalog fetch.
+/// Reuse an HTTP connection pool within a Tokio runtime when possible. A pooled connection
+/// is driven by the runtime that opened it, so reusing it from another runtime
+/// can lose in-flight requests when the original runtime shuts down.
 pub(crate) fn http_client() -> reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new).clone()
+    static CLIENT: std::sync::Mutex<Option<(tokio::runtime::Id, reqwest::Client)>> =
+        std::sync::Mutex::new(None);
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return reqwest::Client::new();
+    };
+    let mut cached = CLIENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((id, client)) = cached.as_ref()
+        && *id == handle.id()
+    {
+        return client.clone();
+    }
+    let client = reqwest::Client::new();
+    *cached = Some((handle.id(), client.clone()));
+    client
+}
+
+#[cfg(test)]
+mod http_client_tests {
+    #[test]
+    fn shared_client_does_not_depend_on_another_live_runtime() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let released = Arc::new(AtomicBool::new(false));
+        let count = Arc::new(AtomicUsize::new(0));
+        let server_running = running.clone();
+        let server_released = released.clone();
+        let server = std::thread::spawn(move || {
+            let mut handlers = Vec::new();
+            while server_running.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let running = server_running.clone();
+                        let released = server_released.clone();
+                        let count = count.clone();
+                        let request_tx = request_tx.clone();
+                        handlers.push(std::thread::spawn(move || {
+                            stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+                            let mut buf = [0; 4096];
+                            let mut request = Vec::new();
+                            while running.load(Ordering::Acquire) {
+                                match stream.read(&mut buf) {
+                                    Ok(0) => break,
+                                    Ok(len) => {
+                                        request.extend_from_slice(&buf[..len]);
+                                        if !request.windows(4).any(|part| part == b"\r\n\r\n") { continue; }
+                                        request.clear();
+                                        if count.fetch_add(1, Ordering::AcqRel) == 1 {
+                                            let _ = request_tx.send(());
+                                            while !released.load(Ordering::Acquire) && running.load(Ordering::Acquire) { std::thread::sleep(Duration::from_millis(5)); }
+                                        }
+                                        if stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok").is_err() { break; }
+                                    }
+                                    Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {},
+                                    Err(_) => break,
+                                }
+                            }
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("server accept failed: {error}"),
+                }
+            }
+            for handler in handlers {
+                handler.join().unwrap();
+            }
+        });
+        let first_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let url = format!("http://{address}/models");
+        first_runtime.block_on(async {
+            super::http_client()
+                .get(&url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+        let second = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                super::http_client()
+                    .get(&url)
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+            })
+        });
+        let received = request_rx.recv_timeout(Duration::from_secs(4)).is_ok();
+        drop(first_runtime);
+        released.store(true, Ordering::Release);
+        let result = second.join().unwrap();
+        running.store(false, Ordering::Release);
+        server.join().unwrap();
+        assert!(received, "the second request did not reach the server");
+        assert!(
+            result.is_ok(),
+            "request failed after the other runtime exited: {result:?}"
+        );
+    }
+
+    #[test]
+    fn shared_client_survives_sequential_tokio_runtimes() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = running.clone();
+        let server = std::thread::spawn(move || {
+            let mut handlers = Vec::new();
+            while server_running.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let running = server_running.clone();
+                        handlers.push(std::thread::spawn(move || {
+                            stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+                            let mut bytes = [0; 4096];
+                            let mut request = Vec::new();
+                            while running.load(Ordering::Acquire) {
+                                match stream.read(&mut bytes) {
+                                    Ok(0) => break,
+                                    Ok(len) => {
+                                        request.extend_from_slice(&bytes[..len]);
+                                        if !request.windows(4).any(|part| part == b"\r\n\r\n") { continue; }
+                                        request.clear();
+                                        if stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok").is_err() { break; }
+                                    },
+                                    Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {},
+                                    Err(_) => break,
+                                }
+                            }
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("server accept failed: {error}"),
+                }
+            }
+            for handler in handlers {
+                handler.join().unwrap();
+            }
+        });
+        let send = || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                super::http_client()
+                    .get(format!("http://{address}/models"))
+                    .timeout(Duration::from_secs(3))
+                    .send()
+                    .await?
+                    .text()
+                    .await
+            })
+        };
+        let first = send();
+        let second = send();
+        running.store(false, Ordering::Release);
+        server.join().unwrap();
+        assert_eq!(first.unwrap(), "ok");
+        assert_eq!(second.unwrap(), "ok");
+    }
 }
 
 /// Mint a conversation-stable UUIDv7 cache-routing key for OpenAI-family
