@@ -123,6 +123,56 @@ async fn persona_can_be_granted_mutating_tools() {
 }
 
 #[tokio::test]
+async fn smol_drops_the_mcp_surface_the_other_personas_keep() {
+    let fixture = TestFixture::new();
+    let mut agent = Agent::builder(
+        MockProvider::empty(),
+        registry_with(&[
+            "read",
+            "write",
+            "edit",
+            "bash",
+            "terminal",
+            "todowrite",
+            "set_session_title",
+            "grep",
+            "mcp__github__create_issue",
+            "mcp__browser__browser_navigate",
+        ]),
+        // Review projects from the planning registry, which carries the parent's
+        // MCP surface too.
+        registry_with(&["read", "mcp__github__create_issue"]),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .build()
+    .unwrap();
+
+    // The parent coding persona keeps the extension surface...
+    agent.set_persona(ActivePersona::Builtin(super::AgentMode::Coding));
+    assert!(
+        agent
+            .tool_registry
+            .get("mcp__github__create_issue")
+            .is_some()
+    );
+
+    // ...SMOL does not. Its schema budget is the whole point: a host with a few
+    // MCP servers configured would otherwise spend more tokens on MCP tool
+    // definitions than on the seven tools the profile actually keeps.
+    agent.set_smol_mode(true);
+    let schema = agent.active_tool_schema();
+    let names = schema.names();
+    assert!(names.iter().any(|name| name == "bash"), "{names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|name| crate::extension::is_mcp_wire_name(name)),
+        "SMOL must not inherit MCP tools: {names:?}"
+    );
+}
+
+#[tokio::test]
 async fn mcp_tools_reach_the_projected_read_only_and_review_registries() {
     let fixture = TestFixture::new();
     let temp = tempfile::TempDir::new().unwrap();

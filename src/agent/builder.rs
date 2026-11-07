@@ -91,7 +91,8 @@ impl Agent {
     /// personas. Discovered MCP tools ride along in `source` order after the
     /// named subset: every agent runs with the parent's extension surface (each
     /// call re-enters the shared extension gate), and a projection must not
-    /// silently drop what the parent was told to use.
+    /// silently drop what the parent was told to use. SMOL is the one exception
+    /// — see [`Self::smol_registry_from`].
     fn registry_subset(source: &Arc<ToolRegistry>, names: &[&str]) -> Arc<ToolRegistry> {
         let mut registry = ToolRegistry::new();
         for name in names {
@@ -128,7 +129,19 @@ impl Agent {
         } else {
             &SMOL_TOOL_NAMES
         };
-        Self::registry_subset(coding_registry, names)
+        // Deliberately NOT `registry_subset`: SMOL is the small-context persona,
+        // and riding along every discovered MCP tool defeats it outright. A host
+        // with a handful of MCP servers configured carries ~100 MCP schemas
+        // (~27k tokens) — more than the whole 7-tool SMOL set — which on a local
+        // model is the difference between "fits" and "48% of the window spent on
+        // tool definitions". Callers who need the extension surface turn SMOL off.
+        let mut registry = ToolRegistry::new();
+        for name in names {
+            if let Some(tool) = coding_registry.get(name) {
+                registry.register(tool);
+            }
+        }
+        Arc::new(registry)
     }
 
     #[cfg(test)]
