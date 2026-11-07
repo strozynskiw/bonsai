@@ -234,6 +234,7 @@ pub(in crate::tui) async fn handle_providers_command(
                 .iter()
                 .map(|connection| connection.default_base_url.to_string())
                 .collect();
+            state.taken_ids = taken_ids.clone();
             // Probing a dead endpoint is a refused connection, not a hang: the
             // budget bounds anything slower than a local round trip.
             if let Some(found) =

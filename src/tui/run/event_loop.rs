@@ -5011,6 +5011,7 @@ async fn local_model_wizard_state_for_input(
             .iter()
             .map(|connection| connection.default_base_url.to_string())
             .collect();
+        state.taken_ids = taken_ids.clone();
         if let Some(found) =
             crate::tui::local_model_wizard::discover_local_endpoint(known_base_urls).await
         {

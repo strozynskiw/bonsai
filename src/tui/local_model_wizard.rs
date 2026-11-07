@@ -450,6 +450,10 @@ pub(crate) struct LocalModelWizardState {
     /// provider (`/wizard <id>`): the id is locked and commit replaces the
     /// provider's catalog files instead of refusing to overwrite them.
     pub editing_existing: bool,
+    /// Provider ids already in the catalog. Used to keep an auto-derived id
+    /// free and to reject a typed collision on the Setup step instead of at
+    /// write time, after the whole wizard has been filled in.
+    pub taken_ids: Vec<String>,
 }
 
 impl Default for LocalModelWizardState {
@@ -476,6 +480,7 @@ impl Default for LocalModelWizardState {
             status: None,
             error: None,
             editing_existing: false,
+            taken_ids: Vec::new(),
         }
     }
 }
@@ -849,10 +854,30 @@ impl LocalModelWizardState {
             .trim()
             .parse::<ConnectionId>()
             .map_err(|err| err.to_string())?;
+        // A new provider may not reuse an existing id: the writer would refuse
+        // at the very end. Catch it here, while the id field is still editable
+        // and nothing typed has been lost.
+        if !self.editing_existing && self.id_is_taken() {
+            let id = self.provider_id.trim();
+            let suggestion = unique_provider_id(id, &self.taken_ids);
+            return Err(format!(
+                "Provider id `{id}` already exists — use `{suggestion}`, or clear the Provider ID \
+                 field on this step to pick another."
+            ));
+        }
         self.preset
             .normalize_base_url(&self.base_url)
             .map(|_| ())
             .map_err(|err| format!("{err:#}"))
+    }
+
+    fn id_is_taken(&self) -> bool {
+        let id = self.provider_id.trim();
+        !id.is_empty()
+            && self
+                .taken_ids
+                .iter()
+                .any(|taken| taken.eq_ignore_ascii_case(id))
     }
 
     pub(crate) fn catalog_input(&self) -> Result<LocalCatalogEntryInput, String> {
@@ -957,7 +982,10 @@ impl LocalModelWizardState {
             LocalModelSetupField::DisplayName => {
                 insert_at_cursor(&mut self.display_name, &mut self.text_cursor, ch);
                 if !self.provider_id_edited {
-                    self.provider_id = slugify_provider_id(&self.display_name);
+                    self.provider_id = unique_provider_id(
+                        &slugify_provider_id(&self.display_name),
+                        &self.taken_ids,
+                    );
                 }
             }
             LocalModelSetupField::ProviderId => {
@@ -1885,6 +1913,49 @@ mod tests {
             source.push_str(&format!("remote_model = \"{remote}\"\n"));
         }
         toml::from_str(&source).expect("target spec should parse")
+    }
+
+    #[test]
+    fn auto_provider_id_avoids_an_existing_catalog_id() {
+        // Typing a name whose slug is already taken must not build a wizard that
+        // only fails at write time.
+        let mut state = LocalModelWizardState {
+            taken_ids: vec!["local".to_string()],
+            base_url: "http://192.168.50.123:8888/v1".to_string(),
+            ..LocalModelWizardState::default()
+        };
+
+        state.move_field(1);
+        state.paste("Local");
+
+        assert_eq!(state.provider_id, "local-2");
+        assert!(
+            state.validate_setup().is_ok(),
+            "{:?}",
+            state.validate_setup()
+        );
+    }
+
+    #[test]
+    fn typed_provider_id_collision_is_rejected_on_the_setup_step() {
+        let mut state = LocalModelWizardState {
+            display_name: "Unsloth".to_string(),
+            provider_id: "local".to_string(),
+            provider_id_edited: true,
+            base_url: "http://192.168.50.123:8888/v1".to_string(),
+            taken_ids: vec!["local".to_string()],
+            ..LocalModelWizardState::default()
+        };
+
+        let error = state.validate_setup().unwrap_err();
+        assert!(
+            error.contains("already exists") && error.contains("local-2"),
+            "the message must name the clash and a free id: {error}"
+        );
+
+        // Editing that provider still validates: the id is its own.
+        state.editing_existing = true;
+        assert!(state.validate_setup().is_ok());
     }
 
     #[test]
