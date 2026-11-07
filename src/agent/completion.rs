@@ -929,12 +929,22 @@ impl Agent {
                 "Completion blocked: the assistant explicitly reported an unresolved blocker.",
             );
         }
-        if gaps.iter().any(|gap| {
+        let unfinished_goal = gaps.iter().any(|gap| {
             matches!(
                 gap,
                 CompletionGap::GoalWorkRemaining | CompletionGap::GoalCompletionUnconfirmed
             )
-        }) && !gaps.iter().any(CompletionGap::is_external_blocker)
+        });
+        let goal_needs_verification = self.goal_run_id.is_some()
+            && !gaps.is_empty()
+            && gaps.iter().all(|gap| {
+                matches!(
+                    gap,
+                    CompletionGap::VerificationMissing | CompletionGap::VerificationStale
+                )
+            });
+        if (unfinished_goal || goal_needs_verification)
+            && !gaps.iter().any(CompletionGap::is_external_blocker)
         {
             let revision = self.completion.goal_progress_revision;
             let progressed = self

@@ -519,7 +519,7 @@ fn server_goal_terminal_states_follow_the_classified_evidence() {
     );
     assert_eq!(
         crate::goal::terminal_from_completion(C::Unverified, None).0,
-        G::Blocked
+        G::Paused
     );
     assert_eq!(
         crate::goal::terminal_from_completion(C::BudgetExhausted, Some(B::ProviderQuota)).0,

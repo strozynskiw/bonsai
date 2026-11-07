@@ -427,6 +427,40 @@ async fn explicit_unfinished_goal_work_triggers_recovery_before_completion() {
 }
 
 #[tokio::test]
+async fn goal_retries_unconfirmed_verification_before_pausing() {
+    use crate::agent::completion::{CompletionGuardVerdict, TaskCompletionContract};
+    let fixture = TestFixture::new();
+    let mut agent = goal_agent(&fixture, vec![]);
+    let goal = agent.goal.set("Improve the interface").await.unwrap();
+    agent.goal_run_id = Some(goal.id);
+    agent.begin_completion_task(TaskCompletionContract::verification_action());
+    agent.note_completion_action();
+    for _ in 0..2 {
+        assert!(matches!(
+            agent.completion_guard_verdict("Work completed.").await,
+            CompletionGuardVerdict::Continue { .. }
+        ));
+    }
+    let CompletionGuardVerdict::Reject(failure) =
+        agent.completion_guard_verdict("Work completed.").await
+    else {
+        panic!("repeated missing verification must stop without claiming success");
+    };
+    assert_eq!(
+        failure.outcome,
+        crate::agent::CompletionFailureOutcome::Unverified
+    );
+    assert_eq!(
+        crate::goal::terminal_from_completion(
+            crate::completion_report::CompletionStatus::Unverified,
+            None
+        )
+        .0,
+        GoalState::Paused
+    );
+}
+
+#[tokio::test]
 async fn goal_recovery_continues_with_progress_but_bounds_repeated_status() {
     use crate::agent::completion::CompletionGuardVerdict;
     use crate::completion_report::CompletionStatus;

@@ -62,8 +62,8 @@ pub(crate) fn terminal_from_completion(
             )),
         ),
         C::Unverified => (
-            GoalState::Blocked,
-            Some("Work completed; verification not confirmed.".into()),
+            GoalState::Paused,
+            Some("Verification was not confirmed; resume the goal to continue checking.".into()),
         ),
         C::Blocked => (
             GoalState::Blocked,

@@ -21,7 +21,7 @@ impl RetryBackoff {
             Self::Exponential => Duration::from_secs(
                 provider_error
                     .retry_after_secs()
-                    .unwrap_or(1 << attempt)
+                    .unwrap_or(1u64 << attempt.min(6))
                     .max(1),
             ),
             Self::Immediate => Duration::ZERO,
@@ -529,8 +529,22 @@ impl Agent {
                     // Compute the (owned) backoff while the borrow of `err` is
                     // live, then fall through to retry; any non-retryable error
                     // or exhausted budget returns `err` directly.
+                    // A long-running goal can outlive a transient outage. Use
+                    // the ordinary bounded policy first when a fallback exists,
+                    // and keep rate/quota limits terminal rather than hiding them.
+                    let goal_retry = self.goal_run_lease.is_some()
+                        && self.execution_lane.kind == ExecutionLaneKind::Parent
+                        && self.provider_fallback.is_none()
+                        && self.retry_backoff == RetryBackoff::Exponential
+                        // Failed attempts are metered after this retry sequence.
+                        // Keep bounded retries when an exact billed-token or
+                        // cost limit must be enforced between requests.
+                        && self.budget.max_session_billed_tokens.is_none()
+                        && self.budget.max_session_cost_micros.is_none()
+                        && !matches!(err, ProviderFailure::Decode { .. })
+                        && err.limit_kind().is_none();
                     let retry = match err.is_retryable() {
-                        true if attempt < MAX_PROVIDER_RETRIES => Some((
+                        true if attempt < MAX_PROVIDER_RETRIES || goal_retry => Some((
                             self.retry_backoff.delay(&err, attempt),
                             retry_status_label(&err),
                         )),
@@ -585,7 +599,20 @@ impl Agent {
                         }
                         return Err(ProviderRetryError::new(err.into(), attempts));
                     };
-                    let retry_status = if delay.is_zero() {
+                    let retry_status = if goal_retry && attempt >= MAX_PROVIDER_RETRIES {
+                        if delay.is_zero() {
+                            format!(
+                                "[{retry_label}] goal will retry immediately (attempt {})",
+                                attempt + 1
+                            )
+                        } else {
+                            format!(
+                                "[{retry_label}] goal will retry in {}s (attempt {})",
+                                delay.as_secs(),
+                                attempt + 1
+                            )
+                        }
+                    } else if delay.is_zero() {
                         format!(
                             "[{retry_label}] retrying immediately (attempt {}/{MAX_PROVIDER_RETRIES})",
                             attempt + 1,
@@ -1279,6 +1306,188 @@ mod tests {
             })
         );
         assert_eq!(agent.session_budget_usage().output_chars, 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn active_goal_recovers_after_more_than_the_normal_retry_limit() {
+        struct RecoveringProvider(AtomicUsize);
+        #[async_trait::async_trait]
+        impl Provider for RecoveringProvider {
+            async fn chat_stream(
+                &self,
+                _messages: &[ChatCompletionRequestMessage],
+                _tools: &[async_openai::types::chat::ChatCompletionTool],
+                _cancellation: CancellationToken,
+                _sink: SharedSink,
+            ) -> crate::provider::ProviderResult<StreamedResponse> {
+                if self.0.fetch_add(1, Ordering::Relaxed) < MAX_PROVIDER_RETRIES + 2 {
+                    Err(ProviderFailure::http(500, "temporary outage", None))
+                } else {
+                    Ok(StreamedResponse {
+                        content: "recovered".into(),
+                        ..StreamedResponse::default()
+                    })
+                }
+            }
+            async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+        }
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let mut agent = Agent::new(
+            Box::new(RecoveringProvider(AtomicUsize::new(0))),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        agent
+            .goal
+            .set("Keep working through transient outages")
+            .await
+            .unwrap();
+        agent.goal_run_lease = agent.goal.active_run_lease().await;
+        let stream = agent
+            .chat_stream_with_retry(
+                &[],
+                &[],
+                CancellationToken::new(),
+                Arc::new(CapturingSink::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream.response.content, "recovered");
+        assert_eq!(stream.attempts.len(), MAX_PROVIDER_RETRIES + 3);
+    }
+
+    #[test]
+    fn exponential_retry_delay_stays_bounded_for_long_running_goals() {
+        let failure = ProviderFailure::http(500, "temporary outage", None);
+        assert_eq!(
+            RetryBackoff::Exponential.delay(&failure, 1000),
+            Duration::from_secs(64)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn goal_outages_keep_bounded_retries_with_billed_usage_limits() {
+        for budget in [
+            crate::run_budget::RunBudget {
+                max_session_billed_tokens: Some(100_000),
+                ..crate::run_budget::RunBudget::default()
+            },
+            crate::run_budget::RunBudget {
+                max_session_cost_micros: Some(1_000_000),
+                ..crate::run_budget::RunBudget::default()
+            },
+        ] {
+            let fixture = crate::tool::test_utils::TestFixture::new();
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let mut agent = Agent::new(
+                Box::new(StreamingFailureProvider {
+                    attempts: attempts.clone(),
+                    failure: ProviderFailure::http(500, "temporary outage", None),
+                }),
+                Arc::new(ToolRegistry::new()),
+                Arc::new(ToolRegistry::new()),
+                fixture.read_tracker.clone(),
+                String::new(),
+                fixture.project_root.clone(),
+            )
+            .unwrap();
+            agent.goal.set("Keep working").await.unwrap();
+            agent.goal_run_lease = agent.goal.active_run_lease().await;
+            agent.set_run_budget(budget);
+            assert!(
+                agent
+                    .chat_stream_with_retry(
+                        &[],
+                        &[],
+                        CancellationToken::new(),
+                        Arc::new(CapturingSink::default())
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(attempts.load(Ordering::Relaxed), MAX_PROVIDER_RETRIES + 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_decode_errors_do_not_retry_forever_for_a_goal() {
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut agent = Agent::new(
+            Box::new(StreamingFailureProvider {
+                attempts: attempts.clone(),
+                failure: ProviderFailure::stream_decode("invalid response"),
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        agent.goal.set("Keep working").await.unwrap();
+        agent.goal_run_lease = agent.goal.active_run_lease().await;
+        assert!(
+            agent
+                .chat_stream_with_retry(
+                    &[],
+                    &[],
+                    CancellationToken::new(),
+                    Arc::new(CapturingSink::default())
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::Relaxed), MAX_PROVIDER_RETRIES + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_goal_outage_remains_interruptible() {
+        struct CancelRetry(CancellationToken);
+        impl crate::output::OutputSink for CancelRetry {
+            fn status(&self, text: &str) {
+                if text.contains("goal will retry") {
+                    self.0.cancel();
+                }
+            }
+        }
+        let fixture = crate::tool::test_utils::TestFixture::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut agent = Agent::new(
+            Box::new(StreamingFailureProvider {
+                attempts: attempts.clone(),
+                failure: ProviderFailure::http(500, "temporary outage", None),
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ToolRegistry::new()),
+            fixture.read_tracker.clone(),
+            String::new(),
+            fixture.project_root.clone(),
+        )
+        .unwrap();
+        agent.goal.set("Keep working").await.unwrap();
+        agent.goal_run_lease = agent.goal.active_run_lease().await;
+        let cancellation = CancellationToken::new();
+        let result = agent
+            .chat_stream_with_retry(
+                &[],
+                &[],
+                cancellation.clone(),
+                Arc::new(CancelRetry(cancellation)),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            result.response.terminal,
+            crate::provider::StreamTerminal::Interrupted
+        ));
+        assert_eq!(attempts.load(Ordering::Relaxed), MAX_PROVIDER_RETRIES + 1);
     }
 
     #[tokio::test]
