@@ -756,13 +756,14 @@ impl LocalModelWizardState {
         self.active_fetch_request_id = None;
         if credentials_required(&message) {
             // The URL is right; the server just wants a key. Land on the field
-            // that fixes it instead of leaving the cursor on the address.
+            // that fixes it and say so in the one line the wizard renders.
             self.step = LocalModelWizardStep::Setup;
             self.setup_field = LocalModelSetupField::ApiKey;
             self.text_cursor = None;
-            self.status =
-                Some("This server needs an API key. Type it above and press Enter.".to_string());
-            self.error = Some(message);
+            self.error = Some(format!(
+                "{message} — needs an API key: type it in API key and press Enter."
+            ));
+            self.status = None;
             return;
         }
         self.step = LocalModelWizardStep::SelectModels;
@@ -1684,11 +1685,11 @@ mod tests {
         assert_eq!(state.setup_field, LocalModelSetupField::ApiKey);
         assert!(
             state
-                .status
+                .error
                 .as_deref()
-                .is_some_and(|status| status.contains("needs an API key")),
-            "status should say what to do next: {:?}",
-            state.status
+                .is_some_and(|error| error.contains("needs an API key")),
+            "the error line is what the wizard renders: {:?}",
+            state.error
         );
 
         // A plain unreachable-server failure still lands on manual model entry.
