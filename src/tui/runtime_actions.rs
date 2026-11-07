@@ -1640,6 +1640,15 @@ fn start_local_model_commit(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
                 .ok_or_else(|| anyhow::anyhow!("local catalog writer returned no models"))?;
             let connection_id = report.connection_id.clone();
             let mut messages = Vec::<CommandOutputEvent>::new();
+            let model_count = report.model_ids.len();
+            messages.push(CommandOutputEvent {
+                kind: CommandOutputKind::Status,
+                text: format!(
+                    "{} provider `{provider_id}` with {model_count} model{}.",
+                    if editing_existing { "Updated" } else { "Added" },
+                    if model_count == 1 { "" } else { "s" }
+                ),
+            });
             let provider_selection = {
                 // Canonical lock order: session_store before agent (see `task.rs`).
                 let mut session = session_store.lock().await;
