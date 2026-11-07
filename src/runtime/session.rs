@@ -70,6 +70,12 @@ pub(crate) async fn persist(
     crate::session_persist::SessionSnapshotWriter::new(storage, id)
         .persist(snapshot, Default::default())
         .await
-        .context("Failed to persist session snapshot")?;
+        .with_context(|| {
+            format!(
+                "Failed to persist session snapshot for session {} to {:?}",
+                id.as_i64(),
+                storage.db_path()
+            )
+        })?;
     Ok(())
 }

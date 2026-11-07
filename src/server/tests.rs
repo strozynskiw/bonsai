@@ -1028,6 +1028,48 @@ async fn admission_failure_never_starts_execution() {
     f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
+/// Teardown bookkeeping is best effort: a storage failure while writing the
+/// final snapshot must not fail the drain, because a retained slot makes the
+/// controller un-shutdownable — every retry replays the same failing write.
+/// The last committed snapshot stays as the durable state and the interrupted
+/// status is still recorded.
+#[tokio::test]
+async fn failed_final_snapshot_still_shuts_down() {
+    let f = Fixture::new().await;
+    f.resume().await;
+    let before =
+        f.db.storage
+            .load_runtime_session_snapshot(f.id)
+            .await
+            .unwrap();
+    let pool = failure_pool(&f).await;
+    sqlx::query("CREATE TRIGGER fail_transcript_rewrite BEFORE DELETE ON messages BEGIN SELECT RAISE(FAIL, 'transcript unavailable'); END")
+        .execute(&pool)
+        .await
+        .unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
+    assert_eq!(
+        f.db.storage
+            .session_summary(f.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SessionStatus::Interrupted,
+        "a failed final snapshot suppressed the interrupted status"
+    );
+    let after =
+        f.db.storage
+            .load_runtime_session_snapshot(f.id)
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(before.map(|snapshot| snapshot.transcript)).unwrap(),
+        serde_json::to_value(after.map(|snapshot| snapshot.transcript)).unwrap(),
+        "a failed final snapshot changed the committed transcript"
+    );
+}
+
 #[tokio::test]
 async fn failed_terminal_bookkeeping_preserves_committed_report_without_publication() {
     for table in ["task_runs", "server_commands"] {

@@ -872,8 +872,15 @@ impl Controller {
                     .all(|terminal| terminal.status.is_finished()),
             "Session children did not drain"
         );
-        if loaded.control.lock().await.failure.is_none() {
-            crate::runtime::session::persist(
+        // Teardown bookkeeping is best effort. The worker is joined and every
+        // child is stopped, so no execution can continue, while a storage
+        // hiccup here would otherwise keep the slot and the claim and make the
+        // controller un-shutdownable: every retry replays the same failing
+        // write. The last committed snapshot stays durable — crash recovery
+        // promotes it — so record the loss instead of retaining ownership.
+        let still_clean = loaded.control.lock().await.failure.is_none();
+        if still_clean
+            && let Err(error) = crate::runtime::session::persist(
                 &self.storage,
                 loaded.id,
                 &core.agent,
@@ -881,11 +888,25 @@ impl Controller {
                 &core.plan_store,
                 &loaded.sink.transcript(),
             )
-            .await?;
+            .await
+        {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                session = loaded.id.as_i64(),
+                "final session snapshot was not persisted while draining"
+            );
         }
-        self.storage
+        if let Err(error) = self
+            .storage
             .mark_session_status(loaded.id, crate::storage::SessionStatus::Interrupted)
-            .await?;
+            .await
+        {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                session = loaded.id.as_i64(),
+                "interrupted status was not recorded while draining"
+            );
+        }
         drop(core);
         loaded.released = true;
         state.loaded = None;
