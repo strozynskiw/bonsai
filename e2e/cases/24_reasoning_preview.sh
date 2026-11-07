@@ -16,8 +16,12 @@ tui_keys "/model openai-compatible:mock-model" Enter
 expect_meta "mock model selected" "Coding · mock-model"
 tui_keys "Inspect the streaming reasoning." Enter
 expect "last reasoning line visible" "REASONING_LINE_08"
+expect "larger preview shows additional context" "REASONING_LINE_06"
 forbid "earlier reasoning is folded in transcript" "REASONING_LINE_01"
-tui_keys Tab End Enter
+expect "fold reports hidden reasoning" "✦ thinking · +"
+tui_keys Tab End
+expect "selected fold advertises the detail affordance" "Enter to expand"
+tui_keys Enter
 expect "detail contains earlier reasoning" "REASONING_LINE_01"
 expect "detail contains latest reasoning" "REASONING_LINE_08"
 tui_keys Escape

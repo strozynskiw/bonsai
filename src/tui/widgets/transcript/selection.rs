@@ -136,7 +136,7 @@ pub(super) fn resolve_position_in_item(
         body
     };
     if reasoning_preview && matches!(item, TranscriptItem::ReasoningSummary { .. }) {
-        let rows = reasoning_preview_rows(&body, inner_width);
+        let rows = folded_reasoning_preview(&body, inner_width).rows;
         if let Some((line, offset)) = rows.get(row_in_item.saturating_sub(2)) {
             let local_col =
                 (column as i32 - area.x as i32 - body_col_offset as i32).max(0) as usize;
@@ -284,13 +284,13 @@ mod reasoning_preview_tests {
     #[test]
     fn visible_reasoning_click_maps_to_full_body_after_folding_and_wrapping() {
         let item = TranscriptItem::ReasoningSummary {
-            text: "hidden beginning\n\nabcdefghijklmnopqrstuvwx\n\nvisible ending".into(),
+            text: "hidden beginning\n\nmore hidden context\n\nabcdefghijklmnopqrstuvwx\n\nvisible ending".into(),
         };
         let area = Rect::new(0, 0, 28, 20);
         let width = 20;
         let body = selection_text_for(&item, width);
-        let rows = reasoning_preview_rows(&crate::copy::body_text_for(&item), width);
-        assert_eq!(rows.len(), 3);
+        let rows = folded_reasoning_preview(&crate::copy::body_text_for(&item), width).rows;
+        assert_eq!(rows.len(), 6);
         for (row, (line, expected_offset)) in rows.iter().enumerate() {
             let position = resolve_position_in_item(&item, 0, row + 2, 4, area, true, false);
             assert_eq!(position.grapheme, *expected_offset);

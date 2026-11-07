@@ -189,10 +189,17 @@ pub(super) fn render_transcript_item(
     }
 }
 
-const REASONING_PREVIEW_ROWS: usize = 3;
+const REASONING_PREVIEW_ROWS: usize = 6;
 
-/// Visible wrapped rows and their grapheme offsets in the full rendered body.
-pub(super) fn reasoning_preview_rows(text: &str, width: usize) -> Vec<(Line<'static>, usize)> {
+/// Tail of the rendered reasoning, plus how much the card folded away.
+pub(super) struct ReasoningPreview {
+    /// Visible wrapped rows and their grapheme offsets in the full rendered body.
+    pub(super) rows: Vec<(Line<'static>, usize)>,
+    /// Rows folded above `rows`; `0` when the whole reasoning fits.
+    pub(super) folded_rows: usize,
+}
+
+pub(super) fn folded_reasoning_preview(text: &str, width: usize) -> ReasoningPreview {
     let mut rows = Vec::new();
     let mut offset = 0;
     for (index, line) in render_markdown(text, width).into_iter().enumerate() {
@@ -205,9 +212,36 @@ pub(super) fn reasoning_preview_rows(text: &str, width: usize) -> Vec<(Line<'sta
             offset += length;
         }
     }
-    let skip = rows.len().saturating_sub(REASONING_PREVIEW_ROWS);
-    rows.drain(..skip);
-    rows
+    let folded_rows = rows.len().saturating_sub(REASONING_PREVIEW_ROWS);
+    rows.drain(..folded_rows);
+    ReasoningPreview { rows, folded_rows }
+}
+
+/// Title for the reasoning card. A silently clipped stream reads as the whole
+/// reasoning, so the title names how much is folded. The expand hint is
+/// focus-gated: Enter opens the detail only once the card is selected, and
+/// while the composer has focus Enter submits the draft instead. Forms are
+/// tried longest-first because the title is never wrapped — an oversized one
+/// would spill past the card rail.
+fn reasoning_title(folded_rows: usize, width: usize, focused: bool) -> String {
+    const BASE: &str = "✦ thinking";
+    if folded_rows == 0 {
+        return BASE.to_string();
+    }
+    let count = format!("{BASE} · +{folded_rows} more");
+    let candidates = if focused {
+        vec![
+            format!("{count} · Enter to expand"),
+            format!("{count} · Enter"),
+            count.clone(),
+        ]
+    } else {
+        vec![count]
+    };
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.as_str().width() <= width)
+        .unwrap_or_else(|| BASE.to_string())
 }
 
 fn render_reasoning_preview(
@@ -219,8 +253,9 @@ fn render_reasoning_preview(
     let inner_width = width.saturating_sub(4).max(8);
     let accent = theme::palette().progress;
     let bg = theme::palette().thinking_block;
+    let preview = folded_reasoning_preview(text, inner_width);
     let mut lines = render_block_lines(
-        "✦ thinking",
+        &reasoning_title(preview.folded_rows, inner_width, focused),
         Vec::new(),
         accent,
         theme::block(theme::palette().dim, bg),
@@ -241,7 +276,7 @@ fn render_reasoning_preview(
     } else {
         theme::block(theme::palette().dim, bg)
     };
-    for (line, offset) in reasoning_preview_rows(text, inner_width) {
+    for (line, offset) in preview.rows {
         let line = apply_range_selection(&line, selected, offset);
         lines.push(card_line(
             &line,
@@ -992,11 +1027,14 @@ mod tests {
     #[test]
     fn reasoning_preview_keeps_last_wrapped_rows_and_full_text_offsets() {
         let text = "first\n\nsecond\n\nthird\n\nfourth";
-        let rows = reasoning_preview_rows(text, 40);
-        assert_eq!(rows.len(), 3);
+        let preview = folded_reasoning_preview(text, 40);
+        assert_eq!(preview.rows.len(), REASONING_PREVIEW_ROWS);
+        // Markdown keeps a blank row between paragraphs, so four paragraphs
+        // render seven rows and fold the first one away.
+        assert_eq!(preview.folded_rows, 1);
         let item = TranscriptItem::ReasoningSummary { text: text.into() };
         let full = super::super::selection::selection_text_for(&item, 40);
-        let (last, offset) = rows.last().unwrap();
+        let (last, offset) = preview.rows.last().unwrap();
         let visible: String = last
             .spans
             .iter()
@@ -1008,8 +1046,75 @@ mod tests {
             full.graphemes(true).skip(*offset).collect::<String>(),
             "fourth"
         );
-        let wrapped = reasoning_preview_rows("abcdefghijklmnopqrst", 8);
-        assert!(wrapped.len() <= 3);
+        let wrapped = folded_reasoning_preview("abcdefghijklmnopqrst", 8);
+        assert!(wrapped.rows.len() <= 3);
+    }
+
+    #[test]
+    fn reasoning_preview_reports_nothing_folded_when_everything_fits() {
+        let preview = folded_reasoning_preview("one\n\ntwo", 40);
+        assert_eq!(preview.folded_rows, 0);
+        assert_eq!(preview.rows.len(), 3);
+        assert_eq!(reasoning_title(preview.folded_rows, 80, true), "✦ thinking");
+    }
+
+    #[test]
+    fn reasoning_title_names_the_fold_and_gates_the_hint_on_focus() {
+        assert_eq!(reasoning_title(8, 80, false), "✦ thinking · +8 more");
+        assert_eq!(
+            reasoning_title(8, 80, true),
+            "✦ thinking · +8 more · Enter to expand"
+        );
+        assert_eq!(
+            reasoning_title(1, 80, true),
+            "✦ thinking · +1 more · Enter to expand"
+        );
+    }
+
+    #[test]
+    fn reasoning_title_shortens_before_it_spills_past_the_card() {
+        assert_eq!(reasoning_title(8, 38, true).width(), 38);
+        assert_eq!(reasoning_title(8, 37, true), "✦ thinking · +8 more · Enter");
+        assert_eq!(reasoning_title(8, 27, true), "✦ thinking · +8 more");
+        assert_eq!(reasoning_title(8, 19, true), "✦ thinking");
+        assert_eq!(reasoning_title(8, 19, false), "✦ thinking");
+        assert_eq!(reasoning_title(8, 20, false), "✦ thinking · +8 more");
+    }
+
+    #[test]
+    fn reasoning_card_header_announces_folded_rows() {
+        let text = "first\n\nsecond\n\nthird\n\nfourth\n\nfifth";
+        let folded = folded_reasoning_preview(text, 56).folded_rows;
+        assert!(folded > 0);
+
+        let idle = header_text(&render_reasoning_preview(
+            text,
+            60,
+            ItemSelection::None,
+            false,
+        ));
+        assert!(idle.contains(&format!("+{folded} more")), "{idle}");
+        // Enter submits the composer draft while the card is unfocused, so the
+        // hint only appears once the card is selected.
+        assert!(!idle.contains("Enter"), "{idle}");
+
+        let focused = header_text(&render_reasoning_preview(
+            text,
+            60,
+            ItemSelection::None,
+            true,
+        ));
+        assert!(focused.contains("Enter to expand"), "{focused}");
+        // The header must stay inside the card rail rather than overflow it.
+        assert!(focused.trim_end().width() <= 60, "{focused}");
+    }
+
+    fn header_text(lines: &[Line<'static>]) -> String {
+        lines[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
