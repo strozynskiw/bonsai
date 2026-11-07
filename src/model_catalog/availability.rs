@@ -74,22 +74,33 @@ impl ModelCatalog {
     pub(crate) fn live_context_window_for_connection_model(
         &self,
         connection_id: &ConnectionId,
-        remote_model_id: &str,
+        model: &str,
     ) -> Option<u32> {
-        self.live_model_for_connection_model(connection_id, remote_model_id)
+        self.live_model_for_connection_model(connection_id, model)
             .and_then(|model| model.context_window)
     }
 
+    /// Find a probed model by either identity it can be addressed with: the
+    /// remote id the endpoint reports, or the catalog model id a matching
+    /// target gave it. Callers hold whichever one they have — the model picker
+    /// and the session's fallback window hold the catalog id, a probe holds the
+    /// remote id — so matching only the remote id misses every aliased target.
     pub(crate) fn live_model_for_connection_model(
         &self,
         connection_id: &ConnectionId,
-        remote_model_id: &str,
+        model: &str,
     ) -> Option<super::AvailableModel> {
         self.live_availability_read()
             .get(connection_id)?
             .models
             .iter()
-            .find(|model| model.remote_model_id.as_ref() == remote_model_id)
+            .find(|candidate| {
+                candidate.remote_model_id.as_ref() == model
+                    || candidate
+                        .model_id
+                        .as_ref()
+                        .is_some_and(|model_id| model_id.as_str() == model)
+            })
             .cloned()
     }
 
@@ -143,6 +154,7 @@ impl ModelCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_catalog::AvailableModel;
 
     #[test]
     fn writing_live_availability_marks_it_fresh() {
@@ -156,6 +168,32 @@ mod tests {
             .unwrap();
 
         assert!(catalog.has_fresh_live_availability(&connection_id, Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn live_model_lookup_accepts_the_catalog_model_id_of_an_aliased_target() {
+        let catalog = ModelCatalog::load_builtin().unwrap();
+        let connection_id = "codex".parse::<ConnectionId>().unwrap();
+        let mut probed = AvailableModel::remote_with_context_window("probe-wire-id", Some(60_032));
+        probed.model_id = Some("codex/gpt-current".parse().unwrap());
+        catalog.live_availability_write().insert(
+            connection_id.clone(),
+            LiveModelAvailability {
+                models: vec![probed],
+                ..LiveModelAvailability::default()
+            },
+        );
+
+        // Both identities address the same probe: the wire id a refresh wrote,
+        // and the catalog id the session and the picker carry.
+        assert_eq!(
+            catalog.live_context_window_for_connection_model(&connection_id, "probe-wire-id"),
+            Some(60_032)
+        );
+        assert_eq!(
+            catalog.live_context_window_for_connection_model(&connection_id, "codex/gpt-current"),
+            Some(60_032)
+        );
     }
 
     #[test]
