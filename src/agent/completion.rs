@@ -891,6 +891,13 @@ impl Agent {
             // context refresh.
             self.note_external_finalization_workspace_change();
         }
+        // This candidate answer is the parent's response to any outstanding
+        // reviewer critique, so its disposition is decided here. Recording it
+        // only at the finalization ladder's repair step is not enough: queued
+        // steering restarts the ladder at the review step, so that step is
+        // skipped and the succeeded review row keeps no disposition — which the
+        // review check reads as permanently missing from then on.
+        self.finalize_pending_self_review(response);
         let signals = response_signals(response);
         let evidence = self.completion_decision_evidence(signals).await;
         let mut gaps = completion_gaps(&evidence);

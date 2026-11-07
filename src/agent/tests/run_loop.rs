@@ -2946,6 +2946,93 @@ async fn self_review_subagent_injects_reviewer_critique() {
     );
 }
 
+/// Queued steering restarts the finalization ladder at the review step, so the
+/// ladder never reaches the repair step that records what the parent did with
+/// the reviewer's critique. The completion gate must resolve that open
+/// disposition from the candidate answer instead of blocking forever.
+#[tokio::test]
+async fn completion_gate_records_a_pending_review_disposition_after_a_steering_reset() {
+    let fixture = TestFixture::new();
+    let root = &fixture.project_root;
+    init_repo(root);
+    commit_file(root, "lib.rs", "fn old() {}\n", "baseline");
+
+    let runner = self_review_runner(&fixture, "Major: REVIEWER-FINDING: dirty() is wrong");
+    let mut agent = Agent::builder(
+        Box::new(MockProvider::new(Vec::new())),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        fixture.project_root.clone(),
+    )
+    .subagent_runner(Some(runner))
+    .build()
+    .unwrap();
+    agent.set_self_review_mode(crate::self_review::SelfReviewMode::On);
+    agent.begin_completion_task(
+        super::super::completion::TaskCompletionContract::workspace_action(),
+    );
+    agent.arm_self_review_for_coding_task("change lib").await;
+    let baseline = capture_review_baseline(root).await;
+    agent.self_review.set_deferred_baseline(baseline);
+    std::fs::write(root.join("lib.rs"), REVIEWABLE_RUST_CHANGE).unwrap();
+    agent
+        .self_review
+        .note_typed_mutation(vec!["lib.rs".to_string()]);
+
+    let sink: SharedSink = Arc::new(StdoutSink);
+    assert!(
+        agent
+            .maybe_self_review(&sink, CancellationToken::new())
+            .await,
+        "a non-empty diff should inject a fix turn"
+    );
+    assert_eq!(agent.self_review_runs()[0].disposition, None);
+
+    agent.note_completion_workspace_mutation();
+    agent.merge_completion_steering("How is going?");
+    agent
+        .self_review
+        .note_typed_mutation(vec!["lib.rs".to_string()]);
+    assert_eq!(
+        agent.self_review_runs()[0].disposition,
+        None,
+        "the skipped repair step leaves the reviewer outcome unresolved"
+    );
+    // The workspace is verified, so the reviewer outcome is the only remaining
+    // structured gap the gate can see.
+    agent
+        .record_verification_tool_result(
+            &crate::provider::ToolCall {
+                id: "check-1".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test"}"#.to_string(),
+            },
+            &crate::tool::ToolOutput::Command {
+                rendered: "exit code: 0".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                timed_out: false,
+                truncation: None,
+            },
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    agent.revalidate_verification_for_delivery(0).await;
+
+    assert_eq!(
+        agent
+            .completion_guard_verdict("Fixed the reviewer finding.")
+            .await,
+        super::super::completion::CompletionGuardVerdict::Accept
+    );
+    assert_eq!(
+        agent.self_review_runs()[0].disposition,
+        Some(crate::self_review::SelfReviewDisposition::Fixed)
+    );
+}
+
 #[tokio::test]
 async fn subagent_usage_lands_in_session_totals_at_the_subagent_models_pricing() {
     // A delegated subagent can run a DIFFERENT model than the session; its
