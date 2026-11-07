@@ -27,7 +27,8 @@ pub use auth::{AuthInput, AuthorizeOutcome};
 pub(crate) use codex::codex_cached_authorization;
 pub(crate) use discovery::{DetectedServer, detect_server, fetch_models_with_discovery};
 pub(crate) use endpoint::{
-    normalize_anthropic_compatible_base_url, normalize_openai_compatible_base_url,
+    is_local_endpoint_url, normalize_anthropic_compatible_base_url,
+    normalize_openai_compatible_base_url,
 };
 pub use metadata::{
     ANTHROPIC_PARAMETERS, AuthRequirement, CODEX_REASONING, DEFAULT_CONTEXT_WINDOW_TOKENS,

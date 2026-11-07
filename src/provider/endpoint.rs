@@ -49,6 +49,13 @@ pub(crate) fn normalize_openai_compatible_base_url(input: &str) -> Result<String
     normalize_openai_base_url(input)
 }
 
+/// True when a base URL points at the local network (loopback, RFC1918,
+/// link-local, `.local`) — what the provider add flow probes for a running
+/// server, and what it reaches over plain http.
+pub(crate) fn is_local_endpoint_url(url: &str) -> bool {
+    crate::provider::openai_catalog::is_local_endpoint_url(url)
+}
+
 /// Normalize an Anthropic-compatible base URL (strips `/v1/messages`,
 /// `/messages`, `/v1/models`, `/models`, `/v1`). Validates scheme + host and
 /// defaults a scheme-less host to `https://` (loopback to `http://`).

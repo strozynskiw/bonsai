@@ -371,9 +371,9 @@ fn value_as_positive_u32(value: &Value) -> Option<u32> {
     (parsed > 0).then_some(parsed)
 }
 
-/// Prepend a default URL scheme to a scheme-less authority: `http://` only for
-/// loopback hosts (local dev), `https://` otherwise — so a typo like
-/// `api.vendor.com` can't send the API key over plaintext.
+/// Prepend a default URL scheme to a scheme-less authority: `http://` on the
+/// local network (local dev, LAN model servers), `https://` otherwise — so a
+/// typo like `api.vendor.com` can't send the API key over plaintext.
 pub(crate) fn with_default_scheme(value: &str) -> String {
     if value.contains("://") {
         return value.to_string();
@@ -383,10 +383,39 @@ pub(crate) fn with_default_scheme(value: &str) -> String {
         .rsplit_once(':')
         .map(|(host, _port)| host)
         .unwrap_or(authority);
-    if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
+    if is_local_host(host) {
         format!("http://{value}")
     } else {
         format!("https://{value}")
+    }
+}
+
+/// True when a base URL points at the local network (loopback, RFC1918,
+/// link-local, `.local`) — the endpoints the add flow probes and the ones a
+/// scheme-less URL should reach over http.
+pub(crate) fn is_local_endpoint_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| is_local_host(&host))
+}
+
+/// Hosts that are reached over plain HTTP in practice: loopback, RFC1918
+/// private ranges, link-local, and mDNS `.local` names. A LAN model server
+/// (`192.168.x.x:8888`) guesses wrong under https — the TLS handshake fails
+/// before any provider error explains the URL.
+fn is_local_host(host: &str) -> bool {
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+        Err(_err) => false,
     }
 }
 
@@ -739,6 +768,31 @@ mod tests {
             with_default_scheme("127.0.0.1:8080"),
             "http://127.0.0.1:8080"
         );
+        // So does the rest of the local network: a LAN model server speaks
+        // plain HTTP, and guessing https there fails the TLS handshake before
+        // any provider error can explain the URL.
+        for local in [
+            "192.168.50.123:8888/v1",
+            "10.1.2.3:1234/v1",
+            "172.16.5.9:8000/v1",
+            "169.254.10.20:8080/v1",
+            "gpu-box.local:1234/v1",
+            "[::1]:11434/v1",
+        ] {
+            assert_eq!(
+                with_default_scheme(local),
+                format!("http://{local}"),
+                "{local} is on the local network"
+            );
+        }
+        // Public addresses stay on https.
+        for remote in ["8.8.8.8:443/v1", "172.32.0.1:443/v1", "192.169.1.1:443/v1"] {
+            assert_eq!(
+                with_default_scheme(remote),
+                format!("https://{remote}"),
+                "{remote} is not a private address"
+            );
+        }
         // Explicit scheme is preserved.
         assert_eq!(
             with_default_scheme("http://example.test"),
