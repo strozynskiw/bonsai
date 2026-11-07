@@ -258,6 +258,23 @@ fn arg_completion(app: &AppState, cmd: &str, arg: &str) -> Option<Completion> {
         "/serenity" => literal_arg_completion(cmd, &lower, "mode", ["on", "off", "status"]),
         "/smol" => literal_arg_completion(cmd, &lower, "mode", ["on", "off", "status"]),
         "/permissions" => literal_arg_completion(cmd, &lower, "action", ["list", "remove"]),
+        "/providers" => argument_completion(
+            [
+                ("add", "create a local or self-hosted provider"),
+                ("list", "manage providers"),
+                ("edit", "edit a custom provider"),
+                ("remove", "delete a custom provider"),
+                ("disable", "hide a built-in provider"),
+                ("enable", "restore a disabled provider"),
+            ]
+            .into_iter()
+            .filter(|(value, _detail)| value.starts_with(&lower))
+            .map(|(value, detail)| ArgumentCandidate {
+                label: value.to_string(),
+                detail: detail.to_string(),
+                replacement: format!("{cmd} {value}"),
+            }),
+        ),
         "/sandbox" => sandbox_arg_completion(cmd, arg),
         "/yolo" => argument_completion(
             ["on", "off", "status"]
@@ -918,6 +935,20 @@ mod tests {
     }
 
     #[test]
+    fn providers_arg_completion_suggests_add() {
+        let app = app_with_provider_choices("/providers ad");
+
+        let completion = compute_completion(&app).expect("completion should be present");
+
+        assert_eq!(completion.replacement, "/providers add");
+        assert!(matches!(
+            completion.candidates.first(),
+            Some(CompletionCandidate::Argument { label, replacement, .. })
+                if label == "add" && replacement == "/providers add"
+        ));
+    }
+
+    #[test]
     fn sandbox_arg_completion_suggests_status() {
         let app = app_with_provider_choices("/sandbox st");
 
@@ -967,6 +998,7 @@ mod tests {
             "/forget",
             "/model",
             "/permissions",
+            "/providers",
             "/pure",
             "/resume",
             "/retry",
@@ -989,7 +1021,6 @@ mod tests {
             "/lsp",
             "/mcp",
             "/memory",
-            "/providers",
             "/remember",
             "/search",
             "/skill",

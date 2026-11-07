@@ -39,10 +39,12 @@ per-model TOML files — see [Models](models.md).
 | `tencent` | Tencent Hunyuan | openai-chat | api-key | `tencent/hy3` | `HUNYUAN_API_KEY` / `HUNYUAN_MODEL` / `HUNYUAN_BASE_URL` |
 
 `openai-compatible` defaults its base URL to `http://localhost:11434/v1`
-(Ollama) and `anthropic-compatible` to `http://localhost:8080`, so pointing
-bonsai at a local model server is a matter of authorizing with the right URL.
-`BONSAI_PROVIDER` selects the provider for a new headless run; the default
-provider is `opencode`.
+(Ollama) and `anthropic-compatible` to `http://localhost:8080`. The guided
+path is `/providers add` (or `/wizard`), which probes the server, prefills
+model metadata, writes the provider and model TOML, and authorizes the result
+in one flow — see [Local models](models.md#local-models). `BONSAI_PROVIDER`
+selects the provider for a new headless run; the default provider is
+`opencode`.
 
 A connection entry also carries wire-quirk flags where a vendor's adapter
 needs them — for example `reasoning_content_echo` (DeepSeek/GLM/Kimi adapters
