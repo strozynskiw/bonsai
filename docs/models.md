@@ -44,6 +44,39 @@ native LM Studio (`/api/v1/models`, context length + display name) and Ollama
 (`/api/tags` plus a bounded `/api/show` fan-out) APIs — and caches
 availability under `$BONSAI_HOME/cache/live-models/<connection-id>.json`.
 
+Where a server distinguishes them, discovery reports the **served** context
+window, not the model card maximum: an LM Studio model loaded at 8k reports
+8k, and an Ollama Modelfile `num_ctx` wins over the trained length in
+`model_info`. Budgeting against the maximum silently truncates replies on a
+server configured smaller.
+
+### Local models
+
+`/providers add` (or `/wizard`) walks a local or self-hosted endpoint through
+four steps: server preset, model selection, metadata, review. Presets cover
+LM Studio, Ollama, llama.cpp, vLLM, Unsloth, and the generic OpenAI- and
+Anthropic-compatible kinds; a generic loopback URL is auto-detected on the
+first fetch and upgraded to the native preset so metadata comes from the
+server's own API. A fetch that fails leaves you on manual model entry instead
+of dead-ending.
+
+Two rules make re-running the wizard on an existing provider safe:
+
+- **Re-fetching merges.** `/wizard <id>` (or `e` in `/providers`) re-reads the
+  server but keeps the models already listed, their ticked state, and every
+  value already typed; models the server no longer lists stay until you untick
+  them. Newly discovered models are appended unticked, so pulling a model into
+  the server never silently adds every installed model to the catalog.
+- **Blank means unknown, not zero.** `context_window` blank falls back to the
+  session's window and then to the provider default (120k); `output_limit`
+  blank sends no explicit cap wherever the wire allows one. Both accept only
+  what you type — a server-reported window fills a blank field but never
+  overwrites one you set.
+
+Saving writes `providers/<id>.toml` and `models/<id>.toml` under
+`$BONSAI_HOME`. Creating a provider activates it; editing one leaves the active
+model alone unless the edit dropped the model you were on.
+
 ## Selecting a model
 
 `/model` opens a three-pane picker: **Provider → Model → Reasoning**. Model

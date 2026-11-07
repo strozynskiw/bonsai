@@ -22,7 +22,7 @@ fn wizard_regions(area: Rect) -> (Rect, Rect, Rect) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(6),
-            Constraint::Length(3),
+            Constraint::Length(4),
         ])
         .split(inner);
     (chunks[0], chunks[1], chunks[2])
@@ -377,7 +377,35 @@ fn render_wizard_footer(f: &mut Frame, area: Rect, state: &LocalModelWizardState
     } else {
         lines.push(second);
     }
+    if let Some(hint) = wizard_hint(state) {
+        lines.push(Line::from(Span::styled(hint, theme::dim())));
+    }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// Step-specific guidance for the field being edited. The metadata step is
+/// where users get stuck: both numeric fields accept blank, and blank means
+/// something different for each one.
+fn wizard_hint(state: &LocalModelWizardState) -> Option<&'static str> {
+    match state.step {
+        LocalModelWizardStep::SelectModels
+            if state.editing_existing || state.models.iter().any(|model| !model.selected) =>
+        {
+            Some("New models start unchecked; Space toggles, Enter advances.")
+        }
+        LocalModelWizardStep::Metadata => Some(match state.metadata_field {
+            LocalModelMetadataField::ContextWindow => {
+                "ctx: window the server serves (--ctx-size / num_ctx); blank = unknown"
+            }
+            LocalModelMetadataField::OutputLimit => {
+                "out: max output tokens per reply; blank = server default"
+            }
+            LocalModelMetadataField::ToolCalls => "Space toggles tool calling for this model",
+        }),
+        LocalModelWizardStep::Setup
+        | LocalModelWizardStep::SelectModels
+        | LocalModelWizardStep::Review => None,
+    }
 }
 
 fn set_wizard_cursor(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
@@ -502,6 +530,65 @@ mod tests {
             .get_cursor_position()
             .expect("cursor should be visible");
         assert_eq!(cursor, Position { x: 40, y: 3 });
+    }
+
+    #[test]
+    fn metadata_and_select_steps_render_their_guidance() {
+        let area = Rect::new(0, 0, 100, 24);
+        let mut state = LocalModelWizardState {
+            step: LocalModelWizardStep::Metadata,
+            models: vec![LocalModelWizardModel {
+                remote_model: "qwen3:8b".to_string(),
+                display_name: None,
+                selected: true,
+                context_window: String::new(),
+                output_limit: String::new(),
+                tool_call: true,
+            }],
+            ..LocalModelWizardState::default()
+        };
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test backend");
+
+        let screen = |terminal: &Terminal<TestBackend>| -> String {
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        };
+
+        terminal
+            .draw(|frame| render_local_model_wizard(frame, area, &state))
+            .expect("metadata step should render");
+        assert!(
+            screen(&terminal).contains("blank = unknown"),
+            "the context field must explain what a blank window means"
+        );
+
+        state.metadata_field = LocalModelMetadataField::OutputLimit;
+        terminal
+            .draw(|frame| render_local_model_wizard(frame, area, &state))
+            .expect("output field should render");
+        assert!(screen(&terminal).contains("blank = server default"));
+
+        state.metadata_field = LocalModelMetadataField::ToolCalls;
+        terminal
+            .draw(|frame| render_local_model_wizard(frame, area, &state))
+            .expect("tools field should render");
+        assert!(screen(&terminal).contains("toggles tool calling"));
+
+        state.step = LocalModelWizardStep::SelectModels;
+        state.editing_existing = true;
+        terminal
+            .draw(|frame| render_local_model_wizard(frame, area, &state))
+            .expect("select step should render");
+        assert!(
+            screen(&terminal).contains("New models start unchecked"),
+            "an edit must say that newly discovered models stay unticked"
+        );
     }
 
     #[test]

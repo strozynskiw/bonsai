@@ -14,6 +14,8 @@ use crate::provider::{DetectedServer, Protocol};
 pub(crate) enum ProviderPreset {
     LmStudio,
     Ollama,
+    LlamaCpp,
+    Vllm,
     Unsloth,
     /// Default: the most general server kind — a fresh wizard should not
     /// presume a specific local app is installed.
@@ -27,6 +29,8 @@ impl ProviderPreset {
         match self {
             Self::LmStudio => "LM Studio",
             Self::Ollama => "Ollama",
+            Self::LlamaCpp => "llama.cpp",
+            Self::Vllm => "vLLM",
             Self::Unsloth => "Unsloth",
             Self::OpenAiCompatible => "OpenAI compatible",
             Self::AnthropicCompatible => "Anthropic compatible",
@@ -37,16 +41,20 @@ impl ProviderPreset {
         match self {
             Self::LmStudio => "http://localhost:1234/v1",
             Self::Ollama => "http://localhost:11434/v1",
-            Self::Unsloth => "http://localhost:8000/v1",
+            Self::LlamaCpp => "http://localhost:8080/v1",
+            Self::Vllm | Self::Unsloth => "http://localhost:8000/v1",
             Self::OpenAiCompatible | Self::AnthropicCompatible => "",
         }
     }
 
     pub(crate) const fn transport(self) -> TransportProtocol {
         match self {
-            Self::LmStudio | Self::Ollama | Self::Unsloth | Self::OpenAiCompatible => {
-                TransportProtocol::OpenAiChat
-            }
+            Self::LmStudio
+            | Self::Ollama
+            | Self::LlamaCpp
+            | Self::Vllm
+            | Self::Unsloth
+            | Self::OpenAiCompatible => TransportProtocol::OpenAiChat,
             Self::AnthropicCompatible => TransportProtocol::AnthropicMessages,
         }
     }
@@ -55,16 +63,20 @@ impl ProviderPreset {
         match self {
             Self::LmStudio => DiscoveryKind::LmStudio,
             Self::Ollama => DiscoveryKind::Ollama,
-            Self::Unsloth | Self::OpenAiCompatible | Self::AnthropicCompatible => {
-                DiscoveryKind::Generic
-            }
+            Self::LlamaCpp
+            | Self::Vllm
+            | Self::Unsloth
+            | Self::OpenAiCompatible
+            | Self::AnthropicCompatible => DiscoveryKind::Generic,
         }
     }
 
     pub(crate) const fn toggled(self) -> Self {
         match self {
             Self::LmStudio => Self::Ollama,
-            Self::Ollama => Self::Unsloth,
+            Self::Ollama => Self::LlamaCpp,
+            Self::LlamaCpp => Self::Vllm,
+            Self::Vllm => Self::Unsloth,
             Self::Unsloth => Self::OpenAiCompatible,
             Self::OpenAiCompatible => Self::AnthropicCompatible,
             Self::AnthropicCompatible => Self::LmStudio,
@@ -74,7 +86,9 @@ impl ProviderPreset {
     pub(crate) const fn toggled_back(self) -> Self {
         match self {
             Self::Ollama => Self::LmStudio,
-            Self::Unsloth => Self::Ollama,
+            Self::LlamaCpp => Self::Ollama,
+            Self::Vllm => Self::LlamaCpp,
+            Self::Unsloth => Self::Vllm,
             Self::OpenAiCompatible => Self::Unsloth,
             Self::AnthropicCompatible => Self::OpenAiCompatible,
             Self::LmStudio => Self::AnthropicCompatible,
@@ -241,6 +255,148 @@ impl LocalModelWizardModel {
                 || model.features.contains(&ModelFeature::ToolCall),
         }
     }
+}
+
+/// Merge a fresh discovery listing into the wizard's model list.
+///
+/// A refetch is a *refresh*, not a reset: entries already in the list keep the
+/// user's selection and typed metadata, and models the server no longer lists
+/// stay (the user can still untick them). Newly discovered models are appended
+/// unchecked once the list is non-empty, so re-running the wizard on an existing
+/// provider never silently enables every model installed on the box. The return
+/// value is how many new entries were added unchecked.
+fn merge_fetched_models(
+    mut existing: Vec<LocalModelWizardModel>,
+    fetched: &[AvailableModel],
+    already_curated: bool,
+) -> (Vec<LocalModelWizardModel>, usize) {
+    let select_new = !already_curated;
+    let mut new_unchecked = 0;
+    for model in fetched {
+        let remote_model = model.remote_model_id.to_string();
+        if let Some(current) = existing
+            .iter_mut()
+            .find(|entry| entry.remote_model == remote_model)
+        {
+            // Fill only blank fields: a server-reported window must not
+            // overwrite a value the user set deliberately.
+            if current.display_name.is_none() {
+                current.display_name = model.display_name.as_deref().map(str::to_string);
+            }
+            if current.context_window.trim().is_empty()
+                && let Some(window) = model.context_window
+            {
+                current.context_window = window.to_string();
+            }
+            if current.output_limit.trim().is_empty()
+                && let Some(limit) = model.output_limit
+            {
+                current.output_limit = limit.to_string();
+            }
+            continue;
+        }
+        let mut entry = LocalModelWizardModel::from_available(model);
+        entry.selected = select_new;
+        if !select_new {
+            new_unchecked += 1;
+        }
+        existing.push(entry);
+    }
+    (existing, new_unchecked)
+}
+
+/// Model the wizard should make active after writing the catalog, or `None`
+/// when the write must leave the active target alone.
+///
+/// Creating a provider activates it — that is the point of adding one. Editing
+/// must not pull the user off the model they are working in, so an edit of a
+/// provider that is *not* active returns `None`, and an edit of the active
+/// provider keeps the model the user is on unless the edit dropped it.
+pub(crate) fn activation_after_write(
+    editing_existing: bool,
+    was_current: bool,
+    current_model: &str,
+    targets: &[&TargetSpec],
+    fallback: &crate::model_catalog::ModelId,
+) -> Option<crate::model_catalog::ModelId> {
+    if !editing_existing || was_current {
+        Some(
+            target_matching(targets, current_model)
+                .map(|target| target.model.clone())
+                .unwrap_or_else(|| fallback.clone()),
+        )
+    } else {
+        None
+    }
+}
+
+/// Provider-local model to record when the active target is left alone: keeps
+/// `stored` while it still resolves, else falls back to the first written
+/// target so a later switch to the provider does not land on a dropped model.
+pub(crate) fn retained_provider_model(
+    targets: &[&TargetSpec],
+    stored: &str,
+    fallback: &crate::model_catalog::ModelId,
+) -> crate::model_catalog::ModelId {
+    target_matching(targets, stored)
+        .map(|target| target.model.clone())
+        .unwrap_or_else(|| fallback.clone())
+}
+
+/// Apply a just-written provider to the session.
+///
+/// Creating activates the provider; editing another provider leaves the active
+/// target untouched. Whenever the active model selector actually changes, the
+/// session's per-mode selections are re-linked (the same rule as any other
+/// provider switch) — otherwise the next `Tab` re-applies the old provider's
+/// recorded model and silently undoes the write.
+pub(crate) fn apply_written_provider(
+    session: &mut crate::session::SessionStore,
+    provider_id: &str,
+    connection_id: &ConnectionId,
+    editing_existing: bool,
+    targets: &[&TargetSpec],
+    fallback: &crate::model_catalog::ModelId,
+) {
+    session.ensure_provider(provider_id);
+    let was_current = session.current_kind_id().eq_ignore_ascii_case(provider_id);
+    let current_model = session.current_session().model.clone();
+    match activation_after_write(
+        editing_existing,
+        was_current,
+        &current_model,
+        targets,
+        fallback,
+    ) {
+        Some(model) => {
+            if model.as_str() != current_model {
+                session.set_current_kind_id(provider_id);
+            }
+            session.set_active_model_target(
+                provider_id,
+                Some(connection_id.clone()),
+                Some(model.clone()),
+                model.as_str(),
+            );
+        }
+        None => {
+            // Editing a provider the user is not working in; only realign that
+            // provider's own stored model when the edit dropped it.
+            let stored = session.session(provider_id).model.clone();
+            let realigned = retained_provider_model(targets, &stored, fallback);
+            if realigned.as_str() != stored {
+                session.session_mut(provider_id).model = realigned.to_string();
+            }
+        }
+    }
+}
+
+/// Resolve a persisted session selector — a canonical model id or the wire id
+/// the server reports — to the catalog target that backs it.
+fn target_matching<'a>(targets: &[&'a TargetSpec], selector: &str) -> Option<&'a TargetSpec> {
+    targets.iter().copied().find(|target| {
+        target.model.as_str() == selector || target.remote_model.as_deref() == Some(selector)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +652,8 @@ impl LocalModelWizardState {
         self.loading = false;
         self.active_fetch_request_id = None;
         self.step = LocalModelWizardStep::SelectModels;
+        // The merged list restarts at the top; the cursor clamp below belongs to
+        // the failure path, which keeps the surviving list.
         self.model_cursor = 0;
         let detection_note = outcome
             .detected
@@ -504,15 +662,28 @@ impl LocalModelWizardState {
                 self.preset = preset;
                 format!("Detected {}; using native metadata. ", preset.label())
             });
-        self.models = outcome
-            .models
-            .iter()
-            .map(LocalModelWizardModel::from_available)
-            .collect::<Vec<_>>();
+        let fetched_count = outcome.models.len();
+        // Merge rather than replace: editing a provider must not discard the
+        // models and metadata the user already curated, and a new listing must
+        // not silently re-select everything on disk. A list the user has
+        // already curated — an edit, or a retry after a failed fetch where they
+        // typed a model by hand — is not a fresh selection either.
+        let already_curated = self.editing_existing || !self.models.is_empty();
+        let (models, new_unchecked) = merge_fetched_models(
+            std::mem::take(&mut self.models),
+            &outcome.models,
+            already_curated,
+        );
+        self.models = models;
         let summary = if self.models.is_empty() {
             "No models returned. Enter a model id manually.".to_string()
         } else {
-            format!("Selected {} fetched models.", self.models.len())
+            let selected = self.selected_model_count();
+            let mut summary = format!("Fetched {fetched_count} models; {selected} selected.");
+            if new_unchecked > 0 {
+                summary.push_str(&format!(" {new_unchecked} new left unchecked."));
+            }
+            summary
         };
         self.status = Some(format!("{}{summary}", detection_note.unwrap_or_default()));
         self.error = None;
@@ -522,9 +693,17 @@ impl LocalModelWizardState {
         self.loading = false;
         self.active_fetch_request_id = None;
         self.step = LocalModelWizardStep::SelectModels;
-        self.models.clear();
-        self.model_cursor = 0;
-        self.status = Some("Fetch failed. Enter model ids manually.".to_string());
+        // Keep the cursor inside the list that survives the failure.
+        self.model_cursor = self.model_cursor.min(self.models.len().saturating_sub(1));
+        if self.models.is_empty() {
+            self.status = Some("Fetch failed. Enter model ids manually.".to_string());
+        } else {
+            // Keep whatever the list already holds — an unreachable server must
+            // not throw away a provider the user is part-way through editing.
+            self.status = Some(
+                "Fetch failed; keeping the models already listed. Add ids manually.".to_string(),
+            );
+        }
         self.error = Some(message);
     }
 
@@ -1120,6 +1299,16 @@ mod tests {
         assert_eq!(state.preset.discovery(), DiscoveryKind::Generic);
         assert!(state.models.is_empty());
 
+        // vLLM shares Unsloth's 8000 default; llama.cpp serves on 8080.
+        state.cycle_setup_choice(-1);
+        assert_eq!(state.preset, ProviderPreset::Vllm);
+        assert_eq!(state.base_url, "http://localhost:8000/v1");
+
+        state.cycle_setup_choice(-1);
+        assert_eq!(state.preset, ProviderPreset::LlamaCpp);
+        assert_eq!(state.base_url, "http://localhost:8080/v1");
+        assert_eq!(state.preset.discovery(), DiscoveryKind::Generic);
+
         state.cycle_setup_choice(-1);
         assert_eq!(state.preset, ProviderPreset::Ollama);
         assert_eq!(state.base_url, "http://localhost:11434/v1");
@@ -1320,5 +1509,368 @@ mod tests {
             Some("Fetch failed. Enter model ids manually.")
         );
         assert_eq!(state.error.as_deref(), Some("boom"));
+    }
+
+    fn target_spec(model: &str, remote: Option<&str>) -> TargetSpec {
+        let mut source = format!("connection = \"my-local\"\nmodel = \"{model}\"\n");
+        if let Some(remote) = remote {
+            source.push_str(&format!("remote_model = \"{remote}\"\n"));
+        }
+        toml::from_str(&source).expect("target spec should parse")
+    }
+
+    #[test]
+    fn writing_activates_new_providers_but_never_steals_the_active_target() {
+        let target = target_spec("my-local/qwen3-coder", Some("qwen3-coder"));
+        let targets = vec![&target];
+        let fallback = "my-local/qwen3-coder"
+            .parse::<crate::model_catalog::ModelId>()
+            .unwrap();
+        let model_name = |model: Option<crate::model_catalog::ModelId>| {
+            model.map(|model| model.as_str().to_string())
+        };
+
+        // A brand-new provider takes over, even though the user sits on another
+        // provider — adding a provider is meant to switch to it.
+        assert_eq!(
+            model_name(activation_after_write(
+                false,
+                false,
+                "anthropic/anthropic/claude-sonnet-4-6",
+                &targets,
+                &fallback,
+            )),
+            Some("my-local/qwen3-coder".to_string())
+        );
+
+        // Editing the provider you are using keeps the model you are on.
+        assert_eq!(
+            model_name(activation_after_write(
+                true,
+                true,
+                "my-local/qwen3-coder",
+                &targets,
+                &fallback,
+            )),
+            Some("my-local/qwen3-coder".to_string())
+        );
+
+        // The wire id resolves to the same target.
+        assert_eq!(
+            model_name(activation_after_write(
+                true,
+                true,
+                "qwen3-coder",
+                &targets,
+                &fallback,
+            )),
+            Some("my-local/qwen3-coder".to_string())
+        );
+
+        // Editing a provider you are not using leaves the active target alone.
+        assert_eq!(
+            model_name(activation_after_write(
+                true,
+                false,
+                "anthropic/anthropic/claude-sonnet-4-6",
+                &targets,
+                &fallback,
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn dropped_model_falls_back_without_touching_a_live_selection() {
+        let kept = target_spec("my-local/qwen3-coder", Some("qwen3-coder"));
+        let targets = vec![&kept];
+        let fallback = "my-local/qwen3-coder"
+            .parse::<crate::model_catalog::ModelId>()
+            .unwrap();
+
+        assert_eq!(
+            retained_provider_model(&targets, "qwen3-coder", &fallback).as_str(),
+            "my-local/qwen3-coder"
+        );
+        assert_eq!(
+            retained_provider_model(&targets, "my-local/retired-model", &fallback).as_str(),
+            "my-local/qwen3-coder",
+            "an edit that dropped the stored model must not leave it dangling"
+        );
+        // An active provider whose current model vanished also falls back.
+        assert_eq!(
+            activation_after_write(true, true, "my-local/retired-model", &targets, &fallback)
+                .map(|model| model.as_str().to_string()),
+            Some("my-local/qwen3-coder".to_string())
+        );
+    }
+
+    #[test]
+    fn a_hand_entered_model_counts_as_curation_before_the_next_fetch() {
+        let mut state = LocalModelWizardState::default();
+        state.apply_fetch_error("server not up yet".to_string());
+        state.manual_model_input = "qwen3:8b".to_string();
+        state.submit_selection();
+        state.step = LocalModelWizardStep::SelectModels;
+
+        state.apply_fetch_success(WizardFetchOutcome {
+            models: vec![
+                crate::model_catalog::AvailableModel::remote("qwen3:8b"),
+                crate::model_catalog::AvailableModel::remote("llama3:8b"),
+            ],
+            detected: None,
+        });
+
+        assert!(
+            state.models[0].selected,
+            "the hand-entered model stays picked"
+        );
+        assert!(
+            !state.models[1].selected,
+            "a later discovery must not tick models the user has not reviewed"
+        );
+    }
+
+    #[test]
+    fn writing_a_provider_relinks_mode_models_only_when_the_active_model_moves() {
+        use crate::session::SessionStore;
+
+        let target = target_spec("my-local/qwen3-coder", Some("qwen3-coder"));
+        let targets = vec![&target];
+        let fallback = "my-local/qwen3-coder"
+            .parse::<crate::model_catalog::ModelId>()
+            .unwrap();
+        let connection = "my-local"
+            .parse::<crate::model_catalog::ConnectionId>()
+            .unwrap();
+
+        let mut session = SessionStore::default();
+        session.ensure_provider(crate::session::DEFAULT_PROVIDER_ID);
+        session.set_current_kind_id(crate::session::DEFAULT_PROVIDER_ID);
+        session.record_mode_model("plan", None);
+        assert!(session.mode_model("plan").is_some());
+
+        // Creating a provider activates it — and re-links the working modes, so
+        // the next mode switch cannot snap back to the old provider.
+        apply_written_provider(
+            &mut session,
+            "my-local",
+            &connection,
+            false,
+            &targets,
+            &fallback,
+        );
+        assert_eq!(session.current_kind_id(), "my-local");
+        assert_eq!(session.current_session().model, "my-local/qwen3-coder");
+        assert_eq!(session.mode_model("plan"), None);
+
+        // Editing the active provider while keeping its model touches nothing.
+        session.record_mode_model("plan", None);
+        apply_written_provider(
+            &mut session,
+            "my-local",
+            &connection,
+            true,
+            &targets,
+            &fallback,
+        );
+        assert_eq!(session.current_kind_id(), "my-local");
+        assert!(
+            session.mode_model("plan").is_some(),
+            "an edit that keeps the model must not drop per-mode selections"
+        );
+
+        // Editing a provider the session is not on never moves the active target.
+        session.set_current_kind_id(crate::session::DEFAULT_PROVIDER_ID);
+        apply_written_provider(
+            &mut session,
+            "my-local",
+            &connection,
+            true,
+            &targets,
+            &fallback,
+        );
+        assert_eq!(
+            session.current_kind_id(),
+            crate::session::DEFAULT_PROVIDER_ID
+        );
+    }
+
+    #[test]
+    fn refetch_merges_and_preserves_curated_selection() {
+        let mut state = LocalModelWizardState {
+            editing_existing: true,
+            models: vec![
+                LocalModelWizardModel {
+                    remote_model: "qwen3:32b".to_string(),
+                    display_name: None,
+                    selected: true,
+                    context_window: "65536".to_string(),
+                    output_limit: "8192".to_string(),
+                    tool_call: true,
+                },
+                LocalModelWizardModel {
+                    remote_model: "tiny".to_string(),
+                    display_name: None,
+                    selected: false,
+                    context_window: String::new(),
+                    output_limit: String::new(),
+                    tool_call: false,
+                },
+                LocalModelWizardModel {
+                    remote_model: "manual-model".to_string(),
+                    display_name: None,
+                    selected: true,
+                    context_window: String::new(),
+                    output_limit: String::new(),
+                    tool_call: true,
+                },
+            ],
+            ..LocalModelWizardState::default()
+        };
+
+        state.apply_fetch_success(WizardFetchOutcome {
+            models: vec![
+                crate::model_catalog::AvailableModel::with_metadata(
+                    "qwen3:32b",
+                    Some(4096),
+                    None,
+                    vec![ModelFeature::ToolCall],
+                ),
+                crate::model_catalog::AvailableModel::with_metadata(
+                    "tiny",
+                    Some(2048),
+                    None,
+                    vec![],
+                )
+                .with_output_limit(Some(512)),
+                crate::model_catalog::AvailableModel::with_metadata(
+                    "fresh:7b",
+                    Some(32768),
+                    None,
+                    vec![ModelFeature::ToolCall],
+                ),
+            ],
+            detected: None,
+        });
+
+        assert_eq!(
+            state
+                .models
+                .iter()
+                .map(|model| model.remote_model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["qwen3:32b", "tiny", "manual-model", "fresh:7b"],
+            "curated entries keep their order, server-only additions append"
+        );
+        assert_eq!(
+            state.models[0].context_window, "65536",
+            "a server-reported window must not overwrite a typed one"
+        );
+        assert_eq!(state.models[0].output_limit, "8192");
+        assert_eq!(
+            state.models[1].context_window, "2048",
+            "blank fields take the server value"
+        );
+        assert_eq!(state.models[1].output_limit, "512");
+        assert!(
+            !state.models[1].selected,
+            "an unchecked model stays unchecked after a refetch"
+        );
+        assert!(
+            state.models[2].selected,
+            "a manually entered model the server does not list survives a refetch"
+        );
+        assert!(
+            !state.models[3].selected,
+            "newly pulled models start unchecked so saving never enables the whole library"
+        );
+        assert_eq!(state.models[3].context_window, "32768");
+        assert_eq!(state.selected_model_count(), 2);
+        assert!(
+            state
+                .status
+                .as_deref()
+                .is_some_and(|status| status.contains("1 new left unchecked")),
+            "status should say new models were added unchecked: {:?}",
+            state.status
+        );
+    }
+
+    #[test]
+    fn first_fetch_selects_every_listed_model() {
+        let mut state = LocalModelWizardState::default();
+
+        state.apply_fetch_success(WizardFetchOutcome {
+            models: vec![
+                crate::model_catalog::AvailableModel::remote("alpha"),
+                crate::model_catalog::AvailableModel::remote("beta"),
+            ],
+            detected: None,
+        });
+
+        assert!(state.models.iter().all(|model| model.selected));
+        assert_eq!(state.selected_model_count(), 2);
+        assert!(
+            !state
+                .status
+                .as_deref()
+                .is_some_and(|status| status.contains("unchecked")),
+            "nothing is left unchecked on a first fetch: {:?}",
+            state.status
+        );
+    }
+
+    #[test]
+    fn fetch_failure_keeps_curated_models_for_offline_edits() {
+        let mut state = LocalModelWizardState {
+            editing_existing: true,
+            models: vec![
+                LocalModelWizardModel {
+                    remote_model: "qwen3:32b".to_string(),
+                    display_name: None,
+                    selected: true,
+                    context_window: "65536".to_string(),
+                    output_limit: String::new(),
+                    tool_call: true,
+                },
+                LocalModelWizardModel {
+                    remote_model: "qwen3:8b".to_string(),
+                    display_name: None,
+                    selected: true,
+                    context_window: String::new(),
+                    output_limit: String::new(),
+                    tool_call: true,
+                },
+                LocalModelWizardModel {
+                    remote_model: "llama3:8b".to_string(),
+                    display_name: None,
+                    selected: false,
+                    context_window: String::new(),
+                    output_limit: String::new(),
+                    tool_call: true,
+                },
+            ],
+            model_cursor: 2,
+            ..LocalModelWizardState::default()
+        };
+
+        state.apply_fetch_error("connection refused".to_string());
+
+        assert_eq!(state.models.len(), 3);
+        assert_eq!(state.models[0].context_window, "65536");
+        assert_eq!(
+            state.model_cursor, 2,
+            "the cursor stays inside the surviving list instead of resetting"
+        );
+        assert!(
+            state
+                .status
+                .as_deref()
+                .is_some_and(|status| status.contains("keeping the models already listed")),
+            "status should say the listed models were kept: {:?}",
+            state.status
+        );
+        assert_eq!(state.error.as_deref(), Some("connection refused"));
     }
 }

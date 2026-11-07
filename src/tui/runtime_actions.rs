@@ -1644,11 +1644,13 @@ fn start_local_model_commit(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
                 // Canonical lock order: session_store before agent (see `task.rs`).
                 let mut session = session_store.lock().await;
                 session.ensure_provider(&provider_id);
-                session.set_active_model_target(
+                crate::tui::local_model_wizard::apply_written_provider(
+                    &mut session,
                     &provider_id,
-                    Some(connection_id),
-                    Some(default_model.clone()),
-                    default_model.as_str(),
+                    &connection_id,
+                    editing_existing,
+                    &model_catalog.targets_for_connection(&connection_id),
+                    &default_model,
                 );
                 if !(editing_existing && api_key.is_empty()) {
                     let resolved_source = session
