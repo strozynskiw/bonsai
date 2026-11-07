@@ -42,6 +42,18 @@ pub const PROJECT_STATE_CLEARED_BODY: &str = "## Volatile state\nNo volatile pro
 const STEERING_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", ".cursorrules"];
 /// Cap each steering file so a long one can't blow up the prompt budget.
 const MAX_STEERING_BYTES: usize = 16 * 1024;
+
+/// Subtrees a recursive steering scan never descends into, even when no
+/// `.gitignore` excludes them: version control, installed dependencies, and
+/// Python environments belong to another project's instructions, not this one.
+const PRUNED_SUBTREES: &[&str] = &[
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "site-packages",
+    "__pycache__",
+];
 const SMOL_STEERING_BYTES: usize = 2 * 1024;
 const MAX_STEERING_REFERENCE_PREFLIGHTS: usize = 128;
 /// Cap how far up the tree we walk looking for steering files.
@@ -375,10 +387,24 @@ impl ScopedSteeringState {
 
         let subtree = self.canonical_root.join(target_dir);
         let mut scopes = BTreeSet::new();
-        for entry in walkdir::WalkDir::new(subtree)
+        // A recursive inspection selects a whole tree, so it must not promote
+        // the steering files of ignored or vendored subtrees: `target/`,
+        // `node_modules/`, and a rival checkout each carry instructions for a
+        // different project. `require_git(false)` keeps `.gitignore` in force
+        // outside a repository. A directory the caller names explicitly is
+        // unaffected — `refresh_target_dir` reaches its own rules regardless.
+        for entry in ignore::WalkBuilder::new(&subtree)
+            .hidden(false)
             .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| entry.depth() == 0 || entry.file_name().to_str() != Some(".git"))
+            .require_git(false)
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || !entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| PRUNED_SUBTREES.contains(&name))
+            })
+            .build()
         {
             let entry = entry.map_err(|error| {
                 anyhow::anyhow!(
@@ -386,7 +412,9 @@ impl ScopedSteeringState {
                     target_dir.display()
                 )
             })?;
-            if !entry.file_type().is_file()
+            if !entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_file())
                 || !entry
                     .file_name()
                     .to_str()
@@ -1733,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_steering_subtree_discovers_deeper_rules_without_symlink_escape() {
+    fn scoped_steering_subtree_skips_gitignored_trees_without_symlink_escape() {
         let dir = tempfile::TempDir::new().unwrap();
         let outside = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("packages/app/src")).unwrap();
@@ -1765,8 +1793,66 @@ mod tests {
             .join("\n");
         assert!(rendered.contains("app rules"));
         assert!(rendered.contains("api rules"));
-        assert!(rendered.contains("ignored tree rules"));
+        assert!(
+            !rendered.contains("ignored tree rules"),
+            "a recursive scan must not promote rules from a gitignored subtree"
+        );
         assert!(!rendered.contains("outside rules"));
+    }
+
+    #[test]
+    fn explicitly_named_ignored_tree_still_contributes_its_rules() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor/rival")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "vendor/\n").unwrap();
+        std::fs::write(dir.path().join("vendor/rival/AGENTS.md"), "rival rules").unwrap();
+
+        let mut state = ScopedSteeringState::new(dir.path(), true);
+        let rendered = state
+            .refresh_target_dir(Path::new("vendor/rival"))
+            .iter()
+            .map(ScopedSteeringUpdate::render)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("rival rules"),
+            "a path the caller names explicitly keeps its own steering"
+        );
+    }
+
+    #[test]
+    fn recursive_scan_skips_dependency_and_environment_trees_without_a_gitignore() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for vendored in [
+            "node_modules/pkg",
+            ".venv/lib/python3/site-packages/pkg",
+            "__pycache__/pkg",
+        ] {
+            std::fs::create_dir_all(dir.path().join(vendored)).unwrap();
+            std::fs::write(
+                dir.path().join(vendored).join("AGENTS.md"),
+                "vendored rules",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/AGENTS.md"), "app rules").unwrap();
+
+        let mut state = ScopedSteeringState::new(dir.path(), true);
+        let rendered = state
+            .refresh_subtree(Path::new(""))
+            .unwrap()
+            .iter()
+            .map(ScopedSteeringUpdate::render)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("app rules"));
+        assert!(
+            !rendered.contains("vendored rules"),
+            "dependency and environment trees never contribute instructions"
+        );
     }
 
     #[test]
