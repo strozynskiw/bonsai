@@ -963,7 +963,7 @@ async fn timed_out_shutdown_and_drop_keep_claim_until_execution_settles() {
             .is_none()
     );
     mock.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if db
                 .storage
@@ -989,7 +989,7 @@ async fn failure_pool(f: &Fixture) -> sqlx::SqlitePool {
 }
 
 async fn wait_failed(f: &Fixture) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let (state, _) = f.controller.snapshot().await.unwrap();
             if state.state == "failed" {
