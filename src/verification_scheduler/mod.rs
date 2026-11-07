@@ -1,10 +1,16 @@
 //! Cross-process verification scheduler (#142).
 //!
-//! Identical verification checks run once and share their result; compatible
-//! Cargo jobs that share one canonical target directory queue behind a single
-//! execution lease instead of racing Cargo's own build lock. Coordination lives
-//! in the shared SQLite store, so it spans separate Bonsai processes rather than
-//! one process's memory.
+//! Identical verification checks run once and share their result. That sharing is
+//! the scheduler's whole job: contention between *different* Cargo jobs sharing one
+//! canonical target directory is left to Cargo's own build lock, which already
+//! serializes builders and blocks the second one inside the command itself. A
+//! session whose check cannot be shared therefore runs it ordinarily instead of
+//! waiting on a peer — waiting there converted "someone else is building" into a
+//! 30-minute stall followed by a failed run, which is strictly worse than the lock
+//! wait Cargo performs anyway.
+//!
+//! Coordination lives in the shared SQLite store, so it spans separate Bonsai
+//! processes rather than one process's memory.
 //!
 //! The conservatism is deliberate: anything the scheduler cannot describe
 //! completely (compound commands, pipelines, shell expansion, an unknown target
@@ -49,9 +55,10 @@ pub(crate) struct SchedulerTiming {
     pub(crate) lease: Duration,
     /// How often the producer renews it and re-checks its subscribers.
     pub(crate) refresh: Duration,
-    /// Poll interval while waiting in a lane or following an attempt.
+    /// Poll interval while following another session's attempt.
     pub(crate) poll: Duration,
-    /// How long a subscriber waits for the queue before it gives up cleanly.
+    /// How long a subscriber follows another session's identical attempt before
+    /// giving up on reuse and running the check itself.
     pub(crate) wait_limit: Duration,
     /// How long a just-completed identical result stays reusable.
     pub(crate) reuse_window: Duration,
@@ -107,8 +114,6 @@ pub(crate) struct SharedVerificationPayload {
 pub(crate) enum SharedVerificationState {
     /// This session executed the attempt.
     Produced,
-    /// This session waited for a lane, then executed the attempt.
-    WaitedProduced,
     /// This session reused another attempt's exact result.
     Reused,
 }
@@ -117,7 +122,6 @@ impl SharedVerificationState {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Produced => "produced",
-            Self::WaitedProduced => "waited-producer",
             Self::Reused => "reused",
         }
     }
@@ -128,7 +132,8 @@ impl SharedVerificationState {
 pub(crate) struct SharedVerificationProvenance {
     pub(crate) job_key: String,
     pub(crate) state: SharedVerificationState,
-    /// Time spent waiting for the lane, kept apart from execution time.
+    /// How long the attempt sat queued before it ran; zero for a fresh attempt
+    /// that started immediately.
     pub(crate) queue_ms: i64,
     /// Time the command itself ran.
     pub(crate) compute_ms: i64,
@@ -222,14 +227,26 @@ impl VerificationScheduler {
             VerificationJobClaim::Started(id) => id,
             VerificationJobClaim::Following(id) => id,
             VerificationJobClaim::Queued { job_id, ahead } => {
+                // Another session holds the lane for a different check on this
+                // target directory. Do not wait for it: Cargo's build lock is the
+                // real serializer, and blocking here spent the run's whole budget
+                // on a peer's build. Release the queued subscription and run the
+                // check ordinarily.
                 report_status(
                     sink,
                     &format!(
-                        "verification queued behind {ahead} Cargo job(s) sharing {}",
+                        "{ahead} Cargo job(s) already building {}; starting this check alongside them and letting Cargo's build lock serialize",
                         job_request.command_cwd
                     ),
                 );
-                job_id
+                self.storage
+                    .cancel_verification_subscription(
+                        job_id,
+                        request.session_id,
+                        &job_request.tool_call_id,
+                    )
+                    .await?;
+                return Ok(SharedVerification::Declined);
             }
         };
         let guard = SubscriptionGuard::new(
@@ -240,6 +257,9 @@ impl VerificationScheduler {
         );
 
         match claim {
+            VerificationJobClaim::Queued { .. } => {
+                unreachable!("the queued claim returned above")
+            }
             VerificationJobClaim::Started(id) => {
                 self.produce(
                     id,
@@ -249,33 +269,8 @@ impl VerificationScheduler {
                     sink,
                     guard,
                     producer,
-                    false,
                 )
                 .await
-            }
-            VerificationJobClaim::Queued { job_id, .. } => {
-                match self
-                    .wait_for_lane(job_id, &identity_digest, request, sink, &guard)
-                    .await?
-                {
-                    LaneOutcome::Promoted => {
-                        self.produce(
-                            job_id,
-                            &job_request,
-                            &identity_digest,
-                            request,
-                            sink,
-                            guard,
-                            producer,
-                            true,
-                        )
-                        .await
-                    }
-                    LaneOutcome::Abandoned { reason } => Ok(SharedVerification::Interrupted {
-                        job_key: job_request.job_key.clone(),
-                        reason,
-                    }),
-                }
             }
             VerificationJobClaim::Following(id) => {
                 self.follow(id, &job_request, &identity_digest, request, guard)
@@ -360,63 +355,6 @@ impl VerificationScheduler {
         )))
     }
 
-    /// Wait for a lane to free up, then promote this attempt or follow the
-    /// identical attempt that won the promotion race.
-    async fn wait_for_lane(
-        &self,
-        job_id: i64,
-        identity_digest: &str,
-        request: &VerificationRunRequest,
-        sink: Option<&SharedSink>,
-        guard: &SubscriptionGuard,
-    ) -> Result<LaneOutcome> {
-        let deadline = Instant::now() + self.timing.wait_limit;
-        loop {
-            if guard.is_detached() {
-                return Ok(LaneOutcome::Abandoned {
-                    reason: "subscriber cancelled".to_string(),
-                });
-            }
-            if Instant::now() >= deadline {
-                self.storage
-                    .cancel_verification_subscription(
-                        job_id,
-                        request.session_id,
-                        &request.tool_call_id,
-                    )
-                    .await?;
-                return Ok(LaneOutcome::Abandoned {
-                    reason: format!(
-                        "waited {}s for the Cargo lane without acquiring it; no evidence was produced",
-                        self.timing.wait_limit.as_secs()
-                    ),
-                });
-            }
-            if self
-                .storage
-                .try_promote_verification_job(job_id, request.session_id, self.timing.lease_ms())
-                .await?
-            {
-                // The workspace may have moved while we waited.
-                if !self.identity_still_matches(request, identity_digest).await {
-                    self.storage
-                        .close_verification_job(
-                            job_id,
-                            VerificationJobState::EnvironmentBlocked,
-                            "workspace changed while queued",
-                        )
-                        .await?;
-                    return Ok(LaneOutcome::Abandoned {
-                        reason: "workspace inputs changed while the check was queued".to_string(),
-                    });
-                }
-                report_status(sink, "verification lane acquired; running the queued check");
-                return Ok(LaneOutcome::Promoted);
-            }
-            tokio::time::sleep(self.timing.poll).await;
-        }
-    }
-
     /// Follow an attempt another session is executing (or an identical attempt
     /// that just completed inside the reuse window).
     async fn follow<T>(
@@ -431,10 +369,8 @@ impl VerificationScheduler {
         T: SharedVerificationOutcome,
     {
         let deadline = Instant::now() + self.timing.wait_limit;
-        let mut detached = false;
         loop {
             if guard.is_detached() {
-                detached = true;
                 break;
             }
             if Instant::now() >= deadline {
@@ -444,7 +380,7 @@ impl VerificationScheduler {
                 break;
             };
             match snapshot.state {
-                VerificationJobState::Queued | VerificationJobState::Running => {
+                VerificationJobState::Running => {
                     // Reclaim a dead producer's attempt so followers are woken
                     // instead of waiting out the whole lease window.
                     self.storage.reap_verification_jobs().await?;
@@ -497,30 +433,40 @@ impl VerificationScheduler {
                         },
                     });
                 }
-                VerificationJobState::Interrupted
+                // Neither a queued row (this build removed lane promotion, so it
+                // can never progress on its own) nor a terminal-without-result row
+                // will ever yield a reusable result: release the subscription and
+                // hand the check back to the caller.
+                VerificationJobState::Queued
+                | VerificationJobState::Interrupted
                 | VerificationJobState::Cancelled
                 | VerificationJobState::EnvironmentBlocked => {
-                    return Ok(SharedVerification::Interrupted {
-                        job_key: job_request.job_key.clone(),
-                        reason: snapshot
-                            .terminal_reason
-                            .unwrap_or_else(|| snapshot.state.label().to_string()),
-                    });
+                    // Not this session's verification failure — release the
+                    // subscription and run the check here instead.
+                    tracing::debug!(
+                        job_key = %job_request.job_key,
+                        state = snapshot.state.label(),
+                        reason = snapshot.terminal_reason.as_deref().unwrap_or("none"),
+                        "shared verification attempt ended without a reusable result",
+                    );
+                    self.storage
+                        .cancel_verification_subscription(
+                            job_id,
+                            request.session_id,
+                            &request.tool_call_id,
+                        )
+                        .await?;
+                    return Ok(SharedVerification::Declined);
                 }
             }
         }
-        let reason = if detached {
-            "subscriber cancelled".to_string()
-        } else {
-            format!(
-                "waited {}s for the shared check without a result",
-                self.timing.wait_limit.as_secs()
-            )
-        };
-        Ok(SharedVerification::Interrupted {
-            job_key: job_request.job_key.clone(),
-            reason,
-        })
+        // A cancelled subscriber or an expired wait is not a verification
+        // failure: release the subscription and let the caller run the check
+        // itself rather than reporting evidence that was never produced.
+        self.storage
+            .cancel_verification_subscription(job_id, request.session_id, &request.tool_call_id)
+            .await?;
+        Ok(SharedVerification::Declined)
     }
 
     /// Execute the attempt as its producer, publish one terminal result, and
@@ -535,7 +481,6 @@ impl VerificationScheduler {
         sink: Option<&SharedSink>,
         guard: SubscriptionGuard,
         producer: F,
-        waited: bool,
     ) -> Result<SharedVerification<T>>
     where
         T: SharedVerificationOutcome,
@@ -674,11 +619,7 @@ impl VerificationScheduler {
                     value,
                     provenance: SharedVerificationProvenance {
                         job_key: job_request.job_key.clone(),
-                        state: if waited {
-                            SharedVerificationState::WaitedProduced
-                        } else {
-                            SharedVerificationState::Produced
-                        },
+                        state: SharedVerificationState::Produced,
                         queue_ms,
                         compute_ms,
                     },
@@ -779,12 +720,6 @@ impl VerificationScheduler {
             tracing::debug!(%error, "verification scheduler retention sweep failed");
         }
     }
-}
-
-/// Outcome of waiting in a lane.
-enum LaneOutcome {
-    Promoted,
-    Abandoned { reason: String },
 }
 
 /// Producer-side lease state. Cancellation covers both "lease lost" and "no
@@ -1231,7 +1166,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn incompatible_cargo_jobs_sharing_a_target_directory_serialize() {
+    async fn incompatible_cargo_jobs_sharing_a_target_directory_run_concurrently() {
         let fixture = TestStorage::new().await;
         let root = fixture.project_path().to_path_buf();
         // A genuinely separate connection: coordination must not depend on one
@@ -1258,25 +1193,55 @@ mod tests {
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let executions = Arc::new(AtomicUsize::new(0));
+        // Releases the first task only after the second finished its own execution,
+        // so the overlap assertion below never depends on sleep timing.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        // Mirrors the real caller (`BashTool::scheduled_verification`): `Declined`
+        // only means "run this yourself", so the check then executes without
+        // coordination and Cargo's own build lock serializes the builders.
         let run = |scheduler: VerificationScheduler,
                    request: VerificationRunRequest,
                    delay: Duration,
                    in_flight: Arc<AtomicUsize>,
                    peak: Arc<AtomicUsize>,
-                   executions: Arc<AtomicUsize>| async move {
-            scheduler
-                .run(&request, None, async move {
-                    executions.fetch_add(1, Ordering::SeqCst);
-                    let live = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(live, Ordering::SeqCst);
-                    tokio::time::sleep(delay).await;
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                    Ok(FakeOutcome {
-                        exit_code: Some(0),
-                        body: "ok".to_string(),
-                    })
+                   executions: Arc<AtomicUsize>,
+                   gate: Option<Arc<tokio::sync::Notify>>| async move {
+            let execute = |in_flight: Arc<AtomicUsize>,
+                           peak: Arc<AtomicUsize>,
+                           executions: Arc<AtomicUsize>,
+                           gate: Option<Arc<tokio::sync::Notify>>| async move {
+                executions.fetch_add(1, Ordering::SeqCst);
+                let live = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(live, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok::<_, anyhow::Error>(FakeOutcome {
+                    exit_code: Some(0),
+                    body: "ok".to_string(),
                 })
-                .await
+            };
+            let outcome = scheduler
+                .run(
+                    &request,
+                    None,
+                    execute(
+                        in_flight.clone(),
+                        peak.clone(),
+                        executions.clone(),
+                        gate.clone(),
+                    ),
+                )
+                .await;
+            match outcome {
+                Ok(SharedVerification::Declined) => {
+                    execute(in_flight, peak, executions, gate).await?;
+                    Ok(SharedVerification::Declined)
+                }
+                other => other,
+            }
         };
 
         let first = tokio::spawn(run(
@@ -1293,6 +1258,7 @@ mod tests {
             in_flight.clone(),
             peak.clone(),
             executions.clone(),
+            Some(gate.clone()),
         ));
         wait_for_jobs(&fixture.storage, 1).await;
         let second = tokio::spawn(run(
@@ -1309,29 +1275,29 @@ mod tests {
             in_flight.clone(),
             peak.clone(),
             executions.clone(),
+            None,
         ));
 
-        let first = first.await.expect("first task").expect("scheduler ran");
+        // The second task finishes first; releasing the gate afterwards proves the
+        // first was still running while the second executed.
         let second = second.await.expect("second task").expect("scheduler ran");
+        gate.notify_one();
+        let first = first.await.expect("first task").expect("scheduler ran");
         assert!(matches!(first, SharedVerification::Produced { .. }));
-        match second {
-            SharedVerification::Produced { provenance, .. } => assert_eq!(
-                provenance.state,
-                SharedVerificationState::WaitedProduced,
-                "the incompatible job must wait for the lane rather than race it"
-            ),
-            other => panic!("expected a queued producer, got {other:?}"),
-        }
+        assert!(
+            matches!(second, SharedVerification::Declined),
+            "an unrelated Cargo job must run instead of waiting behind a peer's lane: {second:?}"
+        );
         assert_eq!(executions.load(Ordering::SeqCst), 2);
         assert_eq!(
             peak.load(Ordering::SeqCst),
-            1,
-            "two Cargo jobs must never share one target directory concurrently"
+            2,
+            "the lane must not block one Cargo job behind another; Cargo's own build lock serializes builders"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_workspace_that_moved_while_queued_declines_shared_evidence() {
+    async fn a_workspace_that_moved_mid_flight_declines_shared_evidence() {
         let fixture = TestStorage::new().await;
         let root = fixture.project_path().to_path_buf();
         std::fs::create_dir_all(root.join("src")).expect("source tree");
@@ -1459,7 +1425,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_dead_producer_interrupts_its_followers_instead_of_racing_them() {
+    async fn a_dead_producer_hands_the_check_back_to_its_followers() {
         let fixture = TestStorage::new().await;
         let root = fixture.project_path().to_path_buf();
         let owner = fixture.start_session().await;
@@ -1504,13 +1470,13 @@ mod tests {
             .expect("scheduler ran");
 
         assert!(
-            matches!(outcome, SharedVerification::Interrupted { .. }),
-            "{outcome:?}"
+            matches!(outcome, SharedVerification::Declined),
+            "a dead producer must hand the check back to the follower instead of failing its run: {outcome:?}"
         );
         assert_eq!(
             executions.load(Ordering::SeqCst),
             0,
-            "an interrupted attempt must not be read as a pass or silently rerun"
+            "the scheduler must not rerun the check itself; the caller does that"
         );
         assert_eq!(
             fixture
@@ -1520,6 +1486,66 @@ mod tests {
                 .unwrap(),
             Some(VerificationJobState::Interrupted)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_queued_row_is_never_followed_for_the_whole_wait_limit() {
+        let fixture = TestStorage::new().await;
+        let root = fixture.project_path().to_path_buf();
+        let blocker = fixture.start_session().await;
+        let queued_owner = fixture.start_session().await;
+        let follower = fixture.start_session().await;
+
+        // A different Cargo job holds the lane, so the second claim lands queued
+        // (and lane promotion no longer exists to move it on).
+        let running = admitted(&fixture, &root, blocker, COMMAND, "call-a").await;
+        let queued = admitted(&fixture, &root, queued_owner, OTHER_COMMAND, "call-b").await;
+        assert!(matches!(
+            fixture
+                .storage
+                .claim_verification_job(&running)
+                .await
+                .unwrap(),
+            VerificationJobClaim::Started(_)
+        ));
+        assert!(matches!(
+            fixture
+                .storage
+                .claim_verification_job(&queued)
+                .await
+                .unwrap(),
+            VerificationJobClaim::Queued { .. }
+        ));
+
+        // A third session asks for the same queued check. Following it can never
+        // yield a result, so it must hand the check back immediately instead of
+        // polling the un-promotable row until the wait limit expires.
+        let executions = Arc::new(AtomicUsize::new(0));
+        let request = request(
+            &root,
+            follower,
+            OTHER_COMMAND,
+            "call-c",
+            confined_policy(),
+            None,
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            scheduler_for(&fixture.storage, &root).run(
+                &request,
+                None,
+                fake_execution(executions.clone(), Duration::ZERO),
+            ),
+        )
+        .await
+        .expect("a queued row must not be followed")
+        .expect("scheduler ran");
+
+        assert!(
+            matches!(outcome, SharedVerification::Declined),
+            "a queued attempt must hand the check back: {outcome:?}"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
