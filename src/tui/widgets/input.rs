@@ -712,11 +712,17 @@ fn truncate(text: &str, width: usize) -> String {
 
 /// The popover frame title, extended with a `cursor/total` position when the
 /// candidate list is longer than the visible window so scrolling is evident.
+/// A capped list keeps a trailing `+` so the counter never reads as the whole
+/// match set.
 fn completion_popover_title(app: &AppState, area: Rect) -> String {
     let total = app.completion.candidates.len();
     let visible = area.height.saturating_sub(2).min(COMPLETION_VISIBLE_ROWS) as usize;
     if total > visible {
-        format!("Tab to accept · {}/{total}", app.completion.cursor + 1)
+        let more = if app.completion.hidden > 0 { "+" } else { "" };
+        format!(
+            "Tab to accept · {}/{total}{more}",
+            app.completion.cursor + 1
+        )
     } else {
         "Tab to accept".to_string()
     }
@@ -915,6 +921,36 @@ mod tests {
             completion_popover_title(&app, popover_area),
             "Tab to accept",
             "a fully visible list keeps the plain title"
+        );
+    }
+
+    #[test]
+    fn completion_popover_marks_a_capped_candidate_list() {
+        let mut app = AppState::new(
+            "codex",
+            "test-model".to_string(),
+            "workspace".to_string(),
+            None,
+        );
+        app.completion.active = true;
+        app.completion.candidates = (0..12)
+            .map(|i| crate::tui::app::CompletionCandidate::Path {
+                path: format!("src/file_{i:02}.rs"),
+                kind: crate::tui::path_search::PathKind::File,
+            })
+            .collect();
+        let popover_area = Rect::new(0, 10, 40, COMPLETION_HEIGHT);
+        assert_eq!(
+            completion_popover_title(&app, popover_area),
+            "Tab to accept · 1/12",
+            "an uncapped overflowing list keeps the plain position"
+        );
+
+        app.completion.hidden = 40;
+        assert_eq!(
+            completion_popover_title(&app, popover_area),
+            "Tab to accept · 1/12+",
+            "a capped list admits that more matches exist"
         );
     }
 

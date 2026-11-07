@@ -8,6 +8,9 @@ pub struct CompletionState {
     pub cursor: usize,
     pub active: bool,
     pub replacement_range: Option<(usize, usize)>,
+    /// Matches the candidate cap dropped; rendered as a trailing `+` on the
+    /// popover's position counter.
+    pub hidden: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,7 @@ impl AppState {
                 candidates,
                 replacement: _replacement,
                 replacement_range,
+                hidden,
             }) => {
                 let active = !candidates.is_empty();
                 // Always highlight the first (best) match as the list refines
@@ -62,6 +66,7 @@ impl AppState {
                     cursor: 0,
                     active,
                     replacement_range,
+                    hidden,
                 };
             }
             None => {

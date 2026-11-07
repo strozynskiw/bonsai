@@ -14,6 +14,9 @@ pub struct Completion {
     pub candidates: Vec<CompletionCandidate>,
     pub replacement: String,
     pub replacement_range: Option<(usize, usize)>,
+    /// Matches dropped by [`MAX_COMPLETION_CANDIDATES`]. The popover shows it
+    /// so a capped list is not mistaken for the complete set.
+    pub hidden: usize,
 }
 
 pub fn compute_completion(app: &AppState) -> Option<Completion> {
@@ -83,6 +86,7 @@ fn command_completion(_app: &AppState, prefix: &str) -> Option<Completion> {
                 .unwrap_or_else(|| command.description.to_string()),
         })
         .collect();
+    let hidden = matches.len().saturating_sub(MAX_COMPLETION_CANDIDATES);
     let first = candidates.first().and_then(|c| match c {
         CompletionCandidate::Command { label, .. } => Some(label.clone()),
         _ => None,
@@ -91,6 +95,7 @@ fn command_completion(_app: &AppState, prefix: &str) -> Option<Completion> {
         candidates,
         replacement: label,
         replacement_range: None,
+        hidden,
     })
 }
 
@@ -149,6 +154,7 @@ fn arg_completion(app: &AppState, cmd: &str, arg: &str) -> Option<Completion> {
                 ) => a.cmp(b),
                 _ => std::cmp::Ordering::Equal,
             });
+            let hidden = candidates.len().saturating_sub(MAX_COMPLETION_CANDIDATES);
             candidates.truncate(MAX_COMPLETION_CANDIDATES);
             let first = candidates.first().and_then(|c| match c {
                 CompletionCandidate::Provider { id, .. } => Some(id.clone()),
@@ -158,6 +164,7 @@ fn arg_completion(app: &AppState, cmd: &str, arg: &str) -> Option<Completion> {
                 candidates,
                 replacement: format!("{cmd} {id}"),
                 replacement_range: None,
+                hidden,
             })
         }
         "/model" => {
@@ -182,6 +189,7 @@ fn arg_completion(app: &AppState, cmd: &str, arg: &str) -> Option<Completion> {
                 _ => std::cmp::Ordering::Equal,
             });
             candidates.dedup();
+            let hidden = candidates.len().saturating_sub(MAX_COMPLETION_CANDIDATES);
             candidates.truncate(MAX_COMPLETION_CANDIDATES);
             let first = candidates.first().and_then(|c| match c {
                 CompletionCandidate::Model { replacement, .. } => Some(replacement.clone()),
@@ -191,6 +199,7 @@ fn arg_completion(app: &AppState, cmd: &str, arg: &str) -> Option<Completion> {
                 candidates,
                 replacement: format!("{cmd} {model}"),
                 replacement_range: None,
+                hidden,
             })
         }
         "/theme" => {
@@ -398,6 +407,7 @@ fn argument_completion(
         ) => left.cmp(right),
         _ => std::cmp::Ordering::Equal,
     });
+    let hidden = candidates.len().saturating_sub(MAX_COMPLETION_CANDIDATES);
     candidates.truncate(MAX_COMPLETION_CANDIDATES);
     let first = candidates.first().and_then(|candidate| match candidate {
         CompletionCandidate::Argument { replacement, .. } => Some(replacement.clone()),
@@ -407,6 +417,7 @@ fn argument_completion(
         candidates,
         replacement,
         replacement_range: None,
+        hidden,
     })
 }
 
@@ -522,6 +533,9 @@ fn path_completion(app: &AppState, token: MentionToken) -> Option<Completion> {
         candidates,
         replacement,
         replacement_range: Some((token.start, token.end)),
+        // The path index answers with at most `limit` entries and never says
+        // how many it matched, so a full page cannot be reported as truncation.
+        hidden: 0,
     })
 }
 
@@ -682,6 +696,29 @@ mod tests {
             Some(CompletionCandidate::Provider { id, display })
                 if id == "opencode" && display == "OpenCode Go"
         ));
+    }
+
+    #[test]
+    fn argument_completion_reports_matches_dropped_by_the_cap() {
+        let arguments = |count: usize| {
+            (0..count)
+                .map(|index| ArgumentCandidate {
+                    label: format!("label{index:03}"),
+                    detail: "option".to_string(),
+                    replacement: format!("/cmd label{index:03}"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let capped = argument_completion(arguments(MAX_COMPLETION_CANDIDATES + 4))
+            .expect("completion should be present");
+        assert_eq!(capped.candidates.len(), MAX_COMPLETION_CANDIDATES);
+        assert_eq!(capped.hidden, 4);
+
+        let whole = argument_completion(arguments(MAX_COMPLETION_CANDIDATES))
+            .expect("completion should be present");
+        assert_eq!(whole.candidates.len(), MAX_COMPLETION_CANDIDATES);
+        assert_eq!(whole.hidden, 0, "a list that just fits is not truncated");
     }
 
     #[test]
