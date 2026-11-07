@@ -1039,6 +1039,23 @@ fn lm_studio_models_from_response(value: &Value) -> Result<Vec<AvailableModel>> 
     Ok(items.iter().filter_map(lm_studio_model_from_item).collect())
 }
 
+/// Context the loaded instance actually serves (`loaded_instances[].config.
+/// context_length` from `/api/v1/models`). A model loaded at 8k must budget
+/// 8k even when its card maximum is 262k, or the agent overflows the server
+/// window and the reply is silently truncated.
+fn lm_studio_served_context(item: &Value) -> Option<u32> {
+    item.get("loaded_instances")
+        .and_then(Value::as_array)
+        .and_then(|instances| {
+            instances.iter().find_map(|instance| {
+                instance
+                    .get("config")
+                    .and_then(|config| config.get("context_length"))
+                    .and_then(positive_u32_from_value)
+            })
+        })
+}
+
 fn lm_studio_model_from_item(item: &Value) -> Option<AvailableModel> {
     let id = ["key", "id"]
         .into_iter()
@@ -1052,9 +1069,10 @@ fn lm_studio_model_from_item(item: &Value) -> Option<AvailableModel> {
     if model_type == "vlm" {
         push_unique_feature(&mut features, ModelFeature::Attachment);
     }
-    let context_window = item
-        .get("max_context_length")
-        .and_then(positive_u32_from_value);
+    let context_window = lm_studio_served_context(item).or_else(|| {
+        item.get("max_context_length")
+            .and_then(positive_u32_from_value)
+    });
     let display_name = item
         .get("display_name")
         .and_then(Value::as_str)
@@ -1142,16 +1160,37 @@ async fn fetch_ollama_show(root: &str, name: &str) -> Result<AvailableModel> {
 }
 
 fn ollama_model_from_show(name: &str, value: &Value) -> AvailableModel {
-    let context_window = value
-        .get("model_info")
-        .and_then(Value::as_object)
-        .and_then(|info| {
-            info.iter()
-                .find(|(key, _)| key.ends_with(".context_length"))
-                .and_then(|(_, value)| positive_u32_from_value(value))
-        });
+    // A Modelfile `num_ctx` is the window the server allocates; `model_info`
+    // reports the trained maximum. Prefer the former for compaction budgets —
+    // under-budgeting costs a compaction, over-budgeting truncates replies.
+    let served = value
+        .get("parameters")
+        .and_then(Value::as_str)
+        .and_then(ollama_num_ctx);
+    let context_window = served.or_else(|| {
+        value
+            .get("model_info")
+            .and_then(Value::as_object)
+            .and_then(|info| {
+                info.iter()
+                    .find(|(key, _)| key.ends_with(".context_length"))
+                    .and_then(|(_, value)| positive_u32_from_value(value))
+            })
+    });
     let features = features_from_capabilities(value.get("capabilities"));
     AvailableModel::with_metadata(name, context_window, None, features)
+}
+
+/// `num_ctx` from the `/api/show` `parameters` block, which Ollama renders as a
+/// newline-separated `name value` list.
+fn ollama_num_ctx(parameters: &str) -> Option<u32> {
+    parameters.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("num_ctx") {
+            return None;
+        }
+        parts.next()?.parse::<u32>().ok().filter(|value| *value > 0)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2243,6 +2282,59 @@ mod tests {
             model.features,
             vec![ModelFeature::ToolCall, ModelFeature::Reasoning]
         );
+    }
+
+    #[test]
+    fn lm_studio_prefers_loaded_instance_context_over_model_max() {
+        // Shape validated against LM Studio 0.3.x: a 262k model loaded at 8k
+        // must budget 8k, or prompts overflow the server window.
+        let value = serde_json::json!({
+            "models": [{
+                "type": "llm",
+                "key": "qwen3-coder-30b",
+                "publisher": "lmstudio-community",
+                "max_context_length": 262_144,
+                "loaded_instances": [
+                    {"id": "qwen3-coder-30b", "config": {"context_length": 8192}}
+                ]
+            }]
+        });
+
+        let models = lm_studio_models_from_response(&value).unwrap();
+
+        assert_eq!(models[0].context_window, Some(8192));
+    }
+
+    #[test]
+    fn lm_studio_falls_back_to_model_max_when_nothing_is_loaded() {
+        let value = serde_json::json!({
+            "models": [{
+                "type": "llm",
+                "key": "granite-3.0-2b",
+                "max_context_length": 131_072,
+                "loaded_instances": []
+            }]
+        });
+
+        let models = lm_studio_models_from_response(&value).unwrap();
+
+        assert_eq!(models[0].context_window, Some(131_072));
+    }
+
+    #[test]
+    fn ollama_show_prefers_modelfile_num_ctx_over_trained_window() {
+        let value = serde_json::json!({
+            "model_info": {
+                "general.architecture": "qwen3",
+                "qwen3.context_length": 40_960
+            },
+            "parameters": "stop \"<|im_end|>\"\nnum_ctx 8192\ntemperature 0.7",
+            "capabilities": ["completion", "tools"]
+        });
+
+        let model = ollama_model_from_show("qwen3:latest", &value);
+
+        assert_eq!(model.context_window, Some(8192));
     }
 
     #[test]
