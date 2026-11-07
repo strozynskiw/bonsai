@@ -484,6 +484,17 @@ fn recover_one_transaction(home_dir: &Path, directory: &Path) -> Result<(), Cata
     cleanup_transaction(directory)
 }
 
+/// Recover `<name>.toml.bak` files left by the pre-journal writer.
+///
+/// That writer copied the previous file to `<name>.toml.bak` and then replaced
+/// `<name>.toml`, so the suffix alone says nothing about whether the rewrite
+/// finished. Two shapes exist:
+///
+/// - the live file is present: the rewrite completed and the backup is a stale
+///   artifact — park it under a name this guard ignores and keep loading;
+/// - only the backup survives: either side could be the honest one, so refuse
+///   and let the operator choose (promoting it silently would resurrect a file
+///   they may have deleted on purpose).
 fn detect_legacy_catalog_backups(home_dir: &Path) -> Result<(), CatalogError> {
     let paths = CatalogPaths::from_home_dir(home_dir);
     for directory in [&paths.provider_dir, &paths.model_dir] {
@@ -499,17 +510,41 @@ fn detect_legacy_catalog_backups(home_dir: &Path) -> Result<(), CatalogError> {
                 source,
             })?;
             let path = entry.path();
-            if path
+            if !path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".toml.bak"))
             {
+                continue;
+            }
+            let live = path.with_extension("");
+            if !live.exists() {
                 return Err(CatalogError::InvalidLocalCatalogJournal {
                     path,
-                    message: "legacy backup requires manual recovery before catalog loading"
-                        .to_string(),
+                    message: format!(
+                        "an interrupted legacy write left only this backup; restore it to `{}` to keep those entries, or delete it to ignore them",
+                        live.display()
+                    ),
                 });
             }
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default();
+            let live_name = live
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("catalog.toml");
+            let parked = directory.join(format!("{live_name}.legacy-{stamp}.bak"));
+            fs::rename(&path, &parked).map_err(|source| CatalogError::WriteFile {
+                path: path.clone(),
+                source,
+            })?;
+            tracing::warn!(
+                backup = %parked.display(),
+                live = %live.display(),
+                "parked a stale legacy catalog backup whose rewrite had completed"
+            );
         }
     }
     Ok(())
@@ -817,7 +852,36 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fixed_backup_is_reported_instead_of_ignored() {
+    fn legacy_backup_beside_the_live_file_is_parked_and_loading_continues() {
+        // The pre-journal writer left `<name>.toml.bak` behind after a completed
+        // rewrite; that artifact must not block the catalog forever.
+        let home = tempfile::TempDir::new().unwrap();
+        let paths = CatalogPaths::from_home_dir(home.path());
+        fs::create_dir_all(&paths.provider_dir).unwrap();
+        fs::write(paths.provider_dir.join("legacy.toml"), "current").unwrap();
+        fs::write(paths.provider_dir.join("legacy.toml.bak"), "stale").unwrap();
+
+        with_recovered_catalog_lock(home.path(), || Ok(())).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(paths.provider_dir.join("legacy.toml")).unwrap(),
+            "current",
+            "the live file is authoritative and must be untouched"
+        );
+        assert!(!paths.provider_dir.join("legacy.toml.bak").exists());
+        let parked = fs::read_dir(&paths.provider_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("legacy.toml.legacy-") && name.ends_with(".bak"))
+            .count();
+        assert_eq!(parked, 1, "the stale backup is parked under an inert name");
+    }
+
+    #[test]
+    fn legacy_backup_without_its_live_file_still_requires_recovery() {
+        // Only the backup survives: either side could be the honest one, so the
+        // operator chooses instead of the loader guessing.
         let home = tempfile::TempDir::new().unwrap();
         let paths = CatalogPaths::from_home_dir(home.path());
         fs::create_dir_all(&paths.provider_dir).unwrap();
@@ -825,9 +889,10 @@ mod tests {
 
         let error = with_recovered_catalog_lock(home.path(), || Ok(())).unwrap_err();
 
-        assert!(matches!(
-            error,
-            CatalogError::InvalidLocalCatalogJournal { .. }
-        ));
+        assert!(
+            matches!(error, CatalogError::InvalidLocalCatalogJournal { .. }),
+            "an orphaned backup must still stop the load: {error:?}"
+        );
+        assert!(paths.provider_dir.join("legacy.toml.bak").exists());
     }
 }
