@@ -1403,6 +1403,9 @@ pub(in crate::tui::run) fn enqueue_running_follow_up(
         },
     };
     app.reduce(action);
+    if delivery == FollowUpDelivery::Queue {
+        super::goal::send_running_follow_up(app, tasks);
+    }
     true
 }
 

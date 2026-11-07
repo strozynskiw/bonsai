@@ -4,12 +4,11 @@ use crate::storage::SessionId;
 use crate::tui::pickers::ModelSelection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Whether a busy-state composer message joins the active turn or waits for
-/// the next foreground run.
+/// How a busy-state composer message reaches the agent.
 pub enum FollowUpDelivery {
     /// Replace the active foreground turn and open the next one immediately.
     Steer,
-    /// Hold the message until the active foreground run finishes.
+    /// Deliver at the next model boundary, or in a new run if this one ends first.
     Queue,
 }
 

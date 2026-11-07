@@ -612,11 +612,7 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             ("Esc", " dismiss"),
         ]
     } else if matches!(app.task_state, crate::tui::event::TaskState::Running) {
-        let active_goal = app
-            .session_goal
-            .as_ref()
-            .is_some_and(|goal| goal.state == crate::goal::GoalState::Active);
-        let mut hints = vec![("Enter", if active_goal { " send  " } else { " queue  " })];
+        let mut hints = vec![("Enter", " send  ")];
         if app.last_queued_input().is_some() {
             hints.push(("Esc", " steer"));
         }
@@ -1099,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn meta_line_only_advertises_queue_before_message_is_queued() {
+    fn meta_line_advertises_send_before_message_is_queued() {
         let mut app = AppState::new(
             "codex",
             "test-model".to_string(),
@@ -1110,7 +1106,7 @@ mod tests {
 
         let text = line_text(&meta_line(&app, 120, false));
 
-        assert!(text.contains("Enter queue"), "{text}");
+        assert!(text.contains("Enter send"), "{text}");
         assert!(!text.contains("Esc steer"), "{text}");
         assert!(!text.contains("Tab queue"), "{text}");
     }
@@ -1133,7 +1129,7 @@ mod tests {
 
         let text = line_text(&meta_line(&app, 120, false));
 
-        assert!(text.contains("Enter queue  Esc steer"), "{text}");
+        assert!(text.contains("Enter send  Esc steer"), "{text}");
     }
 
     #[test]

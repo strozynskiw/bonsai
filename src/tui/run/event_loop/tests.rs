@@ -2136,6 +2136,87 @@ async fn running_enter_queues_normal_text_for_next_turn() {
 }
 
 #[tokio::test]
+async fn normal_follow_up_reaches_the_active_run() {
+    struct BoundaryProvider {
+        capture: CapturingProvider,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl Provider for BoundaryProvider {
+        async fn chat_stream(
+            &self,
+            messages: &[ChatCompletionRequestMessage],
+            tools: &[ChatCompletionTool],
+            cancellation: tokio_util::sync::CancellationToken,
+            sink: SharedSink,
+        ) -> crate::provider::ProviderResult<StreamedResponse> {
+            let response = self
+                .capture
+                .chat_stream(messages, tools, cancellation.clone(), sink)
+                .await?;
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            assert!(!cancellation.is_cancelled());
+            Ok(response)
+        }
+        async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let (capture, requests) = CapturingProvider::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let agent = test_agent(Box::new(BoundaryProvider {
+        capture,
+        started: started.clone(),
+        release: release.clone(),
+        calls: AtomicUsize::new(0),
+    }));
+    tasks
+        .start_agent_run(
+            agent,
+            crate::agent::UserInput::from_text("Explain the code"),
+            Arc::new(NullSink),
+            crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
+    let mut app = app();
+    app.task_state = TaskState::Running;
+    app.composer.set_text("Also explain the API".into());
+    assert!(enqueue_running_follow_up(
+        &mut app,
+        &tasks,
+        FollowUpDelivery::Queue,
+        &crate::provider::ProviderRegistry::default_registry(),
+        None
+    ));
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while tasks.poll_finished().await.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let requests = requests.lock().await;
+    assert!(requests.len() >= 2);
+    assert!(
+        requests[1]
+            .iter()
+            .any(|text| text == "Also explain the API")
+    );
+}
+
+#[tokio::test]
 async fn goal_follow_up_reaches_the_same_run_without_interrupting_or_replacing_objective() {
     struct BoundaryProvider {
         capture: CapturingProvider,
@@ -2220,7 +2301,6 @@ async fn goal_follow_up_reaches_the_same_run_without_interrupting_or_replacing_o
         &crate::provider::ProviderRegistry::default_registry(),
         None,
     ));
-    super::super::goal::send_goal_follow_up(&mut app, &tasks);
     assert_eq!(app.task_state, TaskState::Running);
     assert_eq!(goal.snapshot().await.unwrap().id, objective.id);
     release.notify_one();

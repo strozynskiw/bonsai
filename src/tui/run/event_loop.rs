@@ -1152,21 +1152,13 @@ async fn handle_toplevel_submit_command(
         {
             return true;
         }
-        let queued = enqueue_running_follow_up(
+        enqueue_running_follow_up(
             app,
             &*tasks,
             FollowUpDelivery::Queue,
             &deps.registry,
             Some(&deps.model_catalog),
         );
-        if queued
-            && goal
-                .snapshot()
-                .await
-                .is_some_and(|record| record.state == crate::goal::GoalState::Active)
-        {
-            super::goal::send_goal_follow_up(app, tasks);
-        }
         return true;
     }
     if matches!(

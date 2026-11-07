@@ -49,8 +49,8 @@ pub(super) async fn sync_goal_snapshot(
     changed
 }
 
-/// Deliver goal steering at the next normal model boundary, preserving the run.
-pub(super) fn send_goal_follow_up(app: &mut AppState, tasks: &TaskController) {
+/// Deliver a follow-up at the next normal model boundary, preserving the run.
+pub(super) fn send_running_follow_up(app: &mut AppState, tasks: &TaskController) {
     let Some(queued) = app.last_queued_input() else {
         return;
     };
@@ -62,10 +62,7 @@ pub(super) fn send_goal_follow_up(app: &mut AppState, tasks: &TaskController) {
         input: submission.input,
     }) {
         // If completion won the race, retain the exact input for idle dispatch.
-        tracing::debug!(
-            ?error,
-            "goal follow-up retained for the next foreground run"
-        );
+        tracing::debug!(?error, "follow-up retained for the next foreground run");
     }
 }
 
