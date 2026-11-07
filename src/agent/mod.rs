@@ -196,6 +196,16 @@ const AUTO_COMPACTION_TRIGGER_PERCENT: usize = 95;
 /// warm again until the next pass. Set between the compaction target (50%) and
 /// trigger (95%) so GC reclaims *before* full compaction is needed.
 const DEFAULT_CONTEXT_GC_TRIGGER_PERCENT: usize = 75;
+/// SMOL keeps its own pressure thresholds, but only marginally below the
+/// standard ones: enough to keep a local model clear of the ragged edge of its
+/// window, not to halve it. The profile's outgoing projection already bounds the
+/// wire (recent-message cap plus truncated tool output), so compacting at half
+/// the window was pure loss — observed firing at 48% usage and discarding live
+/// history the model was still working from.
+const SMOL_AUTO_COMPACTION_TRIGGER_PERCENT: usize = 85;
+/// SMOL's continuous-GC trigger: below auto-compaction, above the target, so GC
+/// reclaims old tool outputs before full compaction is needed.
+const SMOL_CONTEXT_GC_TRIGGER_PERCENT: usize = 70;
 /// Guardrails for the private context-GC A/B experiment. Keeping the range
 /// narrow prevents an accidental environment setting from turning continuous
 /// GC into per-turn history churn or colliding with automatic compaction.

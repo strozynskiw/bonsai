@@ -312,7 +312,7 @@ impl Agent {
 
     pub(super) fn automatic_compaction_trigger_tokens(&self) -> usize {
         let percent = if self.smol_applies_to_active_persona() {
-            50
+            SMOL_AUTO_COMPACTION_TRIGGER_PERCENT
         } else {
             AUTO_COMPACTION_TRIGGER_PERCENT
         };
@@ -324,7 +324,7 @@ impl Agent {
     /// warm; see [`DEFAULT_CONTEXT_GC_TRIGGER_PERCENT`].
     pub(super) fn context_gc_trigger_tokens(&self) -> usize {
         let percent = if self.smol_applies_to_active_persona() {
-            35
+            SMOL_CONTEXT_GC_TRIGGER_PERCENT
         } else {
             self.context_gc_trigger_percent
         };
@@ -630,11 +630,9 @@ impl Agent {
     }
 
     pub(in crate::agent) fn default_compaction_target_tokens(&self) -> usize {
-        let percent = if self.smol_applies_to_active_persona() {
-            35
-        } else {
-            COMPACTION_TARGET_PERCENT
-        };
+        // SMOL shares the standard goal size: its savings come from the outgoing
+        // projection and the lean prompt, not from squeezing history further.
+        let percent = COMPACTION_TARGET_PERCENT;
         let pct_target = self
             .budget
             .context_budget_tokens
