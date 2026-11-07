@@ -128,13 +128,37 @@ impl ProviderPreset {
     }
 
     fn normalize_base_url(self, base_url: &str) -> Result<String> {
-        match self.transport() {
+        let normalized = match self.transport() {
             TransportProtocol::OpenAiChat => {
                 crate::provider::normalize_openai_compatible_base_url(base_url)
             }
             TransportProtocol::AnthropicMessages | TransportProtocol::CodexResponses => {
                 crate::provider::normalize_anthropic_compatible_base_url(base_url)
             }
+        }?;
+        Ok(self.with_openai_mount(normalized))
+    }
+
+    /// Local servers mount their OpenAI surface at `/v1`, but their native
+    /// probes ignore the path — so `http://localhost:1234` fetches models fine
+    /// and then sends chat requests to `/chat/completions`, which 404s. Only
+    /// presets with a known mount get the suffix; the generic compatible kinds
+    /// keep exactly what the user typed.
+    fn with_openai_mount(self, base_url: String) -> String {
+        let known_mount = matches!(
+            self,
+            Self::LmStudio | Self::Ollama | Self::LlamaCpp | Self::Vllm | Self::Unsloth
+        );
+        if !known_mount {
+            return base_url;
+        }
+        let Ok(url) = reqwest::Url::parse(&base_url) else {
+            return base_url;
+        };
+        if url.path().trim_matches('/').is_empty() {
+            format!("{base_url}/v1")
+        } else {
+            base_url
         }
     }
 }
@@ -1351,6 +1375,45 @@ mod tests {
         state.input_char('x');
         state.backspace();
         assert_eq!(state.provider_id, id);
+    }
+
+    #[test]
+    fn known_local_presets_mount_the_openai_surface_at_v1() {
+        // Native discovery probes ignore the path, so a bare host fetches
+        // models fine and then 404s on /chat/completions. Known local servers
+        // get their documented mount; anything else keeps what was typed.
+        assert_eq!(
+            ProviderPreset::LmStudio
+                .normalize_base_url("localhost:1234")
+                .unwrap(),
+            "http://localhost:1234/v1"
+        );
+        assert_eq!(
+            ProviderPreset::Ollama
+                .normalize_base_url("http://127.0.0.1:11434/")
+                .unwrap(),
+            "http://127.0.0.1:11434/v1"
+        );
+        assert_eq!(
+            ProviderPreset::Vllm
+                .normalize_base_url("http://localhost:8000/v1")
+                .unwrap(),
+            "http://localhost:8000/v1"
+        );
+        assert_eq!(
+            ProviderPreset::LmStudio
+                .normalize_base_url("http://localhost:1234/custom")
+                .unwrap(),
+            "http://localhost:1234/custom",
+            "an explicit path is the user's call"
+        );
+        assert_eq!(
+            ProviderPreset::OpenAiCompatible
+                .normalize_base_url("http://gpu-box:9000")
+                .unwrap(),
+            "http://gpu-box:9000",
+            "the generic compatible kind never invents a path"
+        );
     }
 
     #[test]
