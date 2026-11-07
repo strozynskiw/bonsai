@@ -19,6 +19,11 @@ use crate::storage::{SessionId, SessionRunSelection, SessionStatus};
 /// when the session drains correctly.
 const DRAIN_BUDGET: Duration = Duration::from_secs(20);
 
+/// Deadline for observing asynchronous controller state. These waits assert
+/// that a state is reached, never how fast: a machine running the suite beside
+/// another build can take tens of seconds to get there.
+const STATE_WAIT: Duration = Duration::from_secs(60);
+
 #[derive(Default)]
 struct Mock {
     calls: AtomicUsize,
@@ -246,7 +251,7 @@ impl Fixture {
             .unwrap();
     }
     async fn wait_calls(&self, n: usize) {
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout(STATE_WAIT, async {
             while self.mock.calls.load(Ordering::SeqCst) < n {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -255,7 +260,7 @@ impl Fixture {
         .unwrap();
     }
     async fn wait_idle(&self) {
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout(STATE_WAIT, async {
             loop {
                 let (snapshot, _) = self.controller.snapshot().await.unwrap();
                 assert!(snapshot.failure.is_none(), "{:?}", snapshot);
@@ -963,7 +968,7 @@ async fn timed_out_shutdown_and_drop_keep_claim_until_execution_settles() {
             .is_none()
     );
     mock.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(STATE_WAIT, async {
         loop {
             if db
                 .storage
@@ -989,7 +994,7 @@ async fn failure_pool(f: &Fixture) -> sqlx::SqlitePool {
 }
 
 async fn wait_failed(f: &Fixture) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(STATE_WAIT, async {
         loop {
             let (state, _) = f.controller.snapshot().await.unwrap();
             if state.state == "failed" {
