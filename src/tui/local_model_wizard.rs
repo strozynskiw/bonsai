@@ -720,15 +720,33 @@ impl LocalModelWizardState {
         // Keep the cursor inside the list that survives the failure.
         self.model_cursor = self.model_cursor.min(self.models.len().saturating_sub(1));
         if self.models.is_empty() {
-            self.status = Some("Fetch failed. Enter model ids manually.".to_string());
+            self.status = Some(format!("Fetch failed. {}", self.port_hints()));
         } else {
             // Keep whatever the list already holds — an unreachable server must
             // not throw away a provider the user is part-way through editing.
-            self.status = Some(
-                "Fetch failed; keeping the models already listed. Add ids manually.".to_string(),
-            );
+            self.status = Some(format!(
+                "Fetch failed; keeping the models already listed. {}",
+                self.port_hints()
+            ));
         }
         self.error = Some(message);
+    }
+
+    /// Guidance for a failed fetch: a loopback URL that refuses connections is
+    /// usually the wrong port, and the common local servers each ship a default.
+    fn port_hints(&self) -> &'static str {
+        let loopback = reqwest::Url::parse(self.base_url.trim())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .is_some_and(|host| {
+                matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]")
+            });
+        if loopback {
+            "Enter model ids manually, or check the port: LM Studio 1234, \
+             Ollama 11434, llama.cpp 8080, vLLM 8000."
+        } else {
+            "Enter model ids manually."
+        }
     }
 
     pub(crate) fn submit_selection(&mut self) {
@@ -1580,6 +1598,26 @@ mod tests {
             source.push_str(&format!("remote_model = \"{remote}\"\n"));
         }
         toml::from_str(&source).expect("target spec should parse")
+    }
+
+    #[test]
+    fn fetch_failure_suggests_local_ports_for_a_loopback_url() {
+        let mut state = LocalModelWizardState {
+            preset: ProviderPreset::LmStudio,
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            ..LocalModelWizardState::default()
+        };
+
+        state.apply_fetch_error("connection refused".to_string());
+
+        let status = state.status.clone().expect("status should be set");
+        assert!(
+            status.contains("LM Studio 1234")
+                && status.contains("Ollama 11434")
+                && status.contains("llama.cpp 8080")
+                && status.contains("vLLM 8000"),
+            "a refused loopback connection is usually a wrong port: {status}"
+        );
     }
 
     #[test]
