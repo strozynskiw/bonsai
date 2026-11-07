@@ -13,6 +13,12 @@ use crate::provider::{Provider, ProviderFactory, ProviderMetadata, StreamedRespo
 use crate::runtime::RuntimeCore;
 use crate::storage::{SessionId, SessionRunSelection, SessionStatus};
 
+/// Drain budget for controller teardown in these tests. The controller's own
+/// steps (worker join, background-task and terminal stop) each allow five
+/// seconds, so a five-second outer budget can expire on a loaded CI runner even
+/// when the session drains correctly.
+const DRAIN_BUDGET: Duration = Duration::from_secs(20);
+
 #[derive(Default)]
 struct Mock {
     calls: AtomicUsize,
@@ -276,7 +282,7 @@ async fn resume_does_not_run_model_and_live_claim_is_rejected() {
             .unwrap(),
         crate::storage::ResumeSessionOutcome::Live
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -303,7 +309,7 @@ async fn resume_reattaches_and_pauses_durable_goal_without_running_it() {
             .state,
         crate::goal::GoalState::Paused
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -350,7 +356,7 @@ async fn goal_snapshot_and_events_preserve_every_transition_in_order() {
         4
     );
     assert_eq!(f.mock.calls.load(Ordering::SeqCst), 0);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -388,7 +394,7 @@ async fn active_goal_owns_server_task_and_persists_run_timing() {
         service.snapshot().await.unwrap().state,
         crate::goal::GoalState::Complete
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -412,7 +418,7 @@ async fn interrupted_server_goal_is_paused_after_the_run_settles() {
         service.snapshot().await.unwrap().state,
         crate::goal::GoalState::Paused
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -446,7 +452,7 @@ async fn replacing_goal_cancels_old_run_and_preserves_its_identity() {
     assert_eq!(current.id, next.id);
     assert_eq!(current.state, crate::goal::GoalState::Active);
     assert_eq!(f.mock.calls.load(Ordering::SeqCst), 1);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -503,7 +509,7 @@ async fn replacement_does_not_reuse_a_slot_before_the_old_run_stops() {
     let current = f.db.storage.current_goal(f.id).await.unwrap().unwrap();
     assert_eq!(current.id, replacement.id);
     assert_eq!(current.state, crate::goal::GoalState::Active);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[test]
@@ -612,7 +618,7 @@ async fn goal_followups_are_delivered_once_and_recorded_in_order() {
             ("third".into(), "delivered".into())
         ]
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -678,7 +684,7 @@ async fn goal_followup_wakes_a_parked_background_wait() {
             .state,
         "finished"
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -721,7 +727,7 @@ async fn goal_followup_not_delivered_before_interrupt_is_interrupted() {
         }
     }
     assert!(interrupted);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -752,7 +758,7 @@ async fn concurrent_messages_deduplicate_and_conflict_without_queue() {
         .unwrap();
     f.wait_idle().await;
     assert_eq!(f.mock.calls.load(Ordering::SeqCst), 1);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -791,7 +797,7 @@ async fn repeated_turns_reuse_runtime_and_persist_transcript() {
         2
     );
     assert_eq!(f.mock.calls.load(Ordering::SeqCst), 2);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -806,7 +812,7 @@ async fn slot_retained_for_background_children_and_switch_requires_drain() {
         .unwrap();
     assert!(f.controller.resume(second, &f.selection).await.is_err());
     assert_eq!(f.mock.calls.load(Ordering::SeqCst), 0);
-    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.controller.release(DRAIN_BUDGET).await.unwrap();
     assert!(
         background
             .snapshot(&child.id)
@@ -816,7 +822,7 @@ async fn slot_retained_for_background_children_and_switch_requires_drain() {
             .is_finished()
     );
     f.controller.resume(second, &f.selection).await.unwrap();
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -900,7 +906,7 @@ async fn approval_is_responsive_correlated_and_consumed_once() {
     );
     f.controller.interrupt(f.id).await.unwrap();
     f.wait_idle().await;
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -921,9 +927,9 @@ async fn stale_heartbeat_cannot_steal_os_owned_session() {
     let other =
         Controller::new(f.db.project_path(), f.db.storage.clone(), f.factory.clone()).unwrap();
     assert!(other.resume(f.id, &f.selection).await.is_err());
-    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.controller.release(DRAIN_BUDGET).await.unwrap();
     other.resume(f.id, &f.selection).await.unwrap();
-    other.shutdown(Duration::from_secs(5)).await.unwrap();
+    other.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1014,7 +1020,7 @@ async fn admission_failure_never_starts_execution() {
             .is_none()
     );
     assert_eq!(f.controller.snapshot().await.unwrap().0.state, "idle");
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1066,7 +1072,7 @@ async fn failed_terminal_bookkeeping_preserves_committed_report_without_publicat
             );
         }
         assert!(f.controller.message(f.id, "two", "Again").await.is_err());
-        f.controller.release(Duration::from_secs(5)).await.unwrap();
+        f.controller.release(DRAIN_BUDGET).await.unwrap();
         let after =
             f.db.storage
                 .load_runtime_session_snapshot(f.id)
@@ -1108,7 +1114,7 @@ async fn snapshot_failure_never_publishes_completion_or_finishes_command() {
             super::sink::SessionEvent::Completion(_)
         ));
     }
-    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.controller.release(DRAIN_BUDGET).await.unwrap();
 }
 
 #[test]
@@ -1212,7 +1218,7 @@ async fn heartbeat_failure_cancels_run_and_blocks_new_work() {
         .execute(&pool)
         .await
         .unwrap();
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1329,7 +1335,7 @@ async fn bridge_forwards_every_interaction_and_interrupt_denies_pending_requests
             .pending
             .is_empty()
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1376,7 +1382,7 @@ async fn domain_snapshot_retains_plan_guard_until_subscription() {
         serde_json::to_value(fresh.plan).unwrap()
     );
     assert_eq!(reconstructed_todos, fresh.todos);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[test]
@@ -1420,7 +1426,7 @@ async fn usage_is_cumulative_across_turns_and_resume() {
     }
     let (snapshot, _) = f.controller.subscribe().await.unwrap();
     assert_eq!((snapshot.usage.0, snapshot.usage.1), (20, 6));
-    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.controller.release(DRAIN_BUDGET).await.unwrap();
     f.resume().await;
     let (snapshot, _) = f.controller.subscribe().await.unwrap();
     assert_eq!((snapshot.usage.0, snapshot.usage.1), (20, 6));
@@ -1428,7 +1434,7 @@ async fn usage_is_cumulative_across_turns_and_resume() {
     f.wait_idle().await;
     let (snapshot, _) = f.controller.subscribe().await.unwrap();
     assert_eq!((snapshot.usage.0, snapshot.usage.1), (30, 9));
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1481,7 +1487,7 @@ async fn wall_time_budget_cancels_server_work_and_publishes_terminal_evidence() 
         }
     }
     assert!(completion_seen);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1495,7 +1501,7 @@ async fn session_turn_budget_survives_server_resume_without_another_provider_cal
     f.resume().await;
     f.controller.message(f.id, "first", "Hello").await.unwrap();
     f.wait_idle().await;
-    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.controller.release(DRAIN_BUDGET).await.unwrap();
     f.resume().await;
     f.controller
         .message(f.id, "second", "Hello again")
@@ -1521,7 +1527,7 @@ async fn session_turn_budget_survives_server_resume_without_another_provider_cal
         report.usage.budget_exhaustion,
         Some(crate::run_budget::RunBudgetExhaustion::SessionTurns { limit: 1, used: 1 })
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1531,7 +1537,7 @@ async fn forgetting_completed_server_session_removes_only_its_artifacts() {
     f.resume().await;
     f.controller.message(f.id, "one", "Hello").await.unwrap();
     f.wait_idle().await;
-    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.controller.release(DRAIN_BUDGET).await.unwrap();
     let root = f.db.project_path().canonicalize().unwrap();
     let artifacts = super::artifacts::Artifacts::new(f.db.storage.home_dir()).unwrap();
     let records = artifacts
@@ -1543,7 +1549,7 @@ async fn forgetting_completed_server_session_removes_only_its_artifacts() {
     f.controller.resume(other, &f.selection).await.unwrap();
     f.controller.message(other, "two", "Hello").await.unwrap();
     f.wait_idle().await;
-    f.controller.release(Duration::from_secs(5)).await.unwrap();
+    f.controller.release(DRAIN_BUDGET).await.unwrap();
     let other_records = artifacts
         .list(&f.db.storage, &root.to_string_lossy(), other.as_i64())
         .await
@@ -1586,7 +1592,7 @@ async fn forgetting_completed_server_session_removes_only_its_artifacts() {
             .unwrap()
             .is_some()
     );
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
 
 #[tokio::test]
@@ -1605,5 +1611,5 @@ async fn restart_marks_accepted_work_interrupted_without_reexecution() {
     assert_eq!(retry.run_id, "old-run");
     assert_eq!(retry.state, "interrupted");
     assert_eq!(f.mock.calls.load(Ordering::SeqCst), 0);
-    f.controller.shutdown(Duration::from_secs(5)).await.unwrap();
+    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
 }
