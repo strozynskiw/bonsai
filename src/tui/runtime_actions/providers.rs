@@ -222,11 +222,28 @@ pub(in crate::tui) async fn handle_providers_command(
     match (subcommand, id_arg) {
         ("" | "list", _) => open_provider_manager(app, &deps).await,
         ("add", _) => {
+            let mut state = LocalModelWizardState::with_persistence(app.credential_persistence);
+            // A running local server is the common case; probe for it first so
+            // the wizard opens on the model list instead of a blank URL form.
+            let connections = deps.model_catalog.connections();
+            let taken_ids: Vec<String> = connections
+                .iter()
+                .map(|connection| connection.id.to_string())
+                .collect();
+            let known_base_urls: Vec<String> = connections
+                .iter()
+                .map(|connection| connection.default_base_url.to_string())
+                .collect();
+            // Probing a dead endpoint is a refused connection, not a hang: the
+            // budget bounds anything slower than a local round trip.
+            if let Some(found) =
+                crate::tui::local_model_wizard::discover_local_endpoint(known_base_urls).await
+            {
+                state.apply_discovered_endpoint(found, &taken_ids);
+            }
             app.reduce(AppAction::OpenModal(ModalKind::Wizard(
                 crate::tui::event::WizardModal::LocalModelWizard {
-                    state: Box::new(LocalModelWizardState::with_persistence(
-                        app.credential_persistence,
-                    )),
+                    state: Box::new(state),
                 },
             )));
         }

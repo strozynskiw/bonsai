@@ -1303,7 +1303,9 @@ async fn handle_idle_slash_command(
                 &deps.model_catalog,
                 deps.storage.home_dir(),
                 app.credential_persistence,
-            ) {
+            )
+            .await
+            {
                 Ok(state) => {
                     app.reduce(AppAction::OpenModal(ModalKind::Wizard(
                         crate::tui::event::WizardModal::LocalModelWizard {
@@ -4986,10 +4988,10 @@ async fn start_pending_queued_run_if_idle(
     true
 }
 
-/// Build the wizard state for `/wizard [provider-id]`: a blank create flow
-/// without an argument, or a prefilled edit flow when the id names an
-/// existing wizard-managed provider.
-fn local_model_wizard_state_for_input(
+/// Build the wizard state for `/wizard [provider-id]`: a create flow that
+/// adopts a running local server when one answers, or a prefilled edit flow
+/// when the id names an existing wizard-managed provider.
+async fn local_model_wizard_state_for_input(
     input: &str,
     model_catalog: &crate::model_catalog::ModelCatalog,
     home_dir: &std::path::Path,
@@ -4997,11 +4999,24 @@ fn local_model_wizard_state_for_input(
 ) -> Result<crate::tui::local_model_wizard::LocalModelWizardState, String> {
     let argument = input.strip_prefix("/wizard").unwrap_or_default().trim();
     if argument.is_empty() {
-        return Ok(
-            crate::tui::local_model_wizard::LocalModelWizardState::with_persistence(
-                credential_persistence,
-            ),
+        let mut state = crate::tui::local_model_wizard::LocalModelWizardState::with_persistence(
+            credential_persistence,
         );
+        let connections = model_catalog.connections();
+        let taken_ids: Vec<String> = connections
+            .iter()
+            .map(|connection| connection.id.to_string())
+            .collect();
+        let known_base_urls: Vec<String> = connections
+            .iter()
+            .map(|connection| connection.default_base_url.to_string())
+            .collect();
+        if let Some(found) =
+            crate::tui::local_model_wizard::discover_local_endpoint(known_base_urls).await
+        {
+            state.apply_discovered_endpoint(found, &taken_ids);
+        }
+        return Ok(state);
     }
     crate::tui::local_model_wizard::wizard_state_for_provider_id(
         argument,

@@ -221,18 +221,20 @@ impl LocalModelMetadataField {
 }
 
 fn move_enum<T: Copy + PartialEq>(items: &[T], current: T, delta: i16) -> T {
+    let Some(last) = items.len().checked_sub(1) else {
+        return current;
+    };
     let current_index = items.iter().position(|item| *item == current).unwrap_or(0);
     let next = if delta == i16::MIN {
         0
     } else if delta == i16::MAX {
-        items.len().saturating_sub(1)
-    } else if delta.is_negative() {
-        current_index.saturating_sub(delta.unsigned_abs() as usize)
+        last
     } else {
-        current_index.saturating_add(delta as usize)
-    }
-    .min(items.len().saturating_sub(1));
-    items[next]
+        // Tab and Shift-Tab wrap around the field list. Clamping on the last
+        // row strands the cursor there with no forward key left.
+        (current_index as isize + delta as isize).rem_euclid(items.len() as isize) as usize
+    };
+    items[next.min(last)]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,6 +674,42 @@ impl LocalModelWizardState {
         self.error = None;
     }
 
+    /// Adopt a discovered endpoint: prefill the form and jump straight to the
+    /// model list, so adding a running local server is "pick models, Enter"
+    /// instead of typing a URL and a provider id.
+    pub(crate) fn apply_discovered_endpoint(
+        &mut self,
+        endpoint: DiscoveredEndpoint,
+        taken_ids: &[String],
+    ) {
+        let DiscoveredEndpoint {
+            preset,
+            base_url,
+            models,
+        } = endpoint;
+        if self.display_name.trim().is_empty() {
+            self.display_name = preset.label().to_string();
+        }
+        self.provider_id = unique_provider_id(&slugify_provider_id(&self.display_name), taken_ids);
+        self.provider_id_edited = true;
+        self.preset = preset;
+        self.base_url = base_url;
+        self.base_url_edited = true;
+        let model_count = models.len();
+        self.models = models
+            .iter()
+            .map(LocalModelWizardModel::from_available)
+            .collect();
+        self.model_cursor = 0;
+        self.step = LocalModelWizardStep::SelectModels;
+        self.status = Some(format!(
+            "Found {} at {} — {model_count} model(s). Space toggles, Enter continues.",
+            preset.label(),
+            self.base_url
+        ));
+        self.error = None;
+    }
+
     pub(crate) fn apply_fetch_success(&mut self, outcome: WizardFetchOutcome) {
         self.loading = false;
         self.active_fetch_request_id = None;
@@ -716,6 +754,17 @@ impl LocalModelWizardState {
     pub(crate) fn apply_fetch_error(&mut self, message: String) {
         self.loading = false;
         self.active_fetch_request_id = None;
+        if credentials_required(&message) {
+            // The URL is right; the server just wants a key. Land on the field
+            // that fixes it instead of leaving the cursor on the address.
+            self.step = LocalModelWizardStep::Setup;
+            self.setup_field = LocalModelSetupField::ApiKey;
+            self.text_cursor = None;
+            self.status =
+                Some("This server needs an API key. Type it above and press Enter.".to_string());
+            self.error = Some(message);
+            return;
+        }
         self.step = LocalModelWizardStep::SelectModels;
         // Keep the cursor inside the list that survives the failure.
         self.model_cursor = self.model_cursor.min(self.models.len().saturating_sub(1));
@@ -1098,6 +1147,34 @@ fn parse_optional_u32(value: &str) -> Result<Option<u32>, String> {
         .map_err(|err| err.to_string())
 }
 
+/// Whether a model-fetch failure means "this server wants credentials". The
+/// message is what the transport rendered; matching it keeps the hint honest
+/// across transports that report 401/403 in different shapes.
+fn credentials_required(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("(401)")
+        || lower.contains("(403)")
+        || lower.contains("unauthorized")
+        || lower.contains("not authenticated")
+        || lower.contains("invalid api key")
+        || lower.contains("invalid_api_key")
+        || lower.contains("authentication")
+}
+
+/// A provider id that is free in the catalog: the name slug, else `-2`, `-3`…
+/// so adopting a discovered server never fails on a name collision.
+fn unique_provider_id(base: &str, taken: &[String]) -> String {
+    let base = if base.is_empty() { "local" } else { base };
+    let taken_id = |candidate: &str| taken.iter().any(|id| id.eq_ignore_ascii_case(candidate));
+    if !taken_id(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|suffix| format!("{base}-{suffix}"))
+        .find(|candidate| !taken_id(candidate))
+        .unwrap_or_else(|| base.to_string())
+}
+
 fn slugify_provider_id(display_name: &str) -> String {
     let mut slug = String::new();
     let mut previous_dash = false;
@@ -1130,6 +1207,82 @@ fn slugify_provider_id(display_name: &str) -> String {
 pub(crate) struct WizardFetchOutcome {
     pub models: Vec<AvailableModel>,
     pub detected: Option<ProviderPreset>,
+}
+
+/// A local endpoint the add flow found by probing, with the models it serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveredEndpoint {
+    pub preset: ProviderPreset,
+    pub base_url: String,
+    pub models: Vec<AvailableModel>,
+}
+
+/// Endpoints the add flow probes before falling back to an empty form: the
+/// well-known loopback ports, then every loopback/private endpoint the catalog
+/// already knows (a server this machine has talked to before).
+pub(crate) fn local_endpoint_candidates(
+    known_base_urls: impl IntoIterator<Item = String>,
+) -> Vec<(ProviderPreset, String)> {
+    let mut candidates: Vec<(ProviderPreset, String)> = [
+        ProviderPreset::LmStudio,
+        ProviderPreset::Ollama,
+        ProviderPreset::LlamaCpp,
+        ProviderPreset::Vllm,
+    ]
+    .into_iter()
+    .map(|preset| (preset, preset.base_url_prefill().to_string()))
+    .collect();
+    for base_url in known_base_urls {
+        let base_url = base_url.trim().trim_end_matches('/').to_string();
+        if base_url.is_empty() || !crate::provider::is_local_endpoint_url(&base_url) {
+            continue;
+        }
+        if candidates.iter().any(|(_, known)| *known == base_url) {
+            continue;
+        }
+        candidates.push((ProviderPreset::OpenAiCompatible, base_url));
+    }
+    candidates
+}
+
+/// How long probing may take before the wizard shows the empty form instead.
+const LOCAL_ENDPOINT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Probe the candidate endpoints concurrently and return the first that lists
+/// models, so `/providers add` can skip the blank form entirely.
+pub(crate) async fn discover_local_endpoint(
+    known_base_urls: impl IntoIterator<Item = String>,
+) -> Option<DiscoveredEndpoint> {
+    use futures::StreamExt;
+
+    let probes = local_endpoint_candidates(known_base_urls).into_iter().map(
+        |(preset, base_url)| async move {
+            let availability = crate::provider::fetch_models_with_discovery(
+                preset.discovery(),
+                Protocol::from(preset.transport()),
+                preset.label(),
+                &base_url,
+                "",
+                None,
+            )
+            .await
+            .ok()?;
+            (!availability.models.is_empty()).then_some(DiscoveredEndpoint {
+                preset,
+                base_url,
+                models: availability.models,
+            })
+        },
+    );
+    let mut found = Box::pin(
+        futures::stream::iter(probes)
+            .buffer_unordered(6)
+            .filter_map(|endpoint| async move { endpoint }),
+    );
+    tokio::time::timeout(LOCAL_ENDPOINT_PROBE_BUDGET, found.next())
+        .await
+        .ok()
+        .flatten()
 }
 
 pub(crate) async fn fetch_wizard_models(
@@ -1432,6 +1585,139 @@ mod tests {
             "http://gpu-box:9000",
             "the generic compatible kind never invents a path"
         );
+    }
+
+    #[test]
+    fn discovered_endpoint_prefills_a_writable_provider() {
+        let mut state = LocalModelWizardState::default();
+        state.apply_discovered_endpoint(
+            DiscoveredEndpoint {
+                preset: ProviderPreset::LmStudio,
+                base_url: "http://localhost:1234/v1".to_string(),
+                models: vec![
+                    crate::model_catalog::AvailableModel::with_metadata(
+                        "qwen3-coder",
+                        Some(131_072),
+                        None,
+                        vec![ModelFeature::ToolCall],
+                    ),
+                    crate::model_catalog::AvailableModel::remote("granite-3b"),
+                ],
+            },
+            &[],
+        );
+
+        assert_eq!(state.step, LocalModelWizardStep::SelectModels);
+        assert_eq!(state.preset, ProviderPreset::LmStudio);
+        assert_eq!(state.display_name, "LM Studio");
+        assert_eq!(state.provider_id, "lm-studio");
+        assert_eq!(state.base_url, "http://localhost:1234/v1");
+        assert_eq!(state.selected_model_count(), 2);
+        assert_eq!(state.models[0].context_window, "131072");
+        assert!(
+            state
+                .status
+                .as_deref()
+                .is_some_and(|status| status.contains("Found LM Studio")),
+            "status should name the discovered server: {:?}",
+            state.status
+        );
+        assert!(
+            state.catalog_input().is_ok(),
+            "a discovered endpoint must be writable without further input"
+        );
+    }
+
+    #[test]
+    fn discovered_provider_id_avoids_catalog_collisions() {
+        let mut state = LocalModelWizardState::default();
+        state.apply_discovered_endpoint(
+            DiscoveredEndpoint {
+                preset: ProviderPreset::Ollama,
+                base_url: "http://localhost:11434/v1".to_string(),
+                models: vec![crate::model_catalog::AvailableModel::remote("qwen3:8b")],
+            },
+            &["ollama".to_string(), "ollama-2".to_string()],
+        );
+
+        assert_eq!(state.provider_id, "ollama-3");
+    }
+
+    #[test]
+    fn local_endpoint_candidates_probe_loopback_then_known_local_hosts() {
+        let candidates = local_endpoint_candidates(vec![
+            "http://localhost:1234/v1".to_string(),
+            "http://192.168.50.123:8888/v1".to_string(),
+            "https://api.vendor.com/v1".to_string(),
+        ]);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|(_, base_url)| base_url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "http://localhost:1234/v1",
+                "http://localhost:11434/v1",
+                "http://localhost:8080/v1",
+                "http://localhost:8000/v1",
+                "http://192.168.50.123:8888/v1",
+            ],
+            "well-known ports first, then known LAN endpoints, never public hosts"
+        );
+    }
+
+    #[test]
+    fn credentials_rejection_sends_the_user_to_the_api_key_field() {
+        let mut state = LocalModelWizardState {
+            preset: ProviderPreset::OpenAiCompatible,
+            base_url: "http://192.168.50.123:8888/v1".to_string(),
+            display_name: "LAN Local".to_string(),
+            provider_id: "lan-local".to_string(),
+            step: LocalModelWizardStep::Setup,
+            ..LocalModelWizardState::default()
+        };
+
+        state.apply_fetch_error("provider HTTP error (401): Not authenticated".to_string());
+
+        assert_eq!(state.step, LocalModelWizardStep::Setup);
+        assert_eq!(state.setup_field, LocalModelSetupField::ApiKey);
+        assert!(
+            state
+                .status
+                .as_deref()
+                .is_some_and(|status| status.contains("needs an API key")),
+            "status should say what to do next: {:?}",
+            state.status
+        );
+
+        // A plain unreachable-server failure still lands on manual model entry.
+        state.apply_fetch_error("error sending request for url".to_string());
+        assert_eq!(state.step, LocalModelWizardStep::SelectModels);
+    }
+
+    #[test]
+    fn field_navigation_wraps_at_both_ends() {
+        let mut state = LocalModelWizardState::default();
+        assert_eq!(state.setup_field, LocalModelSetupField::Preset);
+
+        // Six forward steps visit every Setup field and return to the first.
+        for _ in 0..6 {
+            state.move_field(1);
+        }
+        assert_eq!(state.setup_field, LocalModelSetupField::Preset);
+
+        // Backward from the first field lands on the last.
+        state.move_field(-1);
+        assert_eq!(state.setup_field, LocalModelSetupField::CredentialStorage);
+
+        // The metadata fields wrap the same way.
+        state.step = LocalModelWizardStep::Metadata;
+        state.metadata_field = LocalModelMetadataField::ToolCalls;
+        state.move_field(1);
+        assert_eq!(state.metadata_field, LocalModelMetadataField::ContextWindow);
+        state.move_field(-1);
+        assert_eq!(state.metadata_field, LocalModelMetadataField::ToolCalls);
     }
 
     #[test]
