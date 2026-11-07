@@ -1102,6 +1102,17 @@ impl BashTool {
                 if confined
                     && !timed_out
                     && matches!(exit_code, Some(code) if code != 0)
+                    && failure_requires_privileges(body)
+                {
+                    // Checked first and *instead of* the escape nudge: escaping
+                    // does not make a root-requiring command runnable either (an
+                    // unconfined child still has no terminal to answer a password
+                    // prompt), so steering the model to `escape_sandbox=true`
+                    // would just burn an approval and fail the same way.
+                    Self::push_paragraph(&mut rendered, PRIVILEGE_ESCALATION_HINT);
+                } else if confined
+                    && !timed_out
+                    && matches!(exit_code, Some(code) if code != 0)
                     && failure_looks_sandbox_related(body)
                 {
                     // Two variants so the guidance is never a dead end: when the
@@ -1249,6 +1260,9 @@ impl BashTool {
     }
 }
 
+/// Model-facing guidance for a confined command that tried to become root.
+const PRIVILEGE_ESCALATION_HINT: &str = "This failed while confined to the sandbox because the command needs root: privilege escalation (sudo, pkexec, polkit) cannot work confined, since the sandbox runs the command in a user namespace the host's authentication service cannot identify, and a password prompt has no terminal to read from. Do not retry this confined, and do not retry it with escape_sandbox=true — an escaped child still has no terminal for a password. If the command genuinely needs root, tell the user and let them run it themselves (or have them approve turning the sandbox off with /sandbox off). Otherwise find a non-privileged way to do the work.";
+
 /// Whether a confined command's failure output carries a signature of the
 /// sandbox itself blocking it — an OS write denial or a denied-network error.
 /// Only these should steer the model toward `escape_sandbox`; every other
@@ -1272,6 +1286,34 @@ fn failure_looks_sandbox_related(body: &str) -> bool {
         "temporary failure in name resolution",
         "network is unreachable",
         "no route to host",
+    ];
+    let lower = body.to_ascii_lowercase();
+    SIGNATURES.iter().any(|sig| lower.contains(sig))
+}
+
+/// Whether a confined failure came from a privileged command that can never
+/// succeed inside the sandbox.
+///
+/// A user namespace (Linux Bubblewrap `--unshare-all`) has no real uid 0 mapped,
+/// so `sudo`/`pkexec` fail at the namespace boundary instead of the write
+/// boundary. The observable shapes are polkit's `Cannot determine user of
+/// subject`, sudo's non-interactive refusals, and the leaked `[sudo] password
+/// for …` prompt. These deserve guidance of their own: escaping is not the fix,
+/// and retrying silently is what produced the confusion this avoids.
+fn failure_requires_privileges(body: &str) -> bool {
+    const SIGNATURES: &[&str] = &[
+        "cannot determine user of subject",
+        "polkit-error-quark",
+        "org.freedesktop.policykit1",
+        "interactive authentication required",
+        "sudo: effective uid is not 0",
+        "no askpass program specified",
+        "sudo: a terminal is required",
+        "sudo: a password is required",
+        "[sudo] password for",
+        "must be run as root",
+        "you must be root",
+        "are you root?",
     ];
     let lower = body.to_ascii_lowercase();
     SIGNATURES.iter().any(|sig| lower.contains(sig))
@@ -1750,6 +1792,92 @@ mod tests {
                 "should NOT flag as sandbox-shaped: {body}"
             );
         }
+    }
+
+    #[test]
+    fn privileged_command_failures_are_detected_case_insensitively() {
+        // The live Linux shape: bwrap's user namespace leaves polkit unable to
+        // resolve the caller, and sudo's prompt leaks into the output.
+        for body in [
+            "[sudo] password for wojtek: agent: GDBus.Error:org.freedesktop.PolicyKit1.Error.Failed: Cannot determine user of subject (polkit-error-quark, 0)",
+            "sudo: a terminal is required to read the password; either use the -S option",
+            "sudo: effective uid is not 0, is /usr/bin/sudo on a file system with the 'nosuid' option set",
+            "sudo: no askpass program specified, try setting SUDO_ASKPASS",
+            "Failed to start systemd-resolved.service: Interactive authentication required.",
+            "install: must be run as root",
+        ] {
+            assert!(
+                failure_requires_privileges(body),
+                "should flag as privilege-shaped: {body}"
+            );
+        }
+
+        // Ordinary failures — including non-root permission problems, which the
+        // sandbox nudge (not this one) is responsible for.
+        for body in [
+            "touch: /etc/x: Operation not permitted",
+            "error[E0433]: failed to resolve: use of undeclared crate",
+            "fatal: could not read from remote repository: Permission denied (publickey)",
+            "echo run sudo later",
+        ] {
+            assert!(
+                !failure_requires_privileges(body),
+                "should NOT flag as privilege-shaped: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn confined_privilege_failure_gets_root_guidance_not_an_escape_nudge() {
+        let failed = summary_with_exit(Some(1));
+        let polkit = "[sudo] password for wojtek: agent: GDBus.Error:org.freedesktop.PolicyKit1.Error.Failed: Cannot determine user of subject (polkit-error-quark, 0)";
+        let rendered = BashTool::finalize_foreground(
+            "make install",
+            polkit,
+            Some(1),
+            false,
+            true,
+            EscapeApproval::None,
+            false,
+            &failed,
+        );
+        assert!(rendered.contains("needs root"), "{rendered}");
+        assert!(rendered.contains("tell the user"), "{rendered}");
+        assert!(rendered.contains("/sandbox off"), "{rendered}");
+        // Escaping would still have no terminal for the password prompt, so the
+        // escape nudge ("retry with escape_sandbox=true") must not appear.
+        assert!(
+            !rendered.contains("retry with escape_sandbox=true"),
+            "{rendered}"
+        );
+
+        // Privilege guidance wins over the generic escape nudge when the output
+        // carries both shapes.
+        let both = BashTool::finalize_foreground(
+            "make install",
+            "cp: cannot create regular file '/usr/lib/x': Permission denied\nsudo: a password is required",
+            Some(1),
+            false,
+            true,
+            EscapeApproval::None,
+            false,
+            &failed,
+        );
+        assert!(both.contains("needs root"), "{both}");
+        assert!(!both.contains("retry with escape_sandbox=true"), "{both}");
+
+        // Unconfined or successful runs get no root guidance.
+        let unconfined = BashTool::finalize_foreground(
+            "make install",
+            polkit,
+            Some(1),
+            false,
+            false,
+            EscapeApproval::None,
+            false,
+            &failed,
+        );
+        assert!(!unconfined.contains("needs root"), "{unconfined}");
     }
 
     #[test]
