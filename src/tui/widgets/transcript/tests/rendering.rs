@@ -670,11 +670,20 @@ fn no_provider_welcome_focuses_on_getting_a_provider() {
         "controls belong to the authorized welcome, not the empty state"
     );
 
-    // Once a provider is authorized the regular welcome returns.
+    // Once a provider is authorized the regular welcome returns, which keeps
+    // the local-model hints so adding a second provider stays discoverable.
     app.has_authorized_provider = true;
     let text = welcome_text_for(&app);
     assert!(text.iter().any(|line| line.contains("token-efficient")));
-    assert!(!text.iter().any(|line| line.contains("/wizard")));
+    assert!(
+        text.iter().any(|line| line.contains("Local models")),
+        "the authorized welcome should still point at local providers"
+    );
+    assert!(
+        !text
+            .iter()
+            .any(|line| line.contains("No provider is authorized"))
+    );
 }
 
 #[test]
@@ -692,12 +701,24 @@ fn agent_welcome_shows_bonsai_blurb_and_critical_commands_only() {
     );
 
     // `/mode ` keeps its trailing space so the check can't pass on `/model`.
-    for command in ["/authorize", "/model", "/mode ", "/review", "/new"] {
+    for command in [
+        "/authorize",
+        "/model",
+        "/mode ",
+        "/review",
+        "/new",
+        "/providers add",
+        "/wizard <id>",
+    ] {
         assert!(
             text.iter().any(|line| line.contains(command)),
             "agent welcome should list {command}"
         );
     }
+    assert!(
+        text.iter().any(|line| line.contains("Local models")),
+        "adding a local model deserves its own section"
+    );
 
     assert!(
         !text.iter().any(|line| line.contains("/c            ")

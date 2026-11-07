@@ -77,11 +77,17 @@ fn no_provider_welcome() -> Vec<Line<'static>> {
     );
     welcome_section(
         &mut lines,
-        "Use a local or custom server",
-        &[(
-            "/wizard",
-            "add LM Studio, Ollama, or any OpenAI/Anthropic-compatible endpoint",
-        )],
+        "Run a local model",
+        &[
+            (
+                "/providers add",
+                "detects a local LM Studio, Ollama, llama.cpp, or vLLM server",
+            ),
+            (
+                "/wizard <id>",
+                "any OpenAI/Anthropic URL, including a server on your LAN",
+            ),
+        ],
     );
     welcome_section(
         &mut lines,
@@ -105,6 +111,20 @@ fn agent_welcome() -> Vec<Line<'static>> {
         &[
             ("/authorize", "choose a provider to authorize"),
             ("/model", "switch model on the current provider"),
+        ],
+    );
+    welcome_section(
+        &mut lines,
+        "Local models",
+        &[
+            (
+                "/providers add",
+                "detects LM Studio, Ollama, llama.cpp, or vLLM on this machine",
+            ),
+            (
+                "/wizard <id>",
+                "any OpenAI/Anthropic URL — this machine or one on the LAN",
+            ),
         ],
     );
     welcome_section(
@@ -171,7 +191,7 @@ fn welcome_section(lines: &mut Vec<Line<'static>>, title: &str, rows: &[(&str, &
     for (cmd, what) in rows {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{cmd:<14}"), md_bold(theme::palette().user)),
+            Span::styled(format!("{cmd:<16}"), md_bold(theme::palette().user)),
             Span::styled((*what).to_string(), md(theme::palette().dim)),
         ]));
     }
