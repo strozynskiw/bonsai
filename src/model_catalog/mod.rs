@@ -642,7 +642,14 @@ impl ModelCatalog {
             .parse()
             .or_else(|_err| format!("{connection_id}/{model}").parse())
             .ok()?;
-        let models_dev_match = self.discovered_models_dev_match(connection_id, canonical.model());
+        // A model served from this machine or the LAN is whatever that server
+        // loaded. A public catalog row that happens to share its name says
+        // nothing about the window or capabilities this box actually serves, so
+        // ground a local shadow in the live listing alone.
+        let models_dev_match =
+            (!crate::provider::is_local_endpoint_url(&connection.default_base_url))
+                .then(|| self.discovered_models_dev_match(connection_id, canonical.model()))
+                .flatten();
         let exact_route_metadata = models_dev_match.as_ref().is_some_and(|matched| {
             matched.kind == models_dev::DiscoveredModelMatchKind::RouteExact
         });
@@ -3301,6 +3308,81 @@ default_base_url = "http://localhost:11434/v1"
             catalog
                 .resolve_connection_model(&connection, "kimi-k9-typo")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn local_endpoint_shadow_ignores_public_catalog_metadata() {
+        // A LAN server that serves a model sharing a public model's name must
+        // take its window from the server: a models.dev row for `qwen3-8-27b`
+        // (262k) says nothing about what this box actually loaded.
+        let spec = load_catalog_sources(
+            &[source(
+                "connections.toml",
+                r#"
+                    [[connections]]
+                    id = "lan"
+                    display_name = "LAN"
+                    auth = "optional-api-key"
+                    transport = "openai-chat"
+                    default_base_url = "http://192.168.50.123:8888/v1"
+                    default_endpoint_path = "chat/completions"
+                    default_token_counter = "heuristic"
+                "#,
+            )],
+            &[],
+        )
+        .unwrap()
+        .with_models_dev(
+            parse_models_dev_catalog(
+                "test",
+                r#"{
+                    "lan": {
+                        "models": {
+                            "qwen3-8-27b": {
+                                "id": "qwen3-8-27b",
+                                "name": "Qwen3.8 27B",
+                                "limit": { "context": 262144, "output": 32768 }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap(),
+        );
+        let catalog = ModelCatalog::from_spec(spec);
+        let connection = connection_id("lan");
+        catalog
+            .write_live_availability(
+                &connection,
+                LiveModelAvailability {
+                    models: vec![AvailableModel::with_metadata(
+                        "qwen/qwen3.8-27b",
+                        Some(60_032),
+                        None,
+                        Vec::new(),
+                    )],
+                    ..LiveModelAvailability::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = catalog
+            .resolve_connection_model(&connection, "qwen/qwen3.8-27b")
+            .expect("a live LAN model resolves through a shadow target");
+
+        assert_eq!(
+            resolved.context_window,
+            Some(60_032),
+            "the served window wins over a public row with the same name"
+        );
+        assert_eq!(
+            resolved.metadata_sources.context_window,
+            Some(ModelMetadataSource::Provider)
+        );
+        assert!(
+            resolved.pricing.is_none(),
+            "a self-hosted model is not billed at a public catalog's rates"
         );
     }
 
