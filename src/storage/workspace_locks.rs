@@ -624,6 +624,22 @@ mod tests {
         }
     }
 
+    /// A lease whose safety margin is wide in absolute terms while the loss is
+    /// still detected quickly. The refresh loop declares the lease lost when the
+    /// safety margin is exhausted, so cancellation lands at roughly
+    /// `lease - safety_margin` (~0.5s here) and the ownership row stays valid
+    /// for another few seconds. `fast_timing` cancels at ~600ms with only 200ms
+    /// of row validity left, so a stalled CI runner expired the row before the
+    /// contender probe ran and the fence assertion became a wall-clock lottery.
+    fn prompt_cancel_timing() -> WorkspaceLeaseTiming {
+        WorkspaceLeaseTiming {
+            lease: Duration::from_secs(4),
+            refresh: Duration::from_millis(50),
+            safety_margin: Duration::from_millis(3500),
+            ..fast_timing()
+        }
+    }
+
     #[tokio::test]
     async fn live_lock_owner_fails_fast_with_coordination_hint() {
         let fixture = TestStorage::new().await;
@@ -695,17 +711,20 @@ mod tests {
         let fixture = TestStorage::new().await;
         let owner = fixture.start_session().await;
         let contender = fixture.start_session().await;
+        let timing = prompt_cancel_timing();
         let guard = fixture
             .storage
-            .acquire_workspace_write_lock_with_timing(fixture.project_path(), owner, fast_timing())
+            .acquire_workspace_write_lock_with_timing(fixture.project_path(), owner, timing)
             .await
             .unwrap();
         guard.inject_refresh_failures(usize::MAX);
 
         let cancellation = guard.run_while_held(std::future::pending::<Result<()>>());
-        let error = tokio::time::timeout(Duration::from_secs(1), cancellation)
+        // The lease must be given up before its own expiry, so the bound is the
+        // lease itself: cancellation lands around `lease - safety_margin`.
+        let error = tokio::time::timeout(timing.lease, cancellation)
             .await
-            .expect("lease loss should cancel before the timeout")
+            .expect("lease loss should cancel before the lease expires")
             .expect_err("persistent renewal failure must lose the lease");
 
         assert!(error.to_string().contains("lease was lost"), "{error:#}");
