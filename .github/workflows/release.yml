@@ -158,12 +158,19 @@ jobs:
             )
           fi
       - name: Qualify packed native artifact
+        # The 1800s per-check default is not enough for the release-mode unit
+        # suite on the Intel macOS runner: v0.4.12 timed out the inline check at
+        # 1800s there while the same suite passed on Linux and arm64 macOS. The
+        # kill also invalidates the incremental target directory, so the next
+        # check paid for a full rebuild (1742s for 23 tests). Keep a generous
+        # but bounded ceiling.
         run: >-
           python3 scripts/qualify_artifact.py
           --target '${{ matrix.target }}'
           --revision '${{ github.sha }}'
           --archive 'dist/bonsai-${{ github.ref_name }}-${{ matrix.target }}.tar.gz'
           --evidence 'qualification/${{ matrix.target }}'
+          --timeout 5400
       - name: Upload qualification summary
         if: always()
         uses: actions/upload-artifact@v7
