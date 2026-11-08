@@ -1025,7 +1025,12 @@ async fn admission_failure_never_starts_execution() {
             .is_none()
     );
     assert_eq!(f.controller.snapshot().await.unwrap().0.state, "idle");
-    f.controller.shutdown(DRAIN_BUDGET).await.unwrap();
+    // Teardown is not this test's subject, and asserting it here is what made
+    // this test the most common CI failure in the repository: a storage hiccup
+    // while writing the final snapshot unwrapped into a panic. That path is
+    // covered deterministically by `failed_final_snapshot_still_shuts_down`,
+    // which injects the write failure through a trigger.
+    let _ = f.controller.shutdown(DRAIN_BUDGET).await;
 }
 
 /// Teardown bookkeeping is best effort: a storage failure while writing the
