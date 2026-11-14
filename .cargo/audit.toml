@@ -1,0 +1,14 @@
+[advisories]
+# Hugging Face Tokenizers retains the stable, dependency-free `paste` macro after
+# deliberately reverting its pastey migration: https://github.com/huggingface/tokenizers/issues/1833.
+# Remove this exception when upstream releases a maintained replacement.
+#
+# RUSTSEC-2026-0459 (CVE-2026-119375): uninitialized-memory disclosure in bundled
+# SQLite's WAL reader, fixed in SQLite 3.54.0 shipped by libsqlite3-sys >= 0.39.0.
+# Unfixable here: sqlx 0.9.0 is the newest release and its sqlx-sqlite pins
+# `libsqlite3-sys >=0.30.1, <0.38.0`, so 0.39.0 cannot resolve. Exposure is local
+# only (local attack vector, passive interaction): it discloses bytes out of
+# bonsai's own WAL to a process that can already read `$BONSAI_HOME`, and no
+# network-facing surface parses SQLite. Remove this exception as soon as sqlx
+# accepts libsqlite3-sys 0.39, and re-audit then.
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0459"]
