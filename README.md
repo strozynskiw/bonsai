@@ -12,6 +12,9 @@ headless command.
 
 - **Terminal-first workflow** — coding, planning, and read-only review agents in
   one responsive TUI.
+- **Durable goals** — `/goal <objective>` records an objective and its lifecycle
+  in SQLite, so long runs can be paused, resumed, replaced, or cleared, and
+  completion needs evidence from the run.
 - **Broad model support** — OpenAI, Codex, Anthropic, OpenCode, MiniMax, Z.AI,
   Moonshot/Kimi, OpenRouter, and compatible endpoints.
 - **Real coding tools** — structured file edits, shell and PTY execution, Git,
@@ -24,6 +27,9 @@ headless command.
   providers, models, MCP servers, hooks, and project memory.
 - **Headless automation** — text, JSON, and streaming JSON output for scripts
   and CI.
+- **Local server API (preview)** — `bonsai serve` exposes the same engine over
+  authenticated loopback HTTP + Server-Sent Events for custom UIs, with scoped
+  tokens, approvals, artifacts, and live goal state.
 
 ## Install
 

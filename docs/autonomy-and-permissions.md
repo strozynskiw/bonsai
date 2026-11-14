@@ -214,6 +214,6 @@ the interactive safe-retry exception never applies.
 | Command tokenizing/segmentation | `src/tool/bash/command.rs` |
 | Bash gate | `src/tool/bash/policy.rs` |
 | Typed action plans & verdicts | `src/tool/action_policy.rs` |
-| Permission rules & namespaces | `src/permissions.rs` |
+| Permission rules & namespaces | `src/permissions/` |
 | Autonomy holder | `src/yolo.rs` |
 | Prompt plumbing | `src/interaction.rs` |

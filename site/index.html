@@ -1019,7 +1019,7 @@
       <div class="shell signals">
         <div class="signal"><strong>5 levels</strong><span>one autonomy ladder</span></div>
         <div class="signal"><strong>3 phases</strong><span>plan · code · review</span></div>
-        <div class="signal"><strong>2 surfaces</strong><span>interactive TUI + headless/CI</span></div>
+        <div class="signal"><strong>3 surfaces</strong><span>TUI · headless/CI · local server API</span></div>
         <div class="signal"><strong>1 session</strong><span>switch models without starting over</span></div>
       </div>
     </section>
@@ -1253,6 +1253,13 @@
           <h3>Honest about what happened</h3>
           <p>Usage, cost, retries, cache reads, verification freshness, file changes, authorization decisions, caveats, and budget exhaustion come from durable evidence—not the model’s recollection.</p>
           <div class="tags"><span>typed outcomes</span><span>typed effects</span><span>/perf</span><span>/usage</span></div>
+        </article>
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">⇄⇥</span>
+          <span class="branch-no">BRANCH 11</span>
+          <h3>Your own UI, same engine (preview)</h3>
+          <p><code>bonsai serve</code> exposes one workspace over loopback HTTP and Server-Sent Events: sessions, streamed events, approvals, artifacts, and durable goals—behind short-lived scoped tokens, exact Host/Origin policy, and bounded admission. It is experimental, documented end to end, and enforces the same workspace trust and sandbox policy as the TUI.</p>
+          <div class="tags"><span>experimental-v0</span><span>SSE</span><span>scoped tokens</span><span>goal control</span></div>
         </article>
       </div>
     </section>

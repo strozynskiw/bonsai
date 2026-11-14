@@ -10,7 +10,7 @@ together.
 ```
 src/
   main.rs               thin entry; parses CLI, dispatches mode
-  cli.rs                hand-rolled arg parser (Run / Print / eval / recovery / doctor / completions)
+  cli/                  hand-rolled arg parser (Serve / Run / Print / eval / recovery / doctor / completions)
   bootstrap.rs          TUI startup + tool-registry construction
   runtime.rs            RuntimeBuilder — surface-neutral assembly + the TUI/headless capability contract
   agent/                turn coordinator, batching, retry, compaction, episodes, guards, self-review
@@ -22,12 +22,14 @@ src/
   commands/             slash-command metadata + shared TUI/headless handlers
   tui/                  event loop (run/), reducer (app/), views, widgets, keymap, themes
   headless/             bonsai -p driver + versioned output sink
+  server/               bonsai serve: loopback HTTP + SSE, scoped tokens, admission, artifacts, wire contract
+  protocol/             surface-neutral session/tool protocol types shared by the surfaces
   eval/                 deterministic eval runner, graders, mock provider, adapters
   hooks/ mcp/ extension/ resource/   extensibility: hooks, MCP, gates, file-based resources
   lsp/ symbol/          language servers; tree-sitter extractors
   memory/               persistent memory stores + hybrid retrieval
   sandbox/              Seatbelt/Bubblewrap confinement
-  context.rs episode.rs peer.rs recovery.rs redact.rs
+  context.rs episode.rs peer.rs recovery.rs redact.rs goal.rs
   permissions.rs interaction.rs run_budget.rs workspace_trust.rs
   self_review.rs completion_report.rs verification.rs
 ```
@@ -151,7 +153,9 @@ From `AGENTS.md`, enforced in review:
 - Errors keep their detail (the malformed-tool-arguments path returns the
   tool name, required fields, bad payload, and parse error to the model).
 - Tests live inline in `#[cfg(test)]` modules next to the code; the batching
-  and agent tests are the spec for their subsystems.
+  and agent tests are the spec for their subsystems. `tests/` holds only the
+  layers that need a real binary: `server_preview.rs` (drives `bonsai serve`
+  end to end), `surface_smoke.rs`, and `performance_baseline.rs`.
 
 See [Development](development.md) for build/test workflow and extension
 recipes.

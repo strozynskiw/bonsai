@@ -74,6 +74,23 @@ Mutating headless runs execute in detached recovery worktrees so the source
 checkout is never touched mid-run. See [Headless mode](headless.md) and
 [Recovery worktrees](recovery.md).
 
+**Durable session goals.** `/goal <objective>` records an objective and its
+lifecycle (`active`, `paused`, `blocked`, `usage-limited`, `budget-limited`,
+`complete`) in SQLite, so work can be paused, resumed, replaced, or cleared
+explicitly and the same record is readable by the TUI and by the server.
+Completion needs evidence from the run — a typed claim inside a current goal
+lease — not the model's optimism. See
+[Slash commands](slash-commands.md#persistent-goals).
+
+**Local server (preview).** `bonsai serve` exposes one canonical workspace over
+loopback HTTP + Server-Sent Events: session create/list/resume/chat/interrupt,
+pending-prompt answers, artifacts, and the goal controls above, behind
+short-lived scoped bearer tokens, exact Host/Origin policy, and bounded
+admission. It drives the same engine, workspace trust, sandbox, budgets, and
+persistence as the TUI — there is no privileged server-only path — and every
+response carries an `experimental-v0` marker. See [Server preview](server.md)
+and [Server changelog](server-changelog.md).
+
 **Extensibility.** Layered `.bonsai/config.toml`, MCP servers (stdio +
 Streamable HTTP + OAuth), lifecycle hooks (shell/HTTP/LLM-judge actions),
 skills, custom agents, and custom themes — all discovered from conventional
@@ -83,7 +100,9 @@ See [Configuration](configuration.md), [MCP](mcp.md), [Hooks](hooks.md),
 
 ## What bonsai is not (yet)
 
-A server API, browser/desktop UI, Windows support, an SDK, a plugin
-marketplace, and hosted agents are explicitly post-1.0. See the GitHub
+A browser/desktop UI, Windows support, an SDK, a plugin marketplace, hosted
+agents, and a stable (v1) server API are explicitly post-1.0 — the local
+server preview above ships now, deliberately outside the 1.0 stability
+contract. See the GitHub
 [milestones](https://github.com/strozynskiw/bonsai/milestones) for the live
 plan; shipped behavior is documented here and in the top-level README.

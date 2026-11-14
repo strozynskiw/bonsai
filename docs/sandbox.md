@@ -120,4 +120,4 @@ Env wins over the `[sandbox]` config section, per the normal
 | Seatbelt profile | `src/sandbox/macos.rs` |
 | Bubblewrap wrapper & probes | `src/sandbox/linux.rs` |
 | Writable-root policy & escapes | `src/sandbox/policy.rs` |
-| Doctor enforcement probe | `src/doctor.rs` |
+| Doctor enforcement probe | `src/doctor/` |

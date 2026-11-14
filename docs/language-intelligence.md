@@ -124,4 +124,4 @@ The execution side of "run, debug, verify":
 | LSP hub, clients, specs | `src/lsp/` |
 | LSP tools & diagnostics | `src/tool/lsp.rs`, `src/tool/diagnostics.rs` |
 | Web tools | `src/tool/webfetch.rs`, `src/tool/websearch.rs` |
-| Background tasks & PTYs | `src/background.rs`, `src/terminal.rs` |
+| Background tasks & PTYs | `src/background.rs`, `src/terminal/` |

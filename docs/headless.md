@@ -174,8 +174,8 @@ interrupted, or incomplete verification exits non-zero.
 
 | Concern | Location |
 | --- | --- |
-| CLI parser | `src/cli.rs` |
+| CLI parser | `src/cli/` |
 | Headless driver | `src/headless/mod.rs` |
 | Output sink & schemas | `src/headless/sink.rs` |
 | Surface capability contract | `src/runtime.rs` |
-| Completion report | `src/completion_report.rs` |
+| Completion report | `src/completion_report/` |

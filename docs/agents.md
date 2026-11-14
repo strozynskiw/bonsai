@@ -175,7 +175,7 @@ under `/self-review`, next to its mode toggle.
 | Concern | Location |
 | --- | --- |
 | Personas & prompts | `src/agent/persona.rs`, `src/agent/prompts.rs` |
-| Subagent registry & live view | `src/subagent.rs` |
+| Subagent registry & live view | `src/subagent/` |
 | Delegation tool, catalog, runner | `src/tool/agent/` |
 | Custom definitions | `src/resource/agent.rs` (discovery: `src/resource/discovery.rs`) |
 | Self-review | `src/self_review.rs`, `src/agent/self_review.rs` |

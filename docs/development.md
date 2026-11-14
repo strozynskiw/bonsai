@@ -16,22 +16,30 @@ cargo test --locked
 cargo build --release --locked
 ```
 
-CI (`.github/workflows/rust.yml`) runs the same set; the release build must
-succeed under `RUSTFLAGS=-D warnings`. The pre-commit hook below enforces
-the fmt+clippy half locally on every commit.
+CI is split. `.github/workflows/rust.yml` runs `cargo check --locked
+--all-targets` and `cargo test --locked` on every push, plus the
+migration-immutability guards and a tmux TUI-isolation job. Formatting,
+clippy, the mock release-gating evals, the install smoke, and the release
+build run in `.github/workflows/release.yml` on a tag, where the build must
+succeed under `RUSTFLAGS=-D warnings`. The pre-commit hook below only guards
+migrations.
 `unsafe_code` is denied crate-wide (scoped, documented waivers only);
 `dbg!` is a hard clippy error.
 
-Enable the pre-commit hook once per clone — it runs rustfmt on staged files
-and clippy before every commit:
+Enable the pre-commit hook once per clone — it refuses a commit that edits an
+already-released migration (it does not run rustfmt or clippy):
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-Tests are inline `#[cfg(test)]` modules next to the code (the top-level
-`tests/` directory is intentionally empty). Note the crate is binary-only,
-so test filters run as `cargo test <filter>`. Use
+Most tests are inline `#[cfg(test)]` modules next to the code. The top-level
+`tests/` directory holds the layers that need a real binary:
+`server_preview.rs` (launches `bonsai serve` against an isolated HOME/DB and
+raises approvals through the Python example client), `surface_smoke.rs`, and
+`performance_baseline.rs` (`--ignored`; the release workflow measures it per
+target). The crate is binary-only, so inline test filters run as
+`cargo test --bin bonsai <filter>`. Use
 `crate::tool::test_utils::TestFixture` for tool tests — it provides a temp
 project root, a drained interaction channel, and a `ReadTracker`.
 
@@ -130,11 +138,13 @@ scripts/release.sh 0.2.0-rc.1 --no-push
 The script validates a clean tree, bumps `Cargo.toml` + public install
 references, runs the release checks, commits
 `chore(release): prepare v<version>`, and creates the annotated tag; the
-pushed tag triggers the `Release` workflow (four-target builds, checksums,
-signed manifest, SBOM, attestations). Signing requires the
-`BONSAI_RELEASE_PUBLIC_KEY` variable and `BONSAI_RELEASE_PRIVATE_KEY`
-secret; the workflow refuses to publish on a mismatch. See
-[`RELEASING.md`](../RELEASING.md) for the full runbook and
+pushed tag triggers the `Release` workflow: four targets, a measured
+performance report per target, `scripts/qualify_artifact.py` re-qualifying
+each packed binary (surface smoke, release-mode unit suite, sandbox probes,
+and the mock evals), checksums, a signed manifest, SBOM, and attestations.
+Signing requires the `BONSAI_RELEASE_PUBLIC_KEY` variable and
+`BONSAI_RELEASE_PRIVATE_KEY` secret; the workflow refuses to publish on a
+mismatch. `scripts/release.sh --help` is the runbook; see
 [Security model](security.md#release-integrity) for verification.
 
 ## Documentation map

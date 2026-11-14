@@ -52,6 +52,8 @@ split by topic.
 | Document | What it covers |
 | --- | --- |
 | [Headless mode](headless.md) | `bonsai -p` print mode, output formats, event stream, exit codes, CI recipes |
+| [Server preview](server.md) | `bonsai serve`: authenticated loopback HTTP + SSE, scopes, limits, artifacts, and the full event contract (experimental) |
+| [Server changelog](server-changelog.md) | Every breaking change in the `experimental-v0` server contract, with client migration notes |
 | [Recovery worktrees](recovery.md) | Isolated runs, `bonsai recovery` commands, merge semantics |
 | [Eval harness](eval.md) | The deterministic eval suite, graders, live mode, reports |
 | [Troubleshooting](troubleshooting.md) | `bonsai doctor`, common failures, and where to look |
@@ -71,6 +73,9 @@ split by topic.
 - **Operator wiring bonsai into CI:** [Headless mode](headless.md) →
   [Recovery worktrees](recovery.md) → [Configuration](configuration.md) →
   [Compatibility](compatibility.md).
+- **Building a UI on the server preview:** [Server preview](server.md) →
+  [Server changelog](server-changelog.md) →
+  [`examples/server_client.py`](../examples/server_client.py).
 - **Security review:** [Security model](security.md) →
   [Sandbox](sandbox.md) → [Autonomy and permissions](autonomy-and-permissions.md) →
   [MCP servers](mcp.md) and [Hooks](hooks.md).

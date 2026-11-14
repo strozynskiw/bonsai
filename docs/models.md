@@ -241,5 +241,5 @@ conversationally; `/providers` manages connections in the TUI.
 | Connection/target specs | `src/model_catalog/spec.rs`, `models/builtin/` |
 | Reasoning efforts & codecs | `src/provider/metadata.rs`, `src/provider/reasoning.rs` |
 | Shortcuts & roles | `src/model_role.rs` |
-| Resolution chains | `src/model_resolution.rs` |
+| Resolution chains | `src/model_resolution/` |
 | Token counting & pricing | `src/provider/token.rs` |
