@@ -1391,7 +1391,35 @@ mod tests {
         let fake = temp_prefix("scope");
         write_executable(&fake.join("bin/ls"), 0o755);
         let command = classify_planning_command_in("ls src", None).unwrap();
-        assert!(!command.command().contains(fake.to_str().unwrap()));
-        assert!(command.command().contains("/usr/bin/ls") || command.command().contains("/bin/ls"));
+        let resolved = command.command();
+        assert!(
+            !resolved.contains(fake.to_str().unwrap()),
+            "planning resolved a package-directory executable: {resolved}"
+        );
+        // The executable has to come from a root-owned system bin directory.
+        // Which one, and whether the distribution usr-merges /bin into
+        // /usr/bin, is the host's business: asserting one literal path made
+        // this fail on Linux runners while passing on macOS.
+        let program = resolved
+            .trim_matches('\'')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        let parent = Path::new(program).parent().map(Path::to_path_buf);
+        let in_system_dirs = parent.is_some_and(|parent| {
+            SYSTEM_BIN_DIRS.iter().any(|directory| {
+                let Ok(directory) = Path::new(directory).canonicalize() else {
+                    return false;
+                };
+                let Ok(parent) = parent.canonicalize() else {
+                    return false;
+                };
+                directory == parent
+            })
+        });
+        assert!(
+            Path::new(program).is_absolute() && in_system_dirs,
+            "planning resolved `ls` outside the system bin dirs: {resolved}"
+        );
     }
 }
