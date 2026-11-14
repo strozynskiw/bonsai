@@ -1402,10 +1402,10 @@ mod tests {
         // and resolution returns the canonical target, so asserting one
         // literal path failed there while passing on macOS.
         let program = resolved
-            .trim_matches('\'')
             .split_whitespace()
             .next()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .trim_matches('\'');
         let executable = Path::new(program);
         assert!(
             executable.is_absolute(),
