@@ -7,11 +7,12 @@ code alone.
 ## What bonsai is
 
 A Rust TUI coding agent — direct competitor to Claude Code / Codex CLI. Single
-static binary, switchable mid-conversation across fourteen built-in connections
-(OpenCode Go, OpenCode Zen, OpenAI API, Codex, Anthropic, MiniMax API, MiniMax
-Coding Plan, Z.AI API, Z.AI Coding Plan, Moonshot AI API, Kimi Coding Plan,
-OpenRouter, `openai-compatible`, `anthropic-compatible`). These are **not**
-fourteen hand-written backends: each is a
+static binary, switchable mid-conversation across twenty-three built-in
+connections (`models/builtin/connections.toml` is the list: OpenCode Go/Zen,
+OpenAI API, Codex, Anthropic, MiniMax API and Coding Plan, Z.AI API and Coding
+Plan, Moonshot AI API, Kimi Coding Plan, OpenRouter, `openai-compatible`,
+`anthropic-compatible`, and others). These are **not**
+twenty-three hand-written backends: each is a
 declarative entry in `models/builtin/connections.toml` bound to one of three wire
 transports (`openai-chat`, `anthropic-messages`, `codex-responses`), with model
 definitions (context windows, pricing, reasoning support) sourced from
@@ -32,8 +33,12 @@ cargo test --locked
 cargo build --release --locked
 ```
 
-CI (`.github/workflows/rust.yml`) runs the same set. The release build must
-succeed under `RUSTFLAGS=-D warnings`; no warnings, ever. There is no
+CI is split: `.github/workflows/rust.yml` runs `cargo check --locked
+--all-targets` and `cargo test --locked` (plus the migration-immutability
+guards and a tmux TUI-isolation job) on every push, while
+`.github/workflows/release.yml` runs fmt, clippy, the mock evals, the install
+smoke, and the release build on a tag. Every release build must succeed under
+`RUSTFLAGS=-D warnings`; no warnings, ever. There is no
 `#![deny(...)]` at the crate root — denials come from clippy `-D warnings`
 plus the standard toolchain lints.
 
@@ -43,27 +48,31 @@ plus the standard toolchain lints.
 src/
   main.rs               thin entry point; bootstrap.rs does the real wiring
   bootstrap.rs          wires Agent + TUI, builds registries + model catalog
-  cli.rs                arg parsing, subcommands (eval, headless, serve-to-be)
+  cli/                  arg parsing, subcommands (serve, eval, headless, recovery, doctor)
   agent/                agent loop, parallel tool batching, retry, compaction
-  session.rs            on-disk provider/session state, env-var normalization
-  model_catalog.rs      models.dev catalog + connections.toml loader, pricing
-  permissions.rs        bash allow/ask/deny rules
+  session/              on-disk provider/session state, env-var normalization
+  model_catalog/        models.dev catalog + connections.toml loader, pricing
+  permissions/          bash allow/ask/deny rules
   interaction.rs        UI-bound prompts (permission asks, question tool)
   todo.rs               TodoWrite backing store
   plan.rs               plan-canvas data model (sections + tasks)
   context.rs            system-prompt project-context block
-  context_view.rs       /ctx report builder (persona + token breakdown)
+  context_view/         /ctx report builder (persona + token breakdown)
   mention.rs            @-mention file/path resolution in the composer
-  review.rs             /review diff-context selection (Uncommitted/LastCommit/…)
+  review/               /review diff-context selection (Uncommitted/LastCommit/…)
   diff.rs               unified diff model for the TUI
   copy.rs               clipboard / selection helpers
   output.rs             SharedSink trait — TUI event channel abstraction
+  goal.rs               durable session objectives + lifecycle state machine
   yolo.rs               auto-accept (/yolo) policy
   commands/             slash-command dispatch (TUI + headless handlers)
   storage/              SQLite persistence, migrations, snapshots
   background.rs         background bash tasks + `tasks` tool
-  terminal.rs           process-local PTY lifecycle + bounded/redacted output
-  headless.rs           `bonsai -p` print mode
+  terminal/             process-local PTY lifecycle + bounded/redacted output
+  headless/             `bonsai -p` print mode
+  server/               `bonsai serve`: loopback HTTP + SSE, scoped tokens, admission,
+                        artifacts, and the checked wire contract (docs/server.md)
+  protocol/             surface-neutral session/tool protocol types shared by the surfaces
   eval/                 eval runner (suite, graders, mock provider, report)
   provider/             provider trait, metadata, SSE, transforms; three wire
                         transports + the catalog-driven ProviderRegistry
@@ -74,17 +83,23 @@ src/
   symbol/               tree-sitter extractors (Rust, TypeScript/JS, Python, Go)
   util/                 small shared helpers
 models/                 builtin/connections.toml + example connector/model TOML
-tests/                  integration tests (currently empty)
+tests/                  integration layers needing a real binary:
+                        server_preview.rs, surface_smoke.rs, performance_baseline.rs,
+                        plus fixtures/upgrade runtime snapshots
 ```
 
 Several modules that were single files are now directories (`agent/`,
-`commands/`, `storage/`, `tui/run/`, `tui/app/`) after the June 2026 refactor
-wave. The legacy `config.rs` is gone (config now lives in
-`model_catalog`/`session`).
+`commands/`, `storage/`, `session/`, `permissions/`, `headless/`, `cli/`,
+`model_catalog/`, `tui/run/`, `tui/app/`). The legacy `config.rs` file is gone;
+`config/` now holds the layered config model, with provider/session state in
+`model_catalog`/`session`.
 
-`tests/` is empty — all tests are inline `#[cfg(test)]` modules next to the
-code they cover. When adding a test, follow that pattern unless the test
-genuinely needs to live in a separate crate.
+Most tests are inline `#[cfg(test)]` modules next to the code they cover — that
+is still the default for new tests. `tests/` is reserved for layers that need a
+real process: `server_preview.rs` launches `bonsai serve` with an isolated
+HOME/DB and drives it end to end, `surface_smoke.rs` guards the headless/TUI
+surfaces, and `performance_baseline.rs` is `--ignored` and run by the release
+workflow per target.
 
 ## Adding a tool
 
@@ -104,9 +119,16 @@ genuinely needs to live in a separate crate.
 4. Use `crate::tool::test_utils::TestFixture` for unit tests — it gives you a
    temp project root, drained interaction channel, and a `ReadTracker`.
 
-`ToolOutput` has three variants: `Text`, `Edit { summary, diff }`, and
-`Image { mime_type, base64_data, description }`. Use `Edit` whenever a tool
-mutates a file so the TUI can show a diff card.
+`ToolOutput` is the surface contract, and it has grown well past the three
+presentation cases: `Text`, `Edit { summary, diff }`, and
+`Image { mime_type, base64_data, description }` sit alongside read-evidence
+variants (`Read`, `ReadDelta`, `ReadReuse`, `MissingPathReuse`),
+`TextWithUsage`, `TrustedContext`/`UntrustedContext`, and run markers
+(`Command`, `BackgroundTaskStarted`, `SubagentStarted`, `WaitStarted`). Use
+`Edit` whenever a tool mutates a file so the TUI can show a diff card, and
+`untrusted_context` for anything the model must treat as data. Changing the
+enum changes every surface — check `src/server/contract.rs` and
+`src/headless/sink.rs` before extending it.
 
 ## Adding a provider
 
@@ -138,7 +160,7 @@ its `ProviderMetadata` from the connection spec and dispatches by `transport`
    flows; `AuthInput::OpenAiCompatible { base_url, api_key, model }` for
    compatible connectors; `AuthInput::FromCodexCache` to import the Codex CLI
    session.
-5. `session.rs` needs no edits — it reads env-var names from the metadata, which
+5. `session/` needs no edits — it reads env-var names from the metadata, which
    the catalog factory derives from the connection spec.
 
 ## Style
@@ -161,8 +183,8 @@ authors too, not just the model:
   color; keep auth labels in the legend only and don't show a separate
   current-provider marker unless requested.
 
-Rust-specific style (from `.agents/skills/rust-code-writer/SKILL.md`, which
-agents must follow):
+Rust-specific style (from the `rust-writer` skill in
+`skills/builtin/rust-writer/`, which agents must follow):
 
 - No `unwrap()`/`expect()` in library code; `Result` + `?` for recoverable
   errors, `thiserror` enums at module boundaries, `anyhow` at the
@@ -231,6 +253,17 @@ next agent doesn't have to relearn them:
   boundary, timeout, permission needs, and batching/access policy. Unknown
   external tools default to serialized execution and explicit permission gates
   until a narrower access policy is proven and tested.
+- **`bonsai serve` reuses the engine — never a second one.** `src/server/`
+  (`http.rs`, `controller.rs`, `sink.rs`, `auth.rs`, `artifacts.rs`,
+  `contract.rs`) drives the same `RuntimeBuilder`/`Agent`, workspace trust,
+  sandbox, budgets, and storage as the TUI. API authentication does not grant
+  repository trust and autonomy cannot be raised over HTTP; every interaction,
+  including sandbox escalation, re-enters the normal permission path. The wire
+  contract is `docs/server.md` plus the fixtures in `docs/server-contract.json`,
+  and `event_kind()` in `contract.rs` is an exhaustive match whose test fails
+  when a new `SessionEvent` variant is neither published nor documented — add a
+  variant and `cargo test` tells you what to update. Release binaries are
+  re-qualified by `scripts/qualify_artifact.py` inside the release workflow.
 - **Untrusted content stays data.** Web/MCP/file-derived content is untrusted
   and must not become executable instruction without explicit user, config, or
   permission gating. Tool calls triggered by untrusted output re-enter the same
@@ -252,11 +285,13 @@ next agent doesn't have to relearn them:
   `chat_stream_with_retry` honors the header and caps at
   `MAX_PROVIDER_RETRIES` (3). Cancellation during the backoff sleep
   short-circuits to `StreamedResponse::interrupted()`.
-- **Context compaction is char/4 + drop-old.** The `char/4` heuristic in
-  `estimate_text_tokens` is the budget check; compaction drops everything
-  between the system message and the last 20 messages, replacing it with
-  a single system message that says "X messages were omitted". Counting is
-  provider-*family* estimation today; exact local tokenizers remain future work.
+- **Compaction is target-driven; counting prefers exact tokenizers.**
+  `provider/token.rs` counts with tiktoken BPE (`o200k_base`/`cl100k_base`) when
+  the provider family maps to one and falls back to family estimation
+  otherwise. Compaction (`src/agent/compaction/`) works toward a token target:
+  it omits middle messages, stubs bulky tool output, keeps a summary plus
+  restore information, and reports exactly what it did ("messages omitted: …;
+  tool outputs stubbed: …; restore: …"). Char/4 is only a coarse fallback.
 - **The `ReadTracker` enforces read-before-edit.** `WriteTool` and `EditTool`
   reject paths the model hasn't read this session, with an mtime staleness
   check. If a tool writes to disk, it should respect the same boundary
