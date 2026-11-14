@@ -11,13 +11,52 @@
     {"kind": "sandbox", "decision": "deny"},
     {"kind": "question", "choices": [0]}
   ],
+  "event_kinds": [
+    "reset", "user_message", "message_delivery", "assistant_delta",
+    "assistant_done", "reasoning_delta", "attempt_started", "attempt_discarded",
+    "tool_started", "tool_output", "tool_result", "usage", "plan", "todos",
+    "goal", "completion", "status", "error", "interaction",
+    "interaction_resolved", "lifecycle"
+  ],
   "events": [
     {"kind": "user_message", "text": "Hello"},
     {"kind": "assistant_delta", "text": "Hi"},
     {"kind": "assistant_done"},
     {"kind": "lifecycle", "run_id": "run-1", "state": "running"},
     {"kind": "error", "code": "execution_failed", "message": "Execution failed; inspect local diagnostics"},
-    {"kind": "reset", "resync_required": true}
+    {"kind": "reset", "resync_required": true},
+    {
+      "kind": "tool_result",
+      "id": "call-1",
+      "result": {
+        "status": "succeeded",
+        "preview": "Edited src/main.rs",
+        "content": {
+          "type": "edit",
+          "summary": "Edited src/main.rs",
+          "diff": {
+            "path": "src/main.rs",
+            "status": "modified",
+            "hunks": [
+              {
+                "old_start": 1,
+                "new_start": 1,
+                "lines": [
+                  {"kind": "removed", "content": "fn old() {}", "old_line": 1, "new_line": null},
+                  {"kind": "added", "content": "fn new() {}", "old_line": null, "new_line": 1}
+                ]
+              }
+            ],
+            "truncated": false,
+            "old_size": 12,
+            "new_size": 12,
+            "added_lines": 1,
+            "removed_lines": 1,
+            "additional_files": []
+          }
+        }
+      }
+    }
   ],
   "permission_prompt": {
     "kind": "permission", "request_id": 7, "command": "echo fixture", "origin": null,

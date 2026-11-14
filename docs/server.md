@@ -179,6 +179,59 @@ controls. Mutations return an acknowledgement; use `goal 12 get` for the
 current record. Setting or resuming a goal does not start a run: send a
 message separately.
 
+## Event stream
+
+`GET /sessions/{id}/events` streams Server-Sent Events; each data frame is one
+JSON object whose `kind` selects the payload. The published set is fixed in
+[server-contract.json](server-contract.json) under `event_kinds`, and a normal
+`cargo test` run fails when the server projects a kind that is not published or
+when this table lists one it no longer emits, so code, fixtures and this table
+cannot drift apart.
+
+| `kind` | payload | behavior |
+| --- | --- | --- |
+| `reset` | `{resync_required: true}` | The cursor cannot continue the stream: reconnect without one and replace local state from the fresh snapshot. |
+| `user_message` | `{text}` | User text accepted for a run. |
+| `message_delivery` | `{run_id, request_id, state}` | A queued follow-up was `delivered`, or `interrupted` because its run ended first. |
+| `assistant_delta` | `{text}` | Incremental assistant text. |
+| `assistant_done` | `{}` | The current assistant message ended. |
+| `reasoning_delta` | `{text}` | Incremental reasoning text, when the provider streams it. |
+| `attempt_started` | `{}` | A provider attempt began; a retry starts another one. |
+| `attempt_discarded` | `{}` | Output from the current attempt was discarded and must be dropped. |
+| `tool_started` | `{id, name, arguments}` | A tool call began; `arguments` stays a raw JSON string. |
+| `tool_output` | `{id, text}` | Incremental output from a running call. |
+| `tool_result` | `{id, result}` | Terminal result carrying the typed envelope, including file diffs. |
+| `usage` | `{prompt_tokens, completion_tokens, cost_micros}` | Cumulative session usage; `cost_micros` is null when pricing is unknown. |
+| `plan` | `{plan}` | Plan-canvas document replacement. |
+| `todos` | `{todos}` | Todo list replacement. |
+| `goal` | `{goal}` | Current goal record, or null after removal. |
+| `completion` | `{report}` | Terminal completion report, published only after its writes land. |
+| `status` | `{text}` | Progress line for humans; never authoritative state. |
+| `error` | `{code, message}` | Fixed, sanitized class of execution failure. |
+| `interaction` | `{request}` | A prompt awaiting an answer; the shapes are above. |
+| `interaction_resolved` | `{request_id}` | That prompt was answered, cancelled, or invalidated. |
+| `lifecycle` | `{run_id, state}` | Run lifecycle transition; `run_id` is null when no run owns it. |
+
+### Tool results and diffs
+
+`tool_result.result` is the surface-neutral envelope: `status` (`succeeded`,
+`failed`, `started`, `skipped`, `interrupted`), `preview` (the short display
+string), and `content`, a tagged object whose `type` picks the shape: `content`
+(parts), `command` (rendered command, stdout, stderr, exit code, timeout,
+truncation), `edit` (summary plus diff), `context` (provenance plus content),
+`background_task`, `subagent`, `wait`. `background_task_id` and `subagent_id`
+appear only when set.
+
+A file mutation arrives as `content.type == "edit"` with a `diff` of `{path,
+status, hunks, truncated, old_size, new_size, added_lines, removed_lines,
+additional_files}`. `status` is `created`, `modified` or `deleted`; a hunk is
+`{old_start, new_start, lines}` and a line is `{kind, content, old_line,
+new_line}` with `kind` one of `context`, `added`, `removed`. `additional_files`
+carries further files written by the same atomic call, so a multi-file edit
+stays structured — render those too instead of showing only `path`. The pinned
+example is the `tool_result` entry in
+[server-contract.json](server-contract.json).
+
 ## SSE, persistence and bounds
 
 First connection sends a consistent snapshot with watermark, then ordered newer
@@ -214,9 +267,11 @@ interrupt and restart/reconnect. Inline server tests cover token matrix, every p
 type, artifact attacks, replay gaps, slow consumers and persistence failures.
 `cargo test --locked --test surface_smoke` retains headless/TUI safety regressions.
 [server-contract.json](server-contract.json) fixtures are checked against actual Rust
-request DTOs, decision decoding and event projections by normal `cargo test`; CI
-therefore rejects fixture drift. Breaking preview changes must be recorded in
-[server-changelog.md](server-changelog.md) with client migration guidance.
+request DTOs, decision decoding and event projections by normal `cargo test`, and
+the event-kind table above is checked against the enum both ways; CI therefore
+rejects fixture and documentation drift. Breaking preview changes must be
+recorded in [server-changelog.md](server-changelog.md) with client migration
+guidance.
 
 No uploads, general-purpose steering outside active goal runs, provider/credential management, ACP,
 web UI, parallel workspaces/scheduler or stable v1 compatibility. Pending prompts
@@ -224,4 +279,5 @@ and work are never automatically replayed on restart. After a hard crash, resume
 can return 409 until the conservative 15-second heartbeat fence expires; retry
 explicitly with a new request ID after a rejected/incomplete admission (an identical
 ID retrieves historical acceptance, not a new attempt). A live OS owner is never displaced, regardless of heartbeat age. #46 is not a claim of
-production multi-tenant security; #77, #78, #79 and #179 remain separate work.
+production multi-tenant security; ACP (#78) and the open-source web-client
+evaluation (#79) remain separate work.
