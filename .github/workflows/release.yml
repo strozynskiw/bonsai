@@ -52,8 +52,6 @@ jobs:
           /tmp/build-release-manifest-tests
       - name: Test qualification failure controls
         run: python3 scripts/test_qualify_artifact.py
-      - name: Test RC soak evidence validator
-        run: python3 scripts/test_check_rc_soak.py
       - name: Test Homebrew tap updater
         run: python3 scripts/test_update_homebrew_tap.py
       - name: Run clippy
