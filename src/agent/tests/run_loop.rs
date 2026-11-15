@@ -5866,3 +5866,164 @@ async fn session_budget_counters_survive_provider_switch_and_mark_unknown_cost()
     );
     assert!(usage.has_reached_alert());
 }
+
+/// An agent whose timing ledger runs on a fake clock, so a run's work/wait split
+/// can be given exactly without sleeping.
+fn agent_with_timing_policy(
+    fixture: &TestFixture,
+    policy: crate::timing::TimingPolicy,
+) -> (Agent, std::sync::Arc<crate::timing::FakeClock>) {
+    let clock = std::sync::Arc::new(crate::timing::FakeClock::new(1_700_000_000_000));
+    let mut agent = Agent::new(
+        Box::new(MockProvider::new(vec![])),
+        empty_registry(),
+        empty_registry(),
+        fixture.read_tracker.clone(),
+        String::new(),
+        fixture.project_root.clone(),
+    )
+    .unwrap();
+    agent.set_timing_ledger(std::sync::Arc::new(crate::timing::TimingLedger::new(
+        clock.clone(),
+        policy,
+    )));
+    (agent, clock)
+}
+
+fn session_time_budget(seconds: u64) -> crate::run_budget::RunBudget {
+    crate::run_budget::RunBudget {
+        max_session_active_seconds: Some(seconds),
+        ..crate::run_budget::RunBudget::default()
+    }
+}
+
+/// Spend `ms` on one interval of `category`, on the agent's own ledger.
+fn charge(
+    agent: &Agent,
+    clock: &crate::timing::FakeClock,
+    category: crate::timing::TimingCategory,
+    ms: i64,
+) {
+    let span = agent.timing.begin(
+        category,
+        crate::timing::TimingLane::Parent,
+        None,
+        Some("test"),
+    );
+    clock.advance_ms(ms);
+    assert_eq!(agent.timing.end(span), Some(ms));
+}
+
+#[tokio::test]
+async fn an_active_compute_budget_is_not_spent_waiting_on_the_user() {
+    let fixture = TestFixture::new();
+    let (mut agent, clock) =
+        agent_with_timing_policy(&fixture, crate::timing::TimingPolicy::ActiveCompute);
+    agent.set_run_budget(session_time_budget(60));
+
+    // Ten seconds of model work and a minute of wall time spent answering a
+    // question. Wall time is seven times the compute, so the two policies have to
+    // disagree about this run — which is the whole point of the split.
+    charge(
+        &agent,
+        &clock,
+        crate::timing::TimingCategory::ModelRequest,
+        10_000,
+    );
+    charge(
+        &agent,
+        &clock,
+        crate::timing::TimingCategory::UserWait,
+        60_000,
+    );
+
+    assert_eq!(
+        agent.session_budget_exhaustion(),
+        None,
+        "waiting on the user must not consume the compute budget"
+    );
+    let usage = agent.session_budget_usage();
+    assert_eq!(usage.active_run_ms, 10_000, "the charged clock is compute");
+    assert_eq!(usage.active_compute_ms, 10_000);
+    assert_eq!(usage.waiting_ms, 60_000);
+    assert_eq!(
+        usage.timing_policy,
+        crate::timing::TimingPolicy::ActiveCompute
+    );
+    assert_eq!(usage.clock_label(), "active compute");
+}
+
+#[tokio::test]
+async fn the_wall_clock_opt_in_charges_the_same_waiting_run() {
+    let fixture = TestFixture::new();
+    let (mut agent, clock) =
+        agent_with_timing_policy(&fixture, crate::timing::TimingPolicy::WallClock);
+    agent.set_run_budget(session_time_budget(60));
+
+    charge(
+        &agent,
+        &clock,
+        crate::timing::TimingCategory::ModelRequest,
+        10_000,
+    );
+    charge(
+        &agent,
+        &clock,
+        crate::timing::TimingCategory::UserWait,
+        60_000,
+    );
+
+    assert_eq!(
+        agent.session_budget_exhaustion(),
+        Some(crate::run_budget::RunBudgetExhaustion::SessionTime {
+            limit_seconds: 60,
+            used_seconds: 70,
+            clock: crate::run_budget::SessionTimeClock::WallClock,
+        }),
+        "the wall-clock policy charges the whole elapsed run"
+    );
+}
+
+#[tokio::test]
+async fn a_restored_session_enforces_the_remaining_compute_budget() {
+    let fixture = TestFixture::new();
+    let (mut agent, clock) =
+        agent_with_timing_policy(&fixture, crate::timing::TimingPolicy::ActiveCompute);
+    agent.set_run_budget(session_time_budget(60));
+
+    // An earlier process spent 55 of the 60 seconds of compute and a good deal of
+    // wall time beyond it. A resumed run must enforce what is left, not the full
+    // limit.
+    agent.restore_session_time(55_000, 300_000);
+    charge(
+        &agent,
+        &clock,
+        crate::timing::TimingCategory::ModelRequest,
+        4_000,
+    );
+    assert_eq!(agent.session_budget_exhaustion(), None);
+
+    let usage = agent.session_budget_usage();
+    assert_eq!(usage.active_run_ms, 59_000);
+    assert_eq!(usage.active_compute_ms, 59_000);
+    assert_eq!(
+        usage.waiting_ms, 245_000,
+        "the restored wall accumulator holds time beyond the compute it recorded"
+    );
+
+    charge(
+        &agent,
+        &clock,
+        crate::timing::TimingCategory::ToolActive,
+        1_000,
+    );
+    assert_eq!(
+        agent.session_budget_exhaustion(),
+        Some(crate::run_budget::RunBudgetExhaustion::SessionTime {
+            limit_seconds: 60,
+            used_seconds: 60,
+            clock: crate::run_budget::SessionTimeClock::ActiveCompute,
+        }),
+        "the remainder, not the full limit, is what the run had left"
+    );
+}

@@ -2794,7 +2794,7 @@ async fn fresh_database_uses_one_current_schema_baseline() {
     // 0001 is the frozen 1.0 baseline (sqlx checksums applied migrations —
     // editing it bricks existing databases); every schema change after it is
     // an additive migration. Bump alongside each new migrations/*.sql file.
-    assert_eq!(migration_count, 18);
+    assert_eq!(migration_count, 19);
 
     let identity_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tool_call_identities'",

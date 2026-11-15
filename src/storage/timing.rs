@@ -69,12 +69,47 @@ pub struct RuntimeTiming {
     pub totals: RuntimeTimingTotals,
     /// Summed resource time per category, in report order.
     pub categories: Vec<(TimingCategory, i64)>,
+    /// Task runs recorded per clock, so the report can name the clock the
+    /// session budget consumed — or say that runs disagree.
+    pub(crate) policies: Vec<(TimingPolicy, u64)>,
 }
 
 impl RuntimeTiming {
     /// The runtime breakdown for one cohort of task runs.
     pub fn new(totals: RuntimeTimingTotals, categories: Vec<(TimingCategory, i64)>) -> Self {
-        Self { totals, categories }
+        Self {
+            totals,
+            categories,
+            policies: Vec::new(),
+        }
+    }
+
+    /// Attach the per-clock run counts.
+    pub(crate) fn with_policies(mut self, policies: Vec<(TimingPolicy, u64)>) -> Self {
+        self.policies = policies;
+        self
+    }
+
+    /// The one clock every recorded run consumed; `None` when runs disagree or
+    /// no run recorded one.
+    pub(crate) fn single_policy(&self) -> Option<TimingPolicy> {
+        match self.policies.as_slice() {
+            [(policy, _)] => Some(*policy),
+            _ => None,
+        }
+    }
+
+    /// Name of the clock the recorded runs consumed: the policy, `mixed` when
+    /// runs disagree, `unknown` when none recorded one.
+    ///
+    /// A report must not present one clock's number under another's name; this
+    /// is the label that keeps the two honest.
+    pub(crate) fn clock_label(&self) -> &'static str {
+        match self.single_policy() {
+            Some(policy) => policy.label(),
+            None if self.policies.len() > 1 => "mixed",
+            None => "unknown",
+        }
     }
 
     /// Summed resource time in one category.
@@ -197,6 +232,31 @@ impl Storage {
             .bind(task_run_id.as_i64()),
         )?;
 
+        // The session's compute counter is what a resumed run enforces against:
+        // a per-run ledger alone cannot answer "how much has this session
+        // spent". The same checkpoint delta lands on both rows, in the same
+        // transaction, so the two can never disagree about what was recorded.
+        // `active_run_ms` is deliberately untouched — its heartbeat union is the
+        // clock the `wall_clock` policy consumes.
+        //
+        // The persisted sum and the live ledger reading are approximate equals,
+        // not identical: each window computes its own work-union-minus-wait
+        // intersection, while the ledger reading unions the whole run, so an
+        // interval straddling a checkpoint with a nested wait can differ by that
+        // overlap. Enforcement tolerates it; nothing depends on bit equality.
+        if checkpoint.active_compute_ms > 0 {
+            storage_op!(
+                &mut transaction,
+                "record session active compute",
+                sqlx::query(
+                    "UPDATE sessions SET active_compute_ms = active_compute_ms + ? \
+                     WHERE id = (SELECT session_id FROM task_runs WHERE id = ?)",
+                )
+                .bind(checkpoint.active_compute_ms)
+                .bind(task_run_id.as_i64()),
+            )?;
+        }
+
         transaction
             .commit()
             .await
@@ -318,7 +378,29 @@ impl Storage {
             categories.push((category, row.try_get("summed_ms")?));
         }
         categories.sort_by_key(|(category, _)| *category);
-        Ok(RuntimeTiming::new(totals, categories))
+
+        // Which clock each run consumed is part of the evidence: the session
+        // budget charges one of them, and a report that shows the split without
+        // naming the clock leaves the operator guessing.
+        let rows = sqlx::query(
+            "SELECT r.timing_policy AS policy, COUNT(*) AS runs \
+             FROM task_runs r JOIN sessions s ON s.id = r.session_id \
+             WHERE s.kind = 'task' AND r.timing_policy IS NOT NULL GROUP BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to load runtime timing policies")?;
+        let mut policies = Vec::with_capacity(rows.len());
+        for row in rows {
+            let raw: String = row.try_get("policy")?;
+            let Some(policy) = TimingPolicy::from_db_str(&raw) else {
+                continue;
+            };
+            let runs = u64::try_from(row.try_get::<i64, _>("runs")?).unwrap_or(0);
+            policies.push((policy, runs));
+        }
+        policies.sort_by_key(|(policy, _)| policy.as_db_str());
+        Ok(RuntimeTiming::new(totals, categories).with_policies(policies))
     }
 
     /// Abandon the timing intervals a dead process left open on this session.
@@ -687,6 +769,78 @@ mod tests {
         assert_eq!(runtime.totals.wall_ms, 6_500);
         assert_eq!(runtime.category_ms(TimingCategory::ToolActive), 1_300);
         assert_eq!(runtime.waiting_share_percent(), Some(80));
+    }
+
+    #[tokio::test]
+    async fn checkpoints_accumulate_the_session_compute_counter() {
+        let fixture = TestStorage::new().await;
+        let session = fixture.start_session().await;
+        let first = fixture
+            .storage
+            .start_task_run(session, None, "First goal")
+            .await
+            .unwrap();
+        let second = fixture
+            .storage
+            .start_task_run(session, None, "Second goal")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .storage
+                .session_active_compute_ms(session)
+                .await
+                .unwrap(),
+            0
+        );
+
+        // Two task runs in one session, so the counter cannot be per-run state.
+        for (task, active) in [(first.id, 1_000), (second.id, 250)] {
+            fixture
+                .storage
+                .checkpoint_task_run_timing(task, &checkpoint(Vec::new(), active + 900, active))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            fixture
+                .storage
+                .session_active_compute_ms(session)
+                .await
+                .unwrap(),
+            1_250,
+            "waits recorded in the same windows must not charge the session"
+        );
+
+        // A checkpoint with nothing new adds nothing.
+        fixture
+            .storage
+            .checkpoint_task_run_timing(second.id, &checkpoint(Vec::new(), 0, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .storage
+                .session_active_compute_ms(session)
+                .await
+                .unwrap(),
+            1_250
+        );
+
+        fixture
+            .storage
+            .checkpoint_task_run_timing(second.id, &checkpoint(Vec::new(), 500, 500))
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .storage
+                .session_active_compute_ms(session)
+                .await
+                .unwrap(),
+            1_750
+        );
     }
 
     #[tokio::test]

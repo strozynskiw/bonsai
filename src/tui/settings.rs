@@ -169,13 +169,21 @@ pub(crate) fn seed_settings_rows(
     });
     rows.push(SettingsRow::Choice {
         id: SettingId::BudgetSessionTime,
-        key: "session time",
+        // Named for the clock it charges: this row is not wall time, so a run
+        // that spends most of its wall clock answering prompts does not spend
+        // most of this budget.
+        key: "session compute",
         values: BUDGET_SESSION_TIME_VALUES,
         current: duration_index(
             BUDGET_SESSION_TIME_VALUES,
             app.run_budget.max_session_active_seconds,
         ),
-        note: Some("active only, across resumes".to_string()),
+        note: Some(format!(
+            // The runtime captures its policy from this same variable, so the note
+            // names the clock enforcement will actually charge.
+            "{} only, across resumes",
+            crate::timing::TimingPolicy::from_env().label()
+        )),
     });
     rows.push(SettingsRow::Choice {
         id: SettingId::BudgetSessionCost,

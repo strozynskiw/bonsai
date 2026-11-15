@@ -893,7 +893,29 @@ async fn session_budget_usage_for_alert(
         .lock()
         .await
         .session_budget_usage()
-        .with_active_run_ms(active_run_ms)
+        .with_session_wall_ms(active_run_ms)
+}
+
+/// What the active run is charging right now, for the header beside the timer.
+///
+/// Compute and waiting are reported separately and only when non-zero. The run
+/// timer beside it is wall time, and the whole point of showing this is that the
+/// two clocks disagree exactly while a permission prompt or a question is open:
+/// wall keeps moving, compute stands still, waiting grows.
+fn session_clock_label(snapshot: Option<crate::timing::TimingSnapshot>) -> Option<String> {
+    let snapshot = snapshot?;
+    let compute_ms = u64::try_from(snapshot.active_compute_ms.max(0)).unwrap_or(0);
+    let waiting_ms = u64::try_from(snapshot.waiting_ms.max(0)).unwrap_or(0);
+    if compute_ms == 0 && waiting_ms == 0 {
+        return None;
+    }
+    let clock =
+        |ms: u64| crate::tui::app::AppState::format_elapsed_label(Duration::from_millis(ms));
+    Some(match (compute_ms, waiting_ms) {
+        (0, waiting) => format!("wait {}", clock(waiting)),
+        (compute, 0) => format!("compute {}", clock(compute)),
+        (compute, waiting) => format!("compute {} · wait {}", clock(compute), clock(waiting)),
+    })
 }
 
 fn compact_command_dispatches_model_work(input: &str) -> bool {
@@ -3379,6 +3401,22 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
             } else {
                 app.mark_run_finished(Instant::now());
             }
+        }
+        // The live session clock rides this same tick: the ledger is shared with
+        // the interaction service and a snapshot is a lock-free read, so the
+        // header can show what the run is charging without a new timer, a new
+        // storage read, or the agent lock a live run holds. Only a live run gets
+        // a reading: the ledger keeps the finished run's intervals until the next
+        // run re-anchors, so an unguarded snapshot would keep advertising compute
+        // beside the frozen run timer.
+        let session_clock = if app.run_started_at.is_some() {
+            session_clock_label(interaction.timing().map(|ledger| ledger.snapshot()))
+        } else {
+            None
+        };
+        if app.session_clock_label != session_clock {
+            app.session_clock_label = session_clock;
+            frame_needs_redraw = true;
         }
         if mirror_run_status(&mut app, &tasks, &subagents, &busy_flag) {
             redraw_requested = true;

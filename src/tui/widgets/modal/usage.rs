@@ -83,63 +83,81 @@ fn usage_body_lines(
     }
 }
 
-fn runtime_line(runtime: &crate::storage::RuntimeTiming) -> Line<'static> {
+/// Widest row label, fixed so the block stays aligned when a wide row is
+/// hidden (`permission wait`).
+const RUNTIME_LABEL_WIDTH: usize = "permission wait".len();
+
+/// The runtime breakdown: which clock the runs consumed, then one aligned
+/// label/duration/share row per non-zero category.
+///
+/// The policy has to come first. Sums only mean something against a named clock,
+/// and the session budget charges exactly one of them — a report that shows the
+/// split without saying which clock was charged is the confusion #146 exists to
+/// remove. Shares are of run wall time, so a row reads as "how much of the run
+/// this was".
+fn runtime_lines(runtime: &crate::storage::RuntimeTiming) -> Vec<Line<'static>> {
     let palette = theme::palette();
     // Read the totals through their own type so the report cannot silently drift
     // from the persisted split.
     let crate::storage::RuntimeTimingTotals {
         wall_ms,
         critical_path_ms,
-        active_compute_ms,
-        waiting_ms,
+        ..
     } = runtime.totals;
-    let mut spans = vec![
+    let wall_ms = wall_ms.max(0);
+    let mut summary = vec![
         Span::styled(" Runtime ", theme::muted()),
         Span::styled(
-            format!(
-                "active compute {} · waiting {}",
-                format_duration_units(active_compute_ms),
-                format_duration_units(waiting_ms),
-            ),
+            format!("clock {}", runtime.clock_label()),
             theme::label(palette.text),
         ),
     ];
     if let Some(percent) = runtime.waiting_share_percent() {
-        spans.push(Span::styled(" · ", theme::muted()));
-        spans.push(Span::styled(
-            format!("{percent}% of run time waiting"),
+        summary.push(Span::styled(" · waiting ", theme::muted()));
+        summary.push(Span::styled(
+            format!("{percent}% of run wall"),
             theme::label(palette.text),
         ));
     }
-    if wall_ms > 0 {
-        spans.push(Span::styled(" · run wall ", theme::muted()));
-        spans.push(Span::styled(
-            format_duration_units(wall_ms),
+    let mut lines = vec![Line::from(summary)];
+    for category in crate::timing::TimingCategory::ALL {
+        let ms = runtime.category_ms(category);
+        if ms <= 0 {
+            continue;
+        }
+        let role = if category.consumes_active_compute() {
+            "compute"
+        } else {
+            "wait"
+        };
+        lines.push(runtime_row(category.label(), ms, wall_ms, role));
+    }
+    // Totals last: they are the denominator, not another category, and zero ones
+    // are hidden exactly like zero categories.
+    for (label, ms) in [("critical path", critical_path_ms), ("run wall", wall_ms)] {
+        if ms > 0 {
+            lines.push(runtime_row(label, ms, wall_ms, ""));
+        }
+    }
+    lines
+}
+
+fn runtime_row(label: &str, ms: i64, wall_ms: i64, role: &str) -> Line<'static> {
+    let palette = theme::palette();
+    let share = if wall_ms > 0 {
+        ms.saturating_mul(100) / wall_ms
+    } else {
+        0
+    };
+    Line::from(vec![
+        Span::styled(format!("   {label:<RUNTIME_LABEL_WIDTH$}"), theme::muted()),
+        Span::styled(
+            format!("{:>9}", format_duration_units(ms)),
             theme::label(palette.text),
-        ));
-    }
-    if critical_path_ms > 0 {
-        spans.push(Span::styled(" · critical path ", theme::muted()));
-        spans.push(Span::styled(
-            format_duration_units(critical_path_ms),
-            theme::label(palette.text),
-        ));
-    }
-    // The category split is what makes the total actionable: model and tool
-    // time is what a budget is meant to consume, so it has to be separable
-    // from queue and human waits rather than summed with them.
-    let parts: Vec<String> = crate::timing::TimingCategory::ALL
-        .iter()
-        .filter_map(|category| {
-            let ms = runtime.category_ms(*category);
-            (ms > 0).then(|| format!("{} {}", category.label(), format_duration_units(ms)))
-        })
-        .collect();
-    if !parts.is_empty() {
-        spans.push(Span::styled(" · ", theme::muted()));
-        spans.push(Span::styled(parts.join(" · "), theme::label(palette.text)));
-    }
-    Line::from(spans)
+        ),
+        Span::styled(format!("{share:>5}%"), theme::muted()),
+        Span::styled(format!("  {role}"), theme::muted()),
+    ])
 }
 
 fn inspection_line(stats: &crate::storage::InspectionBatchingStats) -> Line<'static> {
@@ -251,7 +269,7 @@ fn activity_lines(dashboard: &UsageDashboard, inner_width: usize) -> Vec<Line<'s
     }
     lines.push(Line::from(stats));
     if dashboard.runtime.has_data() {
-        lines.push(runtime_line(&dashboard.runtime));
+        lines.extend(runtime_lines(&dashboard.runtime));
     }
     if dashboard.inspection.has_data() {
         lines.push(inspection_line(&dashboard.inspection));
@@ -499,9 +517,10 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn runtime_line_separates_work_from_waiting() {
-        let runtime = crate::storage::RuntimeTiming::new(
+    fn runtime_fixture(
+        policies: Vec<(crate::timing::TimingPolicy, u64)>,
+    ) -> crate::storage::RuntimeTiming {
+        crate::storage::RuntimeTiming::new(
             crate::storage::RuntimeTimingTotals {
                 wall_ms: 100_000,
                 critical_path_ms: 90_000,
@@ -513,16 +532,75 @@ mod tests {
                 (crate::timing::TimingCategory::ToolActive, 5_000),
                 (crate::timing::TimingCategory::UserWait, 75_000),
             ],
+        )
+        .with_policies(policies)
+    }
+
+    #[test]
+    fn runtime_block_names_the_charged_clock_and_hides_zero_rows() {
+        let runtime = runtime_fixture(vec![(crate::timing::TimingPolicy::ActiveCompute, 7)]);
+        let rendered: Vec<String> = runtime_lines(&runtime).into_iter().map(line_text).collect();
+
+        assert!(rendered[0].contains("Runtime"), "{rendered:?}");
+        // The clock the session budget charges comes first; without it the split
+        // below is just three numbers.
+        assert!(rendered[0].contains("clock active compute"), "{rendered:?}");
+        assert!(rendered[0].contains("75% of run wall"), "{rendered:?}");
+        // Three recorded categories plus the two totals; a zero category is hidden
+        // rather than printed as a row of noise.
+        assert_eq!(rendered.len(), 1 + 3 + 2, "{rendered:?}");
+        assert!(
+            rendered.iter().any(|line| line.contains("user wait")),
+            "{rendered:?}"
         );
-        let rendered = line_text(runtime_line(&runtime));
-        assert!(rendered.contains("Runtime"), "{rendered}");
-        // The split is the point: waiting must not read as work.
-        assert!(rendered.contains("active compute"), "{rendered}");
-        assert!(rendered.contains("75% of run time waiting"), "{rendered}");
-        assert!(rendered.contains("model "), "{rendered}");
-        // A wait category is named, not folded into the tool total.
-        assert!(rendered.contains("user wait "), "{rendered}");
-        assert!(!crate::storage::RuntimeTiming::default().has_data());
+        assert!(
+            !rendered.iter().any(|line| line.contains("queue")),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("permission wait")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_rows_align_their_duration_and_share_columns() {
+        let runtime = runtime_fixture(vec![(crate::timing::TimingPolicy::ActiveCompute, 1)]);
+        let lines = runtime_lines(&runtime);
+        let rows: Vec<String> = lines[1..].iter().cloned().map(line_text).collect();
+        assert!(!rows.is_empty());
+        // Same column for every share, and the duration field starts where the
+        // padded label ends — otherwise the block reads as prose again.
+        let shares: Vec<usize> = rows
+            .iter()
+            .map(|row| row.find('%').expect("every row carries a share"))
+            .collect();
+        assert!(shares.windows(2).all(|pair| pair[0] == pair[1]), "{rows:?}");
+        assert!(
+            rows.iter()
+                .all(|row| row.chars().nth(3 + RUNTIME_LABEL_WIDTH) == Some(' ')),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_policies_are_reported_as_mixed() {
+        let mixed = runtime_fixture(vec![
+            (crate::timing::TimingPolicy::ActiveCompute, 2),
+            (crate::timing::TimingPolicy::WallClock, 1),
+        ]);
+        assert_eq!(mixed.clock_label(), "mixed");
+        assert!(
+            line_text(runtime_lines(&mixed).remove(0)).contains("clock mixed"),
+            "runs recorded on two clocks must not be reported as one"
+        );
+
+        let wall = runtime_fixture(vec![(crate::timing::TimingPolicy::WallClock, 3)]);
+        assert_eq!(wall.clock_label(), "wall clock");
+        assert_eq!(
+            crate::storage::RuntimeTiming::default().clock_label(),
+            "unknown"
+        );
     }
 
     #[test]

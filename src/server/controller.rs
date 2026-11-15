@@ -1123,11 +1123,25 @@ async fn execute_turn(
         None => storage.start_task_run(id, None, prompt).await?,
     };
     let active_ms = storage.begin_session_run(id).await?;
+    let session_policy = crate::timing::TimingPolicy::from_env();
+    // A server turn enforces the session budget against what the session already
+    // spent, exactly like the TUI and headless surfaces: restore the durable
+    // counters before the run records its own.
+    let restored_compute_ms = storage
+        .session_active_compute_ms(id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to load session compute time for a server turn");
+            0
+        });
+    core.agent
+        .restore_session_time(restored_compute_ms, active_ms);
     let selected = crate::run_budget::select_runtime_timeout(
         None,
         core.run_budget.max_run_duration(),
         core.run_budget.max_session_active_duration(),
         active_ms,
+        session_policy,
     );
     let budget_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _timer = selected.map(|(duration, _)| {
@@ -1327,7 +1341,7 @@ async fn execute_turn(
             session_budget: core
                 .agent
                 .session_budget_usage()
-                .with_active_run_ms(active_ms),
+                .with_session_wall_ms(active_ms),
             budget_exhaustion: exhaustion,
         },
     );

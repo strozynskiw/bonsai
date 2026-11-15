@@ -311,6 +311,19 @@ impl Agent {
                 });
             }
         }
+        if let Some(limit_seconds) = self.budget.max_session_active_seconds {
+            let reading = self.session_time_reading();
+            if let Some((limit_seconds, used_seconds)) = reading.exhausted_at(limit_seconds) {
+                // The clock that was charged is part of the evidence: under the
+                // default policy this number is compute, not wall time, and a
+                // message that calls it "foreground execution" misreads the run.
+                return Some(crate::run_budget::RunBudgetExhaustion::SessionTime {
+                    limit_seconds,
+                    used_seconds,
+                    clock: crate::run_budget::SessionTimeClock::of(reading.policy),
+                });
+            }
+        }
         if let (Some(limit_micros), Some(used_micros)) = (
             self.budget.max_session_cost_micros,
             self.usage.exact_session_cost_micros(),

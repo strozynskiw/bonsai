@@ -246,6 +246,24 @@ impl Storage {
         Ok(u64::try_from(active_run_ms).unwrap_or(0))
     }
 
+    /// Cumulative active-compute milliseconds this session has spent.
+    ///
+    /// Distinct from [`Self::session_active_run_ms_now`]: this counter excludes
+    /// queue, permission, user, and child waits, because it is incremented from
+    /// each timing checkpoint's own compute delta. It is the clock the default
+    /// session active-time budget consumes.
+    pub(crate) async fn session_active_compute_ms(&self, session_id: SessionId) -> Result<u64> {
+        let active_compute_ms: i64 =
+            sqlx::query_scalar("SELECT active_compute_ms FROM sessions WHERE id = ?")
+                .bind(session_id.as_i64())
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| {
+                    format!("Failed to load active compute time for session {session_id}")
+                })?;
+        Ok(u64::try_from(active_compute_ms).unwrap_or(0))
+    }
+
     #[cfg(test)]
     pub(crate) async fn session_active_run_ms(&self, session_id: SessionId) -> Result<u64> {
         let active_run_ms: i64 =

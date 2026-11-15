@@ -20,10 +20,12 @@
 //! Work and waiting are separated, not only measured: a summary reports the
 //! active-compute clock (model, active tool, and child-active time) separately
 //! from waiting (queue, permission, user, and child-wait time), and
-//! [`TimingPolicy`] records which clock a run's budgets were meant to consume.
-//! The policy is persisted and reported per task run; the cumulative session
-//! budget still consumes wall time, because changing what stops a run is an
-//! enforcement decision tracked separately from recording what it did.
+//! [`TimingPolicy`] decides which clock a run's budgets consume. The policy is
+//! persisted and reported per task run, and it drives the cumulative session
+//! active-time budget: `ActiveCompute` charges closed work intervals that
+//! [`TimingLedger::snapshot`] has recorded, `WallClock` charges elapsed run
+//! time. `max_run_duration` stays an independent per-run wall deadline under
+//! both, so excluding waits can never let a run continue unbounded.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -253,7 +255,10 @@ impl TimingLane {
 }
 
 /// Which clock a run's budgets and deadlines consume.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum TimingPolicy {
     /// Default. Budgets consume model, active tool, and child-active time, so
     /// permission prompts, user questions, and queue waits do not exhaust them.
@@ -293,12 +298,14 @@ impl TimingPolicy {
     /// Environment variable that selects the policy recorded for new runs.
     pub(crate) const ENV_VAR: &'static str = "BONSAI_TIMING_POLICY";
 
-    /// Policy recorded for a new run: the explicit opt-in from the environment,
-    /// or the default active-compute policy.
+    /// Policy for a new run: the explicit opt-in from the environment, or the
+    /// default active-compute policy.
     ///
-    /// The value is persisted with the run's timing and shown in reports. It
-    /// does not yet change budget enforcement, so an operator should read it as
-    /// "which clock this run's active time is reported against".
+    /// The value is persisted with the run's timing, shown in reports, and it
+    /// **decides what stops a run**: the cumulative session active-time budget
+    /// consumes this clock, and no session wall deadline is armed under
+    /// active compute. `max_run_duration` remains an independent per-run wall
+    /// deadline under both policies.
     ///
     /// An unset or unreadable value keeps the default on purpose: a typo in an
     /// opt-in must never silently start charging a run for the time it spent
@@ -401,7 +408,10 @@ impl TimingSnapshot {
     }
 
     /// The clock reading a budget or deadline consumes under this policy.
-    #[cfg(test)]
+    ///
+    /// Only closed intervals contribute: an interval still open (say a long
+    /// provider stream) is charged when it closes, so a reading taken mid-turn
+    /// lags real spending by at most one open interval.
     pub(crate) const fn budget_consumed_ms(&self) -> i64 {
         match self.policy {
             TimingPolicy::ActiveCompute => self.active_compute_ms,

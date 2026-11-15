@@ -80,8 +80,34 @@ struct SessionRuntimeBudget {
     storage: Storage,
     active_session_id: crate::tool::SharedActiveSessionId,
     max_active_duration: Option<Duration>,
+    /// Clock the session active-time budget consumes. Captured once when the
+    /// runtime budget is installed so enforcement and the deadline selection
+    /// cannot disagree, and so a test can pin either policy.
+    timing_policy: crate::timing::TimingPolicy,
     activity: SessionActivityGate,
     subagents: Arc<SubagentRegistry>,
+}
+
+/// Session timing claimed and restored for one run.
+///
+/// Three clocks travel together because the ledger alone cannot answer any of
+/// them: the durable wall union (consumed by the `wall_clock` policy), the
+/// durable compute counter (consumed by the default policy), and the session row
+/// they belong to.
+#[derive(Debug, Clone, Copy)]
+struct SessionTiming {
+    session_id: SessionId,
+    active_run_ms: u64,
+    active_compute_ms: u64,
+}
+
+/// The clock the cumulative session active-time budget consumes.
+///
+/// Read from the same environment the runtime built the ledger with
+/// (`TimingPolicy::from_env`), so enforcement and reporting never disagree about
+/// which clock a run is charged on.
+fn session_timing_policy() -> crate::timing::TimingPolicy {
+    crate::timing::TimingPolicy::from_env()
 }
 
 #[derive(Clone)]
@@ -264,8 +290,24 @@ impl TaskController {
             storage,
             active_session_id,
             max_active_duration,
+            timing_policy: session_timing_policy(),
             subagents,
         });
+    }
+
+    /// Pin the clock the session active-time budget consumes.
+    #[cfg(test)]
+    pub(crate) fn set_session_time_policy(&mut self, policy: crate::timing::TimingPolicy) {
+        if let Some(runtime) = self.session_runtime_budget.as_mut() {
+            runtime.timing_policy = policy;
+        }
+    }
+
+    /// The clock the session active-time budget consumes right now.
+    fn session_time_policy(&self) -> crate::timing::TimingPolicy {
+        self.session_runtime_budget
+            .as_ref()
+            .map_or_else(session_timing_policy, |runtime| runtime.timing_policy)
     }
 
     pub(crate) fn set_max_session_active_duration(&mut self, duration: Option<Duration>) {
@@ -297,6 +339,15 @@ impl TaskController {
     }
 
     pub(crate) fn session_active_budget_exhausted(&self, active_run_ms: u64) -> bool {
+        // Only the wall-clock opt-in charges the durable wall union. Under the
+        // default policy the agent enforces the session budget on compute at
+        // turn boundaries, because no wall timer can exclude a prompt wait.
+        if !matches!(
+            self.session_time_policy(),
+            crate::timing::TimingPolicy::WallClock
+        ) {
+            return false;
+        }
         self.session_runtime_budget
             .as_ref()
             .and_then(|runtime| runtime.max_active_duration)
@@ -389,7 +440,7 @@ impl TaskController {
             });
             let task_run_id = match begin_task_run(
                 session_runtime_budget.as_ref(),
-                session_timing.map(|(session_id, _)| session_id),
+                session_timing.map(|timing| timing.session_id),
                 task_run_intent,
             )
             .await
@@ -398,7 +449,7 @@ impl TaskController {
                 Err(err) => {
                     let _ = finish_session_timing(
                         session_runtime_budget.as_ref(),
-                        session_timing.map(|(session_id, _)| session_id),
+                        session_timing.map(|timing| timing.session_id),
                     )
                     .await;
                     block_goal_after_failure(
@@ -420,8 +471,15 @@ impl TaskController {
             // inherit the previous run's intervals — and because a checkpoint is
             // the only thing that consumes them, a session that never re-anchored
             // would keep them for the whole process lifetime.
+            // The session budget rides on the same restored state as the other
+            // session counters: a resumed session must enforce the remainder, not
+            // the full limit, and a later run in this process must not restart a
+            // cumulative reading at zero.
             if let Some(context) = completion.as_ref() {
                 let mut agent = context.agent.lock().await;
+                if let Some(timing) = session_timing {
+                    agent.restore_session_time(timing.active_compute_ms, timing.active_run_ms);
+                }
                 agent.begin_timing_run();
                 agent.defer_goal_finalization = explicit_goal.is_some();
             }
@@ -432,7 +490,7 @@ impl TaskController {
                         capture_completion_baseline(
                             context,
                             session_runtime_budget.as_ref(),
-                            session_timing.map(|(session_id, _)| session_id),
+                            session_timing.map(|timing| timing.session_id),
                         )
                         .await,
                     )
@@ -444,7 +502,10 @@ impl TaskController {
                 session_runtime_budget
                     .as_ref()
                     .and_then(|runtime| runtime.max_active_duration),
-                session_timing.map_or(0, |(_, active_run_ms)| active_run_ms),
+                session_timing.map_or(0, |timing| timing.active_run_ms),
+                session_runtime_budget
+                    .as_ref()
+                    .map_or_else(session_timing_policy, |runtime| runtime.timing_policy),
             );
             let preflight_exhaustion = selected_timeout
                 .filter(|(duration, _)| duration.is_zero())
@@ -474,7 +535,7 @@ impl TaskController {
             }
             let final_active_run_ms = match finish_session_timing(
                 session_runtime_budget.as_ref(),
-                session_timing.map(|(session_id, _)| session_id),
+                session_timing.map(|timing| timing.session_id),
             )
             .await
             {
@@ -612,7 +673,7 @@ impl TaskController {
                     baseline,
                     &outcome,
                     session_runtime_budget.as_ref(),
-                    session_timing.map(|(session_id, _)| session_id),
+                    session_timing.map(|timing| timing.session_id),
                     final_active_run_ms,
                 )
                 .await
@@ -1800,7 +1861,7 @@ async fn build_completion_report(
             agent.usage_totals(),
             agent
                 .session_budget_usage()
-                .with_active_run_ms(active_run_ms),
+                .with_session_wall_ms(active_run_ms),
         )
     };
     let authorization_decisions = match (runtime, session_id, baseline.authorization_decision_id) {
@@ -1849,7 +1910,7 @@ fn run_local_last<T: Clone>(records: &[T], baseline: usize) -> Option<T> {
 
 async fn begin_session_timing(
     runtime: Option<&SessionRuntimeBudget>,
-) -> anyhow::Result<Option<(SessionId, u64)>> {
+) -> anyhow::Result<Option<SessionTiming>> {
     let Some(runtime) = runtime else {
         return Ok(None);
     };
@@ -1873,7 +1934,26 @@ async fn begin_session_timing(
         );
     }
     let active_run_ms = runtime.activity.begin_main(session_id).await?.active_run_ms;
-    Ok(Some((session_id, active_run_ms)))
+    // Read the durable compute counter here, where storage and the session id
+    // are already in scope: it is the base the active-compute budget enforces
+    // against, and it covers every earlier segment of this session.
+    let active_compute_ms = runtime
+        .storage
+        .session_active_compute_ms(session_id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %format!("{error:#}"),
+                "failed to load session compute time; enforcing from this run on"
+            );
+            0
+        });
+    Ok(Some(SessionTiming {
+        session_id,
+        active_run_ms,
+        active_compute_ms,
+    }))
 }
 
 async fn finish_session_timing(
@@ -2273,6 +2353,7 @@ mod tests {
             storage: fixture.storage.clone(),
             active_session_id: Arc::new(tokio::sync::Mutex::new(Some(session_id))),
             max_active_duration: None,
+            timing_policy: crate::timing::TimingPolicy::ActiveCompute,
             activity: SessionActivityGate::new(fixture.storage.clone()),
             subagents: Arc::new(SubagentRegistry::new()),
         };
@@ -2637,12 +2718,14 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 Some(Duration::from_secs(60)),
                 55_000,
+                crate::timing::TimingPolicy::WallClock,
             ),
             Some((
                 Duration::from_secs(5),
                 crate::run_budget::RunBudgetExhaustion::SessionTime {
                     limit_seconds: 60,
-                    used_seconds: 60,
+                    used_seconds: 55,
+                    clock: crate::run_budget::SessionTimeClock::WallClock,
                 }
             ))
         );
@@ -2668,6 +2751,10 @@ mod tests {
             Some(Duration::from_millis(1)),
             Arc::new(SubagentRegistry::new()),
         );
+        // The wall-clock opt-in is the only policy that charges wall time, so pin
+        // it: the default policy leaves this run to the agent's turn-boundary
+        // compute check instead.
+        tasks.set_session_time_policy(crate::timing::TimingPolicy::WallClock);
         let invoked = Arc::new(AtomicBool::new(false));
         let invoked_by_run = invoked.clone();
 
@@ -2709,6 +2796,65 @@ mod tests {
         assert_eq!(
             task.terminal_reason.map(|reason| reason.code),
             Some(TaskTerminalReasonCode::BudgetExhausted)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_compute_policy_does_not_block_a_run_on_spent_wall_time() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        fixture.storage.begin_session_run(session_id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        fixture
+            .storage
+            .finish_session_run(session_id)
+            .await
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(sender);
+        tasks.configure_session_runtime_budget(
+            fixture.storage.clone(),
+            Arc::new(tokio::sync::Mutex::new(Some(session_id))),
+            Some(Duration::from_millis(1)),
+            Arc::new(SubagentRegistry::new()),
+        );
+        tasks.set_session_time_policy(crate::timing::TimingPolicy::ActiveCompute);
+        let invoked = Arc::new(AtomicBool::new(false));
+        let invoked_by_run = invoked.clone();
+
+        tasks
+            .spawn_agent_task(
+                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+                Vec::new(),
+                TaskRunIntent::Start("Compute-limited task".to_string()),
+                None,
+                move |_token, _queue| async move {
+                    invoked_by_run.store(true, Ordering::Release);
+                    Ok(AgentRunResult::Completed(String::new()))
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RuntimeEvent::AgentStarted)
+        ));
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !matches!(
+                event,
+                RuntimeEvent::AgentFinished(Ok(
+                    crate::tui::event::AgentRunOutcome::BudgetExhausted(_)
+                ))
+            ),
+            "wall time already spent must not preflight-block a compute budget"
+        );
+        assert!(
+            invoked.load(Ordering::Acquire),
+            "the run must reach the agent, which charges compute at turn boundaries"
         );
     }
 }

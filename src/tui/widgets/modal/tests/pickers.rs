@@ -943,7 +943,7 @@ fn settings_wide_layout_shows_every_section_in_two_columns() {
         "bottom section should render: {text}"
     );
     assert!(
-        text.contains("session output") && text.contains("session time"),
+        text.contains("session output") && text.contains("session compute"),
         "all budget rows should render: {text}"
     );
 }

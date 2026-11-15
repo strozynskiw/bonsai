@@ -566,6 +566,12 @@ pub struct Agent {
     /// The runtime creates it so the interaction service can report prompt
     /// waits on the same ledger the agent reports model and tool work on.
     timing: SharedTimingLedger,
+    /// Durable session time this process starts from, per clock.
+    ///
+    /// The ledger only knows the active run, so the already-spent session budget
+    /// is restored from `sessions.active_compute_ms` (default policy) and
+    /// `sessions.active_run_ms` (wall-clock opt-in) at each run start.
+    restored_session_time: timing::RestoredSessionTime,
     /// Identity of the active provider/model, stamped onto each usage turn for
     /// per-model analytics. `None` in tests and evals that build a provider
     /// without a run selection.

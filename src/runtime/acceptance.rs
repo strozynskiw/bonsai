@@ -95,6 +95,7 @@ async fn surface_acceptance_snapshot(surface: SurfaceKind) -> SurfaceAcceptanceS
             Some(Duration::from_secs(10)),
             Some(Duration::from_secs(60)),
             55_000,
+            crate::timing::TimingPolicy::WallClock,
         ),
         cancellation_propagated: run_cancellation.is_cancelled(),
         recovery_isolation: [
@@ -181,7 +182,8 @@ async fn tui_and_headless_pass_the_same_surface_acceptance_fixture() {
             Duration::from_secs(5),
             RunBudgetExhaustion::SessionTime {
                 limit_seconds: 60,
-                used_seconds: 60,
+                used_seconds: 55,
+                clock: crate::run_budget::SessionTimeClock::WallClock,
             },
         ))
     );

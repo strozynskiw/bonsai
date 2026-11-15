@@ -328,6 +328,13 @@ pub struct AppState {
     pub(crate) branch: Option<String>,
     pub(crate) run_started_at: Option<Instant>,
     pub(crate) completed_run_elapsed: Option<Duration>,
+    /// Live reading of the run's timing ledger, shown beside the run timer.
+    ///
+    /// `None` when nothing is charging or when the runtime wired no ledger. It
+    /// exists because the run timer is wall time and the session budget is not:
+    /// an operator watching a prompt wait open can see the compute clock stand
+    /// still while wall time keeps moving.
+    pub(crate) session_clock_label: Option<String>,
     pub(crate) session_goal: Option<crate::goal::GoalRecord>,
     pub(crate) goal_elapsed: Duration,
     pub(crate) current_phase: Option<String>,
@@ -599,6 +606,7 @@ impl AppState {
             branch,
             run_started_at: None,
             completed_run_elapsed: None,
+            session_clock_label: None,
             session_goal: None,
             goal_elapsed: Duration::ZERO,
             current_phase: None,
@@ -966,19 +974,25 @@ impl AppState {
             .or(self.completed_run_elapsed)
             .unwrap_or_default();
 
-        Self::format_elapsed_label(elapsed)
+        let label = Self::format_elapsed_label(elapsed);
+        match &self.session_clock_label {
+            Some(clock) => format!("{label} · {clock}"),
+            None => label,
+        }
     }
 
     pub fn mark_run_started(&mut self, started_at: Instant) {
         if self.run_started_at.is_none() {
             self.run_started_at = Some(started_at);
             self.completed_run_elapsed = None;
+            self.session_clock_label = None;
         }
     }
 
     pub fn mark_run_finished(&mut self, finished_at: Instant) {
         if let Some(started_at) = self.run_started_at.take() {
             self.completed_run_elapsed = Some(finished_at.saturating_duration_since(started_at));
+            self.session_clock_label = None;
         }
     }
 

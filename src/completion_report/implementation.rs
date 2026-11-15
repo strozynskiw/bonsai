@@ -448,11 +448,21 @@ impl CompletionReport {
                 ));
             }
             if let Some(limit_seconds) = self.usage.session_budget.active_limit_seconds {
+                // The budget is charged on one named clock, and under the default
+                // policy that clock is not wall time. Naming it plus the waiting
+                // share is what separates a long run from an expensive one.
                 values.push(format!(
-                    "active time {}/{}s",
+                    "{} {}/{}s",
+                    self.usage.session_budget.clock_label(),
                     self.usage.session_budget.active_run_ms / 1_000,
                     limit_seconds
                 ));
+                if self.usage.session_budget.waiting_ms > 0 {
+                    values.push(format!(
+                        "waiting {}s",
+                        self.usage.session_budget.waiting_ms / 1_000
+                    ));
+                }
             }
             if let Some(limit_micros) = self.usage.session_budget.cost_limit_micros {
                 let used = self
@@ -1205,6 +1215,7 @@ mod tests {
                     output_chars: 34_000,
                     output_char_limit: Some(256_000),
                     active_run_ms: 45_000,
+                    waiting_ms: 12_000,
                     active_limit_seconds: Some(7_200),
                     exact_cost_micros: Some(1_250_000),
                     cost_limit_micros: Some(5_000_000),
@@ -1214,8 +1225,10 @@ mod tests {
             },
         );
 
+        // The value names the clock it charges and carries the waiting split, so a
+        // 45s compute reading is never misread as 45s of wall time.
         assert!(report.render_compact().contains(
-            "Budget · session turns 12/100 · output 34000/256000 · active time 45/7200s · cost $1.250000/$5.000000"
+            "Budget · session turns 12/100 · output 34000/256000 · active compute 45/7200s · waiting 12s · cost $1.250000/$5.000000"
         ));
     }
 

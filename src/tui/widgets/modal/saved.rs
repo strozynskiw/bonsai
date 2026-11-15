@@ -202,15 +202,28 @@ pub(super) fn render_budget_warning(
             Constraint::Length(1),
         ])
         .split(inner);
-    let mut lines = vec![Line::from(
-        "A configured cumulative alert has been reached. Current usage:",
-    )];
+    let mut lines = vec![
+        Line::from("A configured cumulative alert has been reached. Current usage:"),
+        // Name the clock before the numbers: under the default policy the active
+        // time beside these thresholds is compute, not wall time, and the split
+        // is what makes the decision to continue an informed one.
+        Line::from(format!(
+            "Active clock · {} · {} spent · {} waiting",
+            usage.clock_label(),
+            super::usage::format_duration_units(
+                i64::try_from(usage.active_run_ms).unwrap_or(i64::MAX)
+            ),
+            super::usage::format_duration_units(
+                i64::try_from(usage.waiting_ms).unwrap_or(i64::MAX)
+            ),
+        )),
+    ];
     // Reached axes first, then the upcoming ones, so the decision to continue
     // is made with the next threshold visible — not just the crossed one.
     let mut alerts = usage.alert_states();
     alerts.sort_by_key(|alert| !alert.is_reached());
     for alert in alerts {
-        lines.push(Line::from(format_session_alert(alert)));
+        lines.push(Line::from(format_session_alert(alert, usage.clock_label())));
     }
     lines.push(Line::from(
         "Raise or disable thresholds in /settings under Session alerts.",
@@ -245,7 +258,7 @@ pub(super) fn render_budget_warning(
     );
 }
 
-fn format_session_alert(alert: crate::run_budget::SessionBudgetAlertState) -> String {
+fn format_session_alert(alert: crate::run_budget::SessionBudgetAlertState, clock: &str) -> String {
     use crate::run_budget::SessionBudgetAlertState;
     let state = if alert.is_reached() {
         "reached"
@@ -269,7 +282,7 @@ fn format_session_alert(alert: crate::run_budget::SessionBudgetAlertState) -> St
             used_ms,
             threshold_seconds,
         } => format!(
-            "Active time · {}s/{threshold_seconds}s · {state}",
+            "{clock} time · {}s/{threshold_seconds}s · {state}",
             used_ms / 1_000
         ),
         SessionBudgetAlertState::Cost {

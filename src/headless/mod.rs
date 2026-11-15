@@ -787,11 +787,13 @@ async fn run_inner_with_provider_runtime(
     };
     let (terminal_event_stop, terminal_event_task) =
         spawn_terminal_event_forwarder(terminals.subscribe(), sink.clone());
+    let session_timing_policy = crate::timing::TimingPolicy::from_env();
     let selected_timeout = crate::run_budget::select_runtime_timeout(
         config.timeout,
         run_budget.max_run_duration(),
         run_budget.max_session_active_duration(),
         active_run_ms_before,
+        session_timing_policy,
     );
     let run_timeout = selected_timeout.map(|(duration, _)| duration);
     let run_timeout_exhaustion = selected_timeout.and_then(|(_, exhaustion)| exhaustion);
@@ -808,6 +810,20 @@ async fn run_inner_with_provider_runtime(
 
     sink.begin_completion_run();
     sink.user_message(&prompt);
+    // The session budget enforces what this session already spent: the ledger
+    // only knows the active run, so the durable counters are restored here.
+    let restored_compute_ms = storage
+        .session_active_compute_ms(current_session_id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                session_id = %current_session_id,
+                error = %format!("{error:#}"),
+                "failed to load session compute time; enforcing from this run on"
+            );
+            0
+        });
+    agent.restore_session_time(restored_compute_ms, active_run_ms_before);
     // The run clock starts at the run, not at agent construction: one agent
     // serves every task run of the session.
     agent.begin_timing_run();
@@ -846,7 +862,16 @@ async fn run_inner_with_provider_runtime(
     // no-wake registry. Keep the activity ownership shared with TUI, while
     // avoiding a detached-only waiter for a foreground record.
     while subagents.has_active_detached() {
-        let Some(limit) = run_budget.max_session_active_duration() else {
+        // A session compute budget is enforced by the agent at turn boundaries;
+        // the detached-tail loop can only observe the wall union, so it only
+        // charges that union under the wall-clock opt-in.
+        let wall_limit = run_budget.max_session_active_duration().filter(|_| {
+            matches!(
+                session_timing_policy,
+                crate::timing::TimingPolicy::WallClock
+            )
+        });
+        let Some(limit) = wall_limit else {
             let _ = subagents
                 .wait_for_any_detached(std::time::Duration::from_secs(1))
                 .await;
@@ -863,7 +888,8 @@ async fn run_inner_with_provider_runtime(
             detached_budget_exhaustion =
                 Some(crate::run_budget::RunBudgetExhaustion::SessionTime {
                     limit_seconds,
-                    used_seconds: active_run_ms.div_ceil(1_000).max(limit_seconds),
+                    used_seconds: active_run_ms.div_ceil(1_000),
+                    clock: crate::run_budget::SessionTimeClock::of(session_timing_policy),
                 });
             let _ = subagents
                 .wait_for_any_detached(BACKGROUND_TASK_SHUTDOWN_TIMEOUT)
@@ -1080,7 +1106,7 @@ async fn run_inner_with_provider_runtime(
             usage: usage_totals,
             session_budget: agent
                 .session_budget_usage()
-                .with_active_run_ms(active_run_ms),
+                .with_session_wall_ms(active_run_ms),
             budget_exhaustion,
         },
     );
@@ -2708,6 +2734,7 @@ mod tests {
             Some(Duration::from_secs(10)),
             Some(Duration::from_secs(60)),
             55_000,
+            crate::timing::TimingPolicy::WallClock,
         );
 
         assert_eq!(
@@ -2716,7 +2743,8 @@ mod tests {
                 Duration::from_secs(5),
                 Some(crate::run_budget::RunBudgetExhaustion::SessionTime {
                     limit_seconds: 60,
-                    used_seconds: 60,
+                    used_seconds: 55,
+                    clock: crate::run_budget::SessionTimeClock::WallClock,
                 })
             ))
         );
@@ -2729,6 +2757,7 @@ mod tests {
             Some(Duration::from_secs(10)),
             Some(Duration::from_secs(60)),
             61_001,
+            crate::timing::TimingPolicy::WallClock,
         );
 
         assert_eq!(
@@ -2738,6 +2767,7 @@ mod tests {
                 Some(crate::run_budget::RunBudgetExhaustion::SessionTime {
                     limit_seconds: 60,
                     used_seconds: 62,
+                    clock: crate::run_budget::SessionTimeClock::WallClock,
                 })
             ))
         );

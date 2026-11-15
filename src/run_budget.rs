@@ -3,6 +3,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::timing::TimingPolicy;
+
 /// Typed reason a foreground run stopped after consuming an explicit budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -18,11 +20,12 @@ pub(crate) enum RunBudgetExhaustion {
     )]
     SessionBilledTokens { limit_tokens: u64, used_tokens: u64 },
     #[error(
-        "session exhausted its {limit_seconds}s active-time budget after {used_seconds}s of foreground execution"
+        "session exhausted its {limit_seconds}s {clock} budget after {used_seconds}s of {clock}"
     )]
     SessionTime {
         limit_seconds: u64,
         used_seconds: u64,
+        clock: SessionTimeClock,
     },
     #[error("run exhausted its {limit_seconds}s wall-time budget")]
     RunTime { limit_seconds: u64 },
@@ -47,6 +50,40 @@ pub(crate) enum RunBudgetExhaustion {
     ProviderRateLimit { attempts: usize },
     #[error("provider account quota or credit limit was exhausted")]
     ProviderQuota,
+}
+
+/// Which clock a session time budget exhausted.
+///
+/// The reason a run stopped has to name the clock it stopped on, because under
+/// the default policy the number is not wall time: a run that spent an hour
+/// answering prompts can report minutes of compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionTimeClock {
+    ActiveCompute,
+    WallClock,
+}
+
+impl SessionTimeClock {
+    pub(crate) const fn of(policy: TimingPolicy) -> Self {
+        match policy {
+            TimingPolicy::ActiveCompute => Self::ActiveCompute,
+            TimingPolicy::WallClock => Self::WallClock,
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::ActiveCompute => "active compute",
+            Self::WallClock => "wall clock",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionTimeClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 impl RunBudgetExhaustion {
@@ -149,6 +186,13 @@ pub(crate) struct SessionBudgetUsage {
     pub(crate) output_chars: usize,
     pub(crate) output_char_limit: Option<usize>,
     pub(crate) active_run_ms: u64,
+    /// Cumulative model, active tool, and child-active time in this session.
+    pub(crate) active_compute_ms: u64,
+    /// Cumulative queue, permission, user, and child-wait time in this session.
+    pub(crate) waiting_ms: u64,
+    /// The clock `active_run_ms` was read on. Under the default policy this is
+    /// compute, not wall time, so an alert must name it.
+    pub(crate) timing_policy: TimingPolicy,
     pub(crate) active_limit_seconds: Option<u64>,
     /// Exact cumulative cost, absent once any provider turn could not be priced.
     pub(crate) exact_cost_micros: Option<u64>,
@@ -160,9 +204,21 @@ pub(crate) struct SessionBudgetUsage {
 }
 
 impl SessionBudgetUsage {
-    pub(crate) const fn with_active_run_ms(mut self, active_run_ms: u64) -> Self {
-        self.active_run_ms = active_run_ms;
+    /// Replace the reading with the live durable wall accumulator.
+    ///
+    /// Only the `wall_clock` policy consumes it. Under the default active-compute
+    /// policy the agent's own compute reading stands, so a surface cannot make a
+    /// compute budget obey wall time by passing a larger number.
+    pub(crate) const fn with_session_wall_ms(mut self, wall_ms: u64) -> Self {
+        if matches!(self.timing_policy, TimingPolicy::WallClock) {
+            self.active_run_ms = wall_ms;
+        }
         self
+    }
+
+    /// The clock this session's active-time budget consumes.
+    pub(crate) const fn clock_label(&self) -> &'static str {
+        SessionTimeClock::of(self.timing_policy).label()
     }
 
     pub(crate) fn alert_states(self) -> Vec<SessionBudgetAlertState> {
@@ -273,11 +329,18 @@ impl RunBudget {
 /// `explicit_timeout` is a headless process deadline rather than a budget, so
 /// it carries no [`RunBudgetExhaustion`]. Saved per-run and cumulative session
 /// limits carry their typed exhaustion reason on both surfaces.
+///
+/// `session_policy` decides *whether* the session budget can be a wall deadline
+/// at all: under the default active-compute policy it is enforced by the agent
+/// at turn boundaries, because a wall timer physically cannot exclude the time a
+/// run spends waiting on its user. `max_run_duration` is armed under either
+/// policy, so the run always has a wall backstop.
 pub(crate) fn select_runtime_timeout(
     explicit_timeout: Option<Duration>,
     max_run_duration: Option<Duration>,
     max_session_active_duration: Option<Duration>,
     active_run_ms: u64,
+    session_policy: TimingPolicy,
 ) -> Option<(Duration, Option<RunBudgetExhaustion>)> {
     let mut selected = explicit_timeout.map(|duration| (duration, None));
     if let Some(duration) = max_run_duration {
@@ -291,11 +354,17 @@ pub(crate) fn select_runtime_timeout(
             selected = Some(candidate);
         }
     }
-    if let Some(limit) = max_session_active_duration {
+    if let Some(limit) = max_session_active_duration
+        && matches!(session_policy, TimingPolicy::WallClock)
+    {
         let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
         let candidate = (
             Duration::from_millis(limit_ms.saturating_sub(active_run_ms)),
-            Some(session_time_exhaustion(limit, active_run_ms)),
+            Some(session_time_exhaustion(
+                limit,
+                active_run_ms,
+                session_policy,
+            )),
         );
         if selected.is_none_or(|current| candidate.0 <= current.0) {
             selected = Some(candidate);
@@ -309,36 +378,47 @@ pub(crate) fn select_budget_timeout(
     max_run_duration: Option<Duration>,
     max_session_active_duration: Option<Duration>,
     active_run_ms: u64,
+    session_policy: TimingPolicy,
 ) -> Option<(Duration, RunBudgetExhaustion)> {
     select_runtime_timeout(
         None,
         max_run_duration,
         max_session_active_duration,
         active_run_ms,
+        session_policy,
     )
     .and_then(|(duration, exhaustion)| exhaustion.map(|reason| (duration, reason)))
 }
 
-fn session_time_exhaustion(limit: Duration, active_run_ms: u64) -> RunBudgetExhaustion {
-    let limit_seconds = limit.as_secs().max(1);
+fn session_time_exhaustion(
+    limit: Duration,
+    used_ms: u64,
+    policy: TimingPolicy,
+) -> RunBudgetExhaustion {
     RunBudgetExhaustion::SessionTime {
-        limit_seconds,
-        used_seconds: active_run_ms.div_ceil(1_000).max(limit_seconds),
+        limit_seconds: limit.as_secs().max(1),
+        // Never report more used time than the clock holds: the old floor at the
+        // limit made a message claim time the session had not spent.
+        used_seconds: used_ms.div_ceil(1_000),
+        clock: SessionTimeClock::of(policy),
     }
 }
 
 /// Refresh cumulative active-time evidence after a foreground run finishes.
 pub(crate) fn refresh_session_time_exhaustion(
     exhaustion: RunBudgetExhaustion,
-    active_run_ms: u64,
+    used_ms: u64,
 ) -> RunBudgetExhaustion {
     match exhaustion {
-        RunBudgetExhaustion::SessionTime { limit_seconds, .. } => {
-            RunBudgetExhaustion::SessionTime {
-                limit_seconds,
-                used_seconds: active_run_ms.div_ceil(1_000).max(limit_seconds),
-            }
-        }
+        RunBudgetExhaustion::SessionTime {
+            limit_seconds,
+            clock,
+            ..
+        } => RunBudgetExhaustion::SessionTime {
+            limit_seconds,
+            used_seconds: used_ms.div_ceil(1_000),
+            clock,
+        },
         exhaustion => exhaustion,
     }
 }
@@ -536,11 +616,15 @@ mod tests {
 
     #[test]
     fn session_deadline_wins_for_both_runtime_timeout_entry_points() {
+        // Under the wall-clock opt-in the session limit really is a wall
+        // deadline, and the evidence reports the time actually spent — not a
+        // floor at the limit.
         let expected = (
             Duration::from_secs(5),
             RunBudgetExhaustion::SessionTime {
                 limit_seconds: 60,
-                used_seconds: 60,
+                used_seconds: 55,
+                clock: SessionTimeClock::WallClock,
             },
         );
 
@@ -549,6 +633,7 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 Some(Duration::from_secs(60)),
                 55_000,
+                TimingPolicy::WallClock,
             ),
             Some(expected)
         );
@@ -558,15 +643,85 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 Some(Duration::from_secs(60)),
                 55_000,
+                TimingPolicy::WallClock,
             ),
             Some((expected.0, Some(expected.1)))
         );
     }
 
     #[test]
+    fn active_compute_leaves_the_session_deadline_to_the_agent() {
+        // A wall timer cannot exclude a permission or question wait, so the
+        // default policy must not arm one for the session budget: the agent
+        // enforces it at turn boundaries instead.
+        assert_eq!(
+            select_budget_timeout(
+                None,
+                Some(Duration::from_secs(60)),
+                55_000,
+                TimingPolicy::ActiveCompute,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn run_wall_deadline_survives_the_active_compute_policy() {
+        // The backstop: excluding waits must never remove the per-run wall
+        // deadline, so a stuck run still stops under either policy.
+        let expected = (
+            Duration::from_secs(10),
+            RunBudgetExhaustion::RunTime { limit_seconds: 10 },
+        );
+        for policy in TimingPolicy::ALL {
+            assert_eq!(
+                select_budget_timeout(Some(Duration::from_secs(10)), None, 0, policy),
+                Some(expected)
+            );
+            assert_eq!(
+                select_runtime_timeout(None, Some(Duration::from_secs(10)), None, 0, policy),
+                Some((expected.0, Some(expected.1)))
+            );
+        }
+    }
+
+    #[test]
+    fn session_time_exhaustion_reports_only_time_actually_spent() {
+        assert_eq!(
+            session_time_exhaustion(Duration::from_secs(60), 61_500, TimingPolicy::ActiveCompute),
+            RunBudgetExhaustion::SessionTime {
+                limit_seconds: 60,
+                used_seconds: 62,
+                clock: SessionTimeClock::ActiveCompute,
+            }
+        );
+        assert_eq!(
+            refresh_session_time_exhaustion(
+                RunBudgetExhaustion::SessionTime {
+                    limit_seconds: 60,
+                    used_seconds: 1,
+                    clock: SessionTimeClock::ActiveCompute,
+                },
+                60_000,
+            ),
+            RunBudgetExhaustion::SessionTime {
+                limit_seconds: 60,
+                used_seconds: 60,
+                clock: SessionTimeClock::ActiveCompute,
+            }
+        );
+    }
+
+    #[test]
     fn explicit_headless_timeout_remains_a_non_budget_deadline() {
         assert_eq!(
-            select_runtime_timeout(Some(Duration::from_secs(2)), None, None, 0),
+            select_runtime_timeout(
+                Some(Duration::from_secs(2)),
+                None,
+                None,
+                0,
+                TimingPolicy::ActiveCompute
+            ),
             Some((Duration::from_secs(2), None))
         );
     }

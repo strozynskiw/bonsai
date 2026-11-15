@@ -249,6 +249,15 @@ impl InteractionService {
         self
     }
 
+    /// The ledger this service records prompt waits on, when a runtime wired one.
+    ///
+    /// Read-only: a snapshot is a cheap mutex read of already-closed intervals, so
+    /// a surface can show what a run is charging without waiting on the agent
+    /// lock a live run holds for its whole duration.
+    pub(crate) fn timing(&self) -> Option<&SharedTimingLedger> {
+        self.timing.as_ref()
+    }
+
     /// Category and bounded labels for one prompt's wait interval.
     fn wait_labels(request: &InteractionRequest) -> (TimingCategory, &'static str, &str) {
         match request {
