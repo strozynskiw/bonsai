@@ -33,6 +33,20 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
         return KeyIntent::Noop;
     }
 
+    // A Command/Meta/Hyper chord belongs to the OS and the terminal, never to
+    // this app: ⌘+Tab switches macOS apps, ⌘+C copies the selection. Terminals
+    // using the kitty keyboard protocol do forward them, with the modifier bit
+    // set on an otherwise ordinary key — and the arms below match `Tab`,
+    // `BackTab` and most keys with `..`, so a forwarded ⌘+Tab was swallowed as
+    // `ToggleView` (next persona) instead of reaching the OS. Drop the chord
+    // here, once, so no modal or focus arm can claim it.
+    if key
+        .modifiers
+        .intersects(KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::HYPER)
+    {
+        return KeyIntent::Noop;
+    }
+
     if matches!(
         app.modal,
         Some(ModalKind::Wizard(
@@ -428,11 +442,6 @@ pub fn map_key(key: KeyEvent, app: &AppState) -> KeyIntent {
 /// priority order. Reached only when no modal is open.
 fn map_primary_key(key: KeyEvent, app: &AppState) -> KeyIntent {
     match key {
-        KeyEvent {
-            code: KeyCode::Char('c') | KeyCode::Char('C'),
-            modifiers,
-            ..
-        } if modifiers.contains(KeyModifiers::SUPER) => KeyIntent::Noop,
         KeyEvent {
             code: KeyCode::Char('c') | KeyCode::Char('C'),
             modifiers,
@@ -1671,6 +1680,54 @@ mod tests {
             KeyModifiers::CONTROL | KeyModifiers::ALT,
         );
         assert!(matches!(map_key(alt_gr, &app), KeyIntent::Insert('@')));
+    }
+
+    #[test]
+    fn os_modified_chords_never_reach_a_binding() {
+        let mut app = app();
+        app.focus = Focus::Input;
+
+        // ⌘+Tab is the macOS app switcher. Terminals with the kitty keyboard
+        // protocol forward it as a SUPER-modified Tab/BackTab; the `..` arms
+        // must not claim it (BackTab used to cycle the agent persona).
+        for code in [KeyCode::Tab, KeyCode::BackTab] {
+            for modifiers in [
+                KeyModifiers::SUPER,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                KeyModifiers::META,
+                KeyModifiers::HYPER,
+            ] {
+                let intent = map_key(KeyEvent::new(code, modifiers), &app);
+                assert!(
+                    matches!(intent, KeyIntent::Noop),
+                    "{code:?} + {modifiers:?} must stay with the OS, got {intent:?}"
+                );
+            }
+        }
+
+        // Same chord inside a modal: the question prompt closes on a plain Tab,
+        // so a forwarded ⌘+Tab must not dismiss the decision either.
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::QuestionPrompt {
+                request_id: 1,
+                prompt: "Pick one".to_string(),
+                header: None,
+                origin: None,
+                options: vec![QuestionOption {
+                    label: "A".to_string(),
+                    description: String::new(),
+                    preselected: false,
+                }],
+                selected: Vec::new(),
+                cursor: 0,
+                multiple: false,
+            },
+        ));
+        let intent = map_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::SUPER | KeyModifiers::SHIFT),
+            &app,
+        );
+        assert!(matches!(intent, KeyIntent::Noop));
     }
 
     #[test]
