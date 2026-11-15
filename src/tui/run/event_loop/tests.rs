@@ -6533,6 +6533,40 @@ async fn deferred_command_waits_for_fresh_plan_transition() {
 }
 
 #[tokio::test]
+async fn a_fresh_plan_that_produces_no_draft_is_reported_once() {
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(crate::plan::PlanDoc::default()));
+    app.fresh_plan_awaiting_draft = true;
+
+    // The planning run is still going: the verdict has to wait for it.
+    app.task_state = TaskState::Running;
+    assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
+    assert!(app.fresh_plan_awaiting_draft);
+
+    // Idle with an empty canvas: say so, exactly once.
+    app.task_state = TaskState::Idle;
+    assert!(maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
+    assert!(!app.fresh_plan_awaiting_draft);
+    assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
+}
+
+#[tokio::test]
+async fn a_drafted_fresh_plan_clears_the_watch_without_a_warning() {
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    app.task_state = TaskState::Idle;
+    app.fresh_plan_awaiting_draft = true;
+    // The planning turn writes through the shared store, not `app.plan`.
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(sample_plan("Fresh canvas")));
+
+    assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
+    assert!(!app.fresh_plan_awaiting_draft);
+}
+
+#[tokio::test]
 async fn deferred_model_selection_preserves_reasoning_after_idle_drain() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let storage = Storage::open_at(temp_dir.path().join("bonsai.db"))

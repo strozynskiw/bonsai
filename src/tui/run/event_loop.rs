@@ -3308,6 +3308,8 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         )
         .await;
         frame_needs_redraw |= started_new_plan;
+        frame_needs_redraw |=
+            maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await;
         if !started_new_plan {
             let started_deferred = start_next_deferred_command_if_idle(
                 &mut app,
@@ -4916,6 +4918,7 @@ async fn maybe_start_new_plan(
     app.pending_start_new_plan = false;
     match protect_canvas_before_new_plan(app, storage, current_session_id, &plan_store).await {
         Ok(()) => {
+            app.fresh_plan_awaiting_draft = true;
             app.reduce(AppAction::SetView(crate::tui::event::View::Plan));
             let persona = app.active_persona.clone();
             app.reduce(AppAction::ScrollBottom);
@@ -4942,6 +4945,50 @@ async fn maybe_start_new_plan(
             false
         }
     }
+}
+
+/// Report a fresh-plan transition that produced no draft.
+///
+/// `maybe_start_new_plan` clears the canvas and re-dispatches under the planning
+/// persona, but the planning turn is unconstrained: it can research for several
+/// minutes and answer in chat, or come back with no canvas tool at all (session
+/// 407: the persona had been flipped back to coding, so `plan_replace_draft` was
+/// not in the tool list). Either way the previous canvas is already saved and
+/// gone, so staying silent leaves an empty plan the user cannot tell apart from
+/// one still being drafted. The flag is armed by the transition and consumed by
+/// the first idle frame that can see the result.
+async fn maybe_report_empty_fresh_plan(
+    app: &mut AppState,
+    tasks: &mut TaskController,
+    plan_store: &SharedPlanStore,
+) -> bool {
+    if !app.fresh_plan_awaiting_draft
+        || !matches!(app.task_state, TaskState::Idle)
+        || tasks.is_busy()
+    {
+        return false;
+    }
+
+    // The planning turn writes through the shared store; the app's copy is the
+    // input fallback (see `open_start_plan_choice`), so either one being
+    // non-empty means a draft exists.
+    let stored = plan_store.lock().await;
+    let drafted = !stored.is_empty();
+    drop(stored);
+    app.fresh_plan_awaiting_draft = false;
+    if drafted || !app.plan.is_empty() {
+        return false;
+    }
+
+    app.reduce(AppAction::CommandOutput {
+        kind: CommandOutputKind::Status,
+        text: "The plan turn ended without writing to the canvas — it is still empty. \
+               The previous plan is in the plan library (/plans). Ask for the draft again, or \
+               check that the plan agent is the one running (Shift+Tab shows its name in the meta \
+               line)."
+            .to_string(),
+    });
+    true
 }
 
 async fn start_pending_queued_run_if_idle(

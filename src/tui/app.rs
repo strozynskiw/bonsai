@@ -365,6 +365,11 @@ pub struct AppState {
     /// fresh plan, then consumed by the event loop after it protects and clears
     /// the old canvas. `None` on any other finish.
     pub(crate) pending_start_new_plan: bool,
+    /// Armed by the fresh-plan transition and cleared by the first idle frame
+    /// that can see whether the planning agent actually wrote a draft. A canvas
+    /// that is still empty at that point means the turn produced no plan, which
+    /// used to pass silently: the previous canvas was already saved and cleared.
+    pub(crate) fresh_plan_awaiting_draft: bool,
     /// One-shot authority for the literal natural-language confirmations
     /// `go`/`continue` to enter the existing `/start` plan handoff. It is armed
     /// only by a completed planning run and never applies to permission,
@@ -622,6 +627,7 @@ impl AppState {
             plan_execution: None,
             phase_advance: None,
             pending_start_new_plan: false,
+            fresh_plan_awaiting_draft: false,
             pending_safe_plan_start_confirmation: false,
             tick: 0,
             sidebar_bonsai: crate::tui::widgets::bonsai::BonsaiGrowth::sprout(),
