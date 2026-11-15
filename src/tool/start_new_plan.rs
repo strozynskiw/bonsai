@@ -56,13 +56,13 @@ impl StartNewPlanTool {
         };
         let options = vec![
             QuestionOption {
-                label: "Start new plan".to_string(),
-                description: "Save any existing canvas, then plan on a fresh canvas".to_string(),
+                label: "Keep coding".to_string(),
+                description: "Stay in the coding agent".to_string(),
                 preselected: false,
             },
             QuestionOption {
-                label: "Keep coding".to_string(),
-                description: "Stay in the coding agent".to_string(),
+                label: "Start new plan".to_string(),
+                description: "Save any existing canvas, then plan on a fresh canvas".to_string(),
                 preselected: false,
             },
         ];
@@ -79,9 +79,13 @@ impl StartNewPlanTool {
             })
             .await;
         match outcome {
-            // Index 0 is "Start new plan"; anything else keeps coding.
+            // Index 1 is "Start new plan"; anything else keeps coding. The
+            // destructive choice is deliberately the *second* row: a
+            // single-select question opens with the cursor on row 0 and Enter
+            // submits it, so putting the canvas-clearing transition first meant
+            // a reflexive Enter wiped a finished plan (session 407).
             Ok(InteractionOutcome::Question(Some(InteractionAnswer::Choices(indices))))
-                if indices.first() == Some(&0) =>
+                if indices.first() == Some(&1) =>
             {
                 Ok(ToolOutput::WaitStarted {
                     reason: WaitReason::StartNewPlan,
@@ -169,7 +173,7 @@ mod tests {
             service
                 .respond(
                     request_id,
-                    InteractionOutcome::Question(Some(InteractionAnswer::Choices(vec![0]))),
+                    InteractionOutcome::Question(Some(InteractionAnswer::Choices(vec![1]))),
                 )
                 .await
                 .unwrap();
@@ -200,7 +204,7 @@ mod tests {
             service
                 .respond(
                     request_id,
-                    InteractionOutcome::Question(Some(InteractionAnswer::Choices(vec![1]))),
+                    InteractionOutcome::Question(Some(InteractionAnswer::Choices(vec![0]))),
                 )
                 .await
                 .unwrap();
