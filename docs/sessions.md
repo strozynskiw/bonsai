@@ -122,7 +122,9 @@ tool call — a stalled call is cancelled without killing the run).
 
 **Per-session** (cumulative across resumes, consuming the persisted ledger —
 including output from failed provider retries): `session turns`,
-`session output`, `session time` (active run time), `session cost`.
+`session output`, `session compute` (the [selected clock](timing.md) — active
+compute by default, so permission and `question` waits do not exhaust it),
+`session cost`.
 
 - Session budgets are checked before each provider call; the cost limit uses
   cache-aware pricing and stops before the next call **only while every
@@ -132,6 +134,10 @@ including output from failed provider retries): `session turns`,
   typed reason (`max_turns`, `session_cost`, `provider_rate_limit`, …) in
   SQLite, and — in headless JSON — emits `status: "budget_exhausted"` with a
   typed `budget_exhaustion` object. See [Headless mode](headless.md).
+- A session time limit names the clock it charged, and `max_run_seconds` stays a
+  per-run **wall** deadline under either policy, so excluding waits can never
+  let a run continue unbounded. `BONSAI_TIMING_POLICY=wall_clock` opts into
+  charging the waits too; see [Runtime timing](timing.md).
 
 ## The usage ledger and `/usage`
 

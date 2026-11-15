@@ -19,7 +19,10 @@ moves into the header. The main area depends on the active view:
 The **header** shows the bonsai brand, session id and status, workspace
 badges (cwd, git branch, elapsed), and a right-pinned **context chip** — a
 fill bar showing context usage percent and cost, colored by pressure (green
-< 70%, amber ≥ 70%, escalating to red ≥ 95%). Click it to open `/ctx`.
+< 70%, amber ≥ 70%, escalating to red ≥ 95%). Click it to open `/ctx`. While a
+run is active the elapsed badge also carries the clock the session budget is
+charging — `⏱ 12m 4s · compute 9m 12s · wait 2m 51s`; see
+[Runtime timing](timing.md).
 
 The **status line** (under the composer) shows: a state dot (spinner while
 busy), active agent, model — then only deviations from defaults: reasoning,

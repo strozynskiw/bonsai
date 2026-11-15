@@ -203,6 +203,7 @@ variables are listed in [Providers](providers.md#built-in-connections).
 | `BONSAI_EPISODES` | `0/false/off/no/disabled` disables task episodes |
 | `BONSAI_SANDBOX`, `BONSAI_SANDBOX_NETWORK`, `BONSAI_SANDBOX_WRITABLE_ROOTS` | [Sandbox](sandbox.md) posture |
 | `BONSAI_MAX_GENERATION_SECONDS`, `BONSAI_MAX_STREAMED_CHARS` | Per-attempt generation caps |
+| `BONSAI_TIMING_POLICY` | `active_compute` (default) or `wall_clock` — which [clock](timing.md) session time budgets consume |
 | `BRAVE_SEARCH_API_KEY`/`BRAVE_API_KEY`, `TAVILY_API_KEY`, `BONSAI_SEARXNG_URL`, `BONSAI_WEB_SEARCH_PROVIDER` | [Web search](language-intelligence.md#web-research) |
 | `BONSAI_RUST_ANALYZER`, `BONSAI_TYPESCRIPT_LANGUAGE_SERVER`, `BONSAI_PYRIGHT_LANGSERVER`, `BONSAI_GOPLS` | [Language-server](language-intelligence.md) command overrides |
 | `BONSAI_MEMORY_EMBEDDINGS` | `off` keeps [memory](memory.md) retrieval BM25-only |
@@ -218,11 +219,16 @@ variables are listed in [Providers](providers.md#built-in-connections).
 `/settings` covers the main runtime preferences without file editing: model,
 autonomy, self-review, context (smol), default credential store, appearance
 (serenity, theme), per-run budgets (max turns, run time, generation, output,
-tool time), session budgets (turns, output, time, cost), session alerts
+tool time), session budgets (turns, output, compute, cost), session alerts
 (tokens, turns, time, cost), and sandbox (confinement, network). Hard budgets
 are off by default; session alerts ship conservative soft defaults you can
 raise or disable per row, and command-line limits still override saved values
 for that run.
+
+Budget time rows are labelled by the clock they charge: `session compute` is
+the default policy's active-compute clock, not wall time. See
+[Runtime timing](timing.md) for what each clock contains, and for the
+`BONSAI_TIMING_POLICY` opt-in to a wall-clock deadline.
 
 Preferences persist in the local database, not in `config.toml`.
 

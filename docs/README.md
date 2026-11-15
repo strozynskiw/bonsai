@@ -26,6 +26,7 @@ split by topic.
 | [Slash commands](slash-commands.md) | Complete reference for every `/command` |
 | [TUI guide](tui.md) | Layout, keybindings, the composer, transcript features, serenity mode |
 | [Sessions](sessions.md) | Session lifecycle, resume, persistence, budgets, and the usage ledger |
+| [Runtime timing](timing.md) | The work/wait split, the clocks budgets consume, and where the breakdown is visible |
 | [Context management](context.md) | Token accounting, compaction, task episodes, recall, and `/ctx` |
 | [Memory](memory.md) | The persistent user/project memory stores and relevance-gated recall |
 | [Theming](theming.md) | Built-in themes, custom palettes, the role contract, terminal color modes |

@@ -73,6 +73,14 @@ text and TUI layout are *not* machine-readable surfaces.
 `[reasoning]`), progress, tool activity, errors, the compact completion
 report, and `Resume: bonsai -c <id>` go to **stderr**.
 
+A finished run's status output ends with one line naming the runtime breakdown
+— the clock the budget charged, critical path, active compute, waiting, and a
+row per recorded category and lane — for example
+`timing (active compute): critical path 611000ms, active compute 302000ms,
+waiting 308000ms | model parent 251000ms, user wait parent 303000ms`. In
+`stream-json` the same text arrives as a `status` event. See
+[Runtime timing](timing.md).
+
 **`json`** — one final object on stdout:
 
 ```json
