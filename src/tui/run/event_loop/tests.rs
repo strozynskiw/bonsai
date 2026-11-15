@@ -9038,7 +9038,7 @@ fn sync_plan_store_snapshot_auto_opens_new_review_findings() {
     let mut plan = app.plan.clone();
     plan.edit().add_finding(review_finding("bug"));
 
-    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review));
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review), &mut false);
 
     assert_eq!(app.view, View::Plan);
     assert_eq!(app.focus, Focus::Plan);
@@ -9058,7 +9058,7 @@ fn auto_opened_findings_keep_review_run_busy_while_planning_is_next_idle_mode() 
     let mut plan = app.plan.clone();
     plan.edit().add_finding(review_finding("bug"));
 
-    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review));
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review), &mut false);
 
     assert_eq!(app.view, View::Plan);
     assert_eq!(app.active_mode(), AgentMode::Planning);
@@ -9073,7 +9073,7 @@ fn sync_plan_store_snapshot_ignores_non_finding_plan_edits() {
     let mut plan = app.plan.clone();
     plan.edit().set_section("Approach", "Do it.");
 
-    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review));
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review), &mut false);
 
     assert_eq!(app.view, View::Agent);
     assert_eq!(app.focus, Focus::Input);
@@ -9089,11 +9089,157 @@ fn sync_plan_store_snapshot_ignores_findings_when_already_in_plan() {
     let mut plan = app.plan.clone();
     plan.edit().add_finding(review_finding("bug"));
 
-    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review));
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Review), &mut false);
 
     assert_eq!(app.view, View::Plan);
     assert_eq!(app.focus, Focus::Input);
     assert_eq!(app.plan.findings.len(), 1);
+}
+
+#[test]
+fn finished_planning_run_snaps_plan_canvas_to_top() {
+    let mut app = app();
+    app.reduce(AppAction::SetView(View::Plan));
+    let mut edited = false;
+
+    // The planner's edits auto-follow to the bottom while the run is live.
+    let mut plan = app.plan.clone();
+    plan.edit()
+        .set_section("Summary", "Ship the summary at the top.");
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Planning), &mut edited);
+    assert!(edited, "a planning edit arms the plan-ready snap");
+    assert_eq!(app.plan_scroll, u16::MAX);
+
+    assert!(
+        !show_plan_top_when_ready(&mut app, Some(AgentMode::Planning), true, &mut edited),
+        "a live run keeps auto-following the newest edit"
+    );
+    assert_eq!(app.plan_scroll, u16::MAX);
+
+    // The run ends: the ready plan opens on its summary, once.
+    assert!(show_plan_top_when_ready(&mut app, None, false, &mut edited));
+    assert_eq!(app.plan_scroll, 0);
+    assert!(!edited, "the arm is consumed");
+
+    // Later idle frames must not fight a manual scroll.
+    app.reduce(AppAction::SetPlanScroll(12));
+    assert!(!show_plan_top_when_ready(
+        &mut app,
+        None,
+        false,
+        &mut edited
+    ));
+    assert_eq!(app.plan_scroll, 12);
+}
+
+// The snap is keyed on the run, not the visible pane: switching to the chat
+// view while the planner works must not lose the reset.
+#[test]
+fn finished_planning_run_snaps_top_from_the_agent_view() {
+    let mut app = app();
+    app.reduce(AppAction::SetView(View::Agent));
+    let mut edited = false;
+
+    let mut plan = app.plan.clone();
+    plan.edit().set_section("Summary", "Summary first.");
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Planning), &mut edited);
+    assert_eq!(app.plan_scroll, u16::MAX);
+
+    assert!(show_plan_top_when_ready(&mut app, None, false, &mut edited));
+    assert_eq!(app.plan_scroll, 0);
+}
+
+#[test]
+fn finished_non_planning_run_keeps_plan_scroll() {
+    let mut app = app();
+    app.reduce(AppAction::SetView(View::Agent));
+    app.plan = sample_plan("Implementation plan");
+    app.plan_scroll = 9;
+
+    let mut edited = false;
+    assert!(!show_plan_top_when_ready(
+        &mut app,
+        Some(AgentMode::Coding),
+        true,
+        &mut edited
+    ));
+    assert!(
+        !show_plan_top_when_ready(&mut app, None, false, &mut edited),
+        "only a finished planning run repositions the canvas"
+    );
+    assert_eq!(app.plan_scroll, 9);
+}
+
+#[test]
+// A planning turn that never touched the canvas must not move a plan the user
+// parked by hand.
+fn planning_run_without_plan_edits_keeps_plan_scroll() {
+    let mut app = app();
+    app.reduce(AppAction::SetView(View::Plan));
+    app.plan = sample_plan("Parked plan");
+    app.plan_scroll = 7;
+
+    let mut edited = false;
+    assert!(!show_plan_top_when_ready(
+        &mut app,
+        Some(AgentMode::Planning),
+        true,
+        &mut edited
+    ));
+    assert!(!show_plan_top_when_ready(
+        &mut app,
+        None,
+        false,
+        &mut edited
+    ));
+    assert_eq!(app.plan_scroll, 7);
+}
+
+// A follow-on coding run (plan implementation, goal continuation) owns the
+// canvas after the planner stops, so its edits auto-follow: the armed snap must
+// be dropped instead of firing when that run ends.
+#[test]
+fn follow_on_coding_run_drops_a_stale_plan_ready_arm() {
+    let mut app = app();
+    app.reduce(AppAction::SetView(View::Plan));
+    let mut edited = false;
+
+    let mut plan = app.plan.clone();
+    plan.edit().set_title("Ready plan");
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Planning), &mut edited);
+    assert!(edited);
+
+    assert!(!show_plan_top_when_ready(
+        &mut app,
+        Some(AgentMode::Coding),
+        true,
+        &mut edited
+    ));
+    assert!(!edited, "the coding run supersedes the planning run");
+    assert!(!show_plan_top_when_ready(
+        &mut app,
+        None,
+        false,
+        &mut edited
+    ));
+    assert_eq!(app.plan_scroll, u16::MAX);
+}
+
+// Nothing to show the top of: an empty canvas consumes the arm without moving.
+#[test]
+fn finished_planning_run_with_empty_plan_keeps_scroll() {
+    let mut app = app();
+    app.plan_scroll = 3;
+    let mut edited = true;
+
+    assert!(!show_plan_top_when_ready(
+        &mut app,
+        None,
+        false,
+        &mut edited
+    ));
+    assert_eq!(app.plan_scroll, 3);
+    assert!(!edited, "the arm is consumed even with nothing to show");
 }
 
 #[test]
@@ -9104,7 +9250,7 @@ fn sync_plan_store_snapshot_ignores_findings_outside_review_runs() {
     let mut plan = app.plan.clone();
     plan.edit().add_finding(review_finding("bug"));
 
-    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Coding));
+    sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Coding), &mut false);
 
     assert_eq!(app.view, View::Agent);
     assert_eq!(app.focus, Focus::Input);

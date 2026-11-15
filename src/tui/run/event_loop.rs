@@ -413,6 +413,7 @@ fn sync_plan_store_snapshot(
     app: &mut AppState,
     plan: &crate::plan::PlanDoc,
     active_agent_mode: Option<AgentMode>,
+    plan_edited: &mut bool,
 ) -> bool {
     if plan.revision == app.plan.revision {
         return false;
@@ -428,6 +429,10 @@ fn sync_plan_store_snapshot(
     );
 
     app.plan = plan.clone();
+    // A revision authored by a planning run arms the plan-ready snap in
+    // `show_plan_top_when_ready`; auto-follow keeps the newest edit visible
+    // until that run ends.
+    *plan_edited |= matches!(active_agent_mode, Some(AgentMode::Planning));
     // Plan content changed (new task, new section, etc.) — follow it to the
     // bottom so the user always sees the latest edit. The render path clamps
     // this against the viewport's max_scroll, so over-shooting is safe.
@@ -437,6 +442,42 @@ fn sync_plan_store_snapshot(
         app.reduce(AppAction::SetView(View::Plan));
         app.reduce(AppAction::SetFocus(Focus::Plan));
     }
+    true
+}
+
+/// Snap the plan canvas back to its top once a planning run finishes.
+///
+/// While the planner writes, every revision auto-follows the canvas to the
+/// bottom so the newest edit stays visible. A finished plan is read top-down and
+/// leads with its summary, so leaving the view parked on the tail hides exactly
+/// the part that matters.
+///
+/// `plan_edited` is armed by [`sync_plan_store_snapshot`] when a planning run
+/// actually changed the plan and consumed here on the first idle frame after
+/// that run, so the snap fires once per authored plan instead of on every idle
+/// frame (a manual scroll afterwards must survive) and never because of a
+/// planning turn that left the canvas untouched. The active view is deliberately
+/// not consulted: the plan pane may be hidden while the planner works, and it
+/// should still open on the summary.
+fn show_plan_top_when_ready(
+    app: &mut AppState,
+    active_agent_mode: Option<AgentMode>,
+    busy: bool,
+    plan_edited: &mut bool,
+) -> bool {
+    if busy {
+        // Another persona's run took over (plan implementation, goal
+        // continuation, a detour): its edits belong to auto-follow, so a stale
+        // arm must not snap the canvas when *that* run ends.
+        if matches!(active_agent_mode, Some(mode) if mode != AgentMode::Planning) {
+            *plan_edited = false;
+        }
+        return false;
+    }
+    if !std::mem::take(plan_edited) || app.plan.is_empty() || app.plan_scroll == 0 {
+        return false;
+    }
+    app.reduce(AppAction::SetPlanScroll(0));
     true
 }
 
@@ -2930,6 +2971,9 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     let mut next_redraw_at = Instant::now();
     let mut next_goal_refresh_at = Instant::now();
     let mut pending_selection_auto_scroll: Option<PendingSelectionAutoScroll> = None;
+    // Armed by `sync_plan_store_snapshot` when a planning run edits the canvas,
+    // so its finish can snap the plan back to the summary at the top.
+    let mut plan_edited_pending = false;
     let mut last_active_persona = app.active_persona.clone();
     let mut persisted_signatures = PersistedSnapshotSignatures {
         transcript: transcript_signature(app.transcript.as_slice()),
@@ -3356,9 +3400,20 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         }
         frame_needs_redraw |= sync_todo_snapshot(&mut app, &todo_store);
         if let Ok(plan) = plan_store.try_lock() {
-            frame_needs_redraw |=
-                sync_plan_store_snapshot(&mut app, &plan, tasks.active_agent_mode());
+            frame_needs_redraw |= sync_plan_store_snapshot(
+                &mut app,
+                &plan,
+                tasks.active_agent_mode(),
+                &mut plan_edited_pending,
+            );
         }
+        let plan_run_busy = app.task_state.is_busy() || tasks.is_busy();
+        frame_needs_redraw |= show_plan_top_when_ready(
+            &mut app,
+            tasks.active_agent_mode(),
+            plan_run_busy,
+            &mut plan_edited_pending,
+        );
 
         frame_needs_redraw |= refresh_cached_model_choices(
             &mut app,
