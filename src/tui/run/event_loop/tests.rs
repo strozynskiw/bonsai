@@ -6553,6 +6553,32 @@ async fn a_fresh_plan_that_produces_no_draft_is_reported_once() {
 }
 
 #[tokio::test]
+async fn a_fresh_plan_parked_on_background_work_waits_for_the_draft() {
+    let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
+    let mut tasks = TaskController::new(runtime_tx);
+    let mut app = app();
+    let plan_store: SharedPlanStore = Arc::new(Mutex::new(crate::plan::PlanDoc::default()));
+    app.fresh_plan_awaiting_draft = true;
+    // A run that parks on background work reports `Idle` while the parked work
+    // can still write the draft, so the verdict has to wait for it.
+    app.task_state = TaskState::Idle;
+    app.waiting_for_background_work = Some(crate::background_wake::BackgroundWorkWait {
+        subscription_id: 1,
+        requester_generation: 1,
+        target_kind: crate::storage::BackgroundWakeTargetKind::BackgroundTask,
+        target_id: "task-1".to_string(),
+        target_incarnation: "inc-1".to_string(),
+        observed_version: 0,
+    });
+
+    assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
+    assert!(app.fresh_plan_awaiting_draft);
+
+    app.waiting_for_background_work = None;
+    assert!(maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
+}
+
+#[tokio::test]
 async fn a_drafted_fresh_plan_clears_the_watch_without_a_warning() {
     let (runtime_tx, _runtime_rx) = mpsc::unbounded_channel();
     let mut tasks = TaskController::new(runtime_tx);

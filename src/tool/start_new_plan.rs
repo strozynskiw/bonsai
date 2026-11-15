@@ -80,10 +80,12 @@ impl StartNewPlanTool {
             .await;
         match outcome {
             // Index 1 is "Start new plan"; anything else keeps coding. The
-            // destructive choice is deliberately the *second* row: a
-            // single-select question opens with the cursor on row 0 and Enter
-            // submits it, so putting the canvas-clearing transition first meant
-            // a reflexive Enter wiped a finished plan (session 407).
+            // destructive choice is deliberately the *second* row: `QuestionPrompt`
+            // is built with `cursor: 0` (tui/run/event_loop.rs) and a single-select
+            // submit answers `Choices(vec![cursor])` (tui/runtime_actions.rs), so
+            // whichever row sits first is what a reflexive Enter picks. Starting a
+            // plan used to be that row, which saved a finished canvas away and
+            // handed the turn to the planning agent (session 407).
             Ok(InteractionOutcome::Question(Some(InteractionAnswer::Choices(indices))))
                 if indices.first() == Some(&1) =>
             {
@@ -167,9 +169,19 @@ mod tests {
         let service = Arc::new(service);
         let tool = StartNewPlanTool::new(service.clone());
         let answerer = tokio::spawn(async move {
-            let InteractionRequest::Question { request_id, .. } = rx.recv().await.unwrap() else {
+            let InteractionRequest::Question {
+                request_id,
+                options,
+                ..
+            } = rx.recv().await.unwrap()
+            else {
                 panic!("expected a question request");
             };
+            // The whole point of the row order: a single-select prompt opens with
+            // the cursor on row 0 and Enter submits it, so row 0 must be the
+            // reversible answer.
+            assert_eq!(options[0].label, "Keep coding");
+            assert_eq!(options[1].label, "Start new plan");
             service
                 .respond(
                     request_id,

@@ -4932,6 +4932,7 @@ async fn maybe_start_new_plan(
                 app.latest_context_report = Some(report);
             }
             if let Err(err) = tasks.start_persona_switch_continuation(agent, sink, persona) {
+                app.fresh_plan_awaiting_draft = false;
                 app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
                 return false;
             }
@@ -4957,6 +4958,9 @@ async fn maybe_start_new_plan(
 /// gone, so staying silent leaves an empty plan the user cannot tell apart from
 /// one still being drafted. The flag is armed by the transition and consumed by
 /// the first idle frame that can see the result.
+///
+/// A run that ended by parking on a peer or background work reports `Idle` too,
+/// and the parked work can still write the draft, so those waits hold the verdict.
 async fn maybe_report_empty_fresh_plan(
     app: &mut AppState,
     tasks: &mut TaskController,
@@ -4965,6 +4969,8 @@ async fn maybe_report_empty_fresh_plan(
     if !app.fresh_plan_awaiting_draft
         || !matches!(app.task_state, TaskState::Idle)
         || tasks.is_busy()
+        || app.waiting_for_peer.is_some()
+        || app.waiting_for_background_work.is_some()
     {
         return false;
     }
@@ -4983,9 +4989,9 @@ async fn maybe_report_empty_fresh_plan(
     app.reduce(AppAction::CommandOutput {
         kind: CommandOutputKind::Status,
         text: "The plan turn ended without writing to the canvas — it is still empty. \
-               The previous plan is in the plan library (/plans). Ask for the draft again, or \
-               check that the plan agent is the one running (Shift+Tab shows its name in the meta \
-               line)."
+               Any earlier plan was saved to the plan library (/plans). Ask for the draft again, \
+               or check that the plan agent is the one running (Shift+Tab shows its name in the \
+               meta line)."
             .to_string(),
     });
     true
