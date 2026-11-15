@@ -604,6 +604,16 @@ impl TaskController {
             } else {
                 let Some(result) = result else {
                     let detail = "Agent run did not produce a result.";
+                    // A run that fails before reaching its own checkpoint still
+                    // has to account for the intervals it opened: the next
+                    // dispatch re-anchors the ledger and clears them, so an
+                    // unrecorded failure loses them instead of deferring them.
+                    persist_task_timing(
+                        session_runtime_budget.as_ref(),
+                        completion.as_ref(),
+                        task_run_id,
+                    )
+                    .await;
                     if let Err(err) = finish_task_run(
                         session_runtime_budget.as_ref(),
                         task_run_id,
@@ -652,6 +662,16 @@ impl TaskController {
                             } else {
                                 TaskTerminalReasonCode::ExecutionFailure
                             };
+                            // Same reason as the missing-result branch above:
+                            // a failed provider call is still a terminal run,
+                            // and its recorded intervals must land before the
+                            // task row does.
+                            persist_task_timing(
+                                session_runtime_budget.as_ref(),
+                                completion.as_ref(),
+                                task_run_id,
+                            )
+                            .await;
                             if let Err(persist_err) = finish_task_run(
                                 session_runtime_budget.as_ref(),
                                 task_run_id,
@@ -1506,7 +1526,7 @@ impl TaskController {
                 // it recorded from the handle the event loop shares. The task
                 // row must not go terminal with the run's intervals unrecorded:
                 // a crash is exactly when the breakdown is worth having.
-                persist_timing_from_agent(
+                persist_timing_from_agent_bounded(
                     self.session_runtime_budget.as_ref(),
                     self.timing_agent.as_ref(),
                     Some(task_run_id),
@@ -1659,12 +1679,60 @@ async fn persist_timing_from_agent(
         return;
     };
     let checkpoint = agent.lock().await.take_timing_checkpoint();
+    persist_timing_checkpoint(runtime, task_run_id, &checkpoint).await;
+}
+
+/// How long the crash path will wait for the shared agent before giving up.
+///
+/// Long enough to lose only to a genuinely stuck holder, short enough that a
+/// crash cannot freeze the UI event loop it runs on.
+const PANIC_CHECKPOINT_LOCK_BUDGET: Duration = Duration::from_millis(250);
+
+/// The same write as [`persist_timing_from_agent`], bounded for the crash path.
+///
+/// This one runs on the UI event loop, in `poll_finished`, where parking behind
+/// another holder of the shared agent would stall the TUI. It takes the lock if
+/// it is free, waits a bounded moment if it is not, and otherwise records that
+/// the breakdown was lost rather than waiting on a lock it does not need.
+async fn persist_timing_from_agent_bounded(
+    runtime: Option<&SessionRuntimeBudget>,
+    agent: Option<&Arc<tokio::sync::Mutex<Agent>>>,
+    task_run_id: Option<TaskRunId>,
+) {
+    let (Some(runtime), Some(agent), Some(task_run_id)) = (runtime, agent, task_run_id) else {
+        return;
+    };
+    let guard = match agent.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => match tokio::time::timeout(PANIC_CHECKPOINT_LOCK_BUDGET, agent.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::warn!(
+                    task_run_id = %task_run_id,
+                    "shared agent stayed locked; the crashed run's timing could not be checkpointed"
+                );
+                return;
+            }
+        },
+    };
+    let checkpoint = guard.take_timing_checkpoint();
+    drop(guard);
+    persist_timing_checkpoint(runtime, task_run_id, &checkpoint).await;
+}
+
+/// Write one run's timing increments, closing nothing: the checkpoint produced
+/// them already. A write failure is logged, never fatal.
+async fn persist_timing_checkpoint(
+    runtime: &SessionRuntimeBudget,
+    task_run_id: TaskRunId,
+    checkpoint: &crate::timing::TimingCheckpoint,
+) {
     if checkpoint.is_empty() {
         return;
     }
     if let Err(error) = runtime
         .storage
-        .checkpoint_task_run_timing(task_run_id, &checkpoint)
+        .checkpoint_task_run_timing(task_run_id, checkpoint)
         .await
     {
         tracing::warn!(
@@ -2912,6 +2980,82 @@ mod tests {
             .await
             .unwrap()
             .expect("a crashed run still has to account for its elapsed interval");
+        assert!(
+            timing.summed_ms(crate::timing::TimingCategory::ModelRequest) > 0,
+            "the open interval must be closed and recorded: {timing:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_still_persists_the_timing_it_recorded() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(sender);
+        tasks.configure_session_runtime_budget(
+            fixture.storage.clone(),
+            Arc::new(tokio::sync::Mutex::new(Some(session_id))),
+            None,
+            Arc::new(SubagentRegistry::new()),
+        );
+        let (completion, _) = completion_context();
+        let ledger = Arc::new(crate::timing::TimingLedger::system(
+            crate::timing::TimingPolicy::ActiveCompute,
+        ));
+        completion
+            .agent
+            .lock()
+            .await
+            .set_timing_ledger(ledger.clone());
+        tasks.set_timing_agent(completion.agent.clone());
+
+        tasks
+            .spawn_agent_task(
+                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+                Vec::new(),
+                TaskRunIntent::Start("Failing task".to_string()),
+                Some(completion),
+                move |_token, _queue| async move {
+                    // A provider failure reaches the controller as `Err`, so the
+                    // run never takes its own checkpoint with these open.
+                    let _model = ledger.begin(
+                        crate::timing::TimingCategory::ModelRequest,
+                        crate::timing::TimingLane::Parent,
+                        Some("model"),
+                        None,
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    Err(anyhow::anyhow!("provider exploded"))
+                },
+            )
+            .unwrap();
+
+        let mut finished = None;
+        for _ in 0..200 {
+            if let Some(kind) = tasks.poll_finished().await {
+                finished = Some(kind);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            finished.is_some(),
+            "the controller must observe the failure"
+        );
+
+        let task = fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.outcome, Some(TaskOutcome::Failed));
+        let timing = fixture
+            .storage
+            .task_run_timing(task.id)
+            .await
+            .unwrap()
+            .expect("a failed run still has to account for its elapsed interval");
         assert!(
             timing.summed_ms(crate::timing::TimingCategory::ModelRequest) > 0,
             "the open interval must be closed and recorded: {timing:?}"
