@@ -88,6 +88,32 @@ pub(super) fn table_widths<T>(total: usize, items: &[T], columns: &[TableColumn<
     widths
 }
 
+/// A cell whose text wraps inside `width` instead of clipping, with continuation
+/// rows indented by `indent` (the columns rendered before it). Tables that carry
+/// prose columns use this so a long description can never be cut mid-word.
+pub(super) fn wrapped_cell(
+    text: &str,
+    width: usize,
+    indent: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    wrap_line(
+        &Line::from(Span::styled(text.to_string(), style)),
+        width.max(1),
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(index, line)| {
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        if index > 0 {
+            spans.push(Span::raw(" ".repeat(indent)));
+        }
+        spans.extend(line.spans);
+        Line::from(spans)
+    })
+    .collect()
+}
+
 /// The bold-muted header row.
 pub(super) fn table_header<T>(columns: &[TableColumn<T>], widths: &[usize]) -> Line<'static> {
     let style = theme::muted().add_modifier(Modifier::BOLD);
@@ -188,5 +214,29 @@ mod tests {
         let row = table_row(&items[0], &cols(), &w, true);
         // Header and row render to the same display width, so columns line up.
         assert_eq!(header.width(), row.width());
+    }
+
+    #[test]
+    fn wrapped_cell_wraps_inside_its_column_and_indents_continuations() {
+        let rows = wrapped_cell(
+            "a description that needs more than a single row",
+            20,
+            8,
+            Style::default(),
+        );
+        assert!(rows.len() > 1, "the text wraps instead of clipping");
+        assert!(
+            rows[0].width() <= 20,
+            "the first row fits its column: {:?}",
+            rows[0].width()
+        );
+        for row in rows.iter().skip(1) {
+            let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.starts_with(&" ".repeat(8)),
+                "continuation rows hang under the cell: {text:?}"
+            );
+            assert!(row.width() <= 20 + 8, "no row past the cell: {text:?}");
+        }
     }
 }

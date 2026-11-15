@@ -150,7 +150,13 @@ fn resolve_question_scroll(app: &mut AppState, area: Rect) {
         return;
     };
 
-    let modal_area = crate::tui::widgets::modal::question_prompt_area(area);
+    let modal_area = crate::tui::widgets::modal::question_prompt_area(
+        area,
+        prompt,
+        origin.as_deref(),
+        options,
+        *multiple,
+    );
     let metrics = crate::tui::widgets::modal::question_prompt_metrics(
         modal_area,
         prompt,

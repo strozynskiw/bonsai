@@ -63,17 +63,30 @@ pub(super) fn command_help_lines(
         Span::styled(truncate_ascii("Action", detail_width), theme::muted()),
     ]));
     for command in commands {
-        lines.push(Line::from(vec![
-            Span::styled(
-                pad_ascii(&command_help_label(command), label_width),
-                theme::body(theme::palette().text),
-            ),
-            Span::raw(" ".repeat(gap_width)),
-            Span::styled(
-                truncate_ascii(command.description, detail_width),
-                theme::dim(),
-            ),
-        ]));
+        let label = Span::styled(
+            pad_ascii(&command_help_label(command), label_width),
+            theme::body(theme::palette().text),
+        );
+        // A zero-width detail column (very narrow pane) keeps the single-line row:
+        // wrapping into zero columns would emit one grapheme per row and bleed into
+        // the neighbouring command column.
+        if detail_width == 0 {
+            lines.push(Line::from(label));
+            continue;
+        }
+        let mut wrapped = wrapped_cell(
+            command.description,
+            detail_width,
+            label_width + gap_width,
+            theme::dim(),
+        )
+        .into_iter();
+        let mut first = vec![label, Span::raw(" ".repeat(gap_width))];
+        if let Some(row) = wrapped.next() {
+            first.extend(row.spans);
+        }
+        lines.push(Line::from(first));
+        lines.extend(wrapped);
     }
     lines
 }

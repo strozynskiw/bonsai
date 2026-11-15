@@ -9,4 +9,5 @@ pub(super) mod support;
 use support::*;
 
 mod details;
+mod invariants;
 mod pickers;

@@ -18,7 +18,7 @@ pub(super) fn render_usage_dashboard(
     dashboard: &UsageDashboard,
     tab: UsageTab,
 ) {
-    let header_lines = vec![usage_tab_bar(tab), Line::from("")];
+    let header_lines = vec![usage_tab_bar(tab)];
     let body_lines = usage_body_lines(dashboard, tab, usage_inner_width(area));
     let footer_lines = vec![footer_hint_line(&[
         ("Tab/1-6", "switch tab"),
@@ -44,8 +44,14 @@ pub(super) fn usage_dashboard_max_scroll(
     dashboard: &UsageDashboard,
     tab: UsageTab,
 ) -> u16 {
+    let header_lines = vec![usage_tab_bar(tab)];
+    let footer_lines = vec![footer_hint_line(&[
+        ("Tab/1-6", "switch tab"),
+        ("Up/Down", "scroll"),
+        ("Esc", "close"),
+    ])];
     let body_lines = usage_body_lines(dashboard, tab, usage_inner_width(area));
-    scrollable_modal_max_scroll(area, 2, 1, &body_lines)
+    scrollable_modal_max_scroll(area, &header_lines, &footer_lines, &body_lines)
 }
 
 /// The frame-inner width the body renders into — the heatmap sizes its week

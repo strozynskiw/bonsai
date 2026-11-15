@@ -33,14 +33,13 @@ pub(super) fn render_list_detail_modal(
     modal: ListDetailModal<'_>,
     render_list: impl FnOnce(&mut Frame, Rect, Rect) -> Vec<Line<'static>>,
 ) {
-    let panel = theme::frame(modal.title, true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    if inner.height == 0 || inner.width == 0 {
+    let regions = list_detail_shell_regions(area);
+    render_modal_chrome(f, area, modal.title, &regions, &[], &modal.footer_lines);
+    if regions.body.height == 0 || regions.body.width == 0 {
         return;
     }
 
-    let (list_area, detail_area, footer_area) = list_detail_regions(area, modal.split);
+    let (list_area, detail_area) = list_detail_panes(regions.body, modal.split);
     let detail_lines = render_list(f, list_area, detail_area);
     render_detail_pane(
         f,
@@ -53,59 +52,58 @@ pub(super) fn render_list_detail_modal(
         &app.modal_body_lines,
         &app.modal_body_rect,
     );
-    f.render_widget(
-        Paragraph::new(modal.footer_lines)
-            .style(theme::panel())
-            .wrap(Wrap { trim: false }),
-        footer_area,
-    );
 }
 
-/// The `(list, detail, footer)` regions of a list-detail modal. The detail-pane
-/// geometry is shared by the renderer and the scroll-clamp helper so they can't
+/// Footer hint rows every list/detail modal pins below its panes. Measurement
+/// helpers split with this same constant, so the scroll clamp always measures
+/// the pane the renderer draws.
+pub(super) const LIST_DETAIL_FOOTER_LINES: usize = 1;
+
+/// The shell geometry of a list/detail modal: the frame and the pinned footer,
+/// with the panes owning the body.
+pub(super) fn list_detail_shell_regions(area: Rect) -> ScrollableRegions {
+    split_scrollable_modal(area, 0, LIST_DETAIL_FOOTER_LINES)
+}
+
+/// The `(list, detail, footer)` regions of a list-detail modal. Both the
+/// renderer and the scroll-clamp helpers derive their panes here so they cannot
 /// drift.
 pub(super) fn list_detail_regions(area: Rect, split: ListDetailSplit) -> (Rect, Rect, Rect) {
-    let inner = theme::frame(String::new(), true).inner(area);
+    let regions = list_detail_shell_regions(area);
+    let (list, detail) = list_detail_panes(regions.body, split);
+    (list, detail, regions.footer)
+}
+
+/// Split the shell body into the list and detail panes.
+pub(super) fn list_detail_panes(body: Rect, split: ListDetailSplit) -> (Rect, Rect) {
+    let split_layout = |constraints: Vec<Constraint>, direction: Direction| {
+        let chunks = Layout::default()
+            .direction(direction)
+            .constraints(constraints)
+            .split(body);
+        (chunks[0], chunks[1])
+    };
     match split {
-        ListDetailSplit::Vertical => {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(44),
-                    Constraint::Min(3),
-                    Constraint::Length(2),
-                ])
-                .split(inner);
-            (chunks[0], chunks[1], chunks[2])
-        }
-        ListDetailSplit::Horizontal => {
-            let body = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(2)])
-                .split(inner);
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-                .split(body[0]);
-            (columns[0], columns[1], body[1])
-        }
+        ListDetailSplit::Vertical => split_layout(
+            vec![Constraint::Percentage(44), Constraint::Min(3)],
+            Direction::Vertical,
+        ),
+        ListDetailSplit::Horizontal => split_layout(
+            vec![Constraint::Percentage(42), Constraint::Percentage(58)],
+            Direction::Horizontal,
+        ),
         ListDetailSplit::Refresh => {
-            let body = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(2)])
-                .split(inner);
-            let panes = if inner.width >= 90 {
-                Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-                    .split(body[0])
+            if body.width >= 90 {
+                split_layout(
+                    vec![Constraint::Percentage(65), Constraint::Percentage(35)],
+                    Direction::Horizontal,
+                )
             } else {
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(3), Constraint::Length(6)])
-                    .split(body[0])
-            };
-            (panes[0], panes[1], body[1])
+                split_layout(
+                    vec![Constraint::Min(3), Constraint::Length(6)],
+                    Direction::Vertical,
+                )
+            }
         }
     }
 }
@@ -139,45 +137,10 @@ pub(super) fn render_detail_pane(
     let detail_frame = theme::frame(title, focused);
     let detail_inner = detail_frame.inner(detail_area);
     body_rect_cache.set(Some(detail_inner));
-    let max_scroll = detail_max_scroll(detail_inner, &detail_lines);
-    let scroll = modal_scroll.min(max_scroll);
 
-    // Apply selection highlighting.
-    let highlighted: Vec<Line<'static>>;
-    let render_lines = if let Some((start, end)) = selection.filter(|(s, e)| s != e) {
-        highlighted = modal_selection_highlight(&detail_lines, start, end);
-        &highlighted
-    } else {
-        &detail_lines
-    };
-
-    // Pre-wrap at the pane width with the same char-granular `wrap_line` the
-    // scroll metrics and the mouse position resolver use — ratatui's word
-    // wrapper breaks at different columns, which would skew selection
-    // hit-testing on wrapped lines.
-    let wrap_width = detail_inner.width.max(1) as usize;
-    let mut wrapped: Vec<Line<'static>> = Vec::new();
-    for line in render_lines {
-        if line.width() <= wrap_width {
-            wrapped.push(line.clone());
-        } else {
-            wrapped.extend(wrap_line(line, wrap_width));
-        }
-    }
-
-    f.render_widget(
-        Paragraph::new(wrapped)
-            .block(detail_frame)
-            .style(theme::panel())
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        detail_area,
-    );
-    if max_scroll > 0 {
-        let mut state = ScrollbarState::new(max_scroll as usize + 1)
-            .position(scroll as usize)
-            .viewport_content_length(detail_inner.height.max(1) as usize);
-        let scrollbar = theme::scrollbar(ScrollbarOrientation::VerticalRight);
-        f.render_stateful_widget(scrollbar, detail_inner, &mut state);
-    }
+    // The pane frame, then the shared body renderer: wrapping, the scroll clamp
+    // and the scrollbar are the same code the shell body uses, so the two can no
+    // longer disagree.
+    f.render_widget(detail_frame, detail_area);
+    render_scroll_body(f, detail_inner, &detail_lines, selection, modal_scroll);
 }

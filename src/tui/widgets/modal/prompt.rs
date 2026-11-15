@@ -1,4 +1,5 @@
 use super::common::*;
+use super::picker_common::pad_ascii;
 use super::*;
 use unicode_width::UnicodeWidthStr;
 
@@ -37,6 +38,16 @@ pub(super) fn approval_footer(scopes: &ApprovalScopes) -> Vec<Line<'static>> {
     vec![footer_hint_line(&hints)]
 }
 
+/// The fixed header above a confirm prompt: the decision, then its subtitles.
+/// Render and scroll metrics share this builder, and the shell owns the blank
+/// row that separates the header from the body.
+pub(super) fn confirm_prompt_header_lines(prompt: &ConfirmPrompt) -> Vec<Line<'static>> {
+    let mut header_lines = Vec::with_capacity(prompt.subtitle.len() + 1);
+    header_lines.push(prompt.heading.clone());
+    header_lines.extend(prompt.subtitle.iter().cloned());
+    header_lines
+}
+
 pub(super) fn render_confirm_prompt(
     f: &mut Frame,
     area: Rect,
@@ -44,10 +55,7 @@ pub(super) fn render_confirm_prompt(
     prompt: &ConfirmPrompt,
     modal_scroll: u16,
 ) {
-    let mut header_lines = Vec::with_capacity(prompt.subtitle.len() + 2);
-    header_lines.push(prompt.heading.clone());
-    header_lines.extend(prompt.subtitle.iter().cloned());
-    header_lines.push(Line::from(""));
+    let header_lines = confirm_prompt_header_lines(prompt);
     render_scrollable_modal(
         f,
         area,
@@ -63,10 +71,7 @@ pub(super) fn render_confirm_prompt(
 }
 
 pub(super) fn confirm_prompt_max_scroll(area: Rect, prompt: &ConfirmPrompt) -> u16 {
-    let mut header_lines = Vec::with_capacity(prompt.subtitle.len() + 2);
-    header_lines.push(prompt.heading.clone());
-    header_lines.extend(prompt.subtitle.iter().cloned());
-    header_lines.push(Line::from(""));
+    let header_lines = confirm_prompt_header_lines(prompt);
     let footer_lines = approval_footer(&prompt.scopes);
     let body = split_scrollable_modal_lines(area, &header_lines, &footer_lines).body;
     detail_max_scroll(body, &prompt.body)
@@ -79,6 +84,17 @@ fn origin_subtitle(origin: Option<&str>) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// The dim line every approval prompt carries, so the popup explains itself even
+/// when no origin is recorded.
+fn approval_subtitle(origin: Option<&str>, explanation: &str) -> Vec<Line<'static>> {
+    let mut subtitle = origin_subtitle(origin);
+    subtitle.push(Line::from(Span::styled(
+        explanation.to_string(),
+        theme::dim(),
+    )));
+    subtitle
+}
+
 pub(super) fn permission_prompt(command: &str, origin: Option<&str>) -> ConfirmPrompt {
     ConfirmPrompt {
         title: "Permission",
@@ -86,7 +102,10 @@ pub(super) fn permission_prompt(command: &str, origin: Option<&str>) -> ConfirmP
             "Allow this command to run?",
             theme::label(theme::palette().tool),
         )),
-        subtitle: origin_subtitle(origin),
+        subtitle: approval_subtitle(
+            origin,
+            "Runs exactly this command, then returns to the conversation.",
+        ),
         body: vec![Line::from(Span::styled(
             command.to_string(),
             theme::body(theme::palette().text),
@@ -100,11 +119,10 @@ pub(super) fn sandbox_escalation_prompt(
     origin: Option<&str>,
     kind: crate::interaction::SandboxEscalationKind,
 ) -> ConfirmPrompt {
-    let mut subtitle = origin_subtitle(origin);
-    subtitle.push(Line::from(Span::styled(
+    let mut subtitle = approval_subtitle(
+        origin,
         "Bypasses filesystem/network confinement for this one run.",
-        theme::dim(),
-    )));
+    );
     if kind == crate::interaction::SandboxEscalationKind::CommandAndSandbox {
         subtitle.push(Line::from(Span::styled(
             "This single decision approves both the command and its sandbox escape.",
@@ -137,7 +155,7 @@ pub(super) fn web_domain_prompt(
     redirected_from: Option<&str>,
     origin: Option<&str>,
 ) -> ConfirmPrompt {
-    let mut subtitle = origin_subtitle(origin);
+    let mut subtitle = approval_subtitle(origin, "Approving stores a rule for this host.");
     if let Some(from) = redirected_from {
         // A cross-domain redirect: make it explicit the user is approving a NEW
         // domain reached via redirect, not the one they originally allowed.
@@ -195,7 +213,7 @@ pub(super) fn extension_tool_prompt(
             theme::label(theme::palette().tool),
         )),
         subtitle: vec![Line::from(Span::styled(
-            format!("from {server}"),
+            format!("from {server} · results come back as untrusted data"),
             theme::dim(),
         ))],
         body,
@@ -216,7 +234,7 @@ pub(super) fn hook_trust_prompt(
             theme::label(theme::palette().tool),
         )),
         subtitle: vec![Line::from(Span::styled(
-            format!("fires on {event} · {action_kind}"),
+            format!("fires on {event} · {action_kind} · runs with your user permissions"),
             theme::dim(),
         ))],
         body: vec![
@@ -245,7 +263,14 @@ pub(super) fn render_question_prompt(
 ) {
     let header_lines = question_prompt_header_lines(prompt, origin);
 
-    let body_lines = question_prompt_body(options, multiple, cursor, selected).lines;
+    let body_lines = question_prompt_body(
+        options,
+        multiple,
+        cursor,
+        selected,
+        theme::frame(String::new(), true).inner(area).width,
+    )
+    .lines;
 
     let footer_lines = question_prompt_footer_lines(multiple);
 
@@ -274,23 +299,54 @@ pub(super) fn question_prompt_footer_lines(multiple: bool) -> Vec<Line<'static>>
     vec![footer_hint_line(&hints)]
 }
 
-/// Builds the fixed header above a question's scrollable options.
-///
-/// Rendering and scroll metrics share this builder so header geometry cannot
-/// drift when a prompt or origin is added.
+/// Builds the fixed header above a question's scrollable options: the one dim
+/// line explaining what the popup is for, then the question itself as the accent
+/// heading. Rendering and scroll metrics share this builder, and the shell owns
+/// the blank row below it.
 pub(super) fn question_prompt_header_lines(
     prompt: &str,
     origin: Option<&str>,
 ) -> Vec<Line<'static>> {
-    let mut header_lines = Vec::new();
-    header_lines.extend(origin_subtitle(origin));
-    header_lines.push(Line::from(Span::styled(
-        prompt.to_string(),
-        theme::body(theme::palette().text),
-    )));
-    header_lines.push(Line::from(""));
-
+    let mut header_lines = if origin.is_some() {
+        origin_subtitle(origin)
+    } else {
+        vec![modal_subtitle("The turn waits for this answer.")]
+    };
+    header_lines.push(modal_heading(prompt.to_string()));
     header_lines
+}
+
+/// Wrapped rows the option body occupies at `inner_width` — measured through
+/// [`question_prompt_body`], the same builder the renderer draws.
+pub(super) fn question_prompt_body_height(
+    options: &[crate::interaction::QuestionOption],
+    multiple: bool,
+    inner_width: u16,
+) -> u16 {
+    let wrap = inner_width.max(1) as usize;
+    question_prompt_body(options, multiple, 0, &[], inner_width)
+        .lines
+        .iter()
+        .fold(0u16, |rows, line| {
+            rows.saturating_add(wrapped_line_count(line, wrap))
+        })
+}
+
+/// Total rows the question prompt draws at `inner_width`: the wrapped header,
+/// the option body and the hint footer, plus the shell chrome. Sizing and
+/// drawing agree because both walk these builders.
+pub(super) fn question_prompt_rows(
+    prompt: &str,
+    origin: Option<&str>,
+    options: &[crate::interaction::QuestionOption],
+    multiple: bool,
+    inner_width: u16,
+) -> u16 {
+    let wrap = inner_width.max(1) as usize;
+    let header = wrapped_lines_height(&question_prompt_header_lines(prompt, origin), wrap) as u16;
+    let body = question_prompt_body_height(options, multiple, inner_width);
+    let footer = wrapped_lines_height(&question_prompt_footer_lines(multiple), wrap) as u16;
+    shell_modal_rows(header, body, footer)
 }
 
 /// The scrollable option body of the question prompt, plus the logical line
@@ -308,40 +364,35 @@ pub(super) fn question_prompt_body(
     multiple: bool,
     cursor: usize,
     selected: &[bool],
+    width: u16,
 ) -> QuestionPromptBody {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut option_offsets: Vec<usize> = Vec::with_capacity(options.len() + 1);
+    // One label column for every option, so the descriptions line up down the
+    // list; `pad_ascii` pads by display width, so CJK labels align too.
     let label_width = options
         .iter()
         .map(|option| UnicodeWidthStr::width(option.label.as_str()))
         .max()
-        .unwrap_or(0)
-        .max(16);
+        .unwrap_or(0);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut option_offsets: Vec<usize> = Vec::with_capacity(options.len() + 1);
     for (idx, opt) in options.iter().enumerate() {
-        option_offsets.push(lines.len());
-        let marker = if idx == cursor { "> " } else { "  " };
-        let checkbox = if multiple {
-            if selected.get(idx).copied().unwrap_or(false) {
-                "[x] "
-            } else {
-                "[ ] "
-            }
-        } else {
-            ""
-        };
-        let prefix = format!("{marker}{checkbox}");
-        let label_padding =
-            " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(opt.label.as_str())));
-        let mut row = vec![
-            Span::styled(prefix, theme::muted()),
-            Span::styled(opt.label.clone(), theme::body(theme::palette().text)),
-            Span::raw(label_padding),
-        ];
-        if !opt.description.is_empty() {
-            row.push(Span::raw("  "));
-            row.push(Span::styled(opt.description.clone(), theme::dim()));
+        if idx > 0 {
+            // One blank row between blocks: this is a decision to read, not a
+            // wall of labels.
+            lines.push(Line::from(""));
         }
-        lines.push(Line::from(row));
+        option_offsets.push(lines.len());
+        let label = pad_ascii(&opt.label, label_width);
+        let description = (!opt.description.trim().is_empty()).then_some(opt.description.as_str());
+        lines.extend(row_block(
+            &RowBlock {
+                selected: idx == cursor,
+                checkbox: multiple.then(|| selected.get(idx).copied().unwrap_or(false)),
+                label: &label,
+                description,
+            },
+            width,
+        ));
     }
     // The trailing sentinel makes `option_offsets[i+1]` the end of option i.
     option_offsets.push(lines.len());

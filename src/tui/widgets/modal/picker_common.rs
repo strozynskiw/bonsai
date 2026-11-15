@@ -305,10 +305,10 @@ pub(super) fn relative_age(updated_at_ms: i64) -> String {
     }
 }
 
-/// Frame + optional header + windowed body + pinned footer — the chrome every
-/// single-column list picker repeats. `body` receives the body rect (so it can
-/// window its rows against the real height with [`visible_picker_rows`]) and
-/// returns the lines to draw; `footer` height tracks `footer.len()`.
+/// Frame + optional header + windowed body + pinned footer, rendered inside the
+/// shared modal shell. `body` receives the body rect (so it can window its rows
+/// against the real height with [`visible_picker_rows`]) and returns the lines
+/// to draw; the footer wraps instead of clipping.
 pub(super) fn render_list_picker(
     f: &mut Frame,
     area: Rect,
@@ -317,50 +317,16 @@ pub(super) fn render_list_picker(
     footer: &[Line<'static>],
     body: impl FnOnce(Rect) -> Vec<Line<'static>>,
 ) {
-    let panel = theme::frame(title, true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    if inner.height == 0 || inner.width == 0 {
+    // The shared shell: one frame, a wrapped header, a scrollable body and a
+    // wrapped footer. The body callback gets the real body rect so it can window
+    // its rows against the height that is actually drawn.
+    let regions = split_scrollable_modal_lines(area, header, footer);
+    render_modal_chrome(f, area, title, &regions, header, footer);
+    if regions.body.height == 0 || regions.body.width == 0 {
         return;
     }
-
-    let footer_height = (footer.len() as u16).max(1);
-    let (body_area, footer_area) = if header.is_empty() {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(footer_height)])
-            .split(inner);
-        (chunks[0], chunks[1])
-    } else {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(header.len() as u16),
-                Constraint::Min(3),
-                Constraint::Length(footer_height),
-            ])
-            .split(inner);
-        f.render_widget(
-            Paragraph::new(header.to_vec())
-                .style(theme::panel())
-                .wrap(Wrap { trim: false }),
-            chunks[0],
-        );
-        (chunks[1], chunks[2])
-    };
-
-    f.render_widget(
-        Paragraph::new(body(body_area))
-            .style(theme::panel())
-            .wrap(Wrap { trim: false }),
-        body_area,
-    );
-    // Footer lines are one-row hints; don't wrap, or a long status line eats the
-    // hint row below it.
-    f.render_widget(
-        Paragraph::new(footer.to_vec()).style(theme::panel()),
-        footer_area,
-    );
+    let body_lines = body(regions.body);
+    render_windowed_body(f, regions.body, &body_lines);
 }
 
 pub(super) fn render_picker_column(
@@ -375,9 +341,28 @@ pub(super) fn render_picker_column(
     } else {
         title.to_string()
     };
-    let panel = Paragraph::new(lines)
-        .block(theme::frame(&title, active))
-        .style(theme::panel());
+    let frame = theme::frame(&title, active);
+    let inner = frame.inner(area);
+    // Wrap each row inside the column with the marker's indent on the
+    // continuation row, so a long label reads as one wrapped entry instead of
+    // being cut at the column edge.
+    let width = inner.width.max(1) as usize;
+    let mut wrapped: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut parts = wrap_line(&line, width).into_iter();
+        if let Some(first) = parts.next() {
+            wrapped.push(first);
+        }
+        for rest in parts {
+            let mut spans = vec![Span::raw(" ".repeat(TABLE_MARKER_WIDTH))];
+            spans.extend(rest.spans);
+            wrapped.push(Line::from(spans));
+        }
+    }
+    let panel = Paragraph::new(wrapped)
+        .block(frame)
+        .style(theme::panel())
+        .wrap(Wrap { trim: false });
     f.render_widget(panel, area);
 }
 
@@ -444,27 +429,15 @@ pub(super) fn visible_weighted_rows(
     lo..hi + 1
 }
 
+/// The picker-facing alias of [`row_line`]: one selectable row with an optional
+/// trailing subtitle, through the shared row vocabulary.
 pub(super) fn picker_line(
     selected: bool,
     label: String,
     subtitle: Option<String>,
     enabled: bool,
 ) -> Line<'static> {
-    let marker = if selected { "> " } else { "  " };
-    let label_style = if enabled {
-        theme::body(theme::palette().text)
-    } else {
-        theme::dim()
-    };
-    let mut spans = vec![
-        Span::styled(marker, theme::muted()),
-        Span::styled(label, label_style),
-    ];
-    if let Some(subtitle) = subtitle {
-        spans.push(Span::styled("  ", theme::dim()));
-        spans.push(Span::styled(subtitle, theme::dim()));
-    }
-    Line::from(spans)
+    row_line(selected, label, subtitle, enabled)
 }
 
 #[cfg(test)]
@@ -570,6 +543,37 @@ mod tests {
         let (lines, (row, col)) = field("", 40);
         assert_eq!(lines.len(), 1);
         assert_eq!((row, col), (0, 9));
+    }
+
+    #[test]
+    fn picker_column_wraps_a_long_label_instead_of_clipping_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let area = Rect::new(0, 0, 26, 6);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test backend should initialize");
+        let lines = vec![picker_line(
+            true,
+            "Xiaomi MiMo Coding Plan".to_string(),
+            None,
+            true,
+        )];
+        terminal
+            .draw(|frame| render_picker_column(frame, area, "Provider", true, lines))
+            .expect("column should render");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Xiaomi"), "first fragment rendered: {text}");
+        assert!(
+            text.contains("Coding") || text.contains("MiMo"),
+            "the label wraps onto a continuation row instead of clipping: {text}"
+        );
     }
 
     #[test]

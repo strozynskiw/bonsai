@@ -10,7 +10,7 @@ use super::*;
 pub(super) fn render_mode_picker(f: &mut Frame, area: Rect, rows: &[ModeRow], cursor: usize) {
     render_list_picker(f, area, "Mode", &[], &mode_picker_footer(), |body_area| {
         if rows.is_empty() {
-            return vec![Line::from(Span::styled("No posture axes", theme::dim()))];
+            return modal_empty_body("No posture axes are defined yet.");
         }
         let cursor = cursor.min(rows.len().saturating_sub(1));
         // Align every value column under a common key width so options line up.

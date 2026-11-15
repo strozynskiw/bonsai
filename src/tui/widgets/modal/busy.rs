@@ -1,6 +1,15 @@
 use super::picker_common::*;
 use super::*;
 
+/// Header every busy-command surface draws: what the popup is for, then the
+/// command it is deciding about.
+fn busy_command_header(input: &str) -> Vec<Line<'static>> {
+    vec![
+        modal_subtitle("The agent is running. Choose what happens to this command."),
+        modal_heading(format!("Command: {input}")),
+    ]
+}
+
 pub(super) fn render_busy_command(
     f: &mut Frame,
     area: Rect,
@@ -8,13 +17,7 @@ pub(super) fn render_busy_command(
     rows: &[crate::tui::event::BusyCommandRow],
     cursor: usize,
 ) {
-    let header = vec![
-        Line::from(Span::styled("The agent is running.", theme::muted())),
-        Line::from(vec![
-            Span::styled("Command: ", theme::muted()),
-            Span::styled(input.to_string(), theme::body(theme::palette().text)),
-        ]),
-    ];
+    let header = busy_command_header(input);
     let footer = vec![footer_hint_line(&[
         ("Up/Down", "move"),
         ("Enter", "select"),
@@ -40,6 +43,21 @@ pub(super) fn render_busy_command(
     });
 }
 
+/// Rows the busy-command popup draws, measured from the same header builder the
+/// renderer uses so a wrapped command is not cut off.
+pub(super) fn busy_command_rows(
+    area: Rect,
+    input: &str,
+    rows: &[crate::tui::event::BusyCommandRow],
+) -> u16 {
+    let wrap = decision_inner_width(area).max(1) as usize;
+    shell_modal_rows(
+        wrapped_lines_height(&busy_command_header(input), wrap) as u16,
+        rows.len().max(1) as u16,
+        1,
+    )
+}
+
 fn busy_command_line(
     selected: bool,
     row: &crate::tui::event::BusyCommandRow,
@@ -47,7 +65,7 @@ fn busy_command_line(
 ) -> Line<'static> {
     let marker = if selected { "> " } else { "  " };
     Line::from(vec![
-        Span::styled(marker, theme::muted()),
+        Span::styled(marker, row_marker_style()),
         Span::styled(
             pad_ascii(row.label, label_width),
             theme::body(theme::palette().text),

@@ -25,7 +25,7 @@ pub(super) fn render_agent_browser(
     ];
     render_list_picker(f, area, "Agents & Subagents", &[], &footer, |body_area| {
         if rows.is_empty() {
-            return vec![Line::from(Span::styled("No definitions", theme::dim()))];
+            return modal_empty_body("No agent or subagent definitions are installed.");
         }
         visible_picker_rows(rows.len(), cursor, picker_body_height(body_area).max(1))
             .map(|idx| {

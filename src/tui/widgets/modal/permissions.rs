@@ -30,14 +30,7 @@ pub(super) fn render_permissions_manager(
     // Search box header, shown only once search is engaged (`/`) or a filter is
     // applied — otherwise the list keeps its full row budget.
     let header = if searching || !filter.is_empty() {
-        let mut spans = vec![
-            Span::styled("Search: ", theme::muted()),
-            Span::styled(filter.to_string(), theme::body(theme::palette().text)),
-        ];
-        if searching {
-            spans.push(Span::styled("▏", theme::muted()));
-        }
-        vec![Line::from(spans)]
+        vec![modal_search_header(filter, searching)]
     } else {
         Vec::new()
     };

@@ -16,15 +16,7 @@ pub(super) fn render_tool_detail(f: &mut Frame, area: Rect, app: &AppState, tool
     let title = format!("Tool: {}", activity.name);
     let body_width = area.width.saturating_sub(6) as usize;
     let body_lines = tool_detail_lines(activity, app.subagent_model_for(tool_id), body_width);
-    // Advertise the diff-preview shortcut only when this tool actually carries
-    // a diff (the action no-ops otherwise).
-    let mut hints: Vec<(&str, &str)> = vec![("Up/Down", "scroll")];
-    if activity.diff.is_some() {
-        hints.push(("d", "diff"));
-    }
-    hints.push(("d-click", "copy word"));
-    hints.push(("Esc", "close"));
-    let footer_lines = vec![footer_hint_line(&hints)];
+    let footer_lines = vec![tool_detail_footer(activity)];
     render_scrollable_modal(
         f,
         area,
@@ -37,6 +29,20 @@ pub(super) fn render_tool_detail(f: &mut Frame, area: Rect, app: &AppState, tool
         &app.modal_body_lines,
         &app.modal_body_rect,
     );
+}
+
+/// The one footer line the tool-detail modal both renders and measures. The
+/// diff shortcut is advertised only when this tool carries a diff (the action
+/// no-ops otherwise), and sharing the builder keeps the measured body height
+/// equal to the drawn one when the hints wrap on a narrow modal.
+pub(super) fn tool_detail_footer(activity: &ToolActivity) -> Line<'static> {
+    let mut hints: Vec<(&str, &str)> = vec![("Up/Down", "scroll")];
+    if activity.diff.is_some() {
+        hints.push(("d", "diff"));
+    }
+    hints.push(("d-click", "copy word"));
+    hints.push(("Esc", "close"));
+    footer_hint_line(&hints)
 }
 
 pub(super) fn render_block_detail(f: &mut Frame, area: Rect, app: &AppState, item_index: usize) {
@@ -257,7 +263,12 @@ pub(super) fn render_diff_preview(f: &mut Frame, area: Rect, app: &AppState, too
 }
 
 pub(super) fn max_diff_preview_scroll(area: Rect, diff: &FileDiff) -> u16 {
-    scrollable_modal_max_scroll(area, 0, 1, &diff_lines(diff))
+    let footer_lines = vec![footer_hint_line(&[
+        ("Up/Down", "scroll"),
+        ("d-click", "copy word"),
+        ("Esc", "close"),
+    ])];
+    scrollable_modal_max_scroll(area, &[], &footer_lines, &diff_lines(diff))
 }
 
 pub(super) fn diff_lines(diff: &FileDiff) -> Vec<Line<'static>> {
@@ -467,7 +478,8 @@ pub(super) fn max_tool_detail_scroll(
         subagent_model,
         area.width.saturating_sub(6) as usize,
     );
-    scrollable_modal_max_scroll(area, 0, 1, &body_lines)
+    let footer_lines = vec![tool_detail_footer(activity)];
+    scrollable_modal_max_scroll(area, &[], &footer_lines, &body_lines)
 }
 
 pub(super) fn tool_argument_lines(activity: &ToolActivity) -> Vec<Line<'static>> {

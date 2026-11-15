@@ -485,6 +485,21 @@ pub(super) fn render_question_to_buffer(area: Rect, scroll: u16) -> ratatui::buf
     terminal.backend().buffer().clone()
 }
 
+/// Render any modal kind through the real `render` dispatch, so one fixture set
+/// can assert the shared chrome invariants without a bespoke helper per popup.
+pub(super) fn render_kind_to_buffer(area: Rect, kind: ModalKind) -> ratatui::buffer::Buffer {
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+    let mut app = AppState::new("codex", "gpt-5".to_string(), ".".to_string(), None);
+    app.modal = Some(kind);
+    terminal
+        .draw(|frame| {
+            render(frame, area, &app);
+        })
+        .expect("modal should render");
+    terminal.backend().buffer().clone()
+}
+
 pub(super) fn render_sessions_to_buffer(
     area: Rect,
     sessions: &[crate::storage::SessionSummary],

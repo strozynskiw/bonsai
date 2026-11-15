@@ -9,9 +9,9 @@ use crate::tui::app::AppState;
 use crate::tui::memory_manager::{MemoryAddWizardState, MemoryWizardField, MemoryWizardStep};
 use crate::tui::theme;
 
-use super::common::footer_hint_line;
+use super::common::{footer_hint_line, render_modal_chrome};
 use super::list_detail::render_detail_pane;
-use super::list_detail::{ListDetailSplit, list_detail_regions};
+use super::list_detail::{ListDetailSplit, list_detail_panes, list_detail_shell_regions};
 use super::picker_common::{
     FieldCaret, FormField, form_field_lines, picker_body_height, visible_picker_rows,
 };
@@ -46,12 +46,18 @@ pub(super) fn render_memory_manager(
     rows: &[MemoryEntry],
     cursor: usize,
 ) {
-    let panel = theme::frame(MANAGER_TITLE, true).style(theme::panel());
-    f.render_widget(Clear, area);
-    f.render_widget(panel, area);
-
-    let (list_area, detail_area, footer_area) =
-        list_detail_regions(area, ListDetailSplit::Horizontal);
+    let footer_lines = vec![footer_hint_line(&[
+        ("Up/Down", "move"),
+        ("PgUp/PgDn", "page detail"),
+        ("Space", "enable/disable"),
+        ("a", "add"),
+        ("e/Enter", "edit"),
+        ("d/Delete", "delete"),
+        ("Esc", "close"),
+    ])];
+    let shell = list_detail_shell_regions(area);
+    render_modal_chrome(f, area, MANAGER_TITLE, &shell, &[], &footer_lines);
+    let (list_area, detail_area) = list_detail_panes(shell.body, ListDetailSplit::Horizontal);
     if list_area.height == 0 || detail_area.height == 0 {
         return;
     }
@@ -85,20 +91,6 @@ pub(super) fn render_memory_manager(
     } else {
         super::common::render_modal_notice(f, detail_area, "Entry", "No memory entries saved.");
     }
-
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("PgUp/PgDn", "page detail"),
-            ("Space", "enable/disable"),
-            ("a", "add"),
-            ("e/Enter", "edit"),
-            ("d/Delete", "delete"),
-            ("Esc", "close"),
-        ]))
-        .style(theme::panel()),
-        footer_area,
-    );
 }
 
 pub(super) fn render_memory_wizard(

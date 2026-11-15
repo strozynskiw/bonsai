@@ -1,5 +1,6 @@
 use super::picker_common::*;
 use super::*;
+use unicode_width::UnicodeWidthStr;
 
 pub(super) fn render_session_picker(
     f: &mut Frame,
@@ -42,10 +43,7 @@ pub(super) fn render_plan_picker(
     query: &str,
     cursor: usize,
 ) {
-    let header = vec![Line::from(vec![
-        Span::styled("Search: ", theme::muted()),
-        Span::styled(query.to_string(), theme::body(theme::palette().text)),
-    ])];
+    let header = vec![modal_search_header(query, false)];
     let footer = vec![
         Line::from(Span::styled("Current project only", theme::dim())),
         footer_hint_line(&[
@@ -81,181 +79,244 @@ pub(super) fn render_plan_picker(
     });
 }
 
-pub(super) fn render_plan_open_choice(
+/// One `row_block` per decision option, with a blank row between blocks. Labels
+/// are padded to a shared column so the descriptions line up down the popup.
+pub(super) fn decision_body(
+    options: &[(String, String)],
+    cursor: usize,
+    inner_width: u16,
+) -> Vec<Line<'static>> {
+    let label_width = options
+        .iter()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (index, (label, description)) in options.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        let padded = pad_ascii(label, label_width);
+        lines.extend(row_block(
+            &RowBlock {
+                selected: index == cursor,
+                checkbox: None,
+                label: &padded,
+                description: Some(description.as_str()),
+            },
+            inner_width,
+        ));
+    }
+    lines
+}
+
+/// The width a decision popup's content wraps at.
+pub(super) fn decision_inner_width(area: Rect) -> u16 {
+    ModalFootprint::Prompt
+        .width(area)
+        .saturating_sub(MODAL_FRAME_COLUMNS)
+}
+
+/// Rows a decision popup draws, so `modal_area` sizes it from the same builders
+/// the renderer uses.
+pub(super) fn decision_rows(
+    header: &[Line<'static>],
+    body: &[Line<'static>],
+    footer: &[Line<'static>],
+    inner_width: u16,
+) -> u16 {
+    let wrap = inner_width.max(1) as usize;
+    let body_rows = body.iter().fold(0u16, |rows, line| {
+        rows.saturating_add(wrapped_line_count(line, wrap))
+    });
+    shell_modal_rows(
+        wrapped_lines_height(header, wrap) as u16,
+        body_rows,
+        wrapped_lines_height(footer, wrap) as u16,
+    )
+}
+
+/// Max scroll the shell clamp needs for a decision popup body, so a decision the
+/// terminal is too short for is still reachable (wheel / page keys).
+pub(super) fn decision_max_scroll(
+    modal: Rect,
+    layout: (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>),
+) -> u16 {
+    let (header, body, footer) = layout;
+    let regions = split_scrollable_modal_lines(modal, &header, &footer);
+    detail_max_scroll(regions.body, &body)
+}
+
+/// Draw a decision popup through the shared shell.
+pub(super) fn render_decision_popup(
     f: &mut Frame,
     area: Rect,
-    plan: &crate::storage::SavedPlanSummary,
-    cursor: usize,
+    app: &AppState,
+    title: &str,
+    layout: (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>),
 ) {
-    let panel = theme::frame("Open Plan", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                plan.title.clone(),
-                theme::body(theme::palette().text),
-            )),
-            Line::from(Span::styled(
-                match plan.source_session_id {
-                    Some(source) => format!("Saved from session #{source}"),
-                    None => "Source session no longer exists".to_string(),
-                },
-                theme::dim(),
-            )),
-        ])
-        .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-
-    let options = [
-        PlanOpenMode::CleanContext,
-        PlanOpenMode::ResumeSourceSession,
-    ];
-    let cursor = cursor.min(options.len().saturating_sub(1));
-    let lines = options
-        .iter()
-        .enumerate()
-        .map(|(idx, mode)| {
-            picker_line(
-                idx == cursor,
-                mode.label().to_string(),
-                Some(mode.description().to_string()),
-                true,
-            )
-        })
-        .collect::<Vec<_>>();
-    f.render_widget(
-        Paragraph::new(lines)
-            .style(theme::panel())
-            .wrap(Wrap { trim: false }),
-        chunks[1],
-    );
-
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[("Enter", "open"), ("Esc", "cancel")])),
-        chunks[2],
+    let (header, body, footer) = layout;
+    render_scrollable_modal(
+        f,
+        area,
+        title,
+        &header,
+        &body,
+        &footer,
+        app.modal_scroll,
+        app.modal_selection.map(|s| s.range()),
+        &app.modal_body_lines,
+        &app.modal_body_rect,
     );
 }
 
-pub(super) fn render_start_plan_choice(f: &mut Frame, area: Rect, cursor: usize) {
-    let panel = theme::frame("Start Plan", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-    f.render_widget(
-        Paragraph::new("Choose the context for implementation.").style(theme::dim()),
-        chunks[0],
-    );
-    let options = [StartPlanMode::CleanContext, StartPlanMode::KeepContext];
+/// Header, body and footer of the Open-Plan choice.
+pub(super) fn plan_open_choice_layout(
+    plan: &crate::storage::SavedPlanSummary,
+    cursor: usize,
+    inner_width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let source = match plan.source_session_id {
+        Some(source) => format!("Saved from session #{source}"),
+        None => "Source session no longer exists".to_string(),
+    };
+    let header = vec![
+        modal_subtitle(format!("{} · {source}", plan.title)),
+        modal_heading("How should this plan be opened?"),
+    ];
+    let options = [
+        PlanOpenMode::CleanContext,
+        PlanOpenMode::ResumeSourceSession,
+    ]
+    .iter()
+    .map(|mode| (mode.label().to_string(), mode.description().to_string()))
+    .collect::<Vec<_>>();
     let cursor = cursor.min(options.len().saturating_sub(1));
-    let lines = options
+    let body = decision_body(&options, cursor, inner_width);
+    let footer = vec![footer_hint_line(&[("Enter", "open"), ("Esc", "cancel")])];
+    (header, body, footer)
+}
+
+pub(super) fn plan_open_choice_rows(
+    area: Rect,
+    plan: &crate::storage::SavedPlanSummary,
+    cursor: usize,
+) -> u16 {
+    let inner_width = decision_inner_width(area);
+    let (header, body, footer) = plan_open_choice_layout(plan, cursor, inner_width);
+    decision_rows(&header, &body, &footer, inner_width)
+}
+
+pub(super) fn render_plan_open_choice(
+    f: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    plan: &crate::storage::SavedPlanSummary,
+    cursor: usize,
+) {
+    let layout = plan_open_choice_layout(plan, cursor, decision_inner_width(area));
+    render_decision_popup(f, area, app, "Open Plan", layout);
+}
+
+/// Header, body and footer of the Start-Plan choice.
+pub(super) fn start_plan_choice_layout(
+    cursor: usize,
+    inner_width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let header = vec![
+        modal_subtitle("The plan canvas is ready to implement."),
+        modal_heading("Which context should implementation use?"),
+    ];
+    let options = [StartPlanMode::CleanContext, StartPlanMode::KeepContext]
         .iter()
-        .enumerate()
-        .map(|(idx, mode)| {
-            picker_line(
-                idx == cursor,
-                mode.label().to_string(),
-                Some(mode.description().to_string()),
-                true,
-            )
-        })
+        .map(|mode| (mode.label().to_string(), mode.description().to_string()))
         .collect::<Vec<_>>();
-    f.render_widget(Paragraph::new(lines).style(theme::panel()), chunks[1]);
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[("Enter", "start"), ("Esc", "cancel")])),
-        chunks[2],
+    let body = decision_body(
+        &options,
+        cursor.min(options.len().saturating_sub(1)),
+        inner_width,
     );
+    let footer = vec![footer_hint_line(&[("Enter", "start"), ("Esc", "cancel")])];
+    (header, body, footer)
+}
+
+pub(super) fn start_plan_choice_rows(area: Rect, cursor: usize) -> u16 {
+    let inner_width = decision_inner_width(area);
+    let (header, body, footer) = start_plan_choice_layout(cursor, inner_width);
+    decision_rows(&header, &body, &footer, inner_width)
+}
+
+pub(super) fn render_start_plan_choice(f: &mut Frame, area: Rect, app: &AppState, cursor: usize) {
+    let layout = start_plan_choice_layout(cursor, decision_inner_width(area));
+    render_decision_popup(f, area, app, "Start Plan", layout);
+}
+
+/// Header, body and footer of the session-budget alert.
+pub(super) fn budget_warning_layout(
+    usage: crate::run_budget::SessionBudgetUsage,
+    cursor: usize,
+    inner_width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let header = vec![
+        modal_subtitle("A configured cumulative alert has been reached."),
+        modal_heading("Continue this submission?"),
+    ];
+    let mut body = vec![section_header("Usage")];
+    body.push(Line::from(format!(
+        "Active clock · {} · {} spent · {} waiting",
+        usage.clock_label(),
+        super::usage::format_duration_units(i64::try_from(usage.active_run_ms).unwrap_or(i64::MAX)),
+        super::usage::format_duration_units(i64::try_from(usage.waiting_ms).unwrap_or(i64::MAX)),
+    )));
+    // Reached axes first, then the upcoming ones, so the decision to continue is
+    // made with the next threshold visible — not just the crossed one.
+    let mut alerts = usage.alert_states();
+    alerts.sort_by_key(|alert| !alert.is_reached());
+    for alert in alerts {
+        body.push(Line::from(format_session_alert(alert, usage.clock_label())));
+    }
+    body.push(Line::from(""));
+    body.extend(decision_body(
+        &[
+            (
+                "Go back".to_string(),
+                "Keep the composer unchanged".to_string(),
+            ),
+            (
+                "Continue once".to_string(),
+                "Run only this retained submission".to_string(),
+            ),
+        ],
+        cursor.min(1),
+        inner_width,
+    ));
+    body.push(Line::from(""));
+    body.push(modal_subtitle(
+        "Raise or disable thresholds in /settings under Session alerts.",
+    ));
+    let footer = vec![footer_hint_line(&[("Enter", "choose"), ("Esc", "go back")])];
+    (header, body, footer)
+}
+
+pub(super) fn budget_warning_rows(
+    area: Rect,
+    usage: crate::run_budget::SessionBudgetUsage,
+    cursor: usize,
+) -> u16 {
+    let inner_width = decision_inner_width(area);
+    let (header, body, footer) = budget_warning_layout(usage, cursor, inner_width);
+    decision_rows(&header, &body, &footer, inner_width)
 }
 
 pub(super) fn render_budget_warning(
     f: &mut Frame,
     area: Rect,
+    app: &AppState,
     usage: crate::run_budget::SessionBudgetUsage,
     cursor: usize,
 ) {
-    let panel = theme::frame("Session budget alert", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(6),
-            Constraint::Length(2),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-    let mut lines = vec![
-        Line::from("A configured cumulative alert has been reached. Current usage:"),
-        // Name the clock before the numbers: under the default policy the active
-        // time beside these thresholds is compute, not wall time, and the split
-        // is what makes the decision to continue an informed one.
-        Line::from(format!(
-            "Active clock · {} · {} spent · {} waiting",
-            usage.clock_label(),
-            super::usage::format_duration_units(
-                i64::try_from(usage.active_run_ms).unwrap_or(i64::MAX)
-            ),
-            super::usage::format_duration_units(
-                i64::try_from(usage.waiting_ms).unwrap_or(i64::MAX)
-            ),
-        )),
-    ];
-    // Reached axes first, then the upcoming ones, so the decision to continue
-    // is made with the next threshold visible — not just the crossed one.
-    let mut alerts = usage.alert_states();
-    alerts.sort_by_key(|alert| !alert.is_reached());
-    for alert in alerts {
-        lines.push(Line::from(format_session_alert(alert, usage.clock_label())));
-    }
-    lines.push(Line::from(
-        "Raise or disable thresholds in /settings under Session alerts.",
-    ));
-    f.render_widget(
-        Paragraph::new(lines)
-            .style(theme::panel())
-            .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-    let options = [
-        ("Go back", "Keep the composer unchanged"),
-        ("Continue once", "Run only this retained submission"),
-    ];
-    let cursor = cursor.min(1);
-    let lines = options
-        .iter()
-        .enumerate()
-        .map(|(idx, (label, detail))| {
-            picker_line(
-                idx == cursor,
-                (*label).to_string(),
-                Some((*detail).to_string()),
-                true,
-            )
-        })
-        .collect::<Vec<_>>();
-    f.render_widget(Paragraph::new(lines).style(theme::panel()), chunks[1]);
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[("Enter", "choose"), ("Esc", "go back")])),
-        chunks[2],
-    );
+    let layout = budget_warning_layout(usage, cursor, decision_inner_width(area));
+    render_decision_popup(f, area, app, "Session budget alert", layout);
 }
 
 fn format_session_alert(alert: crate::run_budget::SessionBudgetAlertState, clock: &str) -> String {

@@ -4,6 +4,15 @@ use super::*;
 /// Label-column pad for the endpoint-auth form fields.
 const AUTH_LABEL_PAD: usize = 8;
 
+/// The header every API-key form draws: what the popup is for, then the provider
+/// being authorized.
+fn api_key_header(provider_id: &str, explanation: &str) -> Vec<Line<'static>> {
+    vec![
+        modal_subtitle(explanation),
+        modal_heading(format!("Authorize {provider_id}")),
+    ]
+}
+
 pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, provider_id: &str) {
     if app.provider_uses_endpoint_auth_form(provider_id) {
         render_openai_compatible_prompt(f, area, app, provider_id);
@@ -14,9 +23,7 @@ pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, p
         return;
     }
 
-    let block = theme::frame("Authorize Provider", true);
-    let inner = block.inner(area);
-
+    let inner = theme::frame(String::new(), true).inner(area);
     let (field_lines, (cursor_row, cursor_col)) = wrapped_input_field(
         vec![Span::styled("API key: ", theme::muted())],
         &"*".repeat(app.provider_auth_form.api_key_input.chars().count()),
@@ -24,39 +31,37 @@ pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, p
         inner.width,
     );
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("Provider: {provider_id}"),
-            theme::body(theme::palette().text),
-        )),
-        Line::from(""),
-    ];
-    let field_start = lines.len() as u16;
-    lines.extend(field_lines);
-    lines.push(Line::from(""));
-    lines.push(kv(
+    let header = api_key_header(
+        provider_id,
+        "The key is stored locally and sent only to this provider.",
+    );
+    let mut body = field_lines;
+    body.push(Line::from(""));
+    body.push(kv(
         "Store",
         app.provider_auth_form.credential_persistence.label(),
         theme::palette().text,
     ));
-    lines.push(Line::from(""));
-    lines.push(footer_hint_line(&[
+    let footer = vec![footer_hint_line(&[
         ("Ctrl+P", "storage"),
         ("Enter", "submit"),
         ("Esc", "cancel"),
-    ]));
+    ])];
 
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .style(theme::panel())
-            .wrap(Wrap { trim: false }),
+    let body_rect = render_form_shell(
+        f,
         area,
+        "Authorize Provider",
+        &header,
+        &body,
+        &footer,
+        &app.modal_body_lines,
+        &app.modal_body_rect,
     );
     f.set_cursor_position(clamp_cursor(
         inner,
-        inner.x + cursor_col,
-        inner.y + field_start + cursor_row,
+        body_rect.x + cursor_col,
+        body_rect.y + cursor_row,
     ));
 }
 
@@ -245,7 +250,7 @@ mod tests {
             .draw(|frame| render_api_key_prompt(frame, area, &app, "codex"))
             .expect("API-key form should render");
         let text = rendered_text(&terminal);
-        assert!(text.contains("Provider: codex"));
+        assert!(text.contains("Authorize codex"));
         assert!(text.contains("API key: ******"));
         assert!(!text.contains("secret"));
         assert!(text.contains("protected file"));
@@ -359,10 +364,7 @@ pub(super) fn render_authorize_provider_picker(
     query: &str,
     cursor: usize,
 ) {
-    let header = vec![Line::from(vec![
-        Span::styled("Search: ", theme::muted()),
-        Span::styled(query.to_string(), theme::body(theme::palette().text)),
-    ])];
+    let header = vec![modal_search_header(query, false)];
     let footer = vec![
         Line::from(vec![
             Span::styled("Legend: ", theme::dim()),
@@ -418,10 +420,7 @@ pub(super) fn render_unauthorize_provider_picker(
     query: &str,
     cursor: usize,
 ) {
-    let header = vec![Line::from(vec![
-        Span::styled("Search: ", theme::muted()),
-        Span::styled(query.to_string(), theme::body(theme::palette().text)),
-    ])];
+    let header = vec![modal_search_header(query, false)];
     let footer = vec![footer_hint_line(&[
         ("Type", "search"),
         ("Up/Down", "move"),
@@ -496,29 +495,41 @@ pub(super) fn render_unauthorize_confirm(f: &mut Frame, area: Rect, display_name
     );
 }
 
-pub(super) fn render_review_scope_picker(f: &mut Frame, area: Rect, cursor: usize) {
-    let footer = vec![
-        Line::from(vec![Span::styled(
-            "Choose which changes to review.",
-            theme::dim(),
-        )]),
-        footer_hint_line(&[("Up/Down", "move"), ("Enter", "review"), ("Esc", "cancel")]),
+/// Header, body and footer of the review-scope choice.
+pub(super) fn review_scope_layout(
+    cursor: usize,
+    inner_width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let header = vec![
+        modal_subtitle("Choose which changes to review."),
+        modal_heading("Which changes should the review cover?"),
     ];
-    render_list_picker(f, area, "Review", &[], &footer, |body_area| {
-        let scopes = crate::agent::ReviewScope::all();
-        let cursor = cursor.min(scopes.len().saturating_sub(1));
-        visible_picker_rows(scopes.len(), cursor, picker_body_height(body_area))
-            .map(|idx| {
-                let scope = scopes[idx];
-                picker_line(
-                    idx == cursor,
-                    scope.label().to_string(),
-                    Some(scope.description().to_string()),
-                    true,
-                )
-            })
-            .collect()
-    });
+    let options = crate::agent::ReviewScope::all()
+        .iter()
+        .map(|scope| (scope.label().to_string(), scope.description().to_string()))
+        .collect::<Vec<_>>();
+    let body = decision_body(
+        &options,
+        cursor.min(options.len().saturating_sub(1)),
+        inner_width,
+    );
+    let footer = vec![footer_hint_line(&[
+        ("Up/Down", "move"),
+        ("Enter", "review"),
+        ("Esc", "cancel"),
+    ])];
+    (header, body, footer)
+}
+
+pub(super) fn review_scope_rows(area: Rect, cursor: usize) -> u16 {
+    let inner_width = decision_inner_width(area);
+    let (header, body, footer) = review_scope_layout(cursor, inner_width);
+    decision_rows(&header, &body, &footer, inner_width)
+}
+
+pub(super) fn render_review_scope_picker(f: &mut Frame, area: Rect, app: &AppState, cursor: usize) {
+    let layout = review_scope_layout(cursor, decision_inner_width(area));
+    render_decision_popup(f, area, app, "Review", layout);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

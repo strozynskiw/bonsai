@@ -993,7 +993,7 @@ fn permission_prompt_scrolls_long_command() {
 fn question_prompt_scroll_changes_visible_options() {
     let area = Rect::new(0, 0, 60, 12);
     let top = render_question_to_buffer(area, 0);
-    let scrolled = render_question_to_buffer(area, 12);
+    let scrolled = render_question_to_buffer(area, u16::MAX);
     let top_text = (0..area.height)
         .map(|y| row_text(&top, y))
         .collect::<Vec<_>>()
@@ -1005,8 +1005,15 @@ fn question_prompt_scroll_changes_visible_options() {
 
     assert!(top_text.contains("Option 0"));
     assert!(!top_text.contains("Option 8"));
-    assert!(scrolled_text.contains("Option 8"));
+    // The last options are only reachable by scrolling, and the first ones are
+    // gone once they are. Which indices land on the fold is the body height's
+    // business (the shell reserves a header gap), so assert the reveal itself.
     assert!(!scrolled_text.contains("Option 0"));
+    assert!(
+        (1..12).any(|index| scrolled_text.contains(&format!("Option {index}"))
+            && !top_text.contains(&format!("Option {index}"))),
+        "scrolling must reveal options below the fold",
+    );
 }
 
 #[test]
@@ -1052,7 +1059,61 @@ fn question_prompt_last_option_visible_at_max_scroll() {
 }
 
 #[test]
-fn question_prompt_metrics_counts_origin_line() {
+fn question_prompt_height_tracks_the_option_count() {
+    let area = Rect::new(0, 0, 100, 30);
+    let options = |count: usize| {
+        (0..count)
+            .map(|index| crate::interaction::QuestionOption {
+                label: format!("Option {index}"),
+                description: "A short description".to_string(),
+                preselected: false,
+            })
+            .collect::<Vec<_>>()
+    };
+    let three = question_prompt_area(area, "Pick one", None, &options(3), false);
+    let twelve = question_prompt_area(area, "Pick one", None, &options(12), false);
+    assert!(
+        three.height < twelve.height,
+        "the popup grows with the option count"
+    );
+    let fitted = question_prompt_metrics(three, "Pick one", None, &options(3), false, 0);
+    assert_eq!(
+        fitted.max_scroll, 0,
+        "three options fit without scrolling (body {})",
+        fitted.body_height
+    );
+    let capped = question_prompt_metrics(twelve, "Pick one", None, &options(12), false, 11);
+    assert!(
+        capped.max_scroll > 0,
+        "twelve options hit the tier cap and scroll instead"
+    );
+}
+
+#[test]
+fn start_plan_choice_explains_itself_and_pins_its_hints() {
+    let area = Rect::new(0, 0, 80, 24);
+    let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+    app.modal = Some(ModalKind::Picker(
+        crate::tui::event::PickerModal::StartPlanChoice { cursor: 1 },
+    ));
+    let buffer = render_full_modal(area, &app);
+    let text = buffer_text(&buffer);
+    assert!(
+        text.contains("The plan canvas is ready to implement."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Which context should implementation use?"),
+        "{text}"
+    );
+    for mode in [StartPlanMode::CleanContext, StartPlanMode::KeepContext] {
+        assert!(text.contains(mode.label()), "{text}");
+    }
+    assert!(text.contains("Enter") && text.contains("start"), "{text}");
+}
+
+#[test]
+fn question_prompt_metrics_uses_the_drawn_header_geometry() {
     let area = Rect::new(0, 0, 60, 12);
     let options = (0..6)
         .map(|index| crate::interaction::QuestionOption {
@@ -1062,19 +1123,28 @@ fn question_prompt_metrics_counts_origin_line() {
         })
         .collect::<Vec<_>>();
 
-    let without_origin = question_prompt_metrics(area, "Pick one", None, &options, false, 0);
-    let with_origin = question_prompt_metrics(
+    // The measured body is the drawn body, whatever the header holds.
+    for origin in [None, Some("subagent explore (sub-1)")] {
+        let metrics = question_prompt_metrics(area, "Pick one", origin, &options, false, 0);
+        let header = question_prompt_header_lines("Pick one", origin);
+        let footer = question_prompt_footer_lines(false);
+        let body = split_scrollable_modal_lines(area, &header, &footer).body;
+        assert_eq!(metrics.body_height, body.height, "origin {origin:?}");
+    }
+
+    // An origin that wraps past the frame costs a header row, not body rows.
+    let short = question_prompt_metrics(area, "Pick one", Some("sub-1"), &options, false, 0);
+    let long = question_prompt_metrics(
         area,
         "Pick one",
-        Some("subagent explore (sub-1)"),
+        Some("subagent explore with a deliberately long origin that wraps past the frame"),
         &options,
         false,
         0,
     );
-
-    assert_eq!(
-        with_origin.body_height.saturating_add(1),
-        without_origin.body_height
+    assert!(
+        long.body_height < short.body_height,
+        "a wrapped origin should shorten the body by a row"
     );
 }
 
@@ -1280,13 +1350,41 @@ fn block_detail_renders_markdown_and_scrolls() {
 }
 
 #[test]
+fn review_scope_decisions_stay_reachable_at_every_size() {
+    let scopes = crate::agent::ReviewScope::all();
+    let last = scopes.len() - 1;
+    let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+    app.modal = Some(ModalKind::Picker(
+        crate::tui::event::PickerModal::ReviewScopePicker { cursor: last },
+    ));
+
+    // A roomy terminal shows every scope with no scroll: the measured height is
+    // the content height.
+    let roomy = Rect::new(0, 0, 80, 24);
+    assert_eq!(max_modal_scroll(&app, roomy), Some(0), "all scopes fit");
+
+    // A short terminal keeps the decision reachable by scrolling instead of
+    // clipping the selected scope behind the footer.
+    let short = Rect::new(0, 0, 60, 14);
+    let max = max_modal_scroll(&app, short).expect("review scope scroll metrics");
+    assert!(max > 0, "a short terminal needs to scroll");
+    app.modal_scroll = max;
+    let text = buffer_text(&render_full_modal(short, &app));
+    assert!(
+        text.contains(scopes[last].label()),
+        "the last scope stays reachable:\n{text}"
+    );
+}
+
+#[test]
 fn review_scope_picker_renders_all_options_and_marks_selected() {
-    let area = Rect::new(0, 0, 60, 12);
+    let area = Rect::new(0, 0, 60, 16);
+    let app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     terminal
         .draw(|frame| {
-            render_review_scope_picker(frame, area, 1);
+            render_review_scope_picker(frame, area, &app, 1);
         })
         .expect("review scope picker should render");
     let buffer = terminal.backend().buffer().clone();
@@ -1444,7 +1542,11 @@ fn confirm_prompt_specs_render_expected_content() {
     assert!(
         rendered_lines_text(std::slice::from_ref(&direct.heading)).contains("Allow web access")
     );
-    assert!(direct.subtitle.is_empty());
+    // Every approval prompt explains itself even with no origin recorded.
+    assert!(
+        rendered_lines_text(&direct.subtitle).contains("stores a rule for this host"),
+        "the plain web prompt carries its one-line explanation"
+    );
     let redirected = web_domain_prompt("evil.com", "https://evil.com/x", Some("good.com"), None);
     assert!(
         rendered_lines_text(&redirected.subtitle).contains("Redirected from good.com"),

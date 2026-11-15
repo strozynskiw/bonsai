@@ -8433,7 +8433,13 @@ fn question_move_keeps_selected_option_visible_in_compact_modal() {
     else {
         panic!("question modal should still be open");
     };
-    let modal_area = crate::tui::widgets::modal::question_prompt_area(area);
+    let modal_area = crate::tui::widgets::modal::question_prompt_area(
+        area,
+        prompt,
+        origin.as_deref(),
+        options,
+        *multiple,
+    );
     let metrics = crate::tui::widgets::modal::question_prompt_metrics(
         modal_area,
         prompt,
@@ -8492,7 +8498,13 @@ fn question_move_keeps_last_option_visible_in_tiny_modal() {
     else {
         panic!("question modal should still be open");
     };
-    let modal_area = crate::tui::widgets::modal::question_prompt_area(area);
+    let modal_area = crate::tui::widgets::modal::question_prompt_area(
+        area,
+        prompt,
+        origin.as_deref(),
+        options,
+        *multiple,
+    );
     let metrics = crate::tui::widgets::modal::question_prompt_metrics(
         modal_area,
         prompt,

@@ -54,6 +54,7 @@ mod picker_common;
 mod prompt;
 mod providers;
 mod refresh;
+mod rows;
 mod sandbox;
 mod saved;
 mod settings;
@@ -91,6 +92,7 @@ use permissions::render_permissions_manager;
 use prompt::*;
 use providers::*;
 use refresh::*;
+use rows::*;
 use sandbox::*;
 use saved::*;
 use settings::*;
@@ -186,14 +188,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             cursor,
         }) => render_plan_picker(f, modal, plans, query, *cursor),
         ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice { plan, cursor }) => {
-            render_plan_open_choice(f, modal, plan, *cursor)
+            render_plan_open_choice(f, modal, app, plan, *cursor)
         }
         ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor }) => {
-            render_start_plan_choice(f, modal, *cursor)
+            render_start_plan_choice(f, modal, app, *cursor)
         }
         ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning {
             usage, cursor, ..
-        }) => render_budget_warning(f, modal, *usage, *cursor),
+        }) => render_budget_warning(f, modal, app, *usage, *cursor),
         ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { plan }) => {
             render_plan_delete_confirm(f, modal, plan)
         }
@@ -205,7 +207,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             title,
         }) => render_plan_discard_confirm(f, modal, *saved_plan_id, title),
         ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor }) => {
-            render_review_scope_picker(f, modal, *cursor)
+            render_review_scope_picker(f, modal, app, *cursor)
         }
         ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { state }) => {
             render_local_model_wizard(f, modal, state)

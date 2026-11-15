@@ -10,12 +10,122 @@ use super::tasks::*;
 use super::usage::*;
 use super::*;
 
-/// Four modal width tiers, so a new modal picks an existing footprint instead
-/// of inventing a twelfth width percentage. Heights stay per-modal.
-const MODAL_WIDTH_PICKER: u16 = 62; // single-column pickers
-const MODAL_WIDTH_PROMPT: u16 = 66; // confirms and small dialogs
-const MODAL_WIDTH_FORM: u16 = 80; // wizards, forms, browsers, list tables
-const MODAL_WIDTH_WIDE: u16 = 90; // reading surfaces and column tables
+/// Rows every modal spends on chrome around its body: the two frame rows, the
+/// header row, the blank row that separates the header from the body, the
+/// footer row and the spacer above it. Content-sized footprints add their
+/// measured body rows to this one constant instead of counting frame rows by
+/// hand in every match arm.
+pub(super) const MODAL_CHROME_ROWS: u16 = 6;
+
+/// Columns the shared frame removes from a modal's width: two borders plus the
+/// one-cell horizontal padding on each side. Content wraps at `width - this`.
+pub(super) const MODAL_FRAME_COLUMNS: u16 = 4;
+
+/// The five modal footprints. Width and height caps live here, so a new modal
+/// picks an existing tier instead of inventing another percentage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModalFootprint {
+    /// Decision dialogs: one question, one answer (confirms, choices).
+    Prompt,
+    /// Single-select lists (providers, themes, modes, sessions, plans).
+    Picker,
+    /// Wizards, forms and browsers, which need room for fields and columns.
+    Form,
+    /// Reading surfaces, managers and tables.
+    Wide,
+    /// Surfaces that own the whole terminal (Settings, onboarding).
+    Full,
+}
+
+impl ModalFootprint {
+    /// `(width percent, height cap percent)` of the terminal area.
+    const fn percents(self) -> (u16, u16) {
+        match self {
+            Self::Prompt => (74, 70),
+            Self::Picker => (74, 80),
+            Self::Form => (86, 88),
+            Self::Wide => (92, 92),
+            Self::Full => (100, 100),
+        }
+    }
+
+    /// Width floor for the tier: a prompt needs room for a wrapped question, a
+    /// wizard for a field label beside its value.
+    const fn min_width(self) -> u16 {
+        match self {
+            Self::Prompt => 60,
+            Self::Picker => 48,
+            Self::Form => 52,
+            Self::Wide => 56,
+            Self::Full => MIN_MODAL_WIDTH,
+        }
+    }
+
+    /// Resolve only the tier's width inside `area`. Content-sized popups need the
+    /// width before they can measure, because their rows depend on how the text
+    /// wraps inside the frame.
+    pub(super) fn width(self, area: Rect) -> u16 {
+        let (percent_x, _) = self.percents();
+        capped_width(area.width, percent_x, self.min_width())
+    }
+
+    /// Resolve the modal rect inside `area`. `content_rows` is the measured
+    /// height (chrome plus body rows) for a content-sized popup; `None` lets the
+    /// height track the tier's cap, which is what reading surfaces, tables and
+    /// forms do by design.
+    pub(super) fn area(self, area: Rect, content_rows: Option<u16>) -> Rect {
+        if self == Self::Full {
+            return area;
+        }
+        let (percent_x, percent_y) = self.percents();
+        // A content-sized popup may use the rows it measured even past the tier's
+        // percentage: the cap keeps prose surfaces from filling the screen, it must
+        // not clip the decision a short popup is asking for. Measurements stay
+        // inside the terminal either way.
+        let cap = match content_rows {
+            Some(_) => area.height.saturating_sub(1),
+            None => percentage_rows(area.height, percent_y),
+        };
+        centered_rect_capped_in(
+            area,
+            percent_x,
+            percent_y,
+            content_rows.unwrap_or(cap),
+            self.min_width(),
+        )
+    }
+}
+
+fn percentage_rows(total: u16, percent: u16) -> u16 {
+    ((u32::from(total) * u32::from(percent)) / 100) as u16
+}
+
+/// The horizontal half of [`centered_rect_capped_in`], shared with
+/// [`ModalFootprint::width`] so a measured popup and its drawn rect can never
+/// disagree about the inner width it wraps at.
+fn capped_width(area_width: u16, percent_x: u16, min_width: u16) -> u16 {
+    percentage_rows(area_width, percent_x)
+        .max(min_width.max(MIN_MODAL_WIDTH).min(area_width))
+        .min(area_width)
+}
+
+/// Total rows a shell modal needs for measured `header_rows`, `body_rows` and
+/// `footer_rows`: the two frame rows, the header plus its blank separator, the
+/// body, and the footer plus the spacer above it. Mirrors
+/// [`split_scrollable_modal_lines`], so a content-sized popup is filled exactly —
+/// no leftover blank row, no guessed fudge. [`MODAL_CHROME_ROWS`] is this for a
+/// one-row header and footer.
+pub(super) fn shell_modal_rows(header_rows: u16, body_rows: u16, footer_rows: u16) -> u16 {
+    let header = if header_rows > 0 {
+        header_rows.saturating_add(1)
+    } else {
+        0
+    };
+    2u16.saturating_add(header)
+        .saturating_add(body_rows)
+        .saturating_add(footer_rows)
+        .saturating_add(1)
+}
 
 pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
     match kind {
@@ -25,150 +135,167 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         | ModalKind::Detail(crate::tui::event::DetailModal::DiffPreview { .. })
         | ModalKind::Detail(crate::tui::event::DetailModal::Context(_))
         | ModalKind::Detail(crate::tui::event::DetailModal::Episodes { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Detail(crate::tui::event::DetailModal::PerfReport { .. }) => {
-            centered_rect(area, MODAL_WIDTH_FORM, 62)
+            ModalFootprint::Wide.area(area, None)
         }
         // First-run setup owns the whole screen: nothing behind it matters
         // yet, and the growing bonsai deserves the canvas.
-        ModalKind::Wizard(crate::tui::event::WizardModal::Onboarding { .. }) => area,
-        ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt { .. }) => {
-            question_prompt_area(area)
+        ModalKind::Wizard(crate::tui::event::WizardModal::Onboarding { .. }) => {
+            ModalFootprint::Full.area(area, None)
         }
+        ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
+            prompt,
+            origin,
+            options,
+            multiple,
+            ..
+        }) => question_prompt_area(area, prompt, origin.as_deref(), options, *multiple),
         ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt { .. })
         | ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt { .. })
         | ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt { .. })
         | ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt { .. })
         | ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 90, 12)
+            ModalFootprint::Prompt.area(area, Some(12))
         }
         ModalKind::Detail(crate::tui::event::DetailModal::CommandHelp) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 82)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Picker(crate::tui::event::PickerModal::AuthorizeProviderPicker {
             providers,
             ..
         }) => {
-            // 2 frame + 1 search header + N provider rows (+2 picker padding)
-            // + 2 footer.
-            let rows = (providers.len().max(1) as u16).saturating_add(7);
-            centered_rect_capped(area, MODAL_WIDTH_PICKER, 58, rows)
+            // Shared chrome plus one row per provider; the tier cap makes a
+            // long provider list scroll inside the modal.
+            let rows = (providers.len().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
+            ModalFootprint::Picker.area(area, Some(rows))
         }
         ModalKind::Picker(crate::tui::event::PickerModal::UnauthorizeProviderPicker {
             providers,
             ..
         }) => {
             // Same footprint as the authorize picker.
-            let rows = (providers.len().max(1) as u16).saturating_add(7);
-            centered_rect_capped(area, MODAL_WIDTH_PICKER, 58, rows)
+            let rows = (providers.len().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
+            ModalFootprint::Picker.area(area, Some(rows))
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::Unauthorize { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
+            ModalFootprint::Prompt.area(area, Some(8))
         }
         ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { .. })
         | ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 76)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 76)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { .. }) => {
-            centered_rect(area, MODAL_WIDTH_FORM, 60)
+            ModalFootprint::Form.area(area, None)
         }
         ModalKind::Picker(crate::tui::event::PickerModal::PlanPicker { .. }) => {
-            centered_rect(area, MODAL_WIDTH_FORM, 60)
+            ModalFootprint::Form.area(area, None)
         }
-        ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 38, 7)
+        ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice { plan, cursor }) => {
+            let rows = plan_open_choice_rows(area, plan, *cursor);
+            ModalFootprint::Prompt.area(area, Some(rows))
         }
-        ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 38, 7)
+        ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor }) => {
+            let rows = start_plan_choice_rows(area, *cursor);
+            ModalFootprint::Prompt.area(area, Some(rows))
         }
-        ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_FORM, 48, 13)
+        ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning {
+            usage, cursor, ..
+        }) => {
+            let rows = budget_warning_rows(area, *usage, *cursor);
+            ModalFootprint::Prompt.area(area, Some(rows))
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
+            ModalFootprint::Prompt.area(area, Some(8))
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::SessionDelete { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
+            ModalFootprint::Prompt.area(area, Some(8))
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDiscard { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 36, 8)
+            ModalFootprint::Prompt.area(area, Some(8))
         }
-        ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { .. }) => {
-            // 2 frame + N scope rows (+2 picker padding) + 2 footer.
-            let rows = (crate::agent::ReviewScope::all().len() as u16).saturating_add(6);
-            centered_rect_capped(area, MODAL_WIDTH_PICKER, 44, rows)
+        ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor }) => {
+            let rows = review_scope_rows(area, *cursor);
+            ModalFootprint::Prompt.area(area, Some(rows))
         }
         ModalKind::Wizard(crate::tui::event::WizardModal::LocalModelWizard { .. }) => {
-            centered_rect(area, MODAL_WIDTH_FORM, 68)
+            ModalFootprint::Form.area(area, None)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::AgentBrowser { .. }) => {
-            centered_rect(area, MODAL_WIDTH_FORM, 66)
+            ModalFootprint::Form.area(area, None)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::SkillManager { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::ProviderDetail { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::MemoryManager { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::PermissionsManager { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Wizard(crate::tui::event::WizardModal::MemoryAddWizard { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 80)
+            ModalFootprint::Wide.area(area, None)
         }
-        ModalKind::Manager(crate::tui::event::ManagerModal::Settings { .. }) => area,
+        ModalKind::Manager(crate::tui::event::ManagerModal::Settings { .. }) => {
+            ModalFootprint::Full.area(area, None)
+        }
         ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { .. }) => {
-            centered_rect(area, MODAL_WIDTH_FORM, 72)
+            ModalFootprint::Form.area(area, None)
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::AgentDelete { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 34, 7)
+            ModalFootprint::Prompt.area(area, Some(7))
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { .. }) => {
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 52, 16)
+            ModalFootprint::Prompt.area(area, Some(16))
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::Doctor { report, .. }) => {
-            // 2 frame + 2 header + N check rows + 2 footer, capped so a long
+            // Chrome plus one row per check, capped by the wide tier so a long
             // check list scrolls internally instead of filling the screen.
-            let rows = (report.checks.len().max(1) as u16).saturating_add(6);
-            centered_rect_capped(area, MODAL_WIDTH_WIDE, 82, rows)
+            let rows = (report.checks.len().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
+            ModalFootprint::Wide.area(area, Some(rows))
         }
         ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { .. }) => {
-            let rows_height = (theme::theme_count().max(1) as u16).saturating_add(8);
-            centered_rect_capped(area, MODAL_WIDTH_PICKER, 42, rows_height)
+            let rows_height =
+                (theme::theme_count().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
+            ModalFootprint::Picker.area(area, Some(rows_height))
         }
         ModalKind::Picker(crate::tui::event::PickerModal::ModePicker { rows, .. }) => {
-            // 2 frame + N rows (+2 picker padding) + 2 footer.
-            let rows_height = (rows.len().max(1) as u16).saturating_add(6);
-            centered_rect_capped(area, MODAL_WIDTH_PICKER, 52, rows_height)
+            let rows_height = (rows.len().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
+            ModalFootprint::Picker.area(area, Some(rows_height))
         }
-        ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { rows, .. }) => {
-            let rows_height = (rows.len().max(1) as u16).saturating_add(6);
-            centered_rect_capped(area, MODAL_WIDTH_PROMPT, 44, rows_height)
+        ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { input, rows, .. }) => {
+            let rows_height = busy_command_rows(area, input, rows);
+            ModalFootprint::Prompt.area(area, Some(rows_height))
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::TaskList { .. })
         | ModalKind::Manager(crate::tui::event::ManagerModal::SubtaskList { .. })
         | ModalKind::Detail(crate::tui::event::DetailModal::Refresh { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 82)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Detail(crate::tui::event::DetailModal::UsageDashboard { .. }) => {
-            centered_rect(area, MODAL_WIDTH_WIDE, 82)
+            ModalFootprint::Wide.area(area, None)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::PeerList { peers, .. }) => {
-            // 2 frame + N peer rows + 2 footer, capped so a crowded project
-            // scrolls internally instead of filling the screen.
-            let rows = (peers.len().max(1) as u16).saturating_add(4);
-            centered_rect_capped(area, MODAL_WIDTH_FORM, 66, rows)
+            // Chrome plus one row per peer, capped so a crowded project scrolls
+            // internally instead of filling the screen.
+            let rows = (peers.len().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
+            ModalFootprint::Form.area(area, Some(rows))
         }
-        // Small dialogs with no dedicated arm: API-key prompt, provider remove
-        // confirm, and help.
-        _ => centered_rect(area, MODAL_WIDTH_PROMPT, 48),
+        // The help sheet is a reading surface: two columns of key/command
+        // descriptions, so it gets the reading footprint rather than a dialog.
+        ModalKind::Detail(crate::tui::event::DetailModal::Help) => {
+            ModalFootprint::Wide.area(area, None)
+        }
+        // Small dialogs with no dedicated arm: API-key prompt and the provider
+        // remove confirm.
+        _ => ModalFootprint::Prompt.area(area, None),
     }
 }
 
@@ -305,6 +432,24 @@ pub(crate) fn max_modal_scroll(app: &AppState, area: Rect) -> Option<u16> {
         ModalKind::Detail(crate::tui::event::DetailModal::UsageDashboard { dashboard, tab }) => {
             Some(usage_dashboard_max_scroll(modal, dashboard, *tab))
         }
+        ModalKind::Picker(crate::tui::event::PickerModal::PlanOpenChoice { plan, cursor }) => {
+            let layout = plan_open_choice_layout(plan, *cursor, decision_inner_width(modal));
+            Some(decision_max_scroll(modal, layout))
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::StartPlanChoice { cursor }) => {
+            let layout = start_plan_choice_layout(*cursor, decision_inner_width(modal));
+            Some(decision_max_scroll(modal, layout))
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::BudgetWarning {
+            usage, cursor, ..
+        }) => {
+            let layout = budget_warning_layout(*usage, *cursor, decision_inner_width(modal));
+            Some(decision_max_scroll(modal, layout))
+        }
+        ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor }) => {
+            let layout = review_scope_layout(*cursor, decision_inner_width(modal));
+            Some(decision_max_scroll(modal, layout))
+        }
         ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { .. }) => None,
         _ => None,
     }
@@ -435,9 +580,41 @@ pub(super) fn render_modal_notice(f: &mut Frame, area: Rect, title: &str, messag
     );
 }
 
-/// The header / body / footer split of a scrollable modal. The header is
-/// dropped (a zero rect) when the modal is too short to fit both it and the
-/// footer, so the body keeps everything above the pinned footer.
+/// One dim line stating what a popup is for. Every modal header starts with one
+/// of these, so a popup explains itself without the transcript behind it.
+pub(super) fn modal_subtitle(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(text.into(), theme::dim()))
+}
+
+/// The actual decision or heading of a popup, in the accent colour the rest of
+/// the TUI reserves for "this is the thing you are answering".
+pub(super) fn modal_heading(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        theme::label(theme::palette().tool),
+    ))
+}
+
+/// The filter line every searchable list renders in its header: the live query
+/// and a caret while the user is typing. One implementation, so the provider,
+/// permission, saved-plan and authorize lists cannot drift apart.
+pub(super) fn modal_search_header(query: &str, searching: bool) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("Search: ", theme::muted()),
+        Span::styled(query.to_string(), theme::body(theme::palette().text)),
+    ];
+    if searching {
+        spans.push(Span::styled("▏", theme::muted()));
+    }
+    Line::from(spans)
+}
+
+/// The body of an empty list: one dim, actionable sentence instead of a blank
+/// pane.
+pub(super) fn modal_empty_body(message: impl Into<String>) -> Vec<Line<'static>> {
+    vec![Line::from(Span::styled(message.into(), theme::dim()))]
+}
+
 pub(crate) struct ScrollableRegions {
     pub header: Rect,
     pub body: Rect,
@@ -491,12 +668,19 @@ pub(crate) fn split_scrollable_modal_lines(
 ) -> ScrollableRegions {
     let inner = theme::frame(String::new(), true).inner(area);
     let width = inner.width.max(1) as usize;
-    let header_rows = wrapped_lines_height(header_lines, width);
+    // A non-empty header is always followed by one blank row, so the body never
+    // starts flush against it. The same reservation is measured here, which is
+    // why render and scroll metrics cannot disagree.
+    let header_rows = if header_lines.is_empty() {
+        0
+    } else {
+        wrapped_lines_height(header_lines, width) + 1
+    };
     let footer_rows = wrapped_lines_height(footer_lines, width);
     split_scrollable_modal(area, header_rows, footer_rows)
 }
 
-fn wrapped_lines_height(lines: &[Line<'static>], width: usize) -> usize {
+pub(super) fn wrapped_lines_height(lines: &[Line<'static>], width: usize) -> usize {
     lines
         .iter()
         .map(|line| usize::from(wrapped_line_count(line, width)))
@@ -516,53 +700,64 @@ pub(super) fn detail_max_scroll(inner: Rect, lines: &[Line<'static>]) -> u16 {
     total_rows.saturating_sub(body_height) as u16
 }
 
-/// Render a modal split into a fixed header, a scrollable body, and a fixed
-/// footer (always visible). Long content scrolls; the action hints stay
-/// pinned to the bottom so they can't be pushed off-screen by a tall command
-/// or a long question.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_scrollable_modal(
+/// Draw the frame, the wrapped header (plus the blank row that separates it from
+/// the body) and the wrapped footer of a modal, leaving the body to the caller.
+/// Every modal chrome goes through here, so the title, the header gap and the
+/// pinned footer cannot drift per popup.
+pub(super) fn render_modal_chrome(
     f: &mut Frame,
     area: Rect,
     title: &str,
+    regions: &ScrollableRegions,
     header_lines: &[Line<'static>],
-    body_lines: &[Line<'static>],
     footer_lines: &[Line<'static>],
-    modal_scroll: u16,
-    selection: Option<(usize, usize)>,
-    body_cache: &std::cell::RefCell<Vec<Line<'static>>>,
-    body_rect_cache: &std::cell::Cell<Option<Rect>>,
 ) {
-    let frame = theme::frame(title.to_string(), true);
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(Vec::new())
-            .block(frame)
+            .block(theme::frame(title.to_string(), true))
             .style(theme::panel()),
         area,
     );
 
-    let regions = split_scrollable_modal_lines(area, header_lines, footer_lines);
-    let body_area = regions.body;
-
-    if regions.header.height > 0 {
-        let header = Paragraph::new(header_lines.to_vec())
-            .style(theme::panel())
-            .wrap(Wrap { trim: false });
-        f.render_widget(header, regions.header);
+    if regions.header.height > 0 && !header_lines.is_empty() {
+        let mut lines = header_lines.to_vec();
+        lines.push(Line::from(""));
+        f.render_widget(
+            Paragraph::new(lines)
+                .style(theme::panel())
+                .wrap(Wrap { trim: false }),
+            regions.header,
+        );
     }
 
-    // Cache the unwrapped body lines and body rect so the mouse handler can
-    // resolve screen coordinates to grapheme offsets without re-generating
-    // content or recomputing the layout.
-    *body_cache.borrow_mut() = body_lines.to_vec();
-    body_rect_cache.set(Some(body_area));
+    if regions.footer.height > 0 && !footer_lines.is_empty() {
+        // The footer region reserves one spacer row, so draw the hints at its
+        // bottom: the blank then separates the hints from the body above them
+        // instead of stranding an empty row under the frame.
+        let rows = wrapped_lines_height(footer_lines, regions.footer.width.max(1) as usize) as u16;
+        let height = rows.min(regions.footer.height);
+        let area = Rect {
+            y: regions.footer.y + regions.footer.height - height,
+            height,
+            ..regions.footer
+        };
+        f.render_widget(
+            Paragraph::new(footer_lines.to_vec())
+                .style(theme::panel())
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
+}
 
-    // The body viewport accounts for wrap width so we can compute the real
-    // line count after wrapping and clamp the scroll.
-    let wrap_width = body_area.width.max(1) as usize;
-    let body_height = body_area.height.max(1) as usize;
-    // Apply selection highlighting before wrapping.
+/// Pre-wrap `body_lines` to `wrap_width` cells, applying selection highlighting
+/// first. The one wrapper shared by drawing and by the scroll clamp.
+pub(super) fn prewrap_body(
+    body_lines: &[Line<'static>],
+    selection: Option<(usize, usize)>,
+    wrap_width: usize,
+) -> Vec<Line<'static>> {
     let highlighted: Vec<Line<'static>>;
     let render_lines = if let Some((start, end)) = selection.filter(|(s, e)| s != e) {
         highlighted = modal_selection_highlight(body_lines, start, end);
@@ -578,6 +773,60 @@ pub(super) fn render_scrollable_modal(
             wrapped.extend(wrap_line(line, wrap_width));
         }
     }
+    wrapped
+}
+
+/// Draw a body the caller already windowed to fit (list pickers): the shared
+/// wrapping, but no scrollbar, because the picker owns its window and never
+/// scrolls — a bar would advertise movement that cannot happen.
+pub(super) fn render_windowed_body(f: &mut Frame, body_area: Rect, body_lines: &[Line<'static>]) {
+    let wrapped = prewrap_body(body_lines, None, body_area.width.max(1) as usize);
+    f.render_widget(
+        Paragraph::new(wrapped)
+            .style(theme::panel())
+            .wrap(Wrap { trim: false }),
+        body_area,
+    );
+}
+
+/// Draw a form popup through the shared shell and return its body rect, so the
+/// caller can place a caret inside the body. Forms do not scroll: their fields
+/// are already wrapped to the body width.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_form_shell(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    header: &[Line<'static>],
+    body: &[Line<'static>],
+    footer: &[Line<'static>],
+    body_cache: &std::cell::RefCell<Vec<Line<'static>>>,
+    body_rect_cache: &std::cell::Cell<Option<Rect>>,
+) -> Rect {
+    let regions = split_scrollable_modal_lines(area, header, footer);
+    render_modal_chrome(f, area, title, &regions, header, footer);
+    *body_cache.borrow_mut() = body.to_vec();
+    body_rect_cache.set(Some(regions.body));
+    render_windowed_body(f, regions.body, body);
+    regions.body
+}
+
+/// Draw a wrapped, scroll-clamped body and its scrollbar into `body_area`,
+/// returning the scroll actually used. This is the one body renderer: the modal
+/// shell and the nested list/detail pane both go through it, so no two
+/// scrollbars can disagree about wrapping or clamping.
+pub(super) fn render_scroll_body(
+    f: &mut Frame,
+    body_area: Rect,
+    body_lines: &[Line<'static>],
+    selection: Option<(usize, usize)>,
+    modal_scroll: u16,
+) -> u16 {
+    // The body viewport accounts for wrap width so we can compute the real
+    // line count after wrapping and clamp the scroll.
+    let wrap_width = body_area.width.max(1) as usize;
+    let body_height = body_area.height.max(1) as usize;
+    let wrapped = prewrap_body(body_lines, selection, wrap_width);
     let max_scroll = wrapped.len().saturating_sub(body_height) as u16;
     let scroll = modal_scroll.min(max_scroll);
 
@@ -588,30 +837,52 @@ pub(super) fn render_scrollable_modal(
     f.render_widget(body, body_area);
 
     if max_scroll > 0 {
-        let scrollbar_area = body_area.inner(Margin {
-            vertical: 0,
-            horizontal: 0,
-        });
         let mut state = ScrollbarState::new(max_scroll as usize + 1)
             .position(scroll as usize)
             .viewport_content_length(body_height);
         let scrollbar = theme::scrollbar(ScrollbarOrientation::VerticalRight);
-        f.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+        f.render_stateful_widget(scrollbar, body_area, &mut state);
     }
+    scroll
+}
 
-    let footer = Paragraph::new(footer_lines.to_vec())
-        .style(theme::panel())
-        .wrap(Wrap { trim: false });
-    f.render_widget(footer, regions.footer);
+/// Render a modal split into a fixed header, a scrollable body, and a fixed
+/// footer (always visible). This is the only modal chrome: list pickers and
+/// list/detail modals lay their content out inside it instead of growing a
+/// parallel implementation. Long content scrolls; the action hints stay pinned
+/// to the bottom so a tall command or a long question cannot push them away.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_scrollable_modal(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    header_lines: &[Line<'static>],
+    body_lines: &[Line<'static>],
+    footer_lines: &[Line<'static>],
+    modal_scroll: u16,
+    selection: Option<(usize, usize)>,
+    body_cache: &std::cell::RefCell<Vec<Line<'static>>>,
+    body_rect_cache: &std::cell::Cell<Option<Rect>>,
+) {
+    let regions = split_scrollable_modal_lines(area, header_lines, footer_lines);
+    render_modal_chrome(f, area, title, &regions, header_lines, footer_lines);
+
+    // Cache the unwrapped body lines and body rect so the mouse handler can
+    // resolve screen coordinates to grapheme offsets without re-generating
+    // content or recomputing the layout.
+    *body_cache.borrow_mut() = body_lines.to_vec();
+    body_rect_cache.set(Some(regions.body));
+
+    render_scroll_body(f, regions.body, body_lines, selection, modal_scroll);
 }
 
 pub(super) fn scrollable_modal_max_scroll(
     area: Rect,
-    header_line_count: usize,
-    footer_line_count: usize,
+    header_lines: &[Line<'static>],
+    footer_lines: &[Line<'static>],
     body_lines: &[Line<'static>],
 ) -> u16 {
-    let body_area = split_scrollable_modal(area, header_line_count, footer_line_count).body;
+    let body_area = split_scrollable_modal_lines(area, header_lines, footer_lines).body;
     detail_max_scroll(body_area, body_lines)
 }
 
@@ -712,7 +983,7 @@ pub(crate) fn question_prompt_metrics(
     // Measure the exact lines the render draws. The checkbox glyph is a
     // constant four cells whether checked or not, so an empty `selected` yields
     // identical wrapped-row geometry — no need to thread selection through here.
-    let body = question_prompt_body(options, multiple, cursor, &[]);
+    let body = question_prompt_body(options, multiple, cursor, &[], body_area.width);
     // Cumulative wrapped-row offset at the start of each logical line, plus the
     // grand total as the last entry.
     let mut wrapped_at = Vec::with_capacity(body.lines.len() + 1);
@@ -752,43 +1023,27 @@ pub(super) fn wrapped_line_count(line: &Line<'static>, width: usize) -> u16 {
     }
 }
 
-pub(super) fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}
-
-/// Floor so a content-sized modal never collapses to an unreadable sliver.
-pub(super) const MIN_MODAL_HEIGHT: u16 = 5;
+/// Floor so a content-sized modal never collapses to an unreadable sliver: a
+/// frame, one body row, one footer row and the footer spacer.
+pub(super) const MIN_MODAL_HEIGHT: u16 = 6;
 pub(super) const MIN_MODAL_WIDTH: u16 = 36;
 
-/// Like [`centered_rect`], but the height tracks the content instead of the
-/// terminal: it grows to fit `content_rows` yet never exceeds `percent_y` of
-/// the area (the cap). Short dialogs stop getting tall vertical padding while
-/// long ones stay capped and scroll internally. Width keeps the percentage
-/// behaviour so the horizontal floor tuning still applies.
-pub(super) fn centered_rect_capped(
+/// The one sizing primitive: centre a box of `percent_x` width, with a height
+/// that tracks `content_rows` yet never exceeds `percent_y` of the area (the
+/// cap). Short dialogs stop getting tall vertical padding while long ones stay
+/// capped and scroll internally. Passing the cap as `content_rows` makes the
+/// height percentage-driven, which is how the footprint tiers whose height
+/// should track the terminal are expressed.
+pub(super) fn centered_rect_capped_in(
     area: Rect,
     percent_x: u16,
     percent_y: u16,
     content_rows: u16,
+    min_width: u16,
 ) -> Rect {
-    let cap = ((u32::from(area.height) * u32::from(percent_y)) / 100) as u16;
-    let cap = cap.min(area.height).max(MIN_MODAL_HEIGHT.min(area.height));
+    let cap = percentage_rows(area.height, percent_y)
+        .min(area.height)
+        .max(MIN_MODAL_HEIGHT.min(area.height));
     let height = content_rows.clamp(MIN_MODAL_HEIGHT.min(cap), cap);
 
     let vertical = Layout::default()
@@ -800,10 +1055,7 @@ pub(super) fn centered_rect_capped(
         ])
         .split(area);
 
-    let percentage_width = ((u32::from(area.width) * u32::from(percent_x)) / 100) as u16;
-    let width = percentage_width
-        .max(MIN_MODAL_WIDTH.min(area.width))
-        .min(area.width);
+    let width = capped_width(area.width, percent_x, min_width);
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -815,8 +1067,18 @@ pub(super) fn centered_rect_capped(
     horizontal[1]
 }
 
-pub(crate) fn question_prompt_area(area: Rect) -> Rect {
-    centered_rect_capped(area, 64, 90, 14)
+pub(crate) fn question_prompt_area(
+    area: Rect,
+    prompt: &str,
+    origin: Option<&str>,
+    options: &[crate::interaction::QuestionOption],
+    multiple: bool,
+) -> Rect {
+    let inner_width = ModalFootprint::Prompt
+        .width(area)
+        .saturating_sub(MODAL_FRAME_COLUMNS);
+    let rows = question_prompt_rows(prompt, origin, options, multiple, inner_width);
+    ModalFootprint::Prompt.area(area, Some(rows))
 }
 
 // ── Modal text selection helpers ──────────────────────────────────────────
@@ -1016,6 +1278,49 @@ mod tests {
     }
 
     #[test]
+    fn header_lines_reserve_one_blank_row_above_the_body() {
+        let area = Rect::new(0, 0, 40, 20);
+        let header = vec![Line::from("Pick a theme")];
+        let regions = split_scrollable_modal_lines(area, &header, &[]);
+        assert_eq!(regions.header.height, 2, "one header row plus its gap");
+        assert_eq!(regions.body.y, regions.header.y + 2);
+        // An empty header reserves nothing, so a headerless picker keeps its rows.
+        let bare = split_scrollable_modal_lines(area, &[], &[]);
+        assert_eq!(bare.header.height, 0);
+    }
+
+    #[test]
+    fn footprints_widen_with_the_tier() {
+        let area = Rect::new(0, 0, 100, 40);
+        assert_eq!(ModalFootprint::Prompt.area(area, None).width, 74);
+        assert_eq!(ModalFootprint::Picker.area(area, None).width, 74);
+        assert_eq!(ModalFootprint::Form.area(area, None).width, 86);
+        assert_eq!(ModalFootprint::Wide.area(area, None).width, 92);
+        assert_eq!(ModalFootprint::Full.area(area, None), area);
+    }
+
+    #[test]
+    fn a_long_footer_wraps_instead_of_clipping() {
+        // Six hint pairs cannot fit 60 columns on one row: the shell must reserve
+        // a second footer row instead of clipping the tail.
+        let area = Rect::new(0, 0, 60, 20);
+        let footer = vec![footer_hint_line(&[
+            ("Up/Down", "move"),
+            ("Enter", "select"),
+            ("Space", "toggle"),
+            ("a", "add"),
+            ("d", "delete"),
+            ("Esc", "close"),
+        ])];
+        let regions = split_scrollable_modal_lines(area, &[], &footer);
+        assert!(
+            regions.footer.height >= 3,
+            "two wrapped hint rows plus the spacer, got {}",
+            regions.footer.height,
+        );
+    }
+
+    #[test]
     fn detail_max_scroll_counts_wrapped_rows_not_logical_lines() {
         let inner = Rect::new(0, 0, 10, 3);
         // One 25-cell line wraps to 3 rows at width 10; 3 rows, 3 tall -> 0.
@@ -1045,7 +1350,7 @@ mod tests {
         // left a short confirm swimming in padding. Content sizing pins it to
         // the content height instead.
         let area = Rect::new(0, 0, 120, 100);
-        let modal = centered_rect_capped(area, 64, 36, 8);
+        let modal = centered_rect_capped_in(area, 74, 36, 8, MIN_MODAL_WIDTH);
         assert_eq!(modal.height, 8, "height should track content, not the cap");
         // Still vertically centered.
         assert_eq!(modal.y, (100 - 8) / 2);
@@ -1057,14 +1362,14 @@ mod tests {
         // internally instead.
         let area = Rect::new(0, 0, 120, 40);
         let cap = 40 * 44 / 100; // percent_y = 44
-        let modal = centered_rect_capped(area, 62, 44, 200);
+        let modal = centered_rect_capped_in(area, 74, 44, 200, MIN_MODAL_WIDTH);
         assert_eq!(modal.height, cap);
     }
 
     #[test]
     fn capped_modal_keeps_a_readable_floor_on_a_tiny_terminal() {
         let area = Rect::new(0, 0, 80, 8);
-        let modal = centered_rect_capped(area, 64, 36, 2);
+        let modal = centered_rect_capped_in(area, 74, 36, 2, MIN_MODAL_WIDTH);
         assert!(modal.height >= MIN_MODAL_HEIGHT.min(area.height));
     }
 
@@ -1099,7 +1404,7 @@ mod tests {
             cursor: 0,
         });
 
-        assert_eq!(modal_area(area, &kind), Rect::new(6, 6, 108, 38));
+        assert_eq!(modal_area(area, &kind), Rect::new(5, 2, 110, 46));
     }
 
     // ── Modal text selection tests ────────────────────────────────────────
