@@ -2938,6 +2938,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         run_budget.max_session_active_duration(),
         subagents.clone(),
     );
+    // The controller writes timing to storage; the run's ledger lives on this
+    // agent. Sharing it is what lets a panicked run still hand over the
+    // intervals it opened before the task row goes terminal.
+    tasks.set_timing_agent(agent.clone());
     tasks.set_persona_model_deps(crate::tui::task::PersonaModelDeps {
         agent: agent.clone(),
         session_store: session_store.clone(),

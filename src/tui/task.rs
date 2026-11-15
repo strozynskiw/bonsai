@@ -242,6 +242,14 @@ pub struct TaskController {
     sender: mpsc::UnboundedSender<RuntimeEvent>,
     max_run_duration: Option<Duration>,
     session_runtime_budget: Option<SessionRuntimeBudget>,
+    /// The agent the event loop shares with every dispatch, so a run that dies
+    /// without reaching its own checkpoint can still hand over its timing.
+    ///
+    /// A panicked run drops the context it was spawned with, and that context
+    /// held the only ledger handle the completion path uses. The ledger itself
+    /// lives on this agent, with the run's intervals still open, so the failure
+    /// path accounts for them the same way every other terminal path does.
+    timing_agent: Option<Arc<tokio::sync::Mutex<Agent>>>,
     /// When set, every agent-run dispatch first applies the run persona's
     /// model (see [`apply_persona_model`]); `None` (tests) skips the step.
     persona_model_deps: Option<PersonaModelDeps>,
@@ -260,8 +268,15 @@ impl TaskController {
             sender,
             max_run_duration: None,
             session_runtime_budget: None,
+            timing_agent: None,
             persona_model_deps: None,
         }
+    }
+
+    /// Share the agent every dispatch runs on, so a panicked run's timing can
+    /// still be checkpointed before its task row becomes terminal.
+    pub(crate) fn set_timing_agent(&mut self, agent: Arc<tokio::sync::Mutex<Agent>>) {
+        self.timing_agent = Some(agent);
     }
 
     /// Install (or refresh, after `/refresh` swaps registry/catalog) the deps
@@ -1486,6 +1501,17 @@ impl TaskController {
                     TaskTerminalReasonCode::ExecutionFailure,
                     &format!("Agent task panicked: {err}"),
                 );
+                // A panicked run never reaches its own checkpoint, and the
+                // context it was spawned with died with it, so account for what
+                // it recorded from the handle the event loop shares. The task
+                // row must not go terminal with the run's intervals unrecorded:
+                // a crash is exactly when the breakdown is worth having.
+                persist_timing_from_agent(
+                    self.session_runtime_budget.as_ref(),
+                    self.timing_agent.as_ref(),
+                    Some(task_run_id),
+                )
+                .await;
                 if let Err(persist_err) = runtime
                     .storage
                     .finish_task_run(task_run_id, TaskOutcome::Failed, Some(&reason))
@@ -1611,11 +1637,28 @@ async fn persist_task_timing(
     completion: Option<&CompletionRunContext>,
     task_run_id: Option<TaskRunId>,
 ) {
-    let (Some(runtime), Some(context), Some(task_run_id)) = (runtime, completion, task_run_id)
-    else {
+    persist_timing_from_agent(
+        runtime,
+        completion.map(|context| &context.agent),
+        task_run_id,
+    )
+    .await;
+}
+
+/// Checkpoint whatever the run recorded, closing the intervals it left open.
+///
+/// Split from [`persist_task_timing`] because a panicked run has no completion
+/// context left to read: the agent the event loop shares is then the only handle
+/// on the ledger, and the intervals the dead run opened are still open on it.
+async fn persist_timing_from_agent(
+    runtime: Option<&SessionRuntimeBudget>,
+    agent: Option<&Arc<tokio::sync::Mutex<Agent>>>,
+    task_run_id: Option<TaskRunId>,
+) {
+    let (Some(runtime), Some(agent), Some(task_run_id)) = (runtime, agent, task_run_id) else {
         return;
     };
-    let checkpoint = context.agent.lock().await.take_timing_checkpoint();
+    let checkpoint = agent.lock().await.take_timing_checkpoint();
     if checkpoint.is_empty() {
         return;
     }
@@ -2796,6 +2839,82 @@ mod tests {
         assert_eq!(
             task.terminal_reason.map(|reason| reason.code),
             Some(TaskTerminalReasonCode::BudgetExhausted)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicked_run_still_persists_the_timing_it_recorded() {
+        let fixture = crate::storage::test_utils::TestStorage::new().await;
+        let session_id = fixture.start_session().await;
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut tasks = TaskController::new(sender);
+        tasks.configure_session_runtime_budget(
+            fixture.storage.clone(),
+            Arc::new(tokio::sync::Mutex::new(Some(session_id))),
+            None,
+            Arc::new(SubagentRegistry::new()),
+        );
+        let (completion, _) = completion_context();
+        let ledger = Arc::new(crate::timing::TimingLedger::system(
+            crate::timing::TimingPolicy::ActiveCompute,
+        ));
+        completion
+            .agent
+            .lock()
+            .await
+            .set_timing_ledger(ledger.clone());
+        // The event loop shares this handle, so it is the one the failure path
+        // can still reach once the run's own context is gone.
+        tasks.set_timing_agent(completion.agent.clone());
+
+        tasks
+            .spawn_agent_task(
+                crate::agent::ActivePersona::Builtin(AgentMode::Coding),
+                Vec::new(),
+                TaskRunIntent::Start("Crashing task".to_string()),
+                Some(completion),
+                move |_token, _queue| async move {
+                    // Left open on purpose: a crash cannot close what it opened.
+                    let _model = ledger.begin(
+                        crate::timing::TimingCategory::ModelRequest,
+                        crate::timing::TimingLane::Parent,
+                        Some("model"),
+                        None,
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    panic!("simulated agent crash");
+                },
+            )
+            .unwrap();
+
+        // The failure path lives in `poll_finished`, exactly as the event loop
+        // drives it, so the test has to drive it too.
+        let mut finished = None;
+        for _ in 0..200 {
+            if let Some(kind) = tasks.poll_finished().await {
+                finished = Some(kind);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(finished.is_some(), "the controller must observe the crash");
+
+        let task = fixture
+            .storage
+            .latest_task_run(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.outcome, Some(TaskOutcome::Failed));
+        let timing = fixture
+            .storage
+            .task_run_timing(task.id)
+            .await
+            .unwrap()
+            .expect("a crashed run still has to account for its elapsed interval");
+        assert!(
+            timing.summed_ms(crate::timing::TimingCategory::ModelRequest) > 0,
+            "the open interval must be closed and recorded: {timing:?}"
         );
     }
 
