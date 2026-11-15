@@ -285,17 +285,85 @@ impl Agent {
     }
 
     pub(super) fn note_typed_verification_worthy_mutation(&mut self, paths: Vec<String>) {
-        self.mark_latest_verification_stale(&paths);
+        let relevant = self.verification_relevant_mutation_paths(&paths);
+        if paths.is_empty() || !relevant.is_empty() {
+            self.mark_latest_verification_stale(&relevant);
+            self.note_completion_verification_relevant_mutation();
+            self.verification.after_edit_verification_pending = true;
+        }
         self.self_review.note_typed_mutation(paths);
         self.note_completion_workspace_mutation();
-        self.verification.after_edit_verification_pending = true;
     }
 
     pub(super) fn note_bash_window_verification_worthy_mutation(&mut self, paths: Vec<String>) {
-        self.mark_latest_verification_stale(&paths);
+        let relevant = self.verification_relevant_mutation_paths(&paths);
+        if paths.is_empty() || !relevant.is_empty() {
+            self.mark_latest_verification_stale(&relevant);
+            self.note_completion_verification_relevant_mutation();
+            self.verification.after_edit_verification_pending = true;
+        }
         self.self_review.note_bash_window_mutation(paths);
         self.note_completion_workspace_mutation();
-        self.verification.after_edit_verification_pending = true;
+    }
+
+    /// The subset of mutated paths a configured or observed check can observe,
+    /// expressed project-relative so both relevance checks agree on it. With no
+    /// known command the whole list stays relevant.
+    fn verification_relevant_mutation_paths(&self, paths: &[String]) -> Vec<String> {
+        let commands = self.verification_input_commands();
+        let relative = paths
+            .iter()
+            .map(|path| self.project_relative_path(path))
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            return relative;
+        }
+        relative
+            .into_iter()
+            .filter(|path| {
+                commands.iter().any(|command| {
+                    crate::agent::run_loop_executor::is_relevant_verification_input(path, command)
+                })
+            })
+            .collect()
+    }
+
+    /// A tool-reported path in the form the digest scope and the relevance
+    /// predicate both use.
+    fn project_relative_path(&self, path: &str) -> String {
+        let path = std::path::Path::new(path);
+        let relative = path.strip_prefix(&self.project_root).unwrap_or(path);
+        relative.to_string_lossy().replace('\\', "/")
+    }
+
+    /// Every command whose inputs define verification relevance here: the ones
+    /// already observed plus the resolved profile, so a configured check that
+    /// has not run yet still contributes its inputs.
+    fn verification_input_commands(&self) -> Vec<String> {
+        let mut commands = self
+            .verification
+            .verification_runs
+            .iter()
+            .rev()
+            .find(|run| !run.checks.is_empty())
+            .map(|run| {
+                run.checks
+                    .iter()
+                    .map(|check| check.command.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let profile = VerificationProfile::resolve(&self.project_root, &self.config.verification);
+        commands.extend(
+            profile
+                .tests
+                .iter()
+                .chain(profile.builds.iter())
+                .map(|check| check.command.clone()),
+        );
+        commands.sort_unstable();
+        commands.dedup();
+        commands
     }
 
     pub(super) fn mark_latest_verification_stale(&mut self, paths: &[String]) {

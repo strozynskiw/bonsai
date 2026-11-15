@@ -640,6 +640,63 @@ async fn foreground_profile_checks_feed_self_review_and_verification_evidence() 
 }
 
 #[tokio::test]
+async fn documentation_only_mutation_keeps_passed_verification_fresh_and_unarmed() {
+    use crate::agent::completion::CompletionCheckEvidence;
+
+    let fixture = TestFixture::new();
+    std::fs::write(
+        fixture.project_root.join("Cargo.toml"),
+        "[package]\nname='doc-only'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    let mut agent = verification_agent_with_policy(&fixture, VerifyAfterEdit::On);
+    agent.reset_after_edit_verification();
+    agent.arm_self_review_for_coding_task("change code").await;
+    agent
+        .record_verification_tool_result(
+            &crate::provider::ToolCall {
+                id: "check-1".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"cargo test"}"#.to_string(),
+            },
+            &command_result(0),
+            crate::output::ToolExecutionStatus::Succeeded,
+        )
+        .await;
+    assert_eq!(
+        agent.verification_runs()[0].status,
+        VerificationRunStatus::Passed
+    );
+
+    agent.note_typed_verification_worthy_mutation(vec!["docs/timing.md".to_string()]);
+
+    let run = &agent.verification_runs()[0];
+    assert_eq!(run.status, VerificationRunStatus::Passed);
+    assert!(run.workspace_changes_after_last_check.is_empty());
+    assert_eq!(
+        agent.completion_verification_evidence(),
+        CompletionCheckEvidence::NotRequired
+    );
+    let sink: SharedSink = Arc::new(StdoutSink);
+    assert!(
+        !agent
+            .maybe_verify_after_edit(&sink, CancellationToken::new())
+            .await
+    );
+
+    // A source mutation still invalidates the same evidence.
+    agent.note_typed_verification_worthy_mutation(vec!["src/lib.rs".to_string()]);
+    assert_eq!(
+        agent.verification_runs()[0].status,
+        VerificationRunStatus::Stale
+    );
+    assert_eq!(
+        agent.completion_verification_evidence(),
+        CompletionCheckEvidence::Stale
+    );
+}
+
+#[tokio::test]
 async fn manual_and_automatic_checks_populate_the_same_evidence_fields() {
     let fixture = TestFixture::new();
     init_repo(&fixture.project_root);

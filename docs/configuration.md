@@ -114,11 +114,14 @@ configuration, selected environment inputs (including `PATH`), and the
 resolved executable's content fingerprint. Capture never launches the
 candidate command or a `--version` probe. In a non-Git project the same model
 uses a content fingerprint of relevant project inputs. Ignored build products
-and unrelated untracked files are excluded from the input set; any observed
-tracked-file mutation is conservatively invalidating. A mutation attributed to
-the active agent task is also treated as relevant immediately, even when its
-new path is not tracked yet; unrelated untracked files that appear externally
-remain governed by the narrower input policy above.
+and unrelated scratch files are excluded from the input set: untracked inputs
+participate when they are source, test, fixture/snapshot data, a build or
+package manifest, or a path the command names; tracked and staged changes
+participate unless they are documentation prose (`docs/`, `*.md`, `README`,
+and friends), so a documentation-only edit cannot stale a passing check. Any
+change the capture cannot classify — an unscoped mutation attributed to the
+active agent task, a non-UTF-8 path, or a diff too large to path-scope — remains
+conservatively invalidating.
 
 Manual recognized Bash checks (including auto-backgrounded checks) and
 `/test`/`/build` workflows use the same evidence path. A logical check persists
@@ -138,7 +141,9 @@ is valid and equals its corresponding delivery binding. Equal `HEAD` alone is
 not sufficient: dirty tracked files, staged changes, relevant untracked
 inputs, dependency/config changes, and toolchain/environment changes all
 participate. Completion evidence is structured as `fresh`, `stale`, `skipped`,
-or `blocked` and includes a short binding id. Skips and capture failures use
+or `blocked` and includes a short binding id. When a turn mutated nothing a
+check can observe, verification is not required for that turn and the post-edit
+gate stays unarmed. Skips and capture failures use
 typed reasons such as `policy_disabled`, `user_skipped`, `cancelled`,
 `environment_blocked`, and `interrupted`; freshness is never inferred from
 the assistant's final prose.

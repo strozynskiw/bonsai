@@ -675,6 +675,8 @@ pub(super) struct CompletionGuardState {
     review_baseline: usize,
     action_observed: bool,
     workspace_mutated: bool,
+    /// Set only for mutations a configured or observed check can observe.
+    verification_relevant_mutation: bool,
     pending_work_started: bool,
     continuation_used: bool,
     goal_progress_revision: u64,
@@ -852,6 +854,11 @@ impl Agent {
     pub(super) fn note_goal_progress(&mut self) {
         self.completion.goal_progress_revision =
             self.completion.goal_progress_revision.saturating_add(1);
+    }
+
+    /// Record that this turn mutated an input verification can observe.
+    pub(super) fn note_completion_verification_relevant_mutation(&mut self) {
+        self.completion.verification_relevant_mutation = true;
     }
 
     pub(super) fn note_completion_workspace_mutation(&mut self) {
@@ -1095,7 +1102,7 @@ impl Agent {
         let requested = &self.verification.requested_shell_checks;
         let requested_cargo = &self.verification.requested_cargo_checks;
         let required = self.completion.contract.verification_required
-            || self.completion.workspace_mutated
+            || self.completion.verification_relevant_mutation
             || !requested.is_empty()
             || !requested_cargo.is_empty();
         if !required {

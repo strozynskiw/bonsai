@@ -185,8 +185,21 @@ pub(crate) async fn capture_verification_workspace_identity(
                 &["diff", "--no-ext-diff", "--no-textconv", "--binary", "--"],
             )
         };
-        let index_digest = git_digest(&worktree_root, index_args).await?;
-        let tracked_worktree_digest = git_digest(&worktree_root, tracked_args).await?;
+        // Only inputs a check can observe participate, so a documentation-only
+        // edit cannot invalidate evidence the binding model already treats as
+        // irrelevant for untracked inputs.
+        let index_paths =
+            relevant_changed_paths(&worktree_root, command, true, head_oid.is_some()).await?;
+        let tracked_paths =
+            relevant_changed_paths(&worktree_root, command, false, head_oid.is_some()).await?;
+        let index_digest = match &index_paths {
+            Some(paths) => tracked_inputs_digest(&worktree_root, index_args, paths).await?,
+            None => git_digest(&worktree_root, index_args).await?,
+        };
+        let tracked_worktree_digest = match &tracked_paths {
+            Some(paths) => tracked_inputs_digest(&worktree_root, tracked_args, paths).await?,
+            None => git_digest(&worktree_root, tracked_args).await?,
+        };
         let untracked_inputs = capture_git_untracked_inputs(&worktree_root, command).await?;
         (
             repository_root,
@@ -305,7 +318,121 @@ fn normalize_command(command: &str) -> String {
     normalize_verification_command(command)
 }
 
-fn is_relevant_verification_input(path: &str, command: &str) -> bool {
+/// Cap on the pathspec bytes passed to one Git invocation. Beyond it the
+/// digest falls back to the path-blind diff, which can only over-invalidate.
+const MAX_TRACKED_PATHSPEC_BYTES: usize = 32 * 1024;
+
+/// Digest standing in for "no changed input a check can observe".
+const NO_RELEVANT_TRACKED_INPUTS: &str = "bonsai:verification:no-relevant-tracked-inputs:v1";
+
+/// Digest the changed tracked inputs of one diff scope, restricted to the
+/// paths a check can observe.
+async fn tracked_inputs_digest(
+    worktree_root: &Path,
+    diff_args: &[&str],
+    paths: &[String],
+) -> Result<String, std::io::Error> {
+    if paths.is_empty() {
+        return Ok(NO_RELEVANT_TRACKED_INPUTS.to_string());
+    }
+    let pathspec_bytes = paths.iter().map(|path| path.len() + 1).sum::<usize>();
+    if pathspec_bytes > MAX_TRACKED_PATHSPEC_BYTES {
+        return git_digest(worktree_root, diff_args).await;
+    }
+    let mut args = vec!["--literal-pathspecs"];
+    args.extend(diff_args.iter().copied());
+    args.extend(paths.iter().map(String::as_str));
+    git_digest(worktree_root, &args).await
+}
+
+/// Changed tracked paths of one diff scope that a check can observe.
+///
+/// `None` means the scope could not be described safely — a path outside
+/// UTF-8 would be silently rewritten by a lossy conversion — so the caller
+/// falls back to the path-blind diff.
+async fn relevant_changed_paths(
+    worktree_root: &Path,
+    command: &str,
+    cached: bool,
+    head_present: bool,
+) -> Result<Option<Vec<String>>, std::io::Error> {
+    let mut args = vec![
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
+    if cached {
+        args.push("--cached");
+    }
+    if head_present {
+        args.push("HEAD");
+    }
+    args.push("--");
+    let raw = git_bytes(worktree_root, &args).await?;
+    let mut paths = Vec::new();
+    for raw_path in raw.split(|byte| *byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        let Ok(path) = std::str::from_utf8(raw_path) else {
+            return Ok(None);
+        };
+        if tracked_change_is_relevant(path, command) {
+            paths.push(path.to_owned());
+        }
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    Ok(Some(paths))
+}
+
+/// Whether a tracked change can change a check outcome.
+///
+/// Versioned content participates unless it is documentation prose: an
+/// extensionless `Makefile` or a `fixtures/` input can change a result, while
+/// `docs/timing.md` cannot. Known build inputs always participate, so prose
+/// that is also an input (`requirements.txt`) is never dropped.
+fn tracked_change_is_relevant(path: &str, command: &str) -> bool {
+    is_relevant_verification_input(path, command) || !is_documentation_path(path)
+}
+
+/// Documentation prose: prose-only extensions and documentation directories.
+fn is_documentation_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let trimmed = normalized.trim_start_matches("./");
+    let in_documentation_directory = trimmed
+        .split('/')
+        .rev()
+        .skip(1)
+        .any(|segment| matches!(segment, "docs" | "doc" | "documentation"));
+    let documentation_extension = normalized.rsplit_once('.').is_some_and(|(_, extension)| {
+        matches!(
+            extension,
+            "md" | "markdown" | "mdx" | "rst" | "adoc" | "asciidoc" | "org" | "tex"
+        )
+    });
+    let stems = [normalized.as_str(), trimmed];
+    let documentation_stem = stems.iter().any(|stem| {
+        matches!(
+            stem.rsplit_once('/').map_or(*stem, |(_, name)| name),
+            "readme"
+                | "changelog"
+                | "changes"
+                | "contributing"
+                | "license"
+                | "licence"
+                | "notice"
+                | "authors"
+                | "code_of_conduct"
+        )
+    });
+    in_documentation_directory || documentation_extension || documentation_stem
+}
+
+pub(super) fn is_relevant_verification_input(path: &str, command: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let file_name = Path::new(path)
         .file_name()
@@ -336,11 +463,51 @@ fn is_relevant_verification_input(path: &str, command: &str) -> bool {
             | "go.work.sum"
             | "rust-toolchain"
             | "rust-toolchain.toml"
+            | "Makefile"
+            | "makefile"
+            | "GNUmakefile"
+            | "Justfile"
+            | "justfile"
+            | "Rakefile"
+            | "Gemfile"
+            | "Dockerfile"
+            | "Containerfile"
+            | "CMakeLists.txt"
+            | "meson.build"
+            | "meson_options.txt"
+            | "build.ninja"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "pom.xml"
+            | "composer.json"
+            | "mix.exs"
+            | "Package.swift"
+            | "BUILD"
+            | "BUILD.bazel"
+            | "WORKSPACE"
+            | "WORKSPACE.bazel"
     );
     known_config
         || normalized.starts_with("src/")
         || normalized.starts_with("test/")
         || normalized.starts_with("tests/")
+        || normalized.starts_with("fixtures/")
+        || normalized.starts_with("__fixtures__/")
+        || normalized.starts_with("snapshots/")
+        || normalized.starts_with("__snapshots__/")
+        || normalized.starts_with("golden/")
+        || normalized.starts_with("testdata/")
+        || normalized.starts_with("test-data/")
+        || normalized.starts_with("spec/")
+        || normalized.starts_with("benches/")
+        || normalized.starts_with("examples/")
+        || normalized.starts_with("assets/")
+        || normalized.contains("/fixtures/")
+        || normalized.contains("/snapshots/")
+        || normalized.contains("/__snapshots__/")
+        || normalized.contains("/testdata/")
         || normalized.rsplit_once('.').is_some_and(|(_, extension)| {
             matches!(
                 extension,
@@ -1497,6 +1664,36 @@ mod tests {
         assert!(status.success());
     }
 
+    #[test]
+    fn verification_input_relevance_keeps_build_files_and_fixtures() {
+        for relevant in [
+            "Makefile",
+            "justfile",
+            "CMakeLists.txt",
+            "fixtures/expected.json",
+            "tests/data/sample.bin",
+            "snapshots/run.snap",
+            "src/main.rs",
+            "Cargo.lock",
+        ] {
+            assert!(
+                is_relevant_verification_input(relevant, "cargo test --locked"),
+                "{relevant} must stay a verification input"
+            );
+            assert!(tracked_change_is_relevant(relevant, "cargo test --locked"));
+        }
+        for documentation in ["docs/timing.md", "README.md", "CHANGELOG.md"] {
+            assert!(!tracked_change_is_relevant(
+                documentation,
+                "cargo test --locked"
+            ));
+        }
+        assert!(!is_relevant_verification_input(
+            "scratch-notes.md",
+            "cargo test --locked"
+        ));
+    }
+
     #[tokio::test]
     async fn verification_identity_distinguishes_index_and_untracked_inputs() {
         let root = tempfile::tempdir().expect("temp repository");
@@ -1553,6 +1750,59 @@ mod tests {
                 .await;
 
         assert_eq!(clean, with_note);
+    }
+
+    #[tokio::test]
+    async fn verification_identity_ignores_tracked_documentation() {
+        let root = tempfile::tempdir().expect("temp repository");
+        run_git(root.path(), &["init", "-q"]);
+        run_git(root.path(), &["config", "user.email", "test@example.com"]);
+        run_git(root.path(), &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(root.path().join("docs")).expect("docs directory");
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        std::fs::write(root.path().join("docs/guide.md"), "prose\n").expect("docs page");
+        run_git(root.path(), &["add", "Cargo.toml", "docs/guide.md"]);
+        run_git(root.path(), &["commit", "-qm", "initial"]);
+
+        let clean =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        std::fs::write(root.path().join("docs/guide.md"), "revised prose\n")
+            .expect("dirty tracked documentation");
+        let with_docs =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        assert_eq!(
+            clean, with_docs,
+            "documentation prose cannot change a cargo test outcome"
+        );
+
+        std::fs::write(root.path().join("lib.rs"), "pub fn f() {}\n").expect("source input");
+        let with_source =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        assert_ne!(with_docs, with_source, "source inputs stay invalidating");
+
+        run_git(root.path(), &["add", "lib.rs"]);
+        run_git(root.path(), &["commit", "-qm", "source"]);
+        std::fs::write(root.path().join("Makefile"), "test:\n\tcargo test\n").expect("makefile");
+        run_git(root.path(), &["add", "Makefile"]);
+        run_git(root.path(), &["commit", "-qm", "makefile"]);
+        let with_makefile =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        std::fs::write(
+            root.path().join("Makefile"),
+            "test:\n\tcargo test --locked\n",
+        )
+        .expect("dirty build file");
+        let with_dirty_makefile =
+            capture_verification_workspace_binding(root.path(), root.path(), "cargo test --locked")
+                .await;
+        assert_ne!(
+            with_makefile, with_dirty_makefile,
+            "an extensionless build file stays an input"
+        );
     }
 
     #[tokio::test]
