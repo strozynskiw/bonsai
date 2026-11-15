@@ -825,6 +825,54 @@ pub enum AgentRunOutcome {
     Waiting(crate::agent::WaitReason),
 }
 
+impl AgentRunOutcome {
+    /// The one short, plain sentence the transcript shows for this run end, or
+    /// `None` when the run should stay silent.
+    ///
+    /// Copy for every run end lives here so the TUI never leaks guard
+    /// internals: `CompletionGuardFailure::detail` still reaches storage and
+    /// the headless surface, but not the transcript. Exhaustive over the enum
+    /// so a new variant fails to compile until it gets a line.
+    pub(crate) fn status_line(&self) -> Option<String> {
+        let line = match self {
+            // A normal finish and a run that merely paused (peer, subagent,
+            // background work, fresh plan) are not run ends the user needs
+            // narrated.
+            Self::Completed | Self::Waiting(_) => return None,
+            Self::Interrupted => "Run interrupted.",
+            Self::BudgetExhausted(reason) => {
+                return Some(format!("Budget exhausted: {reason}."));
+            }
+            Self::Failed => "Agent stopped after repeated tool failures.",
+            Self::Incomplete(failure) => match failure.outcome {
+                crate::agent::CompletionFailureOutcome::Cancelled => {
+                    "Agent stopped: reported cancellation."
+                }
+                crate::agent::CompletionFailureOutcome::Blocked => {
+                    "Agent stopped: unresolved blocker."
+                }
+                crate::agent::CompletionFailureOutcome::Unverified => {
+                    "Agent finished without confirmed verification."
+                }
+                crate::agent::CompletionFailureOutcome::Failed => {
+                    match failure.gaps.iter().find_map(|gap| match gap {
+                        crate::agent::CompletionGap::ImplementationStall(turns) => Some(*turns),
+                        _ => None,
+                    }) {
+                        Some(turns) => {
+                            return Some(format!(
+                                "Agent stopped after {turns} turns without progress."
+                            ));
+                        }
+                        None => "Agent stopped with work still unfinished.",
+                    }
+                }
+            },
+        };
+        Some(line.to_string())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     AgentStarted,
@@ -1587,7 +1635,17 @@ impl CommandOutputKind {
 
 #[cfg(test)]
 mod tests {
-    use super::CommandOutputKind;
+    use super::{AgentRunOutcome, CommandOutputKind};
+    use crate::agent::{CompletionFailureOutcome, CompletionGap, CompletionGuardFailure};
+
+    fn incomplete(outcome: CompletionFailureOutcome, gaps: Vec<CompletionGap>) -> AgentRunOutcome {
+        AgentRunOutcome::Incomplete(CompletionGuardFailure {
+            outcome,
+            gaps,
+            // Technical guard copy: `status_line` must never surface it.
+            detail: "Completion rejected: 1 todo(s) pending; review missing.".to_string(),
+        })
+    }
 
     #[test]
     fn command_output_kind_db_strings_and_labels_are_stable() {
@@ -1605,6 +1663,104 @@ mod tests {
         assert_eq!(
             CommandOutputKind::CompactionStatus.label(),
             "context compacted"
+        );
+    }
+
+    #[test]
+    fn normal_and_paused_runs_stay_silent() {
+        assert_eq!(AgentRunOutcome::Completed.status_line(), None);
+        // A wait is not a run end: printing a line would read as a stop.
+        assert_eq!(
+            AgentRunOutcome::Waiting(crate::agent::WaitReason::StartNewPlan).status_line(),
+            None
+        );
+    }
+
+    #[test]
+    fn interrupted_run_reports_the_interrupt() {
+        assert_eq!(
+            AgentRunOutcome::Interrupted.status_line().as_deref(),
+            Some("Run interrupted.")
+        );
+    }
+
+    #[test]
+    fn budget_line_keeps_the_typed_reason_verbatim() {
+        let reason = crate::run_budget::RunBudgetExhaustion::MaxTurns { limit: 25 };
+        assert_eq!(
+            AgentRunOutcome::BudgetExhausted(reason).status_line(),
+            Some(format!("Budget exhausted: {reason}."))
+        );
+    }
+
+    #[test]
+    fn failed_run_reports_repeated_tool_failures() {
+        assert_eq!(
+            AgentRunOutcome::Failed.status_line().as_deref(),
+            Some("Agent stopped after repeated tool failures.")
+        );
+    }
+
+    #[test]
+    fn guard_rejection_lines_follow_the_typed_outcome() {
+        let cases = [
+            (
+                CompletionFailureOutcome::Cancelled,
+                "Agent stopped: reported cancellation.",
+            ),
+            (
+                CompletionFailureOutcome::Blocked,
+                "Agent stopped: unresolved blocker.",
+            ),
+            (
+                CompletionFailureOutcome::Unverified,
+                "Agent finished without confirmed verification.",
+            ),
+        ];
+        for (outcome, expected) in cases {
+            assert_eq!(
+                incomplete(outcome, vec![CompletionGap::VerificationMissing])
+                    .status_line()
+                    .as_deref(),
+                Some(expected),
+                "unexpected copy for {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn implementation_stall_line_interpolates_the_gap_count() {
+        assert_eq!(
+            incomplete(
+                CompletionFailureOutcome::Failed,
+                vec![
+                    CompletionGap::ReviewMissing,
+                    CompletionGap::ImplementationStall(18),
+                ],
+            )
+            .status_line()
+            .as_deref(),
+            Some("Agent stopped after 18 turns without progress.")
+        );
+    }
+
+    #[test]
+    fn failed_guard_without_a_stall_gap_prints_the_generic_unfinished_line() {
+        assert_eq!(
+            incomplete(
+                CompletionFailureOutcome::Failed,
+                vec![CompletionGap::PendingTodos(1)],
+            )
+            .status_line()
+            .as_deref(),
+            Some("Agent stopped with work still unfinished.")
+        );
+        // An empty gap list must not degrade into an empty line.
+        assert_eq!(
+            incomplete(CompletionFailureOutcome::Failed, Vec::new())
+                .status_line()
+                .as_deref(),
+            Some("Agent stopped with work still unfinished.")
         );
     }
 }

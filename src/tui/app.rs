@@ -1383,34 +1383,18 @@ impl AppState {
                         self.push_transcript_item(TranscriptItem::Error { error: err });
                         self.maybe_scroll_to_bottom_current();
                     }
-                    Ok(AgentRunOutcome::BudgetExhausted(reason)) => {
-                        self.push_transcript_item(TranscriptItem::CommandOutput {
-                            kind: CommandOutputKind::Status,
-                            text: format!(
-                                "Budget exhausted: {reason}. Partial work and session state were preserved."
-                            ),
-                        });
-                        self.maybe_scroll_to_bottom_current();
+                    // Every non-success run end narrates itself through the one
+                    // sentence `status_line` owns; `Completed` and `Waiting`
+                    // stay silent. Guard details remain in storage/headless.
+                    Ok(outcome) => {
+                        if let Some(text) = outcome.status_line() {
+                            self.push_transcript_item(TranscriptItem::CommandOutput {
+                                kind: CommandOutputKind::Status,
+                                text,
+                            });
+                            self.maybe_scroll_to_bottom_current();
+                        }
                     }
-                    Ok(AgentRunOutcome::Interrupted) => {
-                        self.push_transcript_item(TranscriptItem::CommandOutput {
-                            kind: CommandOutputKind::Status,
-                            text: "Run interrupted.".to_string(),
-                        });
-                        self.maybe_scroll_to_bottom_current();
-                    }
-                    Ok(AgentRunOutcome::Incomplete(failure)) => {
-                        self.push_transcript_item(TranscriptItem::CommandOutput {
-                            kind: CommandOutputKind::Status,
-                            text: failure.detail,
-                        });
-                        self.maybe_scroll_to_bottom_current();
-                    }
-                    Ok(
-                        AgentRunOutcome::Completed
-                        | AgentRunOutcome::Failed
-                        | AgentRunOutcome::Waiting(_),
-                    ) => {}
                 }
                 // Signal the event loop to advance (or halt) a phased run. Only
                 // meaningful while a phased plan is executing; flat runs leave
@@ -1755,17 +1739,28 @@ mod tests {
             AgentRunOutcome::Incomplete(crate::agent::CompletionGuardFailure {
                 outcome: crate::agent::CompletionFailureOutcome::Cancelled,
                 gaps: Vec::new(),
-                detail: "Completion cancelled.".to_string(),
+                detail: "Completion cancelled: the assistant explicitly reported cancellation."
+                    .to_string(),
             }),
         ))));
 
         assert_eq!(app.current_session_status, SessionStatus::Interrupted);
         assert!(!app.pending_safe_plan_start_confirmation);
+        // The guard detail is technical and must not reach the transcript.
+        assert!(matches!(
+            app.transcript.as_slice(),
+            [TranscriptItem::CommandOutput {
+                kind: CommandOutputKind::Status,
+                text,
+            }] if text == "Agent stopped: reported cancellation."
+        ));
     }
 
     #[test]
     fn missing_verification_is_visible_as_unverified_not_failed() {
         let mut app = app();
+        // Deliberately technical: the transcript shows the derived human
+        // sentence, never this guard detail.
         let detail = "Work completed; verification not confirmed.";
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
             AgentRunOutcome::Incomplete(crate::agent::CompletionGuardFailure {
@@ -1787,7 +1782,7 @@ mod tests {
             [TranscriptItem::CommandOutput {
                 kind: CommandOutputKind::Status,
                 text,
-            }] if text == detail
+            }] if text == "Agent finished without confirmed verification."
         ));
     }
 
@@ -1809,7 +1804,7 @@ mod tests {
             [TranscriptItem::CommandOutput {
                 kind: CommandOutputKind::Status,
                 text,
-            }] if text == detail
+            }] if text == "Agent stopped after 18 turns without progress."
         ));
     }
 
@@ -3596,7 +3591,16 @@ mod tests {
         ))));
 
         assert_eq!(app.current_session_status, SessionStatus::Failed);
-        assert_eq!(app.transcript.len(), transcript_len);
+        // A repeated-tool-failure run end is narrated, but only by its derived
+        // human line — completion reports themselves stay out of the transcript.
+        assert_eq!(app.transcript.len(), transcript_len + 1);
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptItem::CommandOutput {
+                kind: CommandOutputKind::Status,
+                text,
+            }) if text == "Agent stopped after repeated tool failures."
+        ));
     }
 
     #[test]
