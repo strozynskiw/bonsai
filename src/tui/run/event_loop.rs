@@ -2735,13 +2735,13 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     let TuiRuntime {
         mut agent,
         session_store,
-        mut registry,
+        registry,
         todo_store,
         plan_store,
-        mut interaction_rx,
+        interaction_rx,
         interaction,
         storage,
-        mut model_catalog,
+        model_catalog,
         resume,
         active_session_id,
         background_tasks,
@@ -2757,7 +2757,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         recovery_id,
         accessibility,
     } = runtime;
-    let mut terminal = TerminalSession::enter(accessibility.screen_reader)?;
+    let terminal = TerminalSession::enter(accessibility.screen_reader)?;
     let cwd = session_project_root
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -2780,8 +2780,8 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         crate::tui::theme::set_theme(&theme);
     }
 
-    let (ui_sender, mut ui_receiver) = mpsc::unbounded_channel();
-    let (runtime_sender, mut runtime_receiver) = mpsc::unbounded_channel();
+    let (ui_sender, ui_receiver) = mpsc::unbounded_channel();
+    let (runtime_sender, runtime_receiver) = mpsc::unbounded_channel();
     let mut background_spawns = tokio::task::JoinSet::new();
     // Build the repository map off the startup path: a large repo's tree walk
     // must never block the first frame. It is injected into the agent's context
@@ -2965,7 +2965,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         database = %storage.db_path().display(),
         "started persisted session"
     );
-    let mut last_model_cache_signature = {
+    let last_model_cache_signature = {
         let guard = session_store.lock().await;
         app.sync_cached_model_choices(&guard, &registry, Some(&model_catalog));
         cached_model_signature(&guard, &model_catalog)
@@ -2988,32 +2988,6 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     // within the loop, so a closure holding shared borrows would not compile.
     // Defined here — after every referenced handle is bound — so macro hygiene
     // resolves each identifier to the loop-scope binding at expansion time.
-    macro_rules! runtime_action_deps {
-        () => {
-            RuntimeActionDeps {
-                interaction: interaction.clone(),
-                runtime_sender: runtime_sender.clone(),
-                agent: agent.clone(),
-                memory: memory.clone(),
-                yolo_mode: yolo_mode.clone(),
-                session_store: session_store.clone(),
-                permissions: permissions.clone(),
-                domain_permissions: domain_permissions.clone(),
-                registry: registry.clone(),
-                model_catalog: model_catalog.clone(),
-                storage: &storage,
-                project_root: &project_root,
-                session_project_root: &session_project_root,
-                active_session_id: active_session_id.clone(),
-                todo_store: todo_store.clone(),
-                plan_store: plan_store.clone(),
-                sink: sink.clone(),
-                background_tasks: background_tasks.clone(),
-                terminals: terminals.clone(),
-                peer_bus: Some(peer_bus.clone()),
-            }
-        };
-    }
     let mut tasks = TaskController::new(runtime_sender.clone());
     tasks.set_max_run_duration(run_budget.max_run_duration());
     tasks.configure_session_runtime_budget(
@@ -3035,34 +3009,34 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     });
     let termination_requested = install_termination_signal_handler(&mut background_spawns);
     TtyHangupWatch::spawn_watchdog_thread();
-    let mut background_events = background_tasks.subscribe();
-    let mut terminal_events = terminals.subscribe();
-    let mut background_wake_events = background_wakes.subscribe();
-    let mut pending_background_work_wakes = Vec::new();
-    let mut subagent_events = subagents.subscribe();
-    let mut pending_background_wake: Option<Instant> = None;
+    let background_events = background_tasks.subscribe();
+    let terminal_events = terminals.subscribe();
+    let background_wake_events = background_wakes.subscribe();
+    let pending_background_work_wakes = Vec::new();
+    let subagent_events = subagents.subscribe();
+    let pending_background_wake: Option<Instant> = None;
     // Peer auto-wake: armed when inbound peer messages arrive while
     // the agent may be idle; carries the highest hop among them for the
     // anti-loop brake.
-    let mut pending_peer_wake: Option<PendingPeerWake> = None;
-    let mut pending_peer_wait_recheck: Option<PendingPeerWaitRecheck> = None;
+    let pending_peer_wake: Option<PendingPeerWake> = None;
+    let pending_peer_wait_recheck: Option<PendingPeerWaitRecheck> = None;
     // Holds the async-built repo map until the agent is free to take the lock,
     // and drains it deterministically at turn-start sites.
-    let mut repo_map = RepoMapInjector::new(repo_map_watch);
-    let mut ctrl_c_prompt: Option<CtrlCExitPrompt> = None;
-    let mut deferred_ui_event = None;
-    let mut terminal_input = TerminalInput::default();
-    let mut terminal_input_health = TerminalInputHealth::default();
-    let mut tty_hangup_watch = TtyHangupWatch::open();
-    let mut next_persistence_flush = Instant::now();
-    let mut redraw_requested = true;
-    let mut next_redraw_at = Instant::now();
-    let mut next_goal_refresh_at = Instant::now();
-    let mut pending_selection_auto_scroll: Option<PendingSelectionAutoScroll> = None;
+    let repo_map = RepoMapInjector::new(repo_map_watch);
+    let ctrl_c_prompt: Option<CtrlCExitPrompt> = None;
+    let deferred_ui_event = None;
+    let terminal_input = TerminalInput::default();
+    let terminal_input_health = TerminalInputHealth::default();
+    let tty_hangup_watch = TtyHangupWatch::open();
+    let next_persistence_flush = Instant::now();
+    let redraw_requested = true;
+    let next_redraw_at = Instant::now();
+    let next_goal_refresh_at = Instant::now();
+    let pending_selection_auto_scroll: Option<PendingSelectionAutoScroll> = None;
     // Armed by `sync_plan_store_snapshot` when a planning run edits the canvas,
     // so its finish can snap the plan back to the summary at the top.
-    let mut plan_edited_pending = false;
-    let mut last_active_persona = app.active_persona.clone();
+    let plan_edited_pending = false;
+    let last_active_persona = app.active_persona.clone();
     let mut persisted_signatures = PersistedSnapshotSignatures {
         transcript: transcript_signature(app.transcript.as_slice()),
         plan: plan_signature(&app.plan),
@@ -3074,10 +3048,10 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         self_review: 0,
         episodes: 0,
     };
-    let mut pending_snapshot_flush: Option<tokio::task::JoinHandle<PersistenceFlushResult>> = None;
+    let pending_snapshot_flush: Option<tokio::task::JoinHandle<PersistenceFlushResult>> = None;
     // Cheap dirty check so an unchanged interval never captures, clones, spawns,
     // or writes (#171). The gate resets itself when the active session rotates.
-    let mut snapshot_flush_gate = SnapshotFlushGate::new(current_session_id);
+    let snapshot_flush_gate = SnapshotFlushGate::new(current_session_id);
     if let Some(target) = resume {
         let mut persistence = PersistenceCommandState {
             current_session_id: &mut current_session_id,
@@ -3126,835 +3100,81 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
 
     push_startup_notices(&mut app, &registry, &session_store, &agent).await;
 
-    let result = 'run: loop {
-        // Frame budget watch: everything between here and the event poll runs
-        // on the UI thread, and a slow segment freezes the app — keypresses
-        // (including the Ctrl+C exit dance) queue unread until the next poll.
-        // Users report that as "the app hangs"; the warn below names the
-        // culprit segment instead of leaving a dark zone in the log.
-        let frame_work_started = Instant::now();
-        let mut frame_persist = Duration::ZERO;
-        let mut frame_needs_redraw = false;
-
-        match terminal.ensure_raw_mode() {
-            Ok(true) => {
-                tracing::warn!(
-                    "terminal raw mode was reset externally; restored it and discarded queued input"
-                );
-                frame_needs_redraw = true;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "terminal raw mode was reset and could not be restored; disabled mouse capture"
-                );
-                if app.mouse_capture {
-                    app.reduce(AppAction::ToggleMouseCapture);
-                }
-            }
-        }
-
-        if pending_snapshot_flush
-            .as_ref()
-            .is_some_and(tokio::task::JoinHandle::is_finished)
-            && let Some(handle) = pending_snapshot_flush.take()
-        {
-            match handle.await {
-                Ok(flush) => apply_persistence_flush_result(
-                    flush,
-                    current_session_id,
-                    &mut app,
-                    &agent,
-                    &mut persisted_signatures,
-                ),
-                Err(error) => tracing::warn!(
-                    session_id = %current_session_id,
-                    error = %error,
-                    "periodic snapshot task failed"
-                ),
-            }
-        }
-
-        // A SIGTERM/SIGHUP (terminal window closed, `kill`, logout) lands here
-        // within a frame and exits through bounded cleanup. It is still an
-        // interruption, not a successful completion: preserve the snapshot but
-        // leave the session explicitly resumable.
-        if termination_requested.load(Ordering::Relaxed) {
-            tracing::info!(
-                session_id = %current_session_id,
-                "received termination signal; exiting cleanly"
-            );
-            tasks.abort();
-            prepare_termination_shutdown(&mut app);
-            break 'run Ok(());
-        }
-        clear_expired_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt, Instant::now());
-        if let Some(pending) = pending_selection_auto_scroll
-            && app.pointer_selecting
-            && Instant::now() >= pending.due_at
-        {
-            pending_selection_auto_scroll = handle_mouse_event(
-                pending.mouse,
-                &mut app,
-                &mut ctrl_c_prompt,
-                &mut terminal,
-                &agent,
-                &tasks,
-            )
-            .await?
-            .map(|mouse| PendingSelectionAutoScroll {
-                mouse,
-                due_at: Instant::now() + SELECTION_AUTO_SCROLL_INTERVAL,
-            });
-            frame_needs_redraw = true;
-        } else if !app.pointer_selecting {
-            pending_selection_auto_scroll = None;
-        }
-        let mut changed_files = Vec::new();
-        frame_needs_redraw |= apply_ui_events_for_frame(
-            &mut app,
-            &mut ui_receiver,
-            &mut deferred_ui_event,
-            &mut changed_files,
-        );
-        if !changed_files.is_empty() {
-            // Record off the frame path; the upsert is tiny and low-frequency
-            // (one batch per finished edit/write tool).
-            let storage = storage.clone();
-            let session_id = current_session_id;
-            tokio::spawn(async move {
-                if let Err(panic) = std::panic::AssertUnwindSafe(async {
-                    if let Err(err) = storage
-                        .record_session_file_changes(session_id, &changed_files)
-                        .await
-                    {
-                        tracing::debug!(%err, "file-change ledger write failed");
-                    }
-                })
-                .catch_unwind()
-                .await
-                {
-                    tracing::error!(?panic, "file-change ledger write panicked");
-                }
-            });
-        }
-        // Outgoing peer messages echo into this session's own chat as blue
-        // `you → #N` messages at the send site.
-        let peer_echoes = peer_bus.drain_echoes();
-        if !peer_echoes.is_empty() {
-            frame_needs_redraw = true;
-        }
-        for echo in peer_echoes {
-            app.reduce(AppAction::PeerMessage {
-                source_message_id: None,
-                delivery_receipt: None,
-                session_id: echo.to_session_id.as_i64(),
-                outgoing: true,
-                text: echo.body,
-            });
-        }
-
-        frame_needs_redraw |= drain_background_and_terminal_channels(
-            &mut background_events,
-            &mut terminal_events,
-            &mut app,
-            &background_tasks,
-            &terminals,
-            &mut pending_background_wake,
-        )
-        .await;
-        frame_needs_redraw |= drain_background_work_wakes(
-            &mut background_wake_events,
-            &mut pending_background_work_wakes,
-            &mut app,
-            &mut tasks,
-            agent.clone(),
-            sink.clone(),
-            &mut pending_background_wake,
-            &background_tasks,
-            &terminals,
-        )
-        .await;
-
-        // Subagent activity: while `/subagents` is open, keep its snapshot fresh
-        // so it updates live. Each snapshot deep-clones the run's activity and
-        // result (up to ~18 KB), so the work stays gated on the modal being open.
-        frame_needs_redraw |= drain_subagent_channel(
-            &mut subagent_events,
-            &mut app,
-            &subagents,
-            &mut pending_background_wake,
-        );
-
-        let registry_before_drain = Arc::as_ptr(&registry);
-        let catalog_before_drain = Arc::as_ptr(&model_catalog);
-        frame_needs_redraw |= drain_runtime_events_for_frame(
-            &mut runtime_receiver,
-            &mut app,
-            &tasks,
-            &mut current_session_id,
-            &mut persisted_signatures,
-            &mut model_catalog,
-            &mut registry,
-            &mut last_model_cache_signature,
-            &mut pending_peer_wake,
-            &mut pending_peer_wait_recheck,
-            &mut repo_map,
-            &mut background_spawns,
-            RuntimeEventDrainDeps {
-                storage: &storage,
-                agent: &agent,
-                active_session_id: &active_session_id,
-                project_root: &session_project_root,
-                plan_store: &plan_store,
-                session_store: &session_store,
-                background_tasks: &background_tasks,
-                terminals: &terminals,
-                peer_bus: &peer_bus,
-                memory: &memory,
-            },
-        )
-        .await;
-        // A `/refresh` swapped the registry/catalog handles; re-install them in
-        // the dispatcher's persona-model deps so future runs resolve models
-        // against the fresh catalog.
-        if Arc::as_ptr(&registry) != registry_before_drain
-            || Arc::as_ptr(&model_catalog) != catalog_before_drain
-        {
-            tasks.set_persona_model_deps(crate::tui::task::PersonaModelDeps {
-                agent: agent.clone(),
-                session_store: session_store.clone(),
-                registry: registry.clone(),
-                model_catalog: model_catalog.clone(),
-                custom_agents: app.custom_agents.clone(),
-            });
-        }
-        // ToolStarted and SubagentEvent travel over separate channels. Reconcile
-        // after every runtime drain so a completion observed on an earlier frame
-        // still closes a transcript row that arrives later.
-        frame_needs_redraw |= apply_completed_subagent_tool_calls(&mut app, &subagents);
-        // Inject the async-built repo map as soon as the agent is free.
-        if let Some(report) = repo_map.try_apply_when_idle(&agent) {
-            app.latest_context_report = Some(report);
-            frame_needs_redraw = true;
-        }
-        // Exit the loop as soon as a runtime event (e.g. a CommandFinished
-        // with quit:true from /quit, or the runtime-reducer arm) flips us to
-        // Exiting, so we skip one final draw before breaking below.
-        if matches!(app.task_state, TaskState::Exiting) {
-            tracing::info!(
-                pending_task = tasks.is_busy(),
-                "TUI exiting; run loop broken"
-            );
-            break 'run Ok(());
-        }
-        // Drive phase auto-advance from this unconditional per-frame site, not
-        // only the poll_finished site. The AgentFinished reducer sets
-        // phase_advance + Idle at the top-of-loop drain, which can land a frame
-        // *after* poll_finished already reaped (take()s) the run handle — so a
-        // poll_finished-only driver would miss the signal and the phased plan
-        // would stall after the first phase. maybe_advance self-gates on
-        // idle + !is_busy + phase_advance.take(), so it is a cheap no-op
-        // otherwise. Deferred commands run before phase advancement at both
-        // dispatch sites; queued user input remains last in the idle slot.
-        // Starting a new plan protects and clears the previous canvas before
-        // any deferred command can act on it. It takes priority over phase
-        // advancement and queued work.
-        let started_new_plan = maybe_start_new_plan(
-            &mut app,
-            &mut tasks,
-            agent.clone(),
-            sink.clone(),
-            &mut repo_map,
-            &storage,
-            current_session_id,
-            plan_store.clone(),
-        )
-        .await;
-        frame_needs_redraw |= started_new_plan;
-        frame_needs_redraw |=
-            maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await;
-        if !started_new_plan {
-            let started_deferred = start_next_deferred_command_if_idle(
-                &mut app,
-                &mut tasks,
-                agent.clone(),
-                session_store.clone(),
-                &project_root,
-                DeferredCommandDeps {
-                    registry: registry.clone(),
-                    model_catalog: model_catalog.clone(),
-                    storage: Some(&storage),
-                },
-            )
-            .await;
-            frame_needs_redraw |= started_deferred;
-            let advanced = !started_deferred
-                && maybe_advance_plan_phase(
-                    &mut app,
-                    &mut tasks,
-                    agent.clone(),
-                    sink.clone(),
-                    todo_store.clone(),
-                    plan_store.clone(),
-                    &mut repo_map,
-                )
-                .await;
-            frame_needs_redraw |= advanced;
-            if !started_deferred && !advanced {
-                frame_needs_redraw |= start_pending_queued_run_if_idle(
-                    &mut app,
-                    &mut tasks,
-                    agent.clone(),
-                    sink.clone(),
-                    &mut repo_map,
-                    &registry,
-                    &model_catalog,
-                )
-                .await;
-            }
-        }
-        frame_needs_redraw |= maybe_start_background_wake(
-            &mut pending_background_wake,
-            &mut app,
-            &mut tasks,
-            agent.clone(),
-            sink.clone(),
-            &background_tasks,
-            &terminals,
-            &subagents,
-            &peer_bus,
-        )
-        .await;
-        frame_needs_redraw |= maybe_start_peer_wake(
-            &mut pending_peer_wake,
-            &mut app,
-            &mut tasks,
-            agent.clone(),
-            sink.clone(),
-            &peer_bus,
-        )
-        .await;
-        maybe_recheck_peer_wait(&mut pending_peer_wait_recheck, &app, &tasks, &peer_bus).await;
-
-        if let Some(ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
-            request_id,
-            ..
-        })) = app.modal.as_ref()
-            && !interaction.is_pending(*request_id).await
-        {
-            app.modal = None;
-            app.focus = Focus::Input;
-            push_command_message(
-                &mut app,
-                CommandOutputKind::Status,
-                "Question resolved; work continues. Use /questions for pending questions.",
-            );
-            frame_needs_redraw = true;
-        }
-        frame_needs_redraw |= apply_interaction_request(&mut app, &mut interaction_rx);
-        frame_needs_redraw |=
-            super::goal::maybe_start_goal(&mut app, &mut tasks, &goal_service, &agent, &sink).await;
-
-        if Instant::now() >= next_goal_refresh_at {
-            frame_needs_redraw |=
-                super::goal::sync_goal_snapshot(&mut app, &tasks, &goal_service, &storage).await;
-            next_goal_refresh_at = Instant::now() + Duration::from_secs(1);
-        }
-
-        app.reduce(AppAction::Tick);
-        // A growing bonsai animates at the poll cadence; without this the
-        // idle loop repaints once a second and the growth would stutter.
-        if app.bonsai_growing() {
-            frame_needs_redraw = true;
-        }
-        frame_needs_redraw |= sync_todo_snapshot(&mut app, &todo_store);
-        if let Ok(plan) = plan_store.try_lock() {
-            frame_needs_redraw |= sync_plan_store_snapshot(
-                &mut app,
-                &plan,
-                tasks.active_agent_mode(),
-                &mut plan_edited_pending,
-            );
-        }
-        let plan_run_busy = app.task_state.is_busy() || tasks.is_busy();
-        frame_needs_redraw |= show_plan_top_when_ready(
-            &mut app,
-            tasks.active_agent_mode(),
-            plan_run_busy,
-            &mut plan_edited_pending,
-        );
-
-        frame_needs_redraw |= refresh_cached_model_choices(
-            &mut app,
-            &session_store,
-            &registry,
-            &model_catalog,
-            &mut last_model_cache_signature,
-        );
-
-        let now = Instant::now();
-        if now >= next_persistence_flush && pending_snapshot_flush.is_none() {
-            // `is_busy` covers a run holding the agent lock (agent state can
-            // change under it); the gate's bounded heartbeat covers anything
-            // that settles just after a run releases it.
-            if snapshot_flush_gate.needs_flush(current_session_id, &app, tasks.is_busy()) {
-                let persist_started = Instant::now();
-                pending_snapshot_flush = Some(spawn_changed_snapshot_flush(
-                    &storage,
-                    current_session_id,
-                    &app,
-                    &agent,
-                    persisted_signatures,
-                ));
-                frame_persist = persist_started.elapsed();
-            }
-            next_persistence_flush = now + PERSISTENCE_FLUSH_INTERVAL;
-        }
-
-        let activity = tasks.reconcile_session_activity().await?;
-        if let Some(activity) = activity {
-            if activity.active
-                && !tasks.is_busy()
-                && tasks.session_active_budget_exhausted(activity.active_run_ms)
-            {
-                agent.lock().await.cancel_running_subagents();
-                frame_needs_redraw = true;
-            }
-            if activity.active {
-                app.mark_run_started(Instant::now());
-            } else {
-                app.mark_run_finished(Instant::now());
-            }
-        }
-        // The live session clock rides this same tick: the ledger is shared with
-        // the interaction service and a snapshot is a lock-free read, so the
-        // header can show what the run is charging without a new timer, a new
-        // storage read, or the agent lock a live run holds. Only a live run gets
-        // a reading: the ledger keeps the finished run's intervals until the next
-        // run re-anchors, so an unguarded snapshot would keep advertising compute
-        // beside the frozen run timer.
-        let session_clock = if app.run_started_at.is_some() {
-            session_clock_label(interaction.timing().map(|ledger| ledger.snapshot()))
-        } else {
-            None
-        };
-        if app.session_clock_label != session_clock {
-            app.session_clock_label = session_clock;
-            frame_needs_redraw = true;
-        }
-        if mirror_run_status(&mut app, &tasks, &subagents, &busy_flag) {
-            redraw_requested = true;
-        }
-
-        if frame_needs_redraw {
-            redraw_requested = true;
-        }
-        let mut frame_draw = Duration::ZERO;
-        let now = Instant::now();
-        if should_draw_frame(redraw_requested, now, next_redraw_at) {
-            let draw_started = Instant::now();
-            draw_tui_frame(&mut terminal, &mut app)?;
-            frame_draw = draw_started.elapsed();
-            redraw_requested = false;
-            next_redraw_at = Instant::now()
-                + redraw_interval(
-                    any_task_active(&app, &tasks, &subagents, &background_tasks, &terminals).await,
-                );
-        }
-
-        if matches!(app.task_state, TaskState::Exiting) {
-            tracing::info!(
-                pending_task = tasks.is_busy(),
-                "TUI exiting; run loop broken"
-            );
-            break 'run Ok(());
-        }
-
-        // Liveness-check the tty BEFORE entering the crossterm poll: with the
-        // terminal dead, `event::poll` can spin on EOF internally and never
-        // return, so this is the last point where the loop can still exit.
-        if tty_hangup_watch.poll_hangup() {
-            tracing::warn!(
-                consecutive_hangups = tty_hangup_watch.consecutive_hangups,
-                "controlling terminal hung up; exiting TUI"
-            );
-            tasks.abort();
-            prepare_termination_shutdown(&mut app);
-            break 'run Ok(());
-        }
-
-        // Name the culprit when a frame's work starved the input path. 500ms is
-        // 10 poll periods — users feel it as a hang, and a queued Ctrl+C exit
-        // sits unread the whole time.
-        let frame_work = frame_work_started.elapsed();
-        if frame_work >= SLOW_FRAME_WARN_THRESHOLD {
-            tracing::warn!(
-                frame_work_ms = frame_work.as_millis() as u64,
-                persist_ms = frame_persist.as_millis() as u64,
-                draw_ms = frame_draw.as_millis() as u64,
-                task_state = ?app.task_state,
-                "slow UI frame; input (incl. Ctrl+C) was starved this long"
-            );
-        }
-
-        let poll_started_at = Instant::now();
-        // CPU-time bracket around the blocking poll (no await between the two
-        // readings, so both observe the same OS thread).
-        let poll_cpu_started = thread_cpu_time();
-        let has_terminal_event = match terminal_input.poll(EVENT_POLL_TIMEOUT) {
-            Ok(has_event) => has_event,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => false,
-            Err(err) => {
-                tracing::warn!(error = %err, "terminal event poll failed; exiting TUI");
-                tasks.abort();
-                prepare_termination_shutdown(&mut app);
-                break 'run Ok(());
-            }
-        };
-        let poll_cpu_spent = match (poll_cpu_started, thread_cpu_time()) {
-            (Some(started), Some(ended)) => ended.saturating_sub(started),
-            _ => Duration::ZERO,
-        };
-        if terminal_input_health.record_poll(
-            has_terminal_event,
-            poll_started_at.elapsed(),
-            poll_cpu_spent,
-        ) {
-            tracing::warn!(
-                fast_empty_polls = terminal_input_health.fast_empty_polls,
-                busy_empty_polls = terminal_input_health.busy_empty_polls,
-                poll_timeout_ms = EVENT_POLL_TIMEOUT.as_millis() as u64,
-                "terminal input appears disconnected; exiting TUI"
-            );
-            tasks.abort();
-            prepare_termination_shutdown(&mut app);
-            break 'run Ok(());
-        }
-
-        if has_terminal_event {
-            let terminal_event = match terminal_input.read() {
-                Ok(event) => Some(event),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => None,
-                Err(err) => {
-                    tracing::warn!(error = %err, "terminal event read failed; exiting TUI");
-                    tasks.abort();
-                    prepare_termination_shutdown(&mut app);
-                    break 'run Ok(());
-                }
-            };
-            // Pointer motion is discarded wholesale (see
-            // `terminal_event_is_pointer_motion`): it must not request a
-            // redraw, clear the Ctrl+C prompt, or pay the terminal-size ioctl.
-            let terminal_event = terminal_event.filter(|event| {
-                pending_selection_auto_scroll.is_some() || !terminal_event_is_pointer_motion(event)
-            });
-            if let Some(terminal_event) = terminal_event {
-                redraw_requested = true;
-                if terminal_event_requests_immediate_redraw(&terminal_event) {
-                    let draw_started = Instant::now();
-                    draw_tui_frame(&mut terminal, &mut app)?;
-                    let frame_draw = draw_started.elapsed();
-                    redraw_requested = false;
-                    next_redraw_at = Instant::now()
-                        + redraw_interval(
-                            any_task_active(
-                                &app,
-                                &tasks,
-                                &subagents,
-                                &background_tasks,
-                                &terminals,
-                            )
-                            .await,
-                        );
-                    if frame_draw >= SLOW_FRAME_WARN_THRESHOLD {
-                        tracing::warn!(
-                            draw_ms = frame_draw.as_millis() as u64,
-                            task_state = ?app.task_state,
-                            "slow immediate resize redraw"
-                        );
-                    }
-                }
-                match terminal_event {
-                    Event::Key(key) => {
-                        let intent = map_key(key, &app);
-                        if clears_ctrl_c_prompt(&intent) {
-                            clear_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt);
-                        }
-                        match intent {
-                            KeyIntent::Action(action) => {
-                                if matches!(action, AppAction::BudgetWarningSubmit) {
-                                    if let Some(submission) =
-                                        take_budget_warning_submission(&mut app)
-                                    {
-                                        let input = super::goal::command_input(&submission);
-                                        let mut persistence = PersistenceCommandState {
-                                            current_session_id: &mut current_session_id,
-                                            signatures: &mut persisted_signatures,
-                                        };
-                                        if handle_toplevel_submit_command(
-                                            &input,
-                                            &mut app,
-                                            &mut tasks,
-                                            runtime_action_deps!(),
-                                            &mut persistence,
-                                            &subagents,
-                                            &peer_bus,
-                                            &update_config,
-                                            &goal_service,
-                                        )
-                                        .await
-                                        {
-                                            continue;
-                                        }
-                                        if let Some(command) = idle_slash_command(&input) {
-                                            app.reduce(AppAction::ScrollBottom);
-                                            app.reduce(AppAction::SubmitCommandInput(
-                                                input.clone(),
-                                            ));
-                                            let mut persistence = PersistenceCommandState {
-                                                current_session_id: &mut current_session_id,
-                                                signatures: &mut persisted_signatures,
-                                            };
-                                            handle_idle_slash_command(
-                                                command,
-                                                &input,
-                                                &mut app,
-                                                &mut tasks,
-                                                runtime_action_deps!(),
-                                                &mut persistence,
-                                            )
-                                            .await;
-                                        } else {
-                                            let _ = submit_and_start_run(
-                                                submission,
-                                                &input,
-                                                &mut app,
-                                                &mut tasks,
-                                                runtime_action_deps!(),
-                                                &mut repo_map,
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                    continue;
-                                }
-                                // The Alt+S keybind opens `/subagents` from the cached
-                                // snapshot; refresh it first so the modal opens to
-                                // current data even though live refresh (above) is
-                                // gated on the modal being open.
-                                if matches!(action, AppAction::OpenSubtaskList) {
-                                    app.reduce(AppAction::RefreshSubtaskList {
-                                        subtasks: subagents.list(),
-                                    });
-                                }
-                                let mut persistence = PersistenceCommandState {
-                                    current_session_id: &mut current_session_id,
-                                    signatures: &mut persisted_signatures,
-                                };
-                                let result = handle_runtime_action(
-                                    action,
-                                    &mut app,
-                                    &mut tasks,
-                                    runtime_action_deps!(),
-                                    &mut persistence,
-                                )
-                                .await;
-                                if let RuntimeActionResult::Unhandled(action) = result {
-                                    apply_action_with_task_side_effects(*action, &mut app, &tasks);
-                                }
-                            }
-                            KeyIntent::Quit => {
-                                tasks.abort();
-                                clear_ctrl_c_prompt(&mut app, &mut ctrl_c_prompt);
-                                app.reduce(AppAction::SetTaskState(TaskState::Exiting));
-                                break 'run Ok(());
-                            }
-                            KeyIntent::CancelOrQuit => {
-                                if handle_ctrl_c(
-                                    &mut app,
-                                    &mut tasks,
-                                    &mut ctrl_c_prompt,
-                                    &subagents,
-                                    &agent,
-                                )
-                                .await
-                                {
-                                    break 'run Ok(());
-                                }
-                            }
-                            KeyIntent::Steer => {
-                                steer_active_run(&mut app, &tasks);
-                            }
-                            intent @ (KeyIntent::Submit | KeyIntent::SubmitReplacement(_)) => {
-                                if let KeyIntent::SubmitReplacement(replacement) = &intent {
-                                    app.reduce(AppAction::CompleteInputTo(replacement.clone()));
-                                }
-                                // Snapshot the composer once: `input` is the
-                                // placeholder display text used for slash-command
-                                // detection and the transcript, while
-                                // `submission.input` carries the expanded model
-                                // payload (chip text spliced in, images attached).
-                                let submission = app.composer.submission();
-                                let input = super::goal::command_input(&submission);
-                                if input.is_empty() {
-                                    continue;
-                                }
-                                if matches!(app.task_state, TaskState::Idle)
-                                    && submitted_input_dispatches_model_work(&input)
-                                    && open_budget_warning_if_reached(
-                                        &mut app,
-                                        &tasks,
-                                        &agent,
-                                        submission.clone(),
-                                    )
-                                    .await
-                                {
-                                    continue;
-                                }
-                                let mut persistence = PersistenceCommandState {
-                                    current_session_id: &mut current_session_id,
-                                    signatures: &mut persisted_signatures,
-                                };
-                                if handle_toplevel_submit_command(
-                                    &input,
-                                    &mut app,
-                                    &mut tasks,
-                                    runtime_action_deps!(),
-                                    &mut persistence,
-                                    &subagents,
-                                    &peer_bus,
-                                    &update_config,
-                                    &goal_service,
-                                )
-                                .await
-                                {
-                                    continue;
-                                }
-                                if let Some(command) = idle_slash_command(&input) {
-                                    // Every inline command echoes into the
-                                    // transcript the same way; the arms below do
-                                    // only their distinctive work.
-                                    app.reduce(AppAction::ScrollBottom);
-                                    app.reduce(AppAction::SubmitCommandInput(input.clone()));
-                                    let mut persistence = PersistenceCommandState {
-                                        current_session_id: &mut current_session_id,
-                                        signatures: &mut persisted_signatures,
-                                    };
-                                    handle_idle_slash_command(
-                                        command,
-                                        &input,
-                                        &mut app,
-                                        &mut tasks,
-                                        runtime_action_deps!(),
-                                        &mut persistence,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-
-                                if submit_and_start_run(
-                                    submission,
-                                    &input,
-                                    &mut app,
-                                    &mut tasks,
-                                    runtime_action_deps!(),
-                                    &mut repo_map,
-                                )
-                                .await
-                                {
-                                    continue;
-                                }
-                            }
-                            KeyIntent::Insert(ch) => app.reduce(AppAction::InputChar(ch)),
-                            KeyIntent::Noop => {}
-                        }
-                    }
-                    Event::Mouse(mouse) => {
-                        // While edge auto-scroll is armed, all-motion events update
-                        // its stored pointer position. The timer above applies the
-                        // drag at a fixed cadence, rather than scrolling at the
-                        // terminal's potentially much higher motion-event rate.
-                        if matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
-                            && let Some(pending) = pending_selection_auto_scroll.as_mut()
-                        {
-                            pending.mouse = crossterm::event::MouseEvent {
-                                kind: crossterm::event::MouseEventKind::Drag(
-                                    crossterm::event::MouseButton::Left,
-                                ),
-                                ..mouse
-                            };
-                        } else {
-                            pending_selection_auto_scroll = handle_mouse_event(
-                                mouse,
-                                &mut app,
-                                &mut ctrl_c_prompt,
-                                &mut terminal,
-                                &agent,
-                                &tasks,
-                            )
-                            .await?
-                            .map(|mouse| PendingSelectionAutoScroll {
-                                mouse,
-                                due_at: Instant::now() + SELECTION_AUTO_SCROLL_INTERVAL,
-                            });
-                        }
-                    }
-                    Event::Paste(text) => {
-                        handle_paste_event(
-                            text,
-                            &mut app,
-                            &mut ctrl_c_prompt,
-                            &registry,
-                            &model_catalog,
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if reap_finished_task(&mut app, &mut tasks).await {
-            redraw_requested = true;
-            // Do not dispatch a replacement here. `AgentFinished` may still be
-            // queued; the next frame drains it before the unconditional idle
-            // dispatch site starts plans, commands, phases, or queued input.
-            // A persona selected while the run was in flight was deliberately
-            // not applied mid-run (the busy guard skipped it). Apply it now
-            // that the run ended — completed, failed, or interrupted alike.
-            // When one of the dispatchers above already started a follow-up
-            // run, its busy guard makes this a no-op (each dispatch sets its
-            // own persona anyway).
-            sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
-            apply_idle_persona_model(&mut app, &tasks, &mut redraw_requested).await;
-        }
-
-        // After all event processing for the frame, a view change (Tab, `1`,
-        // `2`, mouse, implement_plan, review_changes) means the selected agent
-        // persona changed, so the tool-schema count in the persisted context
-        // report is stale. Regenerate it before the next draw.
-        //
-        // A persona change never cancels an in-flight run: the running turn
-        // captured its persona at dispatch and keeps it — the user may just be
-        // peeking at the plan canvas mid-implementation, and the review agent's
-        // first finding auto-opens that canvas under the reviewer's feet
-        // (regression: session 7, the finding's own auto-open cancelled the
-        // review 228µs after it was recorded). While busy this sync is a no-op
-        // (its internal guard); the post-completion sync in the poll_finished
-        // block applies the selection once the run ends, and every dispatch
-        // path sets its persona explicitly, so the next user-sent run always
-        // starts under the newly selected persona.
-        if app.active_persona != last_active_persona {
-            last_active_persona = app.active_persona.clone();
-            sync_agent_mode_and_refresh(&mut app, agent.clone()).await;
-            // Idle persona switch: apply the new persona's model right away so
-            // the meta line names the model the next run will actually use.
-            // While busy this skips; dispatch applies it when the run starts.
-            apply_idle_persona_model(&mut app, &tasks, &mut redraw_requested).await;
-            redraw_requested = true;
-        }
+    let mut frame_loop = driver::TuiLoop {
+        agent,
+        session_store,
+        registry,
+        todo_store,
+        plan_store,
+        interaction_rx,
+        interaction,
+        storage,
+        model_catalog,
+        active_session_id,
+        background_tasks,
+        terminals,
+        subagents,
+        peer_bus,
+        project_root,
+        session_project_root,
+        terminal,
+        ui_receiver,
+        runtime_receiver,
+        runtime_sender,
+        background_spawns,
+        update_config,
+        app,
+        current_session_id,
+        goal_service,
+        busy_flag,
+        last_model_cache_signature,
+        memory,
+        sink,
+        tasks,
+        yolo_mode,
+        permissions,
+        domain_permissions,
+        termination_requested,
+        background_events,
+        terminal_events,
+        background_wake_events,
+        pending_background_work_wakes,
+        subagent_events,
+        pending_background_wake,
+        pending_peer_wake,
+        pending_peer_wait_recheck,
+        repo_map,
+        ctrl_c_prompt,
+        deferred_ui_event,
+        terminal_input,
+        terminal_input_health,
+        tty_hangup_watch,
+        next_persistence_flush,
+        redraw_requested,
+        next_redraw_at,
+        next_goal_refresh_at,
+        pending_selection_auto_scroll,
+        plan_edited_pending,
+        last_active_persona,
+        persisted_signatures,
+        pending_snapshot_flush,
+        snapshot_flush_gate,
     };
+    frame_loop.drive().await?;
+    let driver::TuiLoop {
+        terminal,
+        app,
+        agent,
+        storage,
+        current_session_id,
+        background_tasks,
+        terminals,
+        persisted_signatures,
+        peer_bus,
+        pending_snapshot_flush,
+        background_spawns,
+        ..
+    } = frame_loop;
 
     shutdown_tui(
         terminal,
@@ -3970,7 +3190,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         background_spawns,
     )
     .await?;
-    result
+    Ok(())
 }
 
 fn prepare_termination_shutdown(app: &mut AppState) {
@@ -5243,6 +4463,7 @@ async fn local_model_wizard_state_for_input(
 }
 
 mod background;
+mod driver;
 mod scroll;
 
 #[cfg(test)]
