@@ -991,12 +991,9 @@ impl Agent {
             if let Some(lease) = self.goal_run_lease.as_ref()
                 && self.goal.snapshot_for_run(lease).await.is_none()
             {
-                let skipped_calls = batch
-                    .into_iter()
-                    .chain(batches.by_ref().flatten())
-                    .collect();
-                self.drain_skipped_calls(
-                    skipped_calls,
+                self.skip_batch_and_rest(
+                    batch,
+                    &mut batches,
                     "Tool skipped because this goal run is no longer active.",
                     sink,
                     &mut trusted_contexts,
@@ -1024,12 +1021,9 @@ impl Agent {
                 // take priority over even the pre-mutation baseline capture.
                 let queued = queued_messages.next();
                 if !queued.is_empty() {
-                    let skipped_calls = batch
-                        .into_iter()
-                        .chain(batches.by_ref().flatten())
-                        .collect();
-                    self.drain_skipped_calls(
-                        skipped_calls,
+                    self.skip_batch_and_rest(
+                        batch,
+                        &mut batches,
                         "Tool skipped because a new queued user message took priority.",
                         sink,
                         &mut trusted_contexts,
@@ -1047,12 +1041,9 @@ impl Agent {
                     baseline = capture_review_baseline(&self.project_root) => (Some(baseline), None),
                 };
                 if let Some(steering) = steering {
-                    let skipped_calls = batch
-                        .into_iter()
-                        .chain(batches.by_ref().flatten())
-                        .collect();
-                    self.drain_skipped_calls(
-                        skipped_calls,
+                    self.skip_batch_and_rest(
+                        batch,
+                        &mut batches,
                         "Tool skipped because a new queued user message took priority.",
                         sink,
                         &mut trusted_contexts,
@@ -1067,12 +1058,9 @@ impl Agent {
                     self.self_review.set_deferred_baseline(baseline);
                 }
                 if cancellation_token.is_cancelled() {
-                    let skipped_calls = batch
-                        .into_iter()
-                        .chain(batches.by_ref().flatten())
-                        .collect();
-                    self.drain_skipped_calls(
-                        skipped_calls,
+                    self.skip_batch_and_rest(
+                        batch,
+                        &mut batches,
                         "Tool skipped because the run was interrupted.",
                         sink,
                         &mut trusted_contexts,
@@ -1225,12 +1213,9 @@ impl Agent {
             // each completed batch.
             let queued = queued_messages.next();
             if !queued.is_empty() {
-                let skipped_calls = batch
-                    .into_iter()
-                    .chain(batches.by_ref().flatten())
-                    .collect();
-                self.drain_skipped_calls(
-                    skipped_calls,
+                self.skip_batch_and_rest(
+                    batch,
+                    &mut batches,
                     "Tool skipped because a new queued user message took priority.",
                     sink,
                     &mut trusted_contexts,
@@ -1247,12 +1232,9 @@ impl Agent {
                 && self.goal.snapshot_for_run(lease).await.is_none()
             {
                 self.release_verification_bindings(&eligible_calls);
-                let skipped_calls = batch
-                    .into_iter()
-                    .chain(batches.by_ref().flatten())
-                    .collect();
-                self.drain_skipped_calls(
-                    skipped_calls,
+                self.skip_batch_and_rest(
+                    batch,
+                    &mut batches,
                     "Tool skipped because this goal run is no longer active.",
                     sink,
                     &mut trusted_contexts,
@@ -1667,6 +1649,28 @@ impl Agent {
                 );
             }
         }
+    }
+
+    /// Reports the current batch and every batch still queued behind it as
+    /// skipped, so each call gets a tool result and the history stays valid.
+    async fn skip_batch_and_rest(
+        &mut self,
+        batch: Vec<ToolCall>,
+        remaining: &mut impl Iterator<Item = Vec<ToolCall>>,
+        reason: &str,
+        sink: &SharedSink,
+        trusted_contexts: &mut Vec<String>,
+        image_messages: &mut Vec<ChatCompletionRequestMessage>,
+    ) -> Result<()> {
+        let skipped_calls = batch.into_iter().chain(remaining.flatten()).collect();
+        self.drain_skipped_calls(
+            skipped_calls,
+            reason,
+            sink,
+            trusted_contexts,
+            image_messages,
+        )
+        .await
     }
 
     fn planning_research_action(
