@@ -911,6 +911,214 @@ fn is_official_openai_api_base_url(base_url: &str) -> bool {
             .is_some_and(|host| host.eq_ignore_ascii_case("api.openai.com"))
 }
 
+/// Everything accumulated while one OpenAI-compatible chat stream is consumed.
+struct ChatStreamState {
+    content: String,
+    tool_call_accumulator: tool_calls::ChatToolCallAccumulator,
+    token_usage: Option<crate::provider::TokenUsage>,
+    reported_output_tokens: Option<u64>,
+    /// Whether any choice carried a terminal `finish_reason`. A stream that
+    /// ends without one (and without a usage frame) did not complete — the
+    /// connection dropped mid-response. Indistinguishable from success
+    /// without this check: an observed final turn streamed ~53k tokens of
+    /// GLM reasoning, the connection died at a frame boundary, and the
+    /// empty remainder was treated as a clean "task finished".
+    finish_reason: Option<crate::provider::FinishReason>,
+    reasoning_chars: usize,
+    reasoning_for_replay: String,
+    saw_native_reasoning_text: bool,
+    mistral_content_parts: Vec<Value>,
+    saw_mistral_structured_content: bool,
+    openrouter_reasoning_details: Vec<Value>,
+    saw_openrouter_reasoning_details: bool,
+    openrouter_legacy_reasoning: Option<String>,
+    splitter: ThinkTagSplitter,
+}
+
+impl ChatStreamState {
+    fn new(codec: ReasoningCodec) -> Self {
+        // Legacy compatible servers may put a leading <think> block in text.
+        // Known native codecs keep all text literal from the start, including
+        // examples that begin with <think>. Other servers select native mode
+        // as soon as their stream declares a dedicated reasoning channel.
+        let mut splitter = ThinkTagSplitter::new();
+        if matches!(
+            codec,
+            ReasoningCodec::OpenAiChatCompletions
+                | ReasoningCodec::MistralChatCompletions
+                | ReasoningCodec::OpenRouter
+                | ReasoningCodec::Hunyuan
+        ) {
+            splitter.use_native_reasoning_channel();
+        }
+        Self {
+            content: String::new(),
+            tool_call_accumulator: tool_calls::ChatToolCallAccumulator::default(),
+            token_usage: None,
+            reported_output_tokens: None,
+            finish_reason: None,
+            reasoning_chars: 0,
+            reasoning_for_replay: String::new(),
+            saw_native_reasoning_text: false,
+            mistral_content_parts: Vec::new(),
+            saw_mistral_structured_content: false,
+            openrouter_reasoning_details: Vec::new(),
+            saw_openrouter_reasoning_details: false,
+            openrouter_legacy_reasoning: None,
+            splitter,
+        }
+    }
+
+    /// Applies one streamed `choices[]` entry: text, reasoning in every
+    /// provider-specific shape, tool-call deltas and the finish reason.
+    fn apply_choice(&mut self, codec: ReasoningCodec, choice: &Value, sink: &SharedSink) {
+        if let Some(reason) = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
+        {
+            self.finish_reason = Some(crate::provider::FinishReason::from_openai(reason));
+        }
+        let delta = &choice["delta"];
+        // Check the native shape before parsing text in this same
+        // frame. Empty strings/arrays still identify a separate
+        // channel; null placeholders do not. Flush a held opening
+        // fragment first so visible text keeps its wire order.
+        let native_reasoning_text = [
+            "reasoning_summary",
+            "reasoning_summary_text",
+            "reasoning_content",
+            "reasoning",
+        ]
+        .into_iter()
+        .any(|key| delta[key].is_string());
+        if native_reasoning_text || delta["reasoning_details"].is_array() {
+            let literal = self.splitter.use_native_reasoning_channel();
+            if !literal.visible.is_empty() {
+                self.content.push_str(&literal.visible);
+                sink.assistant_delta(&literal.visible);
+            }
+        }
+        let has_openrouter_reasoning_details = codec == ReasoningCodec::OpenRouter
+            && delta["reasoning_details"]
+                .as_array()
+                .is_some_and(|reasoning_details| {
+                    self.saw_openrouter_reasoning_details = true;
+                    for detail in reasoning_details {
+                        if let Some(text) = detail
+                            .get("text")
+                            .or_else(|| detail.get("summary"))
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())
+                        {
+                            self.reasoning_chars =
+                                self.reasoning_chars.saturating_add(text.chars().count());
+                            sink.reasoning_delta(text);
+                        }
+                        // Preserve each object as returned.
+                        // Concatenating chunk arrays in order
+                        // is OpenRouter's reconstruction rule.
+                        self.openrouter_reasoning_details.push(detail.clone());
+                    }
+                    !reasoning_details.is_empty()
+                });
+
+        if codec == ReasoningCodec::MistralChatCompletions
+            && let Some(parts) = delta["content"].as_array()
+        {
+            self.saw_mistral_structured_content = true;
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("thinking") => {
+                        if let Some(thinking) = part.get("thinking").and_then(Value::as_array) {
+                            let text = mistral_thinking_text(thinking);
+                            if !text.is_empty() {
+                                self.reasoning_chars =
+                                    self.reasoning_chars.saturating_add(text.chars().count());
+                                sink.reasoning_delta(&text);
+                            }
+                        } else if let Some(text) = part.get("thinking").and_then(Value::as_str) {
+                            self.reasoning_chars =
+                                self.reasoning_chars.saturating_add(text.chars().count());
+                            sink.reasoning_delta(text);
+                        }
+                    }
+                    Some("text") => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            self.content.push_str(text);
+                            sink.assistant_delta(text);
+                        }
+                    }
+                    _ => {}
+                }
+                // Preserve the provider's entire chunk, including
+                // opaque `p`/signature fields, in wire order.
+                self.mistral_content_parts.push(part.clone());
+            }
+        }
+
+        if let Some(text) = delta["content"].as_str() {
+            let split = self.splitter.push(text);
+            if !split.visible.is_empty() {
+                self.content.push_str(&split.visible);
+                sink.assistant_delta(&split.visible);
+                if codec == ReasoningCodec::MistralChatCompletions {
+                    append_mistral_text_part(&mut self.mistral_content_parts, &split.visible);
+                }
+            }
+            if !split.reasoning.is_empty() {
+                self.reasoning_chars = self
+                    .reasoning_chars
+                    .saturating_add(split.reasoning.chars().count());
+                self.reasoning_for_replay.push_str(&split.reasoning);
+                sink.reasoning_delta(&split.reasoning);
+            }
+        }
+
+        // Native replay is independent of display selection. A
+        // summary and full trace can arrive in the same frame.
+        if let Some(text) = delta["reasoning_content"]
+            .as_str()
+            .or_else(|| delta["reasoning"].as_str())
+        {
+            self.saw_native_reasoning_text = true;
+            self.reasoning_for_replay.push_str(text);
+        }
+        if codec == ReasoningCodec::OpenRouter
+            && let Some(text) = delta["reasoning"].as_str()
+        {
+            self.openrouter_legacy_reasoning
+                .get_or_insert_default()
+                .push_str(text);
+        }
+
+        // Providers surface streamed reasoning under different keys:
+        // OpenAI Responses uses reasoning_summary / reasoning_summary_text,
+        // DeepSeek uses reasoning_content, and OpenRouter/vLLM use
+        // reasoning. Route whichever is present (first non-empty wins)
+        // into the reasoning sink.
+        if !has_openrouter_reasoning_details
+            && let Some(text) = [
+                "reasoning_summary",
+                "reasoning_summary_text",
+                "reasoning_content",
+                "reasoning",
+            ]
+            .into_iter()
+            .find_map(|key| delta[key].as_str().filter(|text| !text.is_empty()))
+        {
+            self.reasoning_chars = self.reasoning_chars.saturating_add(text.chars().count());
+            sink.reasoning_delta(text);
+        }
+
+        if let Some(tool_calls) = delta["tool_calls"].as_array() {
+            for tc in tool_calls {
+                self.tool_call_accumulator.push_delta(tc);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAiCompatibleProvider {
     fn eval_stream_preparation(&self) -> Result<Option<PortableChatPreparation>> {
@@ -1093,40 +1301,7 @@ impl Provider for OpenAiCompatibleProvider {
             return Ok(StreamedResponse::interrupted());
         };
 
-        let mut content = String::new();
-        let mut tool_call_accumulator = tool_calls::ChatToolCallAccumulator::default();
-        let mut token_usage: Option<crate::provider::TokenUsage> = None;
-        let mut reported_output_tokens = None;
-        // Whether any choice carried a terminal `finish_reason`. A stream that
-        // ends without one (and without a usage frame) did not complete — the
-        // connection dropped mid-response. Indistinguishable from success
-        // without this check: an observed final turn streamed ~53k tokens of
-        // GLM reasoning, the connection died at a frame boundary, and the
-        // empty remainder was treated as a clean "task finished".
-        let mut finish_reason: Option<crate::provider::FinishReason> = None;
-        let mut reasoning_chars = 0usize;
-        let mut reasoning_for_replay = String::new();
-        let mut saw_native_reasoning_text = false;
-        let mut mistral_content_parts = Vec::new();
-        let mut saw_mistral_structured_content = false;
-        let mut openrouter_reasoning_details = Vec::new();
-        let mut saw_openrouter_reasoning_details = false;
-        let mut openrouter_legacy_reasoning: Option<String> = None;
-        // Legacy compatible servers may put a leading <think> block in text.
-        // Known native codecs keep all text literal from the start, including
-        // examples that begin with <think>. Other servers select native mode
-        // as soon as their stream declares a dedicated reasoning channel.
-        let mut splitter = ThinkTagSplitter::new();
-        if matches!(
-            self.reasoning_codec,
-            ReasoningCodec::OpenAiChatCompletions
-                | ReasoningCodec::MistralChatCompletions
-                | ReasoningCodec::OpenRouter
-                | ReasoningCodec::Hunyuan
-        ) {
-            splitter.use_native_reasoning_channel();
-        }
-
+        let mut state = ChatStreamState::new(self.reasoning_codec);
         // OpenAI-compatible chat completions send bare `data:` frames (event
         // name unused) whose JSON carries the streamed delta.
         let interrupted = sse::drive_sse(response, cancellation_token, |_event, data| {
@@ -1154,170 +1329,36 @@ impl Provider for OpenAiCompatibleProvider {
 
             // The final chunk (with include_usage) carries totals and no choices.
             if let Some(u) = json.get("usage").filter(|u| !u.is_null()) {
-                token_usage = Some(usage::chat_completions_usage_from_value(u));
+                state.token_usage = Some(usage::chat_completions_usage_from_value(u));
                 if let Some(tokens) = u.get("completion_tokens").and_then(Value::as_u64) {
-                    reported_output_tokens = Some(tokens);
+                    state.reported_output_tokens = Some(tokens);
                 }
             }
 
             if let Some(choices) = json["choices"].as_array() {
                 for choice in choices {
-                    if let Some(reason) = choice
-                        .get("finish_reason")
-                        .and_then(Value::as_str)
-                        .filter(|reason| !reason.is_empty())
-                    {
-                        finish_reason = Some(crate::provider::FinishReason::from_openai(reason));
-                    }
-                    let delta = &choice["delta"];
-                    // Check the native shape before parsing text in this same
-                    // frame. Empty strings/arrays still identify a separate
-                    // channel; null placeholders do not. Flush a held opening
-                    // fragment first so visible text keeps its wire order.
-                    let native_reasoning_text = [
-                        "reasoning_summary",
-                        "reasoning_summary_text",
-                        "reasoning_content",
-                        "reasoning",
-                    ]
-                    .into_iter()
-                    .any(|key| delta[key].is_string());
-                    if native_reasoning_text || delta["reasoning_details"].is_array() {
-                        let literal = splitter.use_native_reasoning_channel();
-                        if !literal.visible.is_empty() {
-                            content.push_str(&literal.visible);
-                            sink.assistant_delta(&literal.visible);
-                        }
-                    }
-                    let has_openrouter_reasoning_details = self.reasoning_codec
-                        == ReasoningCodec::OpenRouter
-                        && delta["reasoning_details"]
-                            .as_array()
-                            .is_some_and(|reasoning_details| {
-                                saw_openrouter_reasoning_details = true;
-                                for detail in reasoning_details {
-                                    if let Some(text) = detail
-                                        .get("text")
-                                        .or_else(|| detail.get("summary"))
-                                        .and_then(Value::as_str)
-                                        .filter(|text| !text.is_empty())
-                                    {
-                                        reasoning_chars =
-                                            reasoning_chars.saturating_add(text.chars().count());
-                                        sink.reasoning_delta(text);
-                                    }
-                                    // Preserve each object as returned.
-                                    // Concatenating chunk arrays in order
-                                    // is OpenRouter's reconstruction rule.
-                                    openrouter_reasoning_details.push(detail.clone());
-                                }
-                                !reasoning_details.is_empty()
-                            });
-
-                    if self.reasoning_codec == ReasoningCodec::MistralChatCompletions
-                        && let Some(parts) = delta["content"].as_array()
-                    {
-                        saw_mistral_structured_content = true;
-                        for part in parts {
-                            match part.get("type").and_then(Value::as_str) {
-                                Some("thinking") => {
-                                    if let Some(thinking) =
-                                        part.get("thinking").and_then(Value::as_array)
-                                    {
-                                        let text = mistral_thinking_text(thinking);
-                                        if !text.is_empty() {
-                                            reasoning_chars = reasoning_chars
-                                                .saturating_add(text.chars().count());
-                                            sink.reasoning_delta(&text);
-                                        }
-                                    } else if let Some(text) =
-                                        part.get("thinking").and_then(Value::as_str)
-                                    {
-                                        reasoning_chars =
-                                            reasoning_chars.saturating_add(text.chars().count());
-                                        sink.reasoning_delta(text);
-                                    }
-                                }
-                                Some("text") => {
-                                    if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                        content.push_str(text);
-                                        sink.assistant_delta(text);
-                                    }
-                                }
-                                _ => {}
-                            }
-                            // Preserve the provider's entire chunk, including
-                            // opaque `p`/signature fields, in wire order.
-                            mistral_content_parts.push(part.clone());
-                        }
-                    }
-
-                    if let Some(text) = delta["content"].as_str() {
-                        let split = splitter.push(text);
-                        if !split.visible.is_empty() {
-                            content.push_str(&split.visible);
-                            sink.assistant_delta(&split.visible);
-                            if self.reasoning_codec == ReasoningCodec::MistralChatCompletions {
-                                append_mistral_text_part(
-                                    &mut mistral_content_parts,
-                                    &split.visible,
-                                );
-                            }
-                        }
-                        if !split.reasoning.is_empty() {
-                            reasoning_chars =
-                                reasoning_chars.saturating_add(split.reasoning.chars().count());
-                            reasoning_for_replay.push_str(&split.reasoning);
-                            sink.reasoning_delta(&split.reasoning);
-                        }
-                    }
-
-                    // Native replay is independent of display selection. A
-                    // summary and full trace can arrive in the same frame.
-                    if let Some(text) = delta["reasoning_content"]
-                        .as_str()
-                        .or_else(|| delta["reasoning"].as_str())
-                    {
-                        saw_native_reasoning_text = true;
-                        reasoning_for_replay.push_str(text);
-                    }
-                    if self.reasoning_codec == ReasoningCodec::OpenRouter
-                        && let Some(text) = delta["reasoning"].as_str()
-                    {
-                        openrouter_legacy_reasoning
-                            .get_or_insert_default()
-                            .push_str(text);
-                    }
-
-                    // Providers surface streamed reasoning under different keys:
-                    // OpenAI Responses uses reasoning_summary / reasoning_summary_text,
-                    // DeepSeek uses reasoning_content, and OpenRouter/vLLM use
-                    // reasoning. Route whichever is present (first non-empty wins)
-                    // into the reasoning sink.
-                    if !has_openrouter_reasoning_details
-                        && let Some(text) = [
-                            "reasoning_summary",
-                            "reasoning_summary_text",
-                            "reasoning_content",
-                            "reasoning",
-                        ]
-                        .into_iter()
-                        .find_map(|key| delta[key].as_str().filter(|text| !text.is_empty()))
-                    {
-                        reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
-                        sink.reasoning_delta(text);
-                    }
-
-                    if let Some(tool_calls) = delta["tool_calls"].as_array() {
-                        for tc in tool_calls {
-                            tool_call_accumulator.push_delta(tc);
-                        }
-                    }
+                    state.apply_choice(self.reasoning_codec, choice, &sink);
                 }
             }
             Ok(())
         })
         .await?;
+        let ChatStreamState {
+            mut content,
+            tool_call_accumulator,
+            token_usage,
+            reported_output_tokens,
+            finish_reason,
+            mut reasoning_chars,
+            mut reasoning_for_replay,
+            saw_native_reasoning_text,
+            mistral_content_parts,
+            saw_mistral_structured_content,
+            openrouter_reasoning_details,
+            saw_openrouter_reasoning_details,
+            openrouter_legacy_reasoning,
+            mut splitter,
+        } = state;
 
         // A non-cancelled stream that never delivered a finish_reason broke
         // mid-response (connection drop at a frame boundary). Surface it as a
