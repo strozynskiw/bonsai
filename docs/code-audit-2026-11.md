@@ -25,6 +25,22 @@ agent loop, the TUI event loop, provider stream handlers) and in **34
 The only concrete runtime-cost issue found is a synchronous whole-tree walk in
 `BashTool`'s verification cache. The release profile is also unconfigured.
 
+## Status (updated after implementation)
+
+| # | Finding | Status |
+|---|---------|--------|
+| 1 | Bash verification fingerprint on async path | **Done** (`spawn_blocking`) |
+| 6 | Release profile | **Done**, measured (-31% binary) |
+| 3 | `execute_tool_calls` | **Partly done**: planning, scoped steering, binding release and skip-and-break extracted; result folding left (shares too much state) |
+| 4 | Provider stream state | **Done for opencode** (`ChatStreamState`). A shared accumulator across transports was *not* done: Anthropic content blocks and Codex Responses events have a different shape, so it would not earn its keep |
+| 9 | Re-measured | `modal_identity` dropped; `handle_runtime_action` still open |
+| 11 | `Result<_, String>` | **Dropped**: ~40 sites are slash-command parsers whose `String` is the user-facing usage message; typed errors would add churn without callers that match on them |
+| 2, 5, 8, 10 | event loop, arg structs, state split, big files | Open (large, need interactive TUI verification) |
+
+Operational note: after `tests/performance_baseline.rs`, check for orphaned
+`target/release/bonsai` processes; two left running at 500%+ CPU made
+`server::tests::wall_time_budget_*` time out until they were killed.
+
 ## High
 
 ### 1. Synchronous whole-project walk on the async path (bash verification cache)
