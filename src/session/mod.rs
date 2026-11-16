@@ -626,17 +626,15 @@ mod tests {
                     "Local Endpoint",
                     "",
                     "",
-                    None,
-                    None,
-                    None,
-                    &[],
                     crate::provider::Protocol::OpenAiChat,
                     crate::provider::ProviderCapabilities::new(
                         crate::provider::NO_REASONING,
                         crate::provider::NO_PARAMETERS,
                     ),
-                    "chat/completions",
                 )
+                .with_env_vars(None, None, None)
+                .with_seed_models(&[])
+                .with_endpoint_path("chat/completions")
             });
         let mut store = make_store();
         store.ensure_provider("local-endpoint");

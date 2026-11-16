@@ -30,10 +30,6 @@ pub static OPENCODE_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         "OpenCode Go",
         "qwen3.8-max",
         "https://opencode.ai/zen/go/v1",
-        Some("OPENCODE_API_KEY"),
-        Some("OPENCODE_MODEL"),
-        Some("OPENCODE_BASE_URL"),
-        &["qwen3.8-max", "glm-5.2"],
         Protocol::OpenAiChat,
         // IMPORTANT CACHE INVARIANT: the zen backends cache prompts server-side
         // (usage frames report cache_read tokens for qwen and GLM alike —
@@ -48,8 +44,14 @@ pub static OPENCODE_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS)
             .with_prompt_cache()
             .with_reasoning_content_echo(),
-        "chat/completions",
     )
+    .with_env_vars(
+        Some("OPENCODE_API_KEY"),
+        Some("OPENCODE_MODEL"),
+        Some("OPENCODE_BASE_URL"),
+    )
+    .with_seed_models(&["qwen3.8-max", "glm-5.2"])
+    .with_endpoint_path("chat/completions")
     .with_context_window(128_000)
     .with_token_counter(TokenCounterKind::Qwen3)
 });
@@ -2625,17 +2627,15 @@ mod tests {
             "Test OpenAI Compatible",
             "",
             "",
-            None,
-            None,
-            None,
-            &[],
             crate::provider::Protocol::OpenAiChat,
             crate::provider::ProviderCapabilities::new(
                 crate::provider::NO_REASONING,
                 crate::provider::NO_PARAMETERS,
             ),
-            "chat/completions",
-        );
+        )
+        .with_env_vars(None, None, None)
+        .with_seed_models(&[])
+        .with_endpoint_path("chat/completions");
         let session = provider_session(
             "sk-openai",
             "https://api.openai.com/v1/chat/completions",

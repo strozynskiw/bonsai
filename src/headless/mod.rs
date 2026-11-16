@@ -1833,14 +1833,16 @@ mod tests {
             "Provider A",
             "model-a",
             "https://a.example/v1",
+            Protocol::OpenAiChat,
+            ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
+        )
+        .with_env_vars(
             Some("PROVIDER_A_API_KEY"),
             Some("PROVIDER_A_MODEL"),
             Some("PROVIDER_A_BASE_URL"),
-            &["model-a"],
-            Protocol::OpenAiChat,
-            ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
-            "chat/completions",
         )
+        .with_seed_models(&["model-a"])
+        .with_endpoint_path("chat/completions")
     });
 
     static TEST_B_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
@@ -1849,14 +1851,16 @@ mod tests {
             "Provider B",
             "model-b",
             "https://b.example/v1",
+            Protocol::OpenAiChat,
+            ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
+        )
+        .with_env_vars(
             Some("PROVIDER_B_API_KEY"),
             Some("PROVIDER_B_MODEL"),
             Some("PROVIDER_B_BASE_URL"),
-            &["model-b"],
-            Protocol::OpenAiChat,
-            ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
-            "chat/completions",
         )
+        .with_seed_models(&["model-b"])
+        .with_endpoint_path("chat/completions")
     });
 
     struct TestFactory {

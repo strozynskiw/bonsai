@@ -464,36 +464,30 @@ pub struct ProviderMetadata {
 }
 
 impl ProviderMetadata {
-    #[allow(clippy::too_many_arguments)]
+    /// Starts a metadata record with the identity, defaults and wire protocol.
+    /// Environment variables, seed models and the endpoint path are optional
+    /// builder steps; the endpoint path defaults to empty.
     pub fn new(
         id: &str,
         display_name: &str,
         default_model: &str,
         default_base_url: &str,
-        env_var_api_key: Option<&str>,
-        env_var_model: Option<&str>,
-        env_var_base_url: Option<&str>,
-        seed_models: &[&str],
         protocol: Protocol,
         capabilities: ProviderCapabilities,
-        endpoint_path: &str,
     ) -> Self {
         Self {
             id: id.into(),
             display_name: display_name.into(),
             default_model: default_model.into(),
             default_base_url: default_base_url.into(),
-            env_var_api_key: env_var_api_key.map(Into::into),
-            env_var_model: env_var_model.map(Into::into),
-            env_var_base_url: env_var_base_url.map(Into::into),
-            seed_models: seed_models
-                .iter()
-                .map(|model| Box::<str>::from(*model))
-                .collect(),
+            env_var_api_key: None,
+            env_var_model: None,
+            env_var_base_url: None,
+            seed_models: Box::default(),
             model_exclude_prefixes: Box::default(),
             protocol,
             capabilities,
-            endpoint_path: endpoint_path.into(),
+            endpoint_path: "".into(),
             auth_requirement: AuthRequirement::ApiKeyRequired,
             context_window: None,
             token_counter: None,
@@ -501,6 +495,35 @@ impl ProviderMetadata {
             discovery: DiscoveryKind::Generic,
             auth_header: None,
         }
+    }
+
+    /// Names the environment variables that override the API key, model and
+    /// base URL.
+    pub fn with_env_vars(
+        mut self,
+        api_key: Option<&str>,
+        model: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Self {
+        self.env_var_api_key = api_key.map(Into::into);
+        self.env_var_model = model.map(Into::into);
+        self.env_var_base_url = base_url.map(Into::into);
+        self
+    }
+
+    /// Models offered before live discovery has run.
+    pub fn with_seed_models(mut self, models: &[&str]) -> Self {
+        self.seed_models = models
+            .iter()
+            .map(|model| Box::<str>::from(*model))
+            .collect();
+        self
+    }
+
+    /// Path appended to the base URL for chat requests.
+    pub fn with_endpoint_path(mut self, endpoint_path: &str) -> Self {
+        self.endpoint_path = endpoint_path.into();
+        self
     }
 
     pub fn with_auth_requirement(mut self, auth_requirement: AuthRequirement) -> Self {
@@ -601,14 +624,16 @@ mod tests {
             "OpenCode Go",
             "qwen3.7-max",
             "https://example.com",
+            Protocol::OpenAiChat,
+            ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
+        )
+        .with_env_vars(
             Some("OPENCODE_API_KEY"),
             Some("OPENCODE_MODEL"),
             Some("OPENCODE_BASE_URL"),
-            &["qwen3.7-max"],
-            Protocol::OpenAiChat,
-            ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
-            "chat/completions",
-        );
+        )
+        .with_seed_models(&["qwen3.7-max"])
+        .with_endpoint_path("chat/completions");
 
         assert!(meta.is_known_id("opencode"));
         assert!(meta.is_known_id("OpenCode"));
@@ -692,14 +717,12 @@ mod tests {
             "Anthropic",
             "claude",
             "https://example.com",
-            None,
-            None,
-            None,
-            &["claude"],
             Protocol::AnthropicMessages,
             ProviderCapabilities::new(NO_REASONING, ANTHROPIC_PARAMETERS),
-            "v1/messages",
-        );
+        )
+        .with_env_vars(None, None, None)
+        .with_seed_models(&["claude"])
+        .with_endpoint_path("v1/messages");
 
         assert_eq!(
             meta.normalize_reasoning_for_model(

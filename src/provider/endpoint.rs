@@ -306,17 +306,15 @@ mod tests {
                 "Test OpenAI Compatible",
                 "",
                 "",
-                None,
-                None,
-                None,
-                &[],
                 Protocol::OpenAiChat,
                 crate::provider::ProviderCapabilities::new(
                     crate::provider::NO_REASONING,
                     crate::provider::NO_PARAMETERS,
                 ),
-                "chat/completions",
             )
+            .with_env_vars(None, None, None)
+            .with_seed_models(&[])
+            .with_endpoint_path("chat/completions")
         });
         assert!(
             empty_success_fallback(&SEEDLESS_OPENAI)
@@ -337,17 +335,15 @@ mod tests {
             "Qwen Test",
             "https://example.test/v1",
             "qwen3.7-plus",
-            None,
-            None,
-            None,
-            &["qwen3.7-plus", "qwen3.7-max"],
             Protocol::OpenAiChat,
             crate::provider::ProviderCapabilities::new(
                 crate::provider::NO_REASONING,
                 crate::provider::NO_PARAMETERS,
             ),
-            "chat/completions",
         )
+        .with_env_vars(None, None, None)
+        .with_seed_models(&["qwen3.7-plus", "qwen3.7-max"])
+        .with_endpoint_path("chat/completions")
         .with_discovery(DiscoveryKind::QwenCloud);
         assert_eq!(
             empty_success_fallback(&qwen).remote_model_ids(),
@@ -365,17 +361,15 @@ mod tests {
             "Qwen Test",
             &format!("http://{address}/v1"),
             "qwen3.7-plus",
-            None,
-            None,
-            None,
-            &["qwen3.7-plus", "qwen3.7-max"],
             Protocol::OpenAiChat,
             crate::provider::ProviderCapabilities::new(
                 crate::provider::NO_REASONING,
                 crate::provider::NO_PARAMETERS,
             ),
-            "chat/completions",
         )
+        .with_env_vars(None, None, None)
+        .with_seed_models(&["qwen3.7-plus", "qwen3.7-max"])
+        .with_endpoint_path("chat/completions")
         .with_discovery(DiscoveryKind::QwenCloud);
         let session = provider_session("test-key", &format!("http://{address}/v1"), "");
 
@@ -399,17 +393,15 @@ mod tests {
             "Test OpenAI Compatible",
             "",
             "",
-            None,
-            None,
-            None,
-            &[],
             Protocol::OpenAiChat,
             crate::provider::ProviderCapabilities::new(
                 crate::provider::NO_REASONING,
                 crate::provider::NO_PARAMETERS,
             ),
-            "chat/completions",
-        );
+        )
+        .with_env_vars(None, None, None)
+        .with_seed_models(&[])
+        .with_endpoint_path("chat/completions");
         let session = provider_session("test-key", &format!("http://{address}/v1"), "local-model");
 
         let available = list_available_models_for_metadata(&metadata, &session)

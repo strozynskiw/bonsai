@@ -16,18 +16,6 @@ pub static MINIMAX_CODING_PLAN_METADATA: LazyLock<ProviderMetadata> = LazyLock::
         "MiniMax Coding Plan",
         "MiniMax-M3",
         "https://api.minimax.io/anthropic",
-        Some("MINIMAX_CODING_PLAN_API_KEY"),
-        Some("MINIMAX_CODING_PLAN_MODEL"),
-        Some("MINIMAX_CODING_PLAN_BASE_URL"),
-        &[
-            "MiniMax-M3",
-            "MiniMax-M2.5",
-            "MiniMax-M2.5-highspeed",
-            "MiniMax-M2.7",
-            "MiniMax-M2",
-            "MiniMax-M2.7-highspeed",
-            "MiniMax-M2.1",
-        ],
         Protocol::AnthropicMessages,
         // MiniMax's Anthropic endpoint supports explicit `cache_control`
         // breakpoints (docs: anthropic-api-compatible-cache; `{"type":"ephemeral"}`,
@@ -35,8 +23,22 @@ pub static MINIMAX_CODING_PLAN_METADATA: LazyLock<ProviderMetadata> = LazyLock::
         // `cache_read_input_tokens` (~99% on a repeated prefix). MiniMax reports the
         // breakdown on `message_delta`, which the usage parser now reads.
         ProviderCapabilities::new(NO_REASONING, ANTHROPIC_PARAMETERS).with_prompt_cache(),
-        "v1/messages",
     )
+    .with_env_vars(
+        Some("MINIMAX_CODING_PLAN_API_KEY"),
+        Some("MINIMAX_CODING_PLAN_MODEL"),
+        Some("MINIMAX_CODING_PLAN_BASE_URL"),
+    )
+    .with_seed_models(&[
+        "MiniMax-M3",
+        "MiniMax-M2.5",
+        "MiniMax-M2.5-highspeed",
+        "MiniMax-M2.7",
+        "MiniMax-M2",
+        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.1",
+    ])
+    .with_endpoint_path("v1/messages")
     .with_context_window(200_000)
     .with_token_counter(TokenCounterKind::AnthropicCountTokens)
 });

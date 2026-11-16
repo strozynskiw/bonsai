@@ -483,14 +483,16 @@ default_base_url = "https://proxy.example/v1"
             "Acme",
             "acme-large",
             "https://acme.example/v1",
+            crate::provider::Protocol::OpenAiChat,
+            ProviderCapabilities::new(&[], &[]),
+        )
+        .with_env_vars(
             Some("BONSAI_TEST_DEFINITELY_UNSET_ENV_9271"),
             None,
             Some("PATH"),
-            &["acme-large", "acme-small"],
-            crate::provider::Protocol::OpenAiChat,
-            ProviderCapabilities::new(&[], &[]),
-            "/chat/completions",
-        );
+        )
+        .with_seed_models(&["acme-large", "acme-small"])
+        .with_endpoint_path("/chat/completions");
         let row = ProviderManagerRow {
             connection_id: "acme".to_string(),
             display_name: "Acme".to_string(),

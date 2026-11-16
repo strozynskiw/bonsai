@@ -53,16 +53,14 @@ pub static CODEX_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         "Codex",
         "gpt-5.6-sol",
         "https://chatgpt.com/backend-api/codex",
-        None,
-        Some("CODEX_MODEL"),
-        Some("CODEX_BASE_URL"),
-        &CODEX_FALLBACK_MODELS,
         Protocol::CodexResponses,
         ProviderCapabilities::new(CODEX_REASONING, NO_PARAMETERS)
             .with_prompt_cache()
             .with_vision(),
-        "responses",
     )
+    .with_env_vars(None, Some("CODEX_MODEL"), Some("CODEX_BASE_URL"))
+    .with_seed_models(&CODEX_FALLBACK_MODELS)
+    .with_endpoint_path("responses")
     .with_auth_requirement(AuthRequirement::CodexCache)
     // Fallback only (used when catalog resolution misses). Keep this aligned
     // with the current Codex working window published by the live catalog.

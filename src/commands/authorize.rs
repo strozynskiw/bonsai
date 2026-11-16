@@ -399,14 +399,12 @@ mod tests {
             "Test Provider",
             "test-model",
             "https://example.test/v1",
-            None,
-            None,
-            None,
-            &["test-model"],
             Protocol::OpenAiChat,
             ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
-            "chat/completions",
         )
+        .with_env_vars(None, None, None)
+        .with_seed_models(&["test-model"])
+        .with_endpoint_path("chat/completions")
     });
 
     fn catalog_with_test_provider(home: &std::path::Path) -> crate::model_catalog::ModelCatalog {

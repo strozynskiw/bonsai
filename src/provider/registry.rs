@@ -302,14 +302,16 @@ fn build_provider_metadata(
         &connection.display_name,
         &default_model,
         &connection.default_base_url,
+        Protocol::from(connection.transport),
+        capabilities,
+    )
+    .with_env_vars(
         connection.api_key_env.as_deref(),
         connection.model_env.as_deref(),
         connection.base_url_env.as_deref(),
-        &seed_model_refs,
-        Protocol::from(connection.transport),
-        capabilities,
-        &endpoint_path,
     )
+    .with_seed_models(&seed_model_refs)
+    .with_endpoint_path(&endpoint_path)
     .with_auth_requirement(auth_requirement_for_connection_auth(&connection.auth))
     .with_discovery(connection.discovery)
     .with_auth_header(connection.auth_header.clone());
@@ -774,14 +776,12 @@ mod tests {
             "T",
             "m",
             "http://x",
-            None,
-            None,
-            None,
-            &[],
             Protocol::AnthropicMessages,
             ProviderCapabilities::new(NO_REASONING, NO_PARAMETERS),
-            "v1/messages",
-        );
+        )
+        .with_env_vars(None, None, None)
+        .with_seed_models(&[])
+        .with_endpoint_path("v1/messages");
         assert_eq!(base.raw_api_key_header_name(), "x-api-key");
         let overridden = base.with_auth_header(Some("api-key".into()));
         assert_eq!(overridden.raw_api_key_header_name(), "api-key");

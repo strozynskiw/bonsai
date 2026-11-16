@@ -37,9 +37,17 @@ pub static ANTHROPIC_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
         "Anthropic API",
         "claude-sonnet-5",
         "https://api.anthropic.com",
+        Protocol::AnthropicMessages,
+        ProviderCapabilities::new(NO_REASONING, ANTHROPIC_PARAMETERS)
+            .with_prompt_cache()
+            .with_vision(),
+    )
+    .with_env_vars(
         Some("ANTHROPIC_API_KEY"),
         Some("ANTHROPIC_MODEL"),
         Some("ANTHROPIC_BASE_URL"),
+    )
+    .with_seed_models(
         // Offline fallback when `GET /v1/models` is unreachable; the live listing
         // supersedes this whenever a key works. Keep in sync with anthropic.toml.
         &[
@@ -59,12 +67,8 @@ pub static ANTHROPIC_METADATA: LazyLock<ProviderMetadata> = LazyLock::new(|| {
             "claude-haiku-4-5",
             "claude-opus-4-1",
         ],
-        Protocol::AnthropicMessages,
-        ProviderCapabilities::new(NO_REASONING, ANTHROPIC_PARAMETERS)
-            .with_prompt_cache()
-            .with_vision(),
-        "v1/messages",
     )
+    .with_endpoint_path("v1/messages")
     .with_context_window(200_000)
     .with_token_counter(TokenCounterKind::AnthropicCountTokens)
 });
@@ -1351,36 +1355,27 @@ async fn parse_anthropic_stream(
     identities: &crate::provider::ToolCallIdentityStore,
     identity_scope: &str,
 ) -> crate::provider::ProviderResult<ParsedAnthropicStream> {
-    let mut content = String::new();
-    let mut blocks: BTreeMap<usize, BlockState> = BTreeMap::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut usage = usage::AnthropicUsageAccumulator::default();
+    let mut state = AnthropicStreamState::default();
     let mut splitter = split_think_tags.then(ThinkTagSplitter::new);
-    let mut finish_reason: Option<crate::provider::FinishReason> = None;
-    let mut terminal_seen = false;
-    let mut reasoning_chars = 0usize;
 
     let interrupted = sse::drive_sse(response, cancellation_token.clone(), |event, data| {
         // Anthropic always pairs `event:` with the following `data:`; a data
         // line with no event is ignored, matching the original behaviour.
         match event {
-            Some(event) => handle_anthropic_event(
-                event,
-                data,
-                &mut blocks,
-                &mut content,
-                &mut tool_calls,
-                &mut usage,
-                &mut finish_reason,
-                &mut terminal_seen,
-                &mut reasoning_chars,
-                &sink,
-                splitter.as_mut(),
-            ),
+            Some(event) => state.handle_event(event, data, &sink, splitter.as_mut()),
             None => Ok(()),
         }
     })
     .await?;
+    let AnthropicStreamState {
+        blocks,
+        mut content,
+        mut tool_calls,
+        usage,
+        mut finish_reason,
+        terminal_seen,
+        mut reasoning_chars,
+    } = state;
 
     // Flush any text the splitter held back waiting on a possible tag boundary,
     // then signal end-of-message.
@@ -1465,187 +1460,209 @@ async fn parse_anthropic_stream(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_anthropic_event(
-    event: &str,
-    data: &str,
-    blocks: &mut BTreeMap<usize, BlockState>,
-    content: &mut String,
-    tool_calls: &mut Vec<ToolCall>,
-    usage: &mut usage::AnthropicUsageAccumulator,
-    finish_reason: &mut Option<crate::provider::FinishReason>,
-    terminal_seen: &mut bool,
-    reasoning_chars: &mut usize,
-    sink: &SharedSink,
-    mut splitter: Option<&mut ThinkTagSplitter>,
-) -> crate::provider::ProviderResult<()> {
-    let Some(payload) = sse::parse_frame(data)? else {
-        return Ok(());
-    };
+/// Everything accumulated while one Anthropic message stream is consumed.
+#[derive(Default)]
+struct AnthropicStreamState {
+    blocks: BTreeMap<usize, BlockState>,
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    usage: usage::AnthropicUsageAccumulator,
+    finish_reason: Option<crate::provider::FinishReason>,
+    terminal_seen: bool,
+    reasoning_chars: usize,
+}
 
-    match event {
-        "content_block_start" => {
-            let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let block = payload.get("content_block").unwrap_or(&Value::Null);
-            let entry = blocks.entry(index).or_default();
-            entry.native_block = Some(block.clone());
-            if matches!(
-                block.get("type").and_then(Value::as_str),
-                Some("thinking" | "redacted_thinking")
-            ) && let Some(splitter) = splitter.as_deref_mut()
-            {
-                let literal = splitter.use_native_reasoning_channel();
-                if !literal.visible.is_empty() {
-                    content.push_str(&literal.visible);
-                    sink.assistant_delta(&literal.visible);
-                }
-            }
-            if block.get("type").and_then(Value::as_str) == Some("thinking")
-                && let Some(text) = block.get("thinking").and_then(Value::as_str)
-                && !text.is_empty()
-            {
-                *reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
-                sink.reasoning_delta(text);
-            }
-            if block.get("type").and_then(Value::as_str) == Some("text")
-                && let Some(text) = block.get("text").and_then(Value::as_str)
-            {
-                emit_anthropic_text(text, splitter, content, reasoning_chars, sink);
-            }
-            if let (Some(id), Some(name)) = (
-                block.get("id").and_then(Value::as_str),
-                block.get("name").and_then(Value::as_str),
-            ) && block.get("type").and_then(Value::as_str) == Some("tool_use")
-            {
-                entry.tool_id = Some(id.to_string());
-                entry.tool_name = Some(name.to_string());
-            }
-        }
-        "content_block_delta" => {
-            let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let delta = payload.get("delta").unwrap_or(&Value::Null);
-            let delta_type = delta
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            match delta_type {
-                "text_delta" => {
-                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                        blocks
-                            .entry(index)
-                            .or_default()
-                            .append_native_text("text", "text", text);
-                        emit_anthropic_text(text, splitter, content, reasoning_chars, sink);
+impl AnthropicStreamState {
+    /// Applies one SSE frame (`event:` name plus `data:` payload).
+    fn handle_event(
+        &mut self,
+        event: &str,
+        data: &str,
+        sink: &SharedSink,
+        mut splitter: Option<&mut ThinkTagSplitter>,
+    ) -> crate::provider::ProviderResult<()> {
+        let Some(payload) = sse::parse_frame(data)? else {
+            return Ok(());
+        };
+
+        match event {
+            "content_block_start" => {
+                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let block = payload.get("content_block").unwrap_or(&Value::Null);
+                let entry = self.blocks.entry(index).or_default();
+                entry.native_block = Some(block.clone());
+                if matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                ) && let Some(splitter) = splitter.as_deref_mut()
+                {
+                    let literal = splitter.use_native_reasoning_channel();
+                    if !literal.visible.is_empty() {
+                        self.content.push_str(&literal.visible);
+                        sink.assistant_delta(&literal.visible);
                     }
                 }
-                "thinking_delta" => {
-                    if let Some(splitter) = splitter {
-                        let literal = splitter.use_native_reasoning_channel();
-                        if !literal.visible.is_empty() {
-                            content.push_str(&literal.visible);
-                            sink.assistant_delta(&literal.visible);
+                if block.get("type").and_then(Value::as_str) == Some("thinking")
+                    && let Some(text) = block.get("thinking").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    self.reasoning_chars =
+                        self.reasoning_chars.saturating_add(text.chars().count());
+                    sink.reasoning_delta(text);
+                }
+                if block.get("type").and_then(Value::as_str) == Some("text")
+                    && let Some(text) = block.get("text").and_then(Value::as_str)
+                {
+                    emit_anthropic_text(
+                        text,
+                        splitter,
+                        &mut self.content,
+                        &mut self.reasoning_chars,
+                        sink,
+                    );
+                }
+                if let (Some(id), Some(name)) = (
+                    block.get("id").and_then(Value::as_str),
+                    block.get("name").and_then(Value::as_str),
+                ) && block.get("type").and_then(Value::as_str) == Some("tool_use")
+                {
+                    entry.tool_id = Some(id.to_string());
+                    entry.tool_name = Some(name.to_string());
+                }
+            }
+            "content_block_delta" => {
+                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let delta = payload.get("delta").unwrap_or(&Value::Null);
+                let delta_type = delta
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match delta_type {
+                    "text_delta" => {
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            self.blocks
+                                .entry(index)
+                                .or_default()
+                                .append_native_text("text", "text", text);
+                            emit_anthropic_text(
+                                text,
+                                splitter,
+                                &mut self.content,
+                                &mut self.reasoning_chars,
+                                sink,
+                            );
                         }
                     }
-                    if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
-                        blocks
-                            .entry(index)
-                            .or_default()
-                            .append_native_text("thinking", "thinking", text);
-                        if !text.is_empty() {
-                            *reasoning_chars = reasoning_chars.saturating_add(text.chars().count());
-                            sink.reasoning_delta(text);
-                        }
-                    }
-                }
-                "signature_delta" => {
-                    if let Some(signature) = delta.get("signature").and_then(Value::as_str)
-                        && let Some(entry) = blocks.get_mut(&index)
-                    {
-                        entry.append_native_text("thinking", "signature", signature);
-                    }
-                }
-                "input_json_delta" => {
-                    if let Some(partial) = delta.get("partial_json").and_then(Value::as_str)
-                        && let Some(entry) = blocks.get_mut(&index)
-                    {
-                        entry.tool_input.push_str(partial);
-                    }
-                }
-                _ => {}
-            }
-        }
-        "content_block_stop" => {
-            let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            if let Some(entry) = blocks.get_mut(&index)
-                && !entry.emitted
-            {
-                entry.emitted = true;
-                if let (Some(id), Some(name)) = (entry.tool_id.take(), entry.tool_name.take()) {
-                    if let Some(block) = &mut entry.native_block {
-                        if !entry.tool_input.is_empty() {
-                            match serde_json::from_str::<Value>(&entry.tool_input) {
-                                Ok(input) => block["input"] = input,
-                                Err(error) => {
-                                    entry.reconstruction_error = Some(format!(
-                                        "Anthropic native tool `{name}` cannot replay its input unchanged: raw arguments {:?}; parse error: {error}",
-                                        entry.tool_input,
-                                    ))
-                                }
+                    "thinking_delta" => {
+                        if let Some(splitter) = splitter {
+                            let literal = splitter.use_native_reasoning_channel();
+                            if !literal.visible.is_empty() {
+                                self.content.push_str(&literal.visible);
+                                sink.assistant_delta(&literal.visible);
                             }
-                        } else if let Some(input) = block.get("input") {
-                            entry.tool_input = serde_json::to_string(input).map_err(|error| {
+                        }
+                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                            self.blocks
+                                .entry(index)
+                                .or_default()
+                                .append_native_text("thinking", "thinking", text);
+                            if !text.is_empty() {
+                                self.reasoning_chars =
+                                    self.reasoning_chars.saturating_add(text.chars().count());
+                                sink.reasoning_delta(text);
+                            }
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str)
+                            && let Some(entry) = self.blocks.get_mut(&index)
+                        {
+                            entry.append_native_text("thinking", "signature", signature);
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(partial) = delta.get("partial_json").and_then(Value::as_str)
+                            && let Some(entry) = self.blocks.get_mut(&index)
+                        {
+                            entry.tool_input.push_str(partial);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if let Some(entry) = self.blocks.get_mut(&index)
+                    && !entry.emitted
+                {
+                    entry.emitted = true;
+                    if let (Some(id), Some(name)) = (entry.tool_id.take(), entry.tool_name.take()) {
+                        if let Some(block) = &mut entry.native_block {
+                            if !entry.tool_input.is_empty() {
+                                match serde_json::from_str::<Value>(&entry.tool_input) {
+                                    Ok(input) => block["input"] = input,
+                                    Err(error) => {
+                                        entry.reconstruction_error = Some(format!(
+                                            "Anthropic native tool `{name}` cannot replay its input unchanged: raw arguments {:?}; parse error: {error}",
+                                            entry.tool_input,
+                                        ))
+                                    }
+                                }
+                            } else if let Some(input) = block.get("input") {
+                                entry.tool_input = serde_json::to_string(input).map_err(|error| {
                                 crate::provider::ProviderFailure::transport(format!(
                                     "Anthropic tool `{name}` input serialization failed: {error}"
                                 ))
                             })?;
+                            }
                         }
+                        entry.tool_call_index = Some(self.tool_calls.len());
+                        self.tool_calls.push(ToolCall {
+                            id,
+                            name,
+                            arguments: std::mem::take(&mut entry.tool_input),
+                        });
                     }
-                    entry.tool_call_index = Some(tool_calls.len());
-                    tool_calls.push(ToolCall {
-                        id,
-                        name,
-                        arguments: std::mem::take(&mut entry.tool_input),
-                    });
                 }
             }
-        }
-        "message_start" => {
-            if let Some(u) = payload.pointer("/message/usage") {
-                usage.apply_event_usage(u);
+            "message_start" => {
+                if let Some(u) = payload.pointer("/message/usage") {
+                    self.usage.apply_event_usage(u);
+                }
             }
-        }
-        "message_delta" => {
-            if let Some(reason) = payload
-                .pointer("/delta/stop_reason")
-                .and_then(Value::as_str)
-            {
-                *finish_reason = Some(crate::provider::FinishReason::from_openai(reason));
-                *terminal_seen = true;
+            "message_delta" => {
+                if let Some(reason) = payload
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                {
+                    self.finish_reason = Some(crate::provider::FinishReason::from_openai(reason));
+                    self.terminal_seen = true;
+                }
+                // `output_tokens` here is cumulative; the last value wins. Input
+                // and cache fields are absent on real Anthropic deltas (their
+                // `message_start` values stand) but carry the final breakdown on
+                // MiniMax-style providers — `apply_event_usage` handles both.
+                if let Some(u) = payload.pointer("/usage") {
+                    self.usage.apply_final_event_usage(u);
+                }
             }
-            // `output_tokens` here is cumulative; the last value wins. Input
-            // and cache fields are absent on real Anthropic deltas (their
-            // `message_start` values stand) but carry the final breakdown on
-            // MiniMax-style providers — `apply_event_usage` handles both.
-            if let Some(u) = payload.pointer("/usage") {
-                usage.apply_final_event_usage(u);
+            "message_stop" => {
+                self.terminal_seen = true;
             }
+            "error" => {
+                // Typed so transient `overloaded_error`/`rate_limit_error` frames
+                // are retried instead of failing the turn as a plain error.
+                return Err(sse::stream_error_from_object(
+                    payload.get("error").unwrap_or(&Value::Null),
+                    "Anthropic stream error",
+                    &payload,
+                ));
+            }
+            _ => {}
         }
-        "message_stop" => {
-            *terminal_seen = true;
-        }
-        "error" => {
-            // Typed so transient `overloaded_error`/`rate_limit_error` frames
-            // are retried instead of failing the turn as a plain error.
-            return Err(sse::stream_error_from_object(
-                payload.get("error").unwrap_or(&Value::Null),
-                "Anthropic stream error",
-                &payload,
-            ));
-        }
-        _ => {}
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 #[cfg(test)]
