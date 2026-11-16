@@ -100,7 +100,8 @@ Each suppression is a missing struct. Introduce small context/options structs
 incrementally as the surrounding files are split (findings 2–4). Good CI
 ratchet: a test or script that fails if the count grows above the current 34.
 
-### 6. `release` profile is unconfigured
+### 6. `release` profile is unconfigured — DONE (measured)
+**Result**: `lto=thin`, `codegen-units=1`, `strip=symbols`: 85.0 MB → 58.6 MB; startup median 2258→2266 ms (noise), idle RSS 178→173 MB, first-delta 43→38 ms. Cost: release build ≈6 min; no symbol names in release backtraces.
 **File**: `Cargo.toml:25-40` (only `[profile.test]` customisations exist)
 **Category**: Build / Performance · **Effort**: S
 
@@ -186,7 +187,7 @@ network access to them in this run). Before starting, search issues for
 
 ## Recommended order
 
-1. **#1 verification fingerprint** — small, isolated, real runtime win.
+1. **#1 verification fingerprint** (done) — small, isolated, real runtime win.
 2. **#6 release profile** — one-line experiment, measure with
    `performance_baseline`; ship only if binary size/throughput improves.
 3. **#4 `StreamAccumulator`** — removes the most duplicated logic and is well

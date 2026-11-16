@@ -33,6 +33,15 @@ codegen-units = 256
 # Keep line-number backtraces without multi-gigabyte test type/debug artifacts.
 debug = "line-tables-only"
 
+# Release binaries: thin LTO + one codegen unit + stripped symbols cut the
+# binary ~31% (85 MB -> 58 MB) with equal-or-better startup/RSS on the
+# performance_baseline harness (see docs/code-audit-2026-11.md). panic stays
+# "unwind"; cancellation and isolation paths must not depend on abort.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 [profile.test]
 # Repeated agent/test builds accumulated multi-gigabyte incremental caches.
 # Cargo still reuses unchanged compiled dependencies without that query cache.
