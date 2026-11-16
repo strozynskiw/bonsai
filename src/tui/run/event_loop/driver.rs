@@ -312,11 +312,15 @@ impl TuiLoop {
             &mut self.pending_background_work_wakes,
             &mut self.app,
             &mut self.tasks,
-            self.agent.clone(),
-            self.sink.clone(),
             &mut self.pending_background_wake,
-            &self.background_tasks,
-            &self.terminals,
+            WakeHandles {
+                agent: self.agent.clone(),
+                sink: self.sink.clone(),
+                background_tasks: &self.background_tasks,
+                terminals: &self.terminals,
+                subagents: &self.subagents,
+                peer_bus: &self.peer_bus,
+            },
         )
         .await;
 
@@ -336,15 +340,17 @@ impl TuiLoop {
             &mut self.runtime_receiver,
             &mut self.app,
             &self.tasks,
-            &mut self.current_session_id,
-            &mut self.persisted_signatures,
-            &mut self.model_catalog,
-            &mut self.registry,
-            &mut self.last_model_cache_signature,
-            &mut self.pending_peer_wake,
-            &mut self.pending_peer_wait_recheck,
-            &mut self.repo_map,
-            &mut self.background_spawns,
+            RuntimeDrainState {
+                current_session_id: &mut self.current_session_id,
+                persisted_signatures: &mut self.persisted_signatures,
+                model_catalog: &mut self.model_catalog,
+                registry: &mut self.registry,
+                last_model_cache_signature: &mut self.last_model_cache_signature,
+                pending_peer_wake: &mut self.pending_peer_wake,
+                pending_peer_wait_recheck: &mut self.pending_peer_wait_recheck,
+                repo_map: &mut self.repo_map,
+                background_spawns: &mut self.background_spawns,
+            },
             RuntimeEventDrainDeps {
                 storage: &self.storage,
                 agent: &self.agent,
@@ -468,12 +474,14 @@ impl TuiLoop {
             &mut self.pending_background_wake,
             &mut self.app,
             &mut self.tasks,
-            self.agent.clone(),
-            self.sink.clone(),
-            &self.background_tasks,
-            &self.terminals,
-            &self.subagents,
-            &self.peer_bus,
+            WakeHandles {
+                agent: self.agent.clone(),
+                sink: self.sink.clone(),
+                background_tasks: &self.background_tasks,
+                terminals: &self.terminals,
+                subagents: &self.subagents,
+                peer_bus: &self.peer_bus,
+            },
         )
         .await;
         frame.needs_redraw |= maybe_start_peer_wake(

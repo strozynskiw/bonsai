@@ -2350,26 +2350,30 @@ struct RuntimeEventDrainDeps<'a> {
     memory: &'a Option<Arc<crate::memory::MemoryService>>,
 }
 
+/// Mutable loop state bundled for [`drain_runtime_events_for_frame`].
+struct RuntimeDrainState<'a> {
+    current_session_id: &'a mut SessionId,
+    persisted_signatures: &'a mut PersistedSnapshotSignatures,
+    model_catalog: &'a mut Arc<crate::model_catalog::ModelCatalog>,
+    registry: &'a mut Arc<ProviderRegistry>,
+    last_model_cache_signature: &'a mut u64,
+    pending_peer_wake: &'a mut Option<PendingPeerWake>,
+    pending_peer_wait_recheck: &'a mut Option<PendingPeerWaitRecheck>,
+    repo_map: &'a mut RepoMapInjector,
+    background_spawns: &'a mut tokio::task::JoinSet<()>,
+}
+
 /// Drain every `RuntimeEvent` enqueued so far this frame. Each event either
 /// short-circuits with its own side effect (repo-map ready, a peer message,
 /// a catalog reload) or falls through to the generic `Runtime` reducer path.
 /// A `CatalogReloaded` outcome additionally routes through the same
 /// clear/rotate handling as a bare `CommandFinished`, so `/clear`'s
 /// session rotation can never be skipped depending on which path produced it.
-#[allow(clippy::too_many_arguments)]
 async fn drain_runtime_events_for_frame(
     runtime_receiver: &mut mpsc::UnboundedReceiver<RuntimeEvent>,
     app: &mut AppState,
     tasks: &TaskController,
-    current_session_id: &mut SessionId,
-    persisted_signatures: &mut PersistedSnapshotSignatures,
-    model_catalog: &mut Arc<crate::model_catalog::ModelCatalog>,
-    registry: &mut Arc<ProviderRegistry>,
-    last_model_cache_signature: &mut u64,
-    pending_peer_wake: &mut Option<PendingPeerWake>,
-    pending_peer_wait_recheck: &mut Option<PendingPeerWaitRecheck>,
-    repo_map: &mut RepoMapInjector,
-    background_spawns: &mut tokio::task::JoinSet<()>,
+    state: RuntimeDrainState<'_>,
     deps: RuntimeEventDrainDeps<'_>,
 ) -> bool {
     let mut changed = false;
@@ -2380,7 +2384,7 @@ async fn drain_runtime_events_for_frame(
             continue;
         }
         let first_run_transition = FirstRunRuntimeTransition::capture(app, &event);
-        update_peer_wait_recheck(pending_peer_wait_recheck, &event, Instant::now());
+        update_peer_wait_recheck(state.pending_peer_wait_recheck, &event, Instant::now());
         changed = true;
         // /clear and /new reset the conversation and rotate to a fresh
         // persisted session; the plan canvas belongs to it.
@@ -2393,8 +2397,8 @@ async fn drain_runtime_events_for_frame(
                 deps.project_root,
                 deps.plan_store,
                 app,
-                current_session_id,
-                persisted_signatures,
+                state.current_session_id,
+                state.persisted_signatures,
                 deps.agent,
             )
             .await;
@@ -2408,7 +2412,7 @@ async fn drain_runtime_events_for_frame(
         // session Active while its heartbeat writer owns it; shutdown, /clear,
         // and /resume are the only paths that terminate or transfer the row.
         if let RuntimeEvent::RepoMapReady(map) = event {
-            repo_map.stash(map);
+            state.repo_map.stash(map);
             continue;
         }
         if let RuntimeEvent::PeerMessagesArrived(messages) = event {
@@ -2472,10 +2476,10 @@ async fn drain_runtime_events_for_frame(
             if !wake_worthy_messages.is_empty() {
                 // Arm the gated auto-wake: the debounce gives a
                 // burst of messages one wake instead of several.
-                if let Some(pending) = pending_peer_wake.as_mut() {
+                if let Some(pending) = state.pending_peer_wake.as_mut() {
                     pending.merge(wake_worthy_messages);
                 } else {
-                    *pending_peer_wake = PendingPeerWake::from_messages(wake_worthy_messages);
+                    *state.pending_peer_wake = PendingPeerWake::from_messages(wake_worthy_messages);
                 }
             }
             continue;
@@ -2498,7 +2502,7 @@ async fn drain_runtime_events_for_frame(
             // subscriber. Single-shot claims make a double fire impossible.
             if app.queued_inputs.is_empty() {
                 let bus = deps.peer_bus.clone();
-                background_spawns.spawn(async move {
+                state.background_spawns.spawn(async move {
                     match bus.fire_own_wake_subscriptions().await {
                         Ok(requesters) if !requesters.is_empty() => {
                             tracing::debug!(
@@ -2523,12 +2527,13 @@ async fn drain_runtime_events_for_frame(
             outcome,
         } = event
         {
-            *model_catalog = next_model_catalog;
-            *registry = next_registry;
-            app.sync_provider_choices(registry);
+            *state.model_catalog = next_model_catalog;
+            *state.registry = next_registry;
+            app.sync_provider_choices(state.registry);
             if let Ok(guard) = deps.session_store.try_lock() {
-                app.sync_cached_model_choices(&guard, registry, Some(model_catalog));
-                *last_model_cache_signature = cached_model_signature(&guard, model_catalog);
+                app.sync_cached_model_choices(&guard, state.registry, Some(state.model_catalog));
+                *state.last_model_cache_signature =
+                    cached_model_signature(&guard, state.model_catalog);
             }
             let event = RuntimeEvent::CommandFinished(outcome);
             // A catalog-reload outcome that clears the transcript must rotate
@@ -2544,8 +2549,8 @@ async fn drain_runtime_events_for_frame(
                     deps.project_root,
                     deps.plan_store,
                     app,
-                    current_session_id,
-                    persisted_signatures,
+                    state.current_session_id,
+                    state.persisted_signatures,
                     deps.agent,
                 )
                 .await;
@@ -2553,12 +2558,13 @@ async fn drain_runtime_events_for_frame(
             let provider_selection = provider_selection_to_persist(app, &event);
             app.reduce(AppAction::Runtime(event));
             sync_agent_state_at_lock_boundary(app, deps.agent).await;
-            persist_provider_selection(deps.storage, *current_session_id, provider_selection).await;
+            persist_provider_selection(deps.storage, *state.current_session_id, provider_selection)
+                .await;
             apply_first_run_runtime_transition(
                 app,
                 first_run_transition,
                 deps.storage,
-                registry,
+                state.registry,
                 deps.session_store,
             )
             .await;
@@ -2575,12 +2581,13 @@ async fn drain_runtime_events_for_frame(
         if sync_mirrors {
             sync_agent_state_at_lock_boundary(app, deps.agent).await;
         }
-        persist_provider_selection(deps.storage, *current_session_id, provider_selection).await;
+        persist_provider_selection(deps.storage, *state.current_session_id, provider_selection)
+            .await;
         apply_first_run_runtime_transition(
             app,
             first_run_transition,
             deps.storage,
-            registry,
+            state.registry,
             deps.session_store,
         )
         .await;
@@ -3161,35 +3168,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         snapshot_flush_gate,
     };
     frame_loop.drive().await?;
-    let driver::TuiLoop {
-        terminal,
-        app,
-        agent,
-        storage,
-        current_session_id,
-        background_tasks,
-        terminals,
-        persisted_signatures,
-        peer_bus,
-        pending_snapshot_flush,
-        background_spawns,
-        ..
-    } = frame_loop;
-
-    shutdown_tui(
-        terminal,
-        app,
-        agent,
-        storage,
-        current_session_id,
-        background_tasks,
-        terminals,
-        persisted_signatures,
-        peer_bus,
-        pending_snapshot_flush,
-        background_spawns,
-    )
-    .await?;
+    shutdown_tui(frame_loop).await?;
     Ok(())
 }
 
@@ -3249,20 +3228,21 @@ async fn drain_background_spawns(spawns: &mut tokio::task::JoinSet<()>) {
 /// (final persistence, drops, storage close) never run — matching `run`'s
 /// prior behavior when this was inline: a restore failure always skipped the
 /// rest of teardown rather than trying to limp through it.
-#[allow(clippy::too_many_arguments)]
-async fn shutdown_tui(
-    mut terminal: TerminalSession,
-    mut app: AppState,
-    agent: Arc<Mutex<Agent>>,
-    storage: Storage,
-    current_session_id: SessionId,
-    background_tasks: Arc<BackgroundTaskRegistry>,
-    terminals: Arc<TerminalRegistry>,
-    mut persisted_signatures: PersistedSnapshotSignatures,
-    peer_bus: Arc<crate::peer::PeerBus>,
-    pending_snapshot_flush: Option<tokio::task::JoinHandle<PersistenceFlushResult>>,
-    mut background_spawns: tokio::task::JoinSet<()>,
-) -> Result<()> {
+async fn shutdown_tui(frame_loop: driver::TuiLoop) -> Result<()> {
+    let driver::TuiLoop {
+        mut terminal,
+        mut app,
+        agent,
+        storage,
+        current_session_id,
+        background_tasks,
+        terminals,
+        mut persisted_signatures,
+        peer_bus,
+        pending_snapshot_flush,
+        mut background_spawns,
+        ..
+    } = frame_loop;
     let shutdown_started_at = Instant::now();
     let app_stats = shutdown_app_stats(&app);
     tracing::info!(

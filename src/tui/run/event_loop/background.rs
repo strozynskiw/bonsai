@@ -308,17 +308,13 @@ pub(super) fn apply_terminal_snapshot(
     effect
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn drain_background_work_wakes(
     wakes: &mut tokio::sync::broadcast::Receiver<crate::background_wake::BackgroundWorkWake>,
     pending_wakes: &mut Vec<crate::background_wake::BackgroundWorkWake>,
     app: &mut AppState,
     tasks: &mut TaskController,
-    agent: Arc<Mutex<Agent>>,
-    sink: SharedSink,
     pending_background_wake: &mut Option<Instant>,
-    background_tasks: &Arc<BackgroundTaskRegistry>,
-    terminals: &Arc<TerminalRegistry>,
+    handles: WakeHandles<'_>,
 ) -> bool {
     while let Ok(wake) = wakes.try_recv() {
         pending_wakes.push(wake);
@@ -340,7 +336,14 @@ pub(super) async fn drain_background_work_wakes(
         return false;
     };
     let wake = pending_wakes.remove(wake_index);
-    if !agent.lock().await.goal.automatic_work_allowed().await {
+    if !handles
+        .agent
+        .lock()
+        .await
+        .goal
+        .automatic_work_allowed()
+        .await
+    {
         pending_wakes.push(wake);
         return false;
     }
@@ -348,17 +351,19 @@ pub(super) async fn drain_background_work_wakes(
     *pending_background_wake = None;
     match wake.wait.target_kind {
         crate::storage::BackgroundWakeTargetKind::BackgroundTask => {
-            background_tasks
+            handles
+                .background_tasks
                 .acknowledge_exact_wake(&wake.wait.target_id, &wake.wait.target_incarnation)
                 .await;
         }
         crate::storage::BackgroundWakeTargetKind::Terminal => {
-            terminals
+            handles
+                .terminals
                 .acknowledge_exact_wake(&wake.wait.target_id, &wake.wait.target_incarnation)
                 .await;
         }
     }
-    agent.lock().await.push_background_work_wake(&wake);
+    handles.agent.lock().await.push_background_work_wake(&wake);
     app.reduce(AppAction::SetTaskState(TaskState::Running));
     app.mark_run_started(Instant::now());
     let truncation = if wake.output_truncated {
@@ -370,7 +375,11 @@ pub(super) async fn drain_background_work_wakes(
         "{} woke at version {} ({}){}",
         wake.wait.target_id, wake.wake_version, wake.reason, truncation
     ))));
-    if let Err(error) = tasks.start_agent_resume(agent.clone(), sink.clone(), app.active_mode()) {
+    if let Err(error) = tasks.start_agent_resume(
+        handles.agent.clone(),
+        handles.sink.clone(),
+        app.active_mode(),
+    ) {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(error)));
     }
     true
@@ -426,25 +435,30 @@ fn completed_subagent_tool_result(snapshot: &crate::subagent::SubagentSnapshot) 
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Shared handles a background-work wake needs; bundled so the wake helpers
+/// stay readable instead of threading six loose parameters.
+pub(super) struct WakeHandles<'a> {
+    pub(super) agent: Arc<Mutex<Agent>>,
+    pub(super) sink: SharedSink,
+    pub(super) background_tasks: &'a Arc<BackgroundTaskRegistry>,
+    pub(super) terminals: &'a Arc<TerminalRegistry>,
+    pub(super) subagents: &'a Arc<crate::subagent::SubagentRegistry>,
+    pub(super) peer_bus: &'a Arc<crate::peer::PeerBus>,
+}
+
 pub(super) async fn maybe_start_background_wake(
     pending_background_wake: &mut Option<Instant>,
     app: &mut AppState,
     tasks: &mut TaskController,
-    agent: Arc<Mutex<Agent>>,
-    sink: SharedSink,
-    background_tasks: &Arc<BackgroundTaskRegistry>,
-    terminals: &Arc<TerminalRegistry>,
-    subagents: &Arc<crate::subagent::SubagentRegistry>,
-    peer_bus: &Arc<crate::peer::PeerBus>,
+    handles: WakeHandles<'_>,
 ) -> bool {
     // Broadcasts are hints, not ownership of a completion. Recover a missed
     // event from the registries, which retain results until the agent consumes
     // them. Do not keep postponing an already armed debounce deadline.
     if pending_background_wake.is_none()
-        && (background_tasks.agent_wake_ready().await
-            || terminals.agent_wake_ready().await
-            || subagents.agent_wake_ready())
+        && (handles.background_tasks.agent_wake_ready().await
+            || handles.terminals.agent_wake_ready().await
+            || handles.subagents.agent_wake_ready())
     {
         *pending_background_wake = Some(Instant::now() + BACKGROUND_AGENT_WAKE_DELAY);
     }
@@ -457,9 +471,9 @@ pub(super) async fn maybe_start_background_wake(
     if Instant::now() < deadline {
         return false;
     }
-    if !background_tasks.agent_wake_ready().await
-        && !terminals.agent_wake_ready().await
-        && !subagents.agent_wake_ready()
+    if !handles.background_tasks.agent_wake_ready().await
+        && !handles.terminals.agent_wake_ready().await
+        && !handles.subagents.agent_wake_ready()
     {
         *pending_background_wake = None;
         return false;
@@ -468,13 +482,20 @@ pub(super) async fn maybe_start_background_wake(
         return false;
     }
 
-    if !agent.lock().await.goal.automatic_work_allowed().await {
+    if !handles
+        .agent
+        .lock()
+        .await
+        .goal
+        .automatic_work_allowed()
+        .await
+    {
         return false;
     }
     *pending_background_wake = None;
     // A background-task wake is not a peer hop — reset the anti-loop chain so
     // sends from this turn count as fresh (peers P3).
-    peer_bus.begin_turn(crate::peer::TurnOrigin::Human);
+    handles.peer_bus.begin_turn(crate::peer::TurnOrigin::Human);
     app.reduce(AppAction::SetTaskState(TaskState::Running));
     app.mark_run_started(Instant::now());
     app.reduce(AppAction::Agent(UiEvent::Thinking(
@@ -486,7 +507,7 @@ pub(super) async fn maybe_start_background_wake(
     // `set_mode`), which then implemented the freshly drafted plan without
     // `/start` — bypassing phased todo seeding and canvas progress entirely
     // (observed live: a whole multi-phase plan ran outside the runner).
-    if let Err(err) = tasks.start_agent_resume(agent, sink, app.active_mode()) {
+    if let Err(err) = tasks.start_agent_resume(handles.agent, handles.sink, app.active_mode()) {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
     }
     true

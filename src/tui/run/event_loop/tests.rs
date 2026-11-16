@@ -5455,12 +5455,14 @@ async fn background_wake_starts_agent_with_completed_task_output() {
         &mut pending,
         &mut app,
         &mut tasks,
-        agent,
-        Arc::new(NullSink),
-        &registry,
-        &terminals,
-        &subagents,
-        &peer_bus,
+        WakeHandles {
+            agent,
+            sink: Arc::new(NullSink),
+            background_tasks: &registry,
+            terminals: &terminals,
+            subagents: &subagents,
+            peer_bus: &peer_bus,
+        },
     )
     .await;
 
@@ -5540,12 +5542,14 @@ async fn background_wake_recovers_missed_events_and_survives_policy_deferral() {
                 &mut pending,
                 &mut app,
                 &mut tasks,
-                agent.clone(),
-                Arc::new(NullSink),
-                &registry,
-                &terminals,
-                &subagents,
-                &peer_bus,
+                WakeHandles {
+                    agent: agent.clone(),
+                    sink: Arc::new(NullSink),
+                    background_tasks: &registry,
+                    terminals: &terminals,
+                    subagents: &subagents,
+                    peer_bus: &peer_bus,
+                },
             )
             .await
         );
@@ -5560,12 +5564,14 @@ async fn background_wake_recovers_missed_events_and_survives_policy_deferral() {
                 &mut pending,
                 &mut app,
                 &mut tasks,
-                agent.clone(),
-                Arc::new(NullSink),
-                &registry,
-                &terminals,
-                &subagents,
-                &peer_bus,
+                WakeHandles {
+                    agent: agent.clone(),
+                    sink: Arc::new(NullSink),
+                    background_tasks: &registry,
+                    terminals: &terminals,
+                    subagents: &subagents,
+                    peer_bus: &peer_bus,
+                },
             )
             .await
         );
@@ -5580,12 +5586,14 @@ async fn background_wake_recovers_missed_events_and_survives_policy_deferral() {
                 &mut pending,
                 &mut app,
                 &mut tasks,
-                agent.clone(),
-                Arc::new(NullSink),
-                &registry,
-                &terminals,
-                &subagents,
-                &peer_bus,
+                WakeHandles {
+                    agent: agent.clone(),
+                    sink: Arc::new(NullSink),
+                    background_tasks: &registry,
+                    terminals: &terminals,
+                    subagents: &subagents,
+                    peer_bus: &peer_bus,
+                },
             )
             .await
         );
@@ -5640,12 +5648,14 @@ async fn background_wake_resumes_under_the_active_persona_mode() {
         &mut pending,
         &mut app,
         &mut tasks,
-        agent.clone(),
-        Arc::new(NullSink),
-        &registry,
-        &terminals,
-        &subagents,
-        &peer_bus,
+        WakeHandles {
+            agent: agent.clone(),
+            sink: Arc::new(NullSink),
+            background_tasks: &registry,
+            terminals: &terminals,
+            subagents: &subagents,
+            peer_bus: &peer_bus,
+        },
     )
     .await;
     assert!(tasks.is_busy());
