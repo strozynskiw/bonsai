@@ -39,7 +39,7 @@ debug = "line-tables-only"
 incremental = false
 
 [dependencies]
-async-openai = { version = "0.42.1", features = ["chat-completion", "model"] }
+async-openai = { version = "0.43.0", features = ["chat-completion", "model"] }
 reqwest = { version = "0.13.5", features = ["stream", "json", "gzip", "brotli"] }
 http = "1"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal", "net"] }
