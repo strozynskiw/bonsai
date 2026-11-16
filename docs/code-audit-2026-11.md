@@ -7,8 +7,8 @@ Date: 2026-11-16 · Base: `master` @ `18f3a9f1` (v0.5.1) · Scope: all of `src/`
 - `cargo clippy --all-targets --all-features -- -D warnings`: **clean**.
 - Metrics from `wc`, `awk` and `grep` over `src/` (≈393k lines incl. tests; tests
   are ≈40% of it). "Production LOC" = lines before the first `#[cfg(test)]`.
-- Function lengths are measured as distance between consecutive `fn` items, so
-  they are upper bounds (they include nested helpers). I read the code of every
+- Function lengths in the main findings were re-verified with brace matching
+  (the first draft's `fn`-to-`fn` distance overstated two of them; corrected). I read the code of every
   finding below; I did not profile anything at runtime. Performance claims are
   by inspection and should be confirmed with a benchmark before/after.
 - `unwrap()`/`expect()` and `lock().unwrap()` hits in `background_wake.rs`,
@@ -72,9 +72,10 @@ finish it: pure planning step (`plan_batches(calls, registry, hooks, budget) ->
 Vec<Batch>`, unit-testable without a provider), execution step, and outcome
 folding. The planning part is already spec'd by `src/agent/batching.rs` tests.
 
-### 4. Provider stream handlers: three 400-line methods with parallel structure
-**File**: `src/provider/opencode.rs:1041` (~400 lines), `anthropic.rs:1025`
-+ `handle_anthropic_event` (`:1469`, takes too many args), `codex.rs:586`
+### 4. Provider stream handlers duplicate the accumulation state machine
+**File**: `src/provider/opencode.rs:1041` (`chat_stream_with_context`, 397 lines), `anthropic.rs:1469`
+(`handle_anthropic_event`, 181 lines, too many args), `codex.rs:586` (82 lines + helpers).
+Re-measured with brace matching: only the opencode method is ~400 lines.
 **Category**: Duplication / Architecture · **Effort**: L
 
 Each transport re-implements the same state machine: accumulate text /
@@ -138,15 +139,13 @@ sidebar, background tasks) so reducers take only the slice they need. This also
 makes `apply_runtime_event` (~320 lines) and `apply_event` (~190) splittable by
 slice. Do after finding 2.
 
-### 9. `handle_runtime_action` (~370 lines) and `modal_identity` (~330 lines)
-**File**: `src/tui/runtime_actions.rs:~1000`, `src/tui/app.rs:163`
+### 9. `handle_runtime_action` (366 lines)
+**File**: `src/tui/runtime_actions.rs:148`
 **Category**: Architecture · **Effort**: M
 
-`modal_identity` hashes a discriminant plus per-variant payload with a long
-match that must be edited for every new modal. Prefer a `fn identity(&self) ->
-ModalId` method on each modal enum (or `#[derive(Hash)]` on the identifying
-fields) so the knowledge lives next to the variant. `handle_runtime_action` is
-a command dispatcher: one match arm → one function in a per-domain submodule.
+A command dispatcher: one match arm → one function in a per-domain submodule.
+*Correction:* an earlier draft also listed `modal_identity`; re-measured, it is
+~25 lines (the first measure counted the distance to the next `fn`). Dropped.
 
 ### 10. Large files that still hold several concerns
 **File**: `storage/peers.rs` (1.9k prod LOC), `model_catalog/mod.rs` (1.9k prod
