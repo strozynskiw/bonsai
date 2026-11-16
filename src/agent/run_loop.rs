@@ -967,52 +967,8 @@ impl Agent {
         let tool_registry = &frozen_registry;
         let mut interrupted_mid_tools = false;
         let mut outcome = ToolExecutionOutcome::default();
-        let mut serialized_tool_names = tool_calls
-            .iter()
-            .filter(|call| {
-                let tool = tool_registry.get(&call.name);
-                let name = tool
-                    .as_ref()
-                    .map_or(call.name.as_str(), |t| t.hook_match_name());
-                self.hooks.tool_may_rewrite(name)
-            })
-            .map(|call| call.name.clone())
-            .collect::<HashSet<_>>();
-        if self.budget.max_session_billed_tokens.is_some() {
-            serialized_tool_names.insert("agent".to_string());
-            serialized_tool_names.insert("task".to_string());
-        }
-        let planned_batches = tool_call_batches_with_yolo(
-            tool_calls,
-            tool_registry,
-            &self.project_root,
-            self.yolo_enabled(),
-            &serialized_tool_names,
-        );
-        // Batching telemetry: how the turn's tool calls were grouped. A
-        // serialized batch (width 1) for >1 calls means a conflict forced
-        // ordering — useful when diagnosing why a turn ran slowly.
-        tracing::debug!(
-            target: "bonsai::batching",
-            tool_calls = tool_calls.len(),
-            batches = planned_batches.len(),
-            widths = ?planned_batches.iter().map(Vec::len).collect::<Vec<_>>(),
-            "planned tool-call batches",
-        );
-        let inspection_turn_index = self.usage.usage_turns.len().checked_sub(1);
-        if let Some(diagnostics) = inspection_turn_index
-            .and_then(|index| self.usage.usage_turns.get_mut(index))
-            .and_then(|turn| turn.inspection_batch.as_mut())
-        {
-            diagnostics.planned_widths = planned_batches.iter().map(Vec::len).collect();
-            if tool_calls.len() > 1 {
-                diagnostics.classification = if planned_batches.len() > 1 {
-                    InspectionBatchClass::ConflictForced
-                } else {
-                    InspectionBatchClass::Batched
-                };
-            }
-        }
+        let (planned_batches, inspection_turn_index) =
+            self.plan_tool_batches(tool_calls, tool_registry);
         let mut batches = planned_batches.into_iter().peekable();
         let mut trusted_contexts = Vec::new();
         let mut image_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
@@ -1050,84 +1006,14 @@ impl Agent {
                 interrupted_mid_tools = true;
                 break;
             }
-            let mut scoped_target_dirs = HashMap::<String, Vec<PathBuf>>::new();
-            for tool_call in &batch {
-                for raw_path in scoped_instruction_paths(tool_call) {
-                    let target_dir = if tool_call.name == "bash" {
-                        let Ok(args) =
-                            serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
-                        else {
-                            continue;
-                        };
-                        let Some(tool) = tool_registry.get("bash") else {
-                            continue;
-                        };
-                        let Some(cwd) = tool.execution_cwd(&args).await else {
-                            continue;
-                        };
-                        let canonical_root = self
-                            .project_root
-                            .canonicalize()
-                            .unwrap_or_else(|_| self.project_root.clone());
-                        let Ok(relative) = cwd.strip_prefix(&canonical_root) else {
-                            continue;
-                        };
-                        relative.to_path_buf()
-                    } else {
-                        let Some(target_dir) = scoped_target_dir(&self.project_root, &raw_path)
-                        else {
-                            continue;
-                        };
-                        target_dir
-                    };
-                    let updates = if scoped_instruction_recurses(tool_call) {
-                        match self.scoped_steering.refresh_subtree(&target_dir) {
-                            Ok(updates) => updates,
-                            Err(error) => {
-                                tool_rejections.scoped_steering.insert(
-                                    tool_call.id.clone(),
-                                    format!(
-                                        "Tool rejected because scoped project instruction coverage could not be established: {error}"
-                                    ),
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        self.scoped_steering.refresh_target_dir(&target_dir)
-                    };
-                    for update in updates {
-                        changed_scoped_steering.insert(update.scope().to_path_buf());
-                        scoped_contexts.push(update.render());
-                    }
-                    scoped_target_dirs
-                        .entry(tool_call.id.clone())
-                        .or_default()
-                        .push(target_dir);
-                }
-            }
-            for tool_call in &batch {
-                if !tool_call_may_mutate_workspace(tool_call) {
-                    continue;
-                }
-                let recursive_scope = scoped_instruction_recurses(tool_call);
-                let affected = scoped_target_dirs
-                    .get(&tool_call.id)
-                    .is_some_and(|targets| {
-                        targets.iter().any(|target| {
-                            changed_scoped_steering.iter().any(|scope| {
-                                target.starts_with(scope)
-                                    || (recursive_scope && scope.starts_with(target))
-                            })
-                        })
-                    });
-                if affected {
-                    tool_rejections.scoped_steering.insert(
-                        tool_call.id.clone(),
-                        "Scoped project instructions for this path were loaded or changed before mutation. Review the newly injected system instruction, then retry the mutation so it is planned under fresh steering coverage.".to_string(),
-                    );
-                }
-            }
+            self.refresh_scoped_steering_for_batch(
+                &batch,
+                tool_registry,
+                &mut tool_rejections,
+                &mut changed_scoped_steering,
+                &mut scoped_contexts,
+            )
+            .await;
             if self.self_review.baseline_pending()
                 && batch.iter().any(|call| {
                     tool_rejections.message_for(call).is_none()
@@ -1212,14 +1098,7 @@ impl Agent {
                 rejections = self.capture_pending_verification_bindings(&eligible_calls) => (Some(rejections), None),
             };
             if verification_rejections.is_none() {
-                for call in &eligible_calls {
-                    self.verification
-                        .pending_verification_bindings
-                        .remove(&call.id);
-                    self.verification
-                        .suppressed_verification_calls
-                        .remove(&call.id);
-                }
+                self.release_verification_bindings(&eligible_calls);
                 let skipped_calls = batch
                     .into_iter()
                     .chain(batches.by_ref().flatten())
@@ -1307,14 +1186,7 @@ impl Agent {
                 baselines = capture_baselines => (Some(baselines), None),
             };
             let Some((diagnostic_baseline, bash_baseline, delegated_baseline)) = baselines else {
-                for call in &eligible_calls {
-                    self.verification
-                        .pending_verification_bindings
-                        .remove(&call.id);
-                    self.verification
-                        .suppressed_verification_calls
-                        .remove(&call.id);
-                }
+                self.release_verification_bindings(&eligible_calls);
                 let skipped_calls = batch
                     .into_iter()
                     .chain(batches.by_ref().flatten())
@@ -1374,14 +1246,7 @@ impl Agent {
             if let Some(lease) = self.goal_run_lease.as_ref()
                 && self.goal.snapshot_for_run(lease).await.is_none()
             {
-                for call in &eligible_calls {
-                    self.verification
-                        .pending_verification_bindings
-                        .remove(&call.id);
-                    self.verification
-                        .suppressed_verification_calls
-                        .remove(&call.id);
-                }
+                self.release_verification_bindings(&eligible_calls);
                 let skipped_calls = batch
                     .into_iter()
                     .chain(batches.by_ref().flatten())
@@ -1644,6 +1509,164 @@ impl Agent {
         }
         outcome.interrupted_mid_tools = interrupted_mid_tools;
         Ok(outcome)
+    }
+
+    /// Groups a turn's tool calls into conflict-free batches and records the
+    /// batching telemetry. Returns the batches and the index of the usage turn
+    /// whose inspection diagnostics were updated, for the caller's later
+    /// `actual_widths` bookkeeping.
+    fn plan_tool_batches(
+        &mut self,
+        tool_calls: &[ToolCall],
+        tool_registry: &ToolRegistry,
+    ) -> (Vec<Vec<ToolCall>>, Option<usize>) {
+        let mut serialized_tool_names = tool_calls
+            .iter()
+            .filter(|call| {
+                let tool = tool_registry.get(&call.name);
+                let name = tool
+                    .as_ref()
+                    .map_or(call.name.as_str(), |t| t.hook_match_name());
+                self.hooks.tool_may_rewrite(name)
+            })
+            .map(|call| call.name.clone())
+            .collect::<HashSet<_>>();
+        if self.budget.max_session_billed_tokens.is_some() {
+            serialized_tool_names.insert("agent".to_string());
+            serialized_tool_names.insert("task".to_string());
+        }
+        let planned_batches = tool_call_batches_with_yolo(
+            tool_calls,
+            tool_registry,
+            &self.project_root,
+            self.yolo_enabled(),
+            &serialized_tool_names,
+        );
+        // Batching telemetry: how the turn's tool calls were grouped. A
+        // serialized batch (width 1) for >1 calls means a conflict forced
+        // ordering — useful when diagnosing why a turn ran slowly.
+        tracing::debug!(
+            target: "bonsai::batching",
+            tool_calls = tool_calls.len(),
+            batches = planned_batches.len(),
+            widths = ?planned_batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            "planned tool-call batches",
+        );
+        let inspection_turn_index = self.usage.usage_turns.len().checked_sub(1);
+        if let Some(diagnostics) = inspection_turn_index
+            .and_then(|index| self.usage.usage_turns.get_mut(index))
+            .and_then(|turn| turn.inspection_batch.as_mut())
+        {
+            diagnostics.planned_widths = planned_batches.iter().map(Vec::len).collect();
+            if tool_calls.len() > 1 {
+                diagnostics.classification = if planned_batches.len() > 1 {
+                    InspectionBatchClass::ConflictForced
+                } else {
+                    InspectionBatchClass::Batched
+                };
+            }
+        }
+        (planned_batches, inspection_turn_index)
+    }
+
+    /// Forgets verification bindings captured for calls that will not run.
+    fn release_verification_bindings(&mut self, calls: &[ToolCall]) {
+        for call in calls {
+            self.verification
+                .pending_verification_bindings
+                .remove(&call.id);
+            self.verification
+                .suppressed_verification_calls
+                .remove(&call.id);
+        }
+    }
+
+    /// Loads or refreshes scoped project instructions for every path a batch
+    /// touches, and rejects mutations planned before that steering was active.
+    async fn refresh_scoped_steering_for_batch(
+        &mut self,
+        batch: &[ToolCall],
+        tool_registry: &ToolRegistry,
+        tool_rejections: &mut ToolRejections,
+        changed_scoped_steering: &mut HashSet<PathBuf>,
+        scoped_contexts: &mut Vec<String>,
+    ) {
+        let mut scoped_target_dirs = HashMap::<String, Vec<PathBuf>>::new();
+        for tool_call in batch {
+            for raw_path in scoped_instruction_paths(tool_call) {
+                let target_dir = if tool_call.name == "bash" {
+                    let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+                    else {
+                        continue;
+                    };
+                    let Some(tool) = tool_registry.get("bash") else {
+                        continue;
+                    };
+                    let Some(cwd) = tool.execution_cwd(&args).await else {
+                        continue;
+                    };
+                    let canonical_root = self
+                        .project_root
+                        .canonicalize()
+                        .unwrap_or_else(|_| self.project_root.clone());
+                    let Ok(relative) = cwd.strip_prefix(&canonical_root) else {
+                        continue;
+                    };
+                    relative.to_path_buf()
+                } else {
+                    let Some(target_dir) = scoped_target_dir(&self.project_root, &raw_path) else {
+                        continue;
+                    };
+                    target_dir
+                };
+                let updates = if scoped_instruction_recurses(tool_call) {
+                    match self.scoped_steering.refresh_subtree(&target_dir) {
+                        Ok(updates) => updates,
+                        Err(error) => {
+                            tool_rejections.scoped_steering.insert(
+                                tool_call.id.clone(),
+                                format!(
+                                    "Tool rejected because scoped project instruction coverage could not be established: {error}"
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    self.scoped_steering.refresh_target_dir(&target_dir)
+                };
+                for update in updates {
+                    changed_scoped_steering.insert(update.scope().to_path_buf());
+                    scoped_contexts.push(update.render());
+                }
+                scoped_target_dirs
+                    .entry(tool_call.id.clone())
+                    .or_default()
+                    .push(target_dir);
+            }
+        }
+        for tool_call in batch {
+            if !tool_call_may_mutate_workspace(tool_call) {
+                continue;
+            }
+            let recursive_scope = scoped_instruction_recurses(tool_call);
+            let affected = scoped_target_dirs
+                .get(&tool_call.id)
+                .is_some_and(|targets| {
+                    targets.iter().any(|target| {
+                        changed_scoped_steering.iter().any(|scope| {
+                            target.starts_with(scope)
+                                || (recursive_scope && scope.starts_with(target))
+                        })
+                    })
+                });
+            if affected {
+                tool_rejections.scoped_steering.insert(
+                    tool_call.id.clone(),
+                    "Scoped project instructions for this path were loaded or changed before mutation. Review the newly injected system instruction, then retry the mutation so it is planned under fresh steering coverage.".to_string(),
+                );
+            }
+        }
     }
 
     fn planning_research_action(
