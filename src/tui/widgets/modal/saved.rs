@@ -1,3 +1,4 @@
+use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use super::picker_common::*;
 use super::*;
 
@@ -96,13 +97,19 @@ pub(super) fn render_decision_popup(
         f,
         area,
         title,
-        &header,
-        &body,
-        &footer,
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &header,
+            body: &body,
+            footer: &footer,
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 

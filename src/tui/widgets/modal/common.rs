@@ -946,20 +946,48 @@ pub(super) fn wizard_body_regions(inner: Rect, footer: &[Line<'static>]) -> (Rec
     (chunks[0], chunks[1])
 }
 
+/// Header, scrollable body and pinned footer of a modal.
+#[derive(Clone, Copy)]
+pub(super) struct ModalLines<'a> {
+    pub(super) header: &'a [Line<'static>],
+    pub(super) body: &'a [Line<'static>],
+    pub(super) footer: &'a [Line<'static>],
+}
+
+/// Scroll offset and text selection of a modal body.
+#[derive(Clone, Copy)]
+pub(super) struct ModalScrollView {
+    pub(super) scroll: u16,
+    pub(super) selection: Option<(usize, usize)>,
+}
+
+/// Render-side caches the mouse handler reads to map screen coordinates back
+/// to text: the unwrapped body lines and the body rectangle.
+#[derive(Clone, Copy)]
+pub(super) struct ModalCaches<'a> {
+    pub(super) body: &'a std::cell::RefCell<Vec<Line<'static>>>,
+    pub(super) body_rect: &'a std::cell::Cell<Option<Rect>>,
+}
+
 /// Draw a form popup through the shared shell and return its body rect, so the
 /// caller can place a caret inside the body. Forms do not scroll: their fields
 /// are already wrapped to the body width.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_form_shell(
     f: &mut Frame,
     area: Rect,
     title: &str,
-    header: &[Line<'static>],
-    body: &[Line<'static>],
-    footer: &[Line<'static>],
-    body_cache: &std::cell::RefCell<Vec<Line<'static>>>,
-    body_rect_cache: &std::cell::Cell<Option<Rect>>,
+    lines: ModalLines<'_>,
+    caches: ModalCaches<'_>,
 ) -> Rect {
+    let ModalLines {
+        header,
+        body,
+        footer,
+    } = lines;
+    let ModalCaches {
+        body: body_cache,
+        body_rect: body_rect_cache,
+    } = caches;
     let regions = split_scrollable_modal_lines(area, header, footer);
     render_modal_chrome(f, area, title, &regions, header, footer);
     *body_cache.borrow_mut() = body.to_vec();
@@ -1008,19 +1036,27 @@ pub(super) fn render_scroll_body(
 /// list/detail modals lay their content out inside it instead of growing a
 /// parallel implementation. Long content scrolls; the action hints stay pinned
 /// to the bottom so a tall command or a long question cannot push them away.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_scrollable_modal(
     f: &mut Frame,
     area: Rect,
     title: &str,
-    header_lines: &[Line<'static>],
-    body_lines: &[Line<'static>],
-    footer_lines: &[Line<'static>],
-    modal_scroll: u16,
-    selection: Option<(usize, usize)>,
-    body_cache: &std::cell::RefCell<Vec<Line<'static>>>,
-    body_rect_cache: &std::cell::Cell<Option<Rect>>,
+    lines: ModalLines<'_>,
+    view: ModalScrollView,
+    caches: ModalCaches<'_>,
 ) {
+    let ModalLines {
+        header: header_lines,
+        body: body_lines,
+        footer: footer_lines,
+    } = lines;
+    let ModalScrollView {
+        scroll: modal_scroll,
+        selection,
+    } = view;
+    let ModalCaches {
+        body: body_cache,
+        body_rect: body_rect_cache,
+    } = caches;
     let regions = split_scrollable_modal_lines(area, header_lines, footer_lines);
     render_modal_chrome(f, area, title, &regions, header_lines, footer_lines);
 

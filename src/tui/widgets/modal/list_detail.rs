@@ -1,4 +1,5 @@
 use super::common::*;
+use super::common::{ModalCaches, ModalScrollView};
 use super::*;
 
 /// How a list-plus-detail modal arranges its two panes.
@@ -47,10 +48,14 @@ pub(super) fn render_list_detail_modal(
         modal.detail_title,
         modal.detail_focused,
         detail_lines,
-        modal.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalScrollView {
+            scroll: modal.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 
@@ -119,18 +124,23 @@ pub(super) fn detail_pane_inner(detail_area: Rect) -> Rect {
 /// Render the framed, scrollable detail pane plus its scrollbar, clamping
 /// `modal_scroll` to the content. The three list-detail modals share this so
 /// the scroll/scrollbar plumbing lives in one place.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_detail_pane(
     f: &mut Frame,
     detail_area: Rect,
     title: &str,
     focused: bool,
     detail_lines: Vec<Line<'static>>,
-    modal_scroll: u16,
-    selection: Option<(usize, usize)>,
-    body_cache: &std::cell::RefCell<Vec<Line<'static>>>,
-    body_rect_cache: &std::cell::Cell<Option<Rect>>,
+    view: ModalScrollView,
+    caches: ModalCaches<'_>,
 ) {
+    let ModalScrollView {
+        scroll: modal_scroll,
+        selection,
+    } = view;
+    let ModalCaches {
+        body: body_cache,
+        body_rect: body_rect_cache,
+    } = caches;
     // Cache unwrapped detail lines and detail inner rect for mouse hit-testing.
     *body_cache.borrow_mut() = detail_lines.clone();
 

@@ -1084,13 +1084,15 @@ fn question_prompt_last_option_visible_at_max_scroll() {
             render_question_prompt(
                 frame,
                 area,
-                "Pick one",
-                Some("Question header"),
-                None,
-                &options,
-                false,
-                last,
-                &selected,
+                QuestionPromptView {
+                    prompt: "Pick one",
+                    header: Some("Question header"),
+                    origin: None,
+                    options: &options,
+                    multiple: false,
+                    cursor: last,
+                    selected: &selected,
+                },
                 metrics.max_scroll,
             );
         })
@@ -1311,13 +1313,15 @@ fn question_prompt_uses_its_header_as_the_title_and_aligns_option_details() {
             render_question_prompt(
                 frame,
                 area,
-                "Project-owned configuration is disabled until trusted.",
-                Some("Workspace trust"),
-                None,
-                &options,
-                false,
-                0,
-                &selected,
+                QuestionPromptView {
+                    prompt: "Project-owned configuration is disabled until trusted.",
+                    header: Some("Workspace trust"),
+                    origin: None,
+                    options: &options,
+                    multiple: false,
+                    cursor: 0,
+                    selected: &selected,
+                },
                 0,
             );
         })

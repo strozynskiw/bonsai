@@ -1,3 +1,4 @@
+use super::common::{ModalCaches, ModalScrollView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -77,10 +78,14 @@ pub(super) fn render_memory_manager(
             "Entry",
             true,
             detail_lines,
-            app.modal_scroll,
-            app.modal_selection.map(|s| s.range()),
-            &app.modal_body_lines,
-            &app.modal_body_rect,
+            ModalScrollView {
+                scroll: app.modal_scroll,
+                selection: app.modal_selection.map(|s| s.range()),
+            },
+            ModalCaches {
+                body: &app.modal_body_lines,
+                body_rect: &app.modal_body_rect,
+            },
         );
     } else {
         super::common::render_modal_notice(f, detail_area, "Entry", "No memory entries saved.");
@@ -118,10 +123,14 @@ pub(super) fn render_memory_wizard(
         "Preview",
         true,
         wizard_preview_lines(state),
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 

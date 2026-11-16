@@ -366,13 +366,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         }) => render_question_prompt(
             f,
             modal,
-            prompt,
-            header.as_deref(),
-            origin.as_deref(),
-            options,
-            *multiple,
-            *cursor,
-            selected,
+            QuestionPromptView {
+                prompt,
+                header: header.as_deref(),
+                origin: origin.as_deref(),
+                options,
+                multiple: *multiple,
+                cursor: *cursor,
+                selected,
+            },
             app.modal_scroll,
         ),
     }

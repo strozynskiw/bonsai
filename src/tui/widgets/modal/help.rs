@@ -1,3 +1,4 @@
+use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use super::picker_common::*;
 use super::*;
 
@@ -216,12 +217,18 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
         f,
         area,
         "Shortcuts",
-        &[],
-        &lines,
-        &[footer_hint_line(HELP_KEYS_HINTS)],
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &[],
+            body: &lines,
+            footer: &[footer_hint_line(HELP_KEYS_HINTS)],
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }

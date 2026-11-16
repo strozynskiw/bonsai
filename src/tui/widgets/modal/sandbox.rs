@@ -1,3 +1,4 @@
+use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use super::*;
 
 /// The subtitle every sandbox popup carries.
@@ -19,13 +20,19 @@ pub(super) fn render_sandbox_status(f: &mut Frame, area: Rect, app: &AppState, c
         f,
         area,
         "Sandbox",
-        &header,
-        &body,
-        &footer,
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &header,
+            body: &body,
+            footer: &footer,
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 

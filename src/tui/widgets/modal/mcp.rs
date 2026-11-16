@@ -1,3 +1,4 @@
+use super::common::{ModalCaches, ModalScrollView};
 use super::list_detail::{
     ListDetailSplit, detail_pane_inner, list_detail_panes, render_detail_pane,
 };
@@ -52,10 +53,14 @@ pub(super) fn render_mcp_servers(
             "Detail",
             true,
             mcp_detail_lines(&rows[cursor]),
-            app.modal_scroll,
-            app.modal_selection.map(|s| s.range()),
-            &app.modal_body_lines,
-            &app.modal_body_rect,
+            ModalScrollView {
+                scroll: app.modal_scroll,
+                selection: app.modal_selection.map(|s| s.range()),
+            },
+            ModalCaches {
+                body: &app.modal_body_lines,
+                body_rect: &app.modal_body_rect,
+            },
         );
     }
 }

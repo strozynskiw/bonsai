@@ -471,13 +471,15 @@ pub(super) fn render_question_to_buffer(area: Rect, scroll: u16) -> ratatui::buf
             render_question_prompt(
                 frame,
                 area,
-                "Pick one",
-                Some("Question header"),
-                None,
-                &options,
-                false,
-                8,
-                &vec![false; options.len()],
+                QuestionPromptView {
+                    prompt: "Pick one",
+                    header: Some("Question header"),
+                    origin: None,
+                    options: &options,
+                    multiple: false,
+                    cursor: 8,
+                    selected: &vec![false; options.len()],
+                },
                 scroll,
             );
         })

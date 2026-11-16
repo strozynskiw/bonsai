@@ -1,4 +1,5 @@
 use super::common::*;
+use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use super::picker_common::pad_ascii;
 use super::*;
 use unicode_width::UnicodeWidthStr;
@@ -61,13 +62,19 @@ pub(super) fn render_confirm_prompt(
         f,
         area,
         prompt.title,
-        &header_lines,
-        &prompt.body,
-        &approval_footer(&prompt.scopes),
-        modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &header_lines,
+            body: &prompt.body,
+            footer: &approval_footer(&prompt.scopes),
+        },
+        ModalScrollView {
+            scroll: modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 
@@ -249,19 +256,32 @@ pub(super) fn hook_trust_prompt(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The question being asked and the state of its option list.
+pub(super) struct QuestionPromptView<'a> {
+    pub(super) prompt: &'a str,
+    pub(super) header: Option<&'a str>,
+    pub(super) origin: Option<&'a str>,
+    pub(super) options: &'a [crate::interaction::QuestionOption],
+    pub(super) multiple: bool,
+    pub(super) cursor: usize,
+    pub(super) selected: &'a [bool],
+}
+
 pub(super) fn render_question_prompt(
     f: &mut Frame,
     area: Rect,
-    prompt: &str,
-    header: Option<&str>,
-    origin: Option<&str>,
-    options: &[crate::interaction::QuestionOption],
-    multiple: bool,
-    cursor: usize,
-    selected: &[bool],
+    question: QuestionPromptView<'_>,
     modal_scroll: u16,
 ) {
+    let QuestionPromptView {
+        prompt,
+        header,
+        origin,
+        options,
+        multiple,
+        cursor,
+        selected,
+    } = question;
     let header_lines = question_prompt_header_lines(prompt, origin);
 
     let body_lines = question_prompt_body(
@@ -279,13 +299,19 @@ pub(super) fn render_question_prompt(
         f,
         area,
         header.unwrap_or("Question"),
-        &header_lines,
-        &body_lines,
-        &footer_lines,
-        modal_scroll,
-        None,
-        &std::cell::RefCell::new(Vec::new()),
-        &std::cell::Cell::new(None),
+        ModalLines {
+            header: &header_lines,
+            body: &body_lines,
+            footer: &footer_lines,
+        },
+        ModalScrollView {
+            scroll: modal_scroll,
+            selection: None,
+        },
+        ModalCaches {
+            body: &std::cell::RefCell::new(Vec::new()),
+            body_rect: &std::cell::Cell::new(None),
+        },
     );
 }
 

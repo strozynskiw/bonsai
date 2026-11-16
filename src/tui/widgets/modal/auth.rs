@@ -1,3 +1,4 @@
+use super::common::{ModalCaches, ModalLines};
 use super::picker_common::*;
 use super::*;
 
@@ -50,11 +51,15 @@ pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, p
         f,
         area,
         "Authorize Provider",
-        &header,
-        &body,
-        &footer,
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &header,
+            body: &body,
+            footer: &footer,
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
     f.set_cursor_position(clamp_cursor(
         inner,

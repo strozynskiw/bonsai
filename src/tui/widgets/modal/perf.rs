@@ -1,4 +1,5 @@
 use super::common::*;
+use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use super::*;
 
 pub(super) fn render_perf_report(
@@ -14,13 +15,19 @@ pub(super) fn render_perf_report(
         f,
         area,
         title,
-        &[],
-        &body_lines,
-        &footer_lines,
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &[],
+            body: &body_lines,
+            footer: &footer_lines,
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 

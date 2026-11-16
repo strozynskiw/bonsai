@@ -1,3 +1,4 @@
+use super::common::{ModalCaches, ModalScrollView};
 use super::picker_common::*;
 use super::*;
 use crate::tui::provider_manager::{ProviderDetail, ProviderManagerRow, ProviderOrigin};
@@ -120,10 +121,14 @@ pub(super) fn render_provider_detail(
         &format!("Provider · {}", detail.display_name),
         true,
         provider_detail_lines(detail),
-        modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalScrollView {
+            scroll: modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
     f.render_widget(
         Paragraph::new(footer_hint_line(PROVIDER_DETAIL_HINTS)).style(theme::panel()),

@@ -2,6 +2,7 @@
 //! usage aggregates in [`UsageDashboard`]. This file owns the shell (tab bar,
 //! scroll clamp) and the Activity tab; the other tabs live in `usage_tabs`.
 
+use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use crate::context_view::telemetry::{compact_tokens, format_cost_micros};
 use crate::storage::UsageDashboard;
 use crate::tui::event::UsageTab;
@@ -25,13 +26,19 @@ pub(super) fn render_usage_dashboard(
         f,
         area,
         " Usage — all projects ",
-        &header_lines,
-        &body_lines,
-        &footer_lines,
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &header_lines,
+            body: &body_lines,
+            footer: &footer_lines,
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 

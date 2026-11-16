@@ -1,4 +1,5 @@
 use super::common::*;
+use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use super::context::*;
 use super::*;
 
@@ -21,13 +22,19 @@ pub(super) fn render_tool_detail(f: &mut Frame, area: Rect, app: &AppState, tool
         f,
         area,
         &title,
-        &[],
-        &body_lines,
-        &footer_lines,
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &[],
+            body: &body_lines,
+            footer: &footer_lines,
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 
@@ -74,13 +81,19 @@ pub(super) fn render_block_detail(f: &mut Frame, area: Rect, app: &AppState, ite
         f,
         area,
         &block_detail_title(item),
-        &[],
-        &body_lines,
-        &footer_lines,
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &[],
+            body: &body_lines,
+            footer: &footer_lines,
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 
@@ -117,13 +130,19 @@ pub(super) fn render_plan_finding_detail(f: &mut Frame, area: Rect, app: &AppSta
         f,
         area,
         &title,
-        &[],
-        &body,
-        &[footer_hint_line(&hints)],
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &[],
+            body: &body,
+            footer: &[footer_hint_line(&hints)],
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 
@@ -242,13 +261,19 @@ pub(super) fn render_diff_preview(f: &mut Frame, area: Rect, app: &AppState, too
         f,
         area,
         &title,
-        &[],
-        &diff_lines(diff),
-        &footer_lines,
-        app.modal_scroll,
-        app.modal_selection.map(|s| s.range()),
-        &app.modal_body_lines,
-        &app.modal_body_rect,
+        ModalLines {
+            header: &[],
+            body: &diff_lines(diff),
+            footer: &footer_lines,
+        },
+        ModalScrollView {
+            scroll: app.modal_scroll,
+            selection: app.modal_selection.map(|s| s.range()),
+        },
+        ModalCaches {
+            body: &app.modal_body_lines,
+            body_rect: &app.modal_body_rect,
+        },
     );
 }
 
