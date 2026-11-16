@@ -167,27 +167,83 @@ pub(super) fn render_model_picker(
             }
             .to_string()
         });
-    // Only the active pane assigns shortcuts with a bare letter, so the cue is a
-    // hint on the active pane instead of a row the Reasoning pane must reserve.
-    let pane_hints = model_picker_hints(app.model_picker.active_pane);
-    let mut hints = footer_hint_line(pane_hints);
-    // The hint row never wraps, so the Reasoning-only cue is what yields when it
-    // would push `Esc` past the footer's edge.
-    if hints.width() > footer_width {
-        hints = footer_hint_line(MODEL_PICKER_CHOOSE);
-    }
-    // Two footer rows, always: the selected model's summary and price above, the
-    // key hints below. Neither pane spends a body row on text of its own.
+    // The footer band explains the picker before it reports on it: orientation, then
+    // the selected model's summary and price, then the keys. No pane spends a body
+    // row on text of its own.
     let price = selected_model
         .map(selected_model_price_text)
         .unwrap_or_default();
+    // Only the active pane assigns shortcuts with a bare letter, so the cue belongs to
+    // that pane rather than to a row the Reasoning list has to reserve.
+    let mut hints = footer_hint_line(model_picker_hints(app.model_picker.active_pane));
+    // The hint row never wraps, so the Reasoning-only cue is what yields when it would
+    // push `Esc` past the footer's edge.
+    if hints.width() > footer_width {
+        hints = footer_hint_line(MODEL_PICKER_CHOOSE);
+    }
+    let mut footer_lines = if layout.help {
+        model_picker_help_lines()
+    } else {
+        Vec::new()
+    };
+    footer_lines.push(model_picker_summary_line(&summary, &price, footer_width));
+    footer_lines.push(hints_with_shortcut_usage(
+        hints,
+        selected_model,
+        footer_width,
+    ));
     f.render_widget(
-        Paragraph::new(vec![
-            model_picker_summary_line(&summary, &price, footer_width),
-            hints_with_shortcut_usage(hints, selected_model, footer_width),
-        ]),
+        Paragraph::new(footer_lines)
+            .style(theme::panel())
+            .wrap(Wrap { trim: false }),
         layout.footer,
     );
+}
+
+/// The orientation lines are a luxury: they show only while the panes still get a
+/// readable body, so a short terminal keeps its rows for models.
+pub(super) const MODEL_PICKER_HELP_MIN_BODY_ROWS: u16 = 8;
+
+fn model_picker_help_rows(width: u16) -> u16 {
+    wrapped_lines_height(&model_picker_help_lines(), width.max(1) as usize) as u16
+}
+
+/// Rows the footer band takes, and whether it carries the orientation lines.
+/// `body_rows` is the height the panes get while the band includes them; the layout
+/// and `model_picker_rows` both pass that, so the measured popup and the drawn one
+/// agree.
+pub(super) fn model_picker_footer_rows(body_rows: u16, width: u16) -> (u16, bool) {
+    let with_help = model_picker_help_rows(width).saturating_add(2);
+    if body_rows >= MODEL_PICKER_HELP_MIN_BODY_ROWS {
+        (with_help, true)
+    } else {
+        (2, false)
+    }
+}
+
+/// Orientation above the summary: what the three panes are, which keys move between
+/// them, and what a bare letter does where it is pressed.
+fn model_picker_help_lines() -> Vec<Line<'static>> {
+    let key = |text: &'static str| Span::styled(text, theme::body(theme::palette().text));
+    let dim = |text: &'static str| Span::styled(text, theme::dim());
+    vec![
+        Line::from(vec![
+            Span::styled("Panes ", theme::muted()),
+            dim("Provider → Model → Reasoning  ·  "),
+            key("←/→/Tab"),
+            dim(" switch  ·  "),
+            key("↑/↓"),
+            dim(" move  ·  "),
+            key("Enter"),
+            dim(" select"),
+        ]),
+        Line::from(vec![
+            Span::styled("Keys  ", theme::muted()),
+            dim("type to filter  ·  in Reasoning a letter binds "),
+            key("/<key>"),
+            dim(" to model + effort"),
+        ]),
+    ]
 }
 
 /// Provider, model and reasoning pane indices, in the order [`ModelPickerLayout`]
@@ -206,18 +262,27 @@ pub(super) struct ModelPickerLayout {
     /// Provider, model and reasoning panes, left to right, all spanning the full
     /// body height.
     pub panes: [Rect; 3],
-    /// The two-row summary/hint footer.
+    /// The footer band: the orientation lines, the selected-model summary and the
+    /// hint row.
     pub footer: Rect,
+    /// Whether the band carries the orientation lines.
+    pub help: bool,
 }
 
 pub(super) fn model_picker_layout(area: Rect) -> ModelPickerLayout {
     let inner = theme::frame("Models", true).inner(area);
+    let help_rows = model_picker_help_rows(inner.width);
+    let body_with_help = inner
+        .height
+        .saturating_sub(1)
+        .saturating_sub(help_rows.saturating_add(2));
+    let (footer_rows, help) = model_picker_footer_rows(body_with_help, inner.width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(4),
-            Constraint::Length(2),
+            Constraint::Length(footer_rows),
         ])
         .split(inner);
     let columns = Layout::default()
@@ -232,6 +297,7 @@ pub(super) fn model_picker_layout(area: Rect) -> ModelPickerLayout {
         filter: chunks[0],
         panes: [columns[0], columns[1], columns[2]],
         footer: chunks[2],
+        help,
     }
 }
 
@@ -413,8 +479,10 @@ fn selected_model_price_text(entry: &ModelOption) -> String {
     if entry.unverified {
         parts.push("⚠ unverified live model".to_string());
     }
+    // Where the model's metadata came from is diagnostic noise when everything agrees;
+    // the footer keeps that line about the model, not about the catalog.
     let sources = entry.metadata_sources.compact_label();
-    if !sources.is_empty() {
+    if (!entry.catalog_drift.is_empty() || entry.unverified) && !sources.is_empty() {
         parts.push(format!("sources: {sources}"));
     }
     parts.join(" · ")
@@ -618,10 +686,19 @@ mod tests {
             );
             assert_eq!(pane.bottom(), pane_bottom, "every pane ends on one row");
         }
-        assert_eq!(layout.footer.height, 2, "the footer is exactly two rows");
+        // The band carries the orientation lines here, because 30 rows leave the panes
+        // plenty: two help rows, the summary and the hint row.
+        assert!(layout.help, "a roomy terminal shows the orientation lines");
+        assert_eq!(layout.footer.height, 4, "help, summary and hints");
         assert!(
             layout.footer.y >= pane_bottom,
             "the footer starts below the panes"
+        );
+
+        let cramped = model_picker_layout(Rect::new(0, 0, 60, 12));
+        assert!(
+            !cramped.help,
+            "a short terminal gives its rows to the panes instead"
         );
 
         let entries = vec![
@@ -655,10 +732,21 @@ mod tests {
             !border_row.contains("price:") && !border_row.contains("reasoning"),
             "the shared border row stays a border: {border_row:?}"
         );
-        let footer_row = row_text(buffer, area.width, layout.footer.y);
+        // The band reads top-down: orientation, then the selected model, then the keys.
+        let help_row = row_text(buffer, area.width, layout.footer.y);
         assert!(
-            footer_row.contains("price:"),
-            "the price draws on the footer's first row: {footer_row:?}"
+            help_row.contains("Provider → Model → Reasoning") && help_row.contains("switch"),
+            "the orientation lines name the panes and their keys: {help_row:?}"
+        );
+        let keys_row = row_text(buffer, area.width, layout.footer.y + 1);
+        assert!(
+            keys_row.contains("binds") && keys_row.contains("/<key>"),
+            "the second line explains the letter shortcut: {keys_row:?}"
+        );
+        let summary_row = row_text(buffer, area.width, layout.footer.y + 2);
+        assert!(
+            summary_row.contains("price:"),
+            "the price draws on the summary row: {summary_row:?}"
         );
     }
 }

@@ -379,10 +379,18 @@ fn model_picker_rows(area: Rect, entries: &[ModelOption]) -> u16 {
     let models = entries.len().saturating_add(1);
     // A content row that lands on a pane's border is not a row the list can show.
     let body = models.max(providers).saturating_add(2).max(4) as u16;
+    // Keep enough body for the orientation band: a two-model catalog should still
+    // explain itself, and the tier cap still bounds the popup.
+    let body = body.max(super::model::MODEL_PICKER_HELP_MIN_BODY_ROWS);
+    // The footer band measures its own orientation lines, so the popup is sized from
+    // the same width the picker draws them at.
+    let inner_width = ModalFootprint::Wide
+        .width(area)
+        .saturating_sub(MODAL_FRAME_COLUMNS);
     let rows = 2u16 // frame
         .saturating_add(1) // filter
         .saturating_add(body)
-        .saturating_add(2); // footer
+        .saturating_add(super::model::model_picker_footer_rows(body, inner_width).0);
     let (_, percent_y) = ModalFootprint::Wide.percents();
     rows.min(percentage_rows(area.height, percent_y))
 }
