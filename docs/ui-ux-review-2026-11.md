@@ -121,3 +121,21 @@ already the default; lld/mold are not available for macOS). Recommendation:
 `~/.cargo/config.toml`). The release profile (`lto = "thin"`, 1 CGU) costs
 ~4.5 min per release build by design; use `cargo build` or `cargo test` for
 iteration.
+
+## H. Status (fix/tui-ux)
+
+Fixed: A1 (one-row composer down to 10 rows), A2, A3, A4 (tight lists), A5
+(shortened welcome rows so they no longer wrap), A6, A8 (zero price reads "no
+per-token charge"), B2 (label column sized from content), B3 (authorize form
+sized to content), B4 (`/keys` regrouped), B5, B7, B8, C1 (names the first
+unfinished gap), C4, B1 (idle sidebar lists changed files, background tasks
+and queued messages above the tree), D (header no longer collides; the
+composer replaces the row-0 status fallback above 10 rows).
+
+Not changed, on purpose:
+- A7 / C2: the status bar model comes from stored session state; the mismatch
+  only appeared with an env-configured provider and no stored authorization.
+- B9: the session picker is a resume picker, so the live session is excluded.
+- B6 / C3: settings grouping and a skippable onboarding need a design pass.
+- C5: authorize legend colour-only labelling follows AGENTS.md ("keep auth
+  labels in the legend only").

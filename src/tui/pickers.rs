@@ -281,6 +281,14 @@ fn pricing_label(pricing: Option<ModelPricing>) -> String {
     let Some(pricing) = pricing else {
         return "n/a".to_string();
     };
+    if pricing.input_micros_per_million == 0
+        && pricing.output_micros_per_million == 0
+        && pricing.cache_read_micros_per_million.unwrap_or(0) == 0
+    {
+        // A literal `$0/M` reads as a pricing bug; zero means the plan or
+        // endpoint does not bill per token.
+        return "no per-token charge".to_string();
+    }
     format!(
         "in {} cached {} out {}",
         price_per_million(pricing.input_micros_per_million),

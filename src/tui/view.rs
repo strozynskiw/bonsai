@@ -1793,7 +1793,7 @@ mod tests {
         let _theme_guard = theme::TEST_LOCK.blocking_lock();
         // On a short terminal where the input is hidden, the status pill falls
         // back to the header so it stays visible.
-        let backend = TestBackend::new(130, 14);
+        let backend = TestBackend::new(130, 8);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut app = AppState::new(
             "codex",
@@ -1818,7 +1818,7 @@ mod tests {
     #[test]
     fn header_status_pill_includes_auto_accept_when_composer_is_hidden() {
         let _theme_guard = theme::TEST_LOCK.blocking_lock();
-        let backend = TestBackend::new(130, 14);
+        let backend = TestBackend::new(130, 8);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut app = AppState::new(
             "codex",
@@ -1846,7 +1846,7 @@ mod tests {
     #[test]
     fn header_status_pill_includes_serenity_when_composer_is_hidden() {
         let _theme_guard = theme::TEST_LOCK.blocking_lock();
-        let backend = TestBackend::new(130, 14);
+        let backend = TestBackend::new(130, 8);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut app = AppState::new(
             "codex",
@@ -1867,7 +1867,7 @@ mod tests {
 
     #[test]
     fn header_status_pill_shows_shutdown_notice_when_composer_is_hidden() {
-        let backend = TestBackend::new(130, 14);
+        let backend = TestBackend::new(130, 8);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut app = AppState::new(
             "codex",
@@ -1888,7 +1888,7 @@ mod tests {
 
     #[test]
     fn header_status_pill_shows_session_toast_when_composer_is_hidden() {
-        let backend = TestBackend::new(130, 14);
+        let backend = TestBackend::new(130, 8);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut app = AppState::new(
             "codex",

@@ -128,7 +128,17 @@ fn transcript_title(app: &AppState) -> String {
         View::Plan => "Chat".to_string(),
         View::Agent => app
             .current_session_title()
-            .map(|title| format!("Chat · {title}"))
+            .map(|title| {
+                // Titles default to the raw first prompt; keep the frame title short.
+                const MAX_TITLE: usize = 48;
+                let title = title.lines().next().unwrap_or_default().trim();
+                if title.chars().count() > MAX_TITLE {
+                    let cut: String = title.chars().take(MAX_TITLE - 1).collect();
+                    format!("Chat · {}…", cut.trim_end())
+                } else {
+                    format!("Chat · {title}")
+                }
+            })
             .unwrap_or_else(|| "Chat".to_string()),
     }
 }

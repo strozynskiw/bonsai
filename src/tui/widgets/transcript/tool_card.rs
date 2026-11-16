@@ -108,8 +108,19 @@ pub(super) fn render_execution_group_summary_row(
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )]
     } else {
+        // Settled groups show their outcome; the spinner frames below replace
+        // this glyph only while a tool is still running.
+        let glyph = if group
+            .tools
+            .iter()
+            .any(|activity| matches!(activity.status, ToolStatus::Failed))
+        {
+            "✗ "
+        } else {
+            "✓ "
+        };
         vec![Span::styled(
-            "⟳ ".to_string(),
+            glyph.to_string(),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )]
     };

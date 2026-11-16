@@ -128,7 +128,7 @@ pub(crate) const COMMANDS: &[CommandMetadata] = &[
     },
     CommandMetadata {
         name: "/cost",
-        description: "Show performance and usage",
+        description: "Alias of /perf: performance and usage",
         usage_hint: None,
         surface: both(),
     },
@@ -535,6 +535,9 @@ pub(crate) fn command_usage_hint(name: &str) -> Option<&'static str> {
 pub(crate) fn command_completion_preview(name: &str) -> Option<String> {
     let description = command_description(name)?;
     match command_usage_hint(name) {
+        // Hints that already carry their own brackets (`[provider]`,
+        // `[status|pause]`) are shown as-is; bare hints (`<path>`) get wrapped.
+        Some(hint) if hint.starts_with('[') => Some(format!("{description} {hint}")),
         Some(hint) => Some(format!("{description} [{hint}]")),
         None => Some(description.to_string()),
     }

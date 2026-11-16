@@ -69,7 +69,16 @@ pub(super) fn command_help_lines(
     commands: &[crate::commands::CommandMetadata],
     width: usize,
 ) -> Vec<Line<'static>> {
-    let label_width = width.saturating_mul(42).saturating_div(100).clamp(10, 22);
+    // Fit the label column to the longest command usage so hints are not cut
+    // while the description column has room to spare; cap it so descriptions
+    // keep at least ~45% of the pane.
+    let longest = commands
+        .iter()
+        .map(|command| command_help_label(command).chars().count())
+        .max()
+        .unwrap_or(10);
+    let label_cap = width.saturating_mul(55).saturating_div(100).max(10);
+    let label_width = (longest + 1).clamp(10, label_cap.min(40));
     let gap_width = usize::from(width > label_width);
     let detail_width = width.saturating_sub(label_width + gap_width);
     let mut lines = Vec::with_capacity(commands.len() + 1);
@@ -116,99 +125,84 @@ pub(super) fn command_help_label(command: &crate::commands::CommandMetadata) -> 
     }
 }
 
-pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
-    let lines = vec![
-        Line::from(Span::styled("Keys", theme::label(theme::palette().tool))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Enter", theme::body(theme::palette().text)),
-            Span::styled("    send / queue while running  ", theme::dim()),
-            Span::styled("Ctrl+P/N", theme::body(theme::palette().text)),
-            Span::styled("  history", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Tab", theme::body(theme::palette().text)),
-            Span::styled(" complete / cycle focus  ", theme::dim()),
-            Span::styled("Alt+Enter", theme::body(theme::palette().text)),
-            Span::styled(" newline", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+Tab", theme::body(theme::palette().text)),
-            Span::styled(" switch agent  ", theme::dim()),
-            Span::styled("Shift+Enter", theme::body(theme::palette().text)),
-            Span::styled(" newline", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("/save", theme::body(theme::palette().text)),
-            Span::styled("    save plan  ", theme::dim()),
-            Span::styled("/start", theme::body(theme::palette().text)),
-            Span::styled(" implement plan", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("/export", theme::body(theme::palette().text)),
-            Span::styled("  export plan  ", theme::dim()),
-            Span::styled("/mode", theme::body(theme::palette().text)),
-            Span::styled(" runtime posture", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Esc", theme::body(theme::palette().text)),
-            Span::styled("       steer queued message  ", theme::dim()),
-            Span::styled("Ctrl+C", theme::body(theme::palette().text)),
-            Span::styled(" cancel all / exit", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("↑/↓", theme::body(theme::palette().text)),
-            Span::styled("      move or scroll where available", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("PgUp/PgDn", theme::body(theme::palette().text)),
-            Span::styled(" page detailed views where available", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Click outside", theme::body(theme::palette().text)),
-            Span::styled(" dismisses using that modal's Esc action", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("/keys", theme::body(theme::palette().text)),
-            Span::styled("   key reference  ", theme::dim()),
-            Span::styled("/help", theme::body(theme::palette().text)),
-            Span::styled(" commands", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+A", theme::body(theme::palette().text)),
-            Span::styled("     select all  ", theme::dim()),
-            Span::styled("/copy", theme::body(theme::palette().text)),
-            Span::styled(" copy row", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+B/F", theme::body(theme::palette().text)),
-            Span::styled("  move  ", theme::dim()),
-            Span::styled("Ctrl+E", theme::body(theme::palette().text)),
-            Span::styled(" line end  ", theme::dim()),
-            Span::styled("Ctrl+D", theme::body(theme::palette().text)),
-            Span::styled(" delete", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+←/→", theme::body(theme::palette().text)),
-            Span::styled(" extend  ", theme::dim()),
-            Span::styled("Click/Drag", theme::body(theme::palette().text)),
-            Span::styled(" select", theme::dim()),
-        ]),
-        Line::from(vec![
-            Span::styled("Ctrl+G", theme::body(theme::palette().text)),
-            Span::styled(
-                "     copy mode: native terminal selection (toggle · or /select)",
-                theme::dim(),
+/// Keyboard reference, grouped and aligned as one key/action table.
+const KEY_GROUPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Run",
+        &[
+            ("Enter", "send; queue while a run is active"),
+            ("Esc", "steer the queued message"),
+            ("Ctrl+C", "cancel run; again to exit"),
+            ("Shift+Tab", "switch agent"),
+            ("Tab", "complete / cycle focus"),
+        ],
+    ),
+    (
+        "Editing",
+        &[
+            ("Alt+Enter", "newline (also Shift+Enter)"),
+            ("Ctrl+P / Ctrl+N", "input history"),
+            ("Ctrl+B / Ctrl+F", "move cursor"),
+            ("Ctrl+E", "end of line"),
+            ("Ctrl+D", "delete character"),
+            ("Ctrl+A", "select all"),
+            ("Shift+←/→", "extend selection"),
+        ],
+    ),
+    (
+        "Navigation",
+        &[
+            ("↑ / ↓", "move or scroll where available"),
+            ("PgUp / PgDn", "page detailed views"),
+            ("Click outside", "dismiss with that modal's Esc action"),
+            ("Click / Drag", "select; double-click copies a word"),
+            (
+                "Ctrl+G",
+                "copy mode: native terminal selection (or /select)",
             ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("/help", theme::body(theme::palette().text)),
-            Span::styled("    command board  ", theme::dim()),
-            Span::styled("/model", theme::body(theme::palette().text)),
-            Span::styled(" model picker", theme::dim()),
-        ]),
-    ];
+        ],
+    ),
+    (
+        "Commands",
+        &[
+            ("/help", "command board"),
+            ("/keys", "this reference"),
+            ("/model", "model picker"),
+            ("/mode", "runtime posture (autonomy, sandbox)"),
+            ("/copy", "copy the selected row"),
+            ("/save  /export", "save or export the plan"),
+            ("/start", "implement the plan"),
+        ],
+    ),
+];
+
+pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
+    let key_width = KEY_GROUPS
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .map(|(key, _)| key.chars().count())
+        .max()
+        .unwrap_or(10)
+        + 2;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (index, (group, rows)) in KEY_GROUPS.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            (*group).to_string(),
+            theme::label(theme::palette().tool),
+        )));
+        for (key, action) in *rows {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}", pad_ascii(key, key_width)),
+                    theme::body(theme::palette().text),
+                ),
+                Span::styled((*action).to_string(), theme::dim()),
+            ]));
+        }
+    }
 
     // Render through the shared scrollable-modal path so the shortcut text is
     // mouse-selectable like every other reading surface (and the scroll is

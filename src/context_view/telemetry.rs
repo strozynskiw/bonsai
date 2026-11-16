@@ -88,6 +88,12 @@ impl CostTelemetry {
 
     pub(crate) fn header_label(&self, report: &ContextReport, width: usize) -> String {
         let mut parts = vec![format!("ctx {}%", self.context_percent)];
+        // Before the first provider call there is no spend to report; `cost $0 ·
+        // cache n/a · ↑0 ↓0` is just noise next to the gauge.
+        let has_usage = report.session_input_tokens() > 0 || report.session_completion_tokens > 0;
+        if !has_usage {
+            return format!(" {} ", parts.join(" · "));
+        }
         if width >= 72 {
             parts.push(session_cost_label(report));
         }

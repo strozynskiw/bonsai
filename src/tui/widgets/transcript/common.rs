@@ -81,12 +81,9 @@ fn no_provider_welcome() -> Vec<Line<'static>> {
         &[
             (
                 "/providers add",
-                "detects a local LM Studio, Ollama, llama.cpp, or vLLM server",
+                "detects LM Studio, Ollama, llama.cpp, vLLM",
             ),
-            (
-                "/wizard <id>",
-                "any OpenAI/Anthropic URL, including a server on your LAN",
-            ),
+            ("/wizard <id>", "any OpenAI/Anthropic URL, local or LAN"),
         ],
     );
     welcome_section(
@@ -119,22 +116,16 @@ fn agent_welcome() -> Vec<Line<'static>> {
         &[
             (
                 "/providers add",
-                "detects LM Studio, Ollama, llama.cpp, or vLLM on this machine",
+                "detects LM Studio, Ollama, llama.cpp, vLLM",
             ),
-            (
-                "/wizard <id>",
-                "any OpenAI/Anthropic URL — this machine or one on the LAN",
-            ),
+            ("/wizard <id>", "any OpenAI/Anthropic URL, local or LAN"),
         ],
     );
     welcome_section(
         &mut lines,
         "Controls",
         &[
-            (
-                "/mode",
-                "set approval level: ask · conservative · balanced · auto-accept · yolo",
-            ),
+            ("/mode", "set approval level (ask … yolo)"),
             ("/sandbox", "toggle OS-level command confinement"),
             ("/review", "review pending changes"),
         ],

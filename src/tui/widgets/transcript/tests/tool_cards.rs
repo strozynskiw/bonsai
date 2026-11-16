@@ -226,18 +226,17 @@ fn lists_use_bullet_markers() {
 
 #[test]
 fn blocks_are_separated_by_a_blank_line() {
-    // Adjacent blocks (list items, paragraphs) get one blank separator line so
-    // the transcript breathes instead of packing every line edge-to-edge.
+    // Paragraphs and lists get one blank separator line so the transcript
+    // breathes; consecutive items of one list stay together.
     let rendered = rendered_text(render_markdown("- one\n- two\n\npara", 40));
     let one = rendered.iter().position(|l| l.contains("one")).unwrap();
     let two = rendered.iter().position(|l| l.contains("two")).unwrap();
     let para = rendered.iter().position(|l| l.contains("para")).unwrap();
 
-    assert_eq!(two, one + 2, "a blank line should sit between list items");
-    assert!(
-        rendered[one + 1].trim().is_empty(),
-        "separator between items should be blank, got {:?}",
-        rendered[one + 1]
+    assert_eq!(
+        two,
+        one + 1,
+        "list items should not be separated by a blank"
     );
     assert_eq!(
         para,

@@ -357,8 +357,12 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         ModalKind::Detail(crate::tui::event::DetailModal::Help) => {
             ModalFootprint::Wide.area(area, None)
         }
-        // Small dialogs with no dedicated arm: API-key prompt and the provider
-        // remove confirm.
+        // Authorization forms are a handful of fields: size to them (the endpoint
+        // form is the tallest at ~10 body rows) instead of taking 70% of the screen.
+        ModalKind::Detail(crate::tui::event::DetailModal::ApiKeyPrompt { .. }) => {
+            ModalFootprint::Form.area(area, Some(10 + MODAL_CHROME_ROWS))
+        }
+        // Small dialogs with no dedicated arm, e.g. the provider remove confirm.
         _ => ModalFootprint::Prompt.area(area, None),
     }
 }

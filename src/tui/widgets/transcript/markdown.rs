@@ -270,21 +270,26 @@ pub(super) fn render_markdown_with_depth(
     // what turns a packed wall of bullets into a readable list.
     let mut lines = Vec::new();
     let mut first_group = true;
-    let mut push_group = |lines: &mut Vec<Line<'static>>, group: Vec<Line<'static>>| {
-        if group.is_empty() {
-            return;
-        }
-        if !first_group {
-            lines.push(Line::from(""));
-        }
-        first_group = false;
-        lines.extend(group);
-    };
+    // Consecutive list items read as one list: no blank separator between them.
+    let mut previous_was_item = false;
+    let mut push_group =
+        |lines: &mut Vec<Line<'static>>, group: Vec<Line<'static>>, is_item: bool| {
+            if group.is_empty() {
+                return;
+            }
+            if !first_group && !(is_item && previous_was_item) {
+                lines.push(Line::from(""));
+            }
+            first_group = false;
+            previous_was_item = is_item;
+            lines.extend(group);
+        };
     for block in blocks {
         match block {
             Block::Paragraph(spans) => {
                 if !spans.is_empty() {
-                    push_group(&mut lines, vec![Line::from(spans)]);
+                    let is_item = starts_with_list_marker(&spans);
+                    push_group(&mut lines, vec![Line::from(spans)], is_item);
                 }
             }
             Block::Heading(style, spans) => {
@@ -294,7 +299,7 @@ pub(super) fn render_markdown_with_depth(
                     next.style = style.patch(span.style).add_modifier(Modifier::BOLD);
                     heading_spans.push(next);
                 }
-                push_group(&mut lines, vec![Line::from(heading_spans)]);
+                push_group(&mut lines, vec![Line::from(heading_spans)], false);
             }
             Block::Rule => push_group(
                 &mut lines,
@@ -302,18 +307,20 @@ pub(super) fn render_markdown_with_depth(
                     "─".repeat(width.min(64)),
                     md(theme::palette().dim),
                 )])],
+                false,
             ),
             Block::CodeBlock { lang, body } => {
-                push_group(&mut lines, render_code_block(&lang, &body, width));
+                push_group(&mut lines, render_code_block(&lang, &body, width), false);
             }
             Block::NestedMarkdown(md) => {
                 push_group(
                     &mut lines,
                     render_markdown_with_depth(&md, width, depth + 1),
+                    false,
                 );
             }
             Block::Table(table) => {
-                push_group(&mut lines, render_table(&table, width));
+                push_group(&mut lines, render_table(&table, width), false);
             }
         }
     }
@@ -350,6 +357,24 @@ pub(super) enum Block {
     CodeBlock { lang: String, body: Vec<String> },
     NestedMarkdown(String),
     Table(MarkdownTable),
+}
+
+/// True when a paragraph's leading span (after an optional quote bar) is a
+/// bullet or ordered-list marker emitted by [`push_block_prefix`].
+fn starts_with_list_marker(spans: &[Span<'static>]) -> bool {
+    let is_marker = |text: &str| {
+        text == "•   "
+            || (text.ends_with(". ")
+                && text[..text.len() - 2]
+                    .trim_start()
+                    .chars()
+                    .all(|c| c.is_ascii_digit())
+                && text.trim_start().len() > 2)
+    };
+    spans
+        .iter()
+        .take(2)
+        .any(|span| is_marker(span.content.as_ref()))
 }
 
 pub(super) fn push_block_prefix(
@@ -486,12 +511,20 @@ pub(super) fn render_code_block(
     // The frame is narrower than the transcript (capped at 80 cols), so code
     // must wrap at the frame's interior width — the outer layout only wraps
     // at pane width, which would let long lines poke out past the border.
-    let interior = total_bar.saturating_sub(2);
+    let interior = total_bar.saturating_sub(4).max(1);
     for code_line in code_lines {
         let highlighted = Line::from(crate::tui::widgets::syntax::highlight_line(code_line, lang));
         for wrapped in super::message::wrap_card_line(&highlighted, interior) {
             let mut spans = vec![Span::styled("│ ", code_style(theme::palette().dim))];
             spans.extend(wrapped.spans);
+            let used: usize = spans
+                .iter()
+                .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            // Pad to the frame width and close the right edge.
+            let pad = total_bar.saturating_sub(used + 1);
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled("│", code_style(theme::palette().dim)));
             lines.push(Line::from(spans));
         }
     }

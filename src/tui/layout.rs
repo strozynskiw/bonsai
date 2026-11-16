@@ -19,10 +19,13 @@ pub struct AppLayout {
 }
 
 pub fn split(area: Rect, surface: PersonaView) -> AppLayout {
-    const COMPOSER_HEIGHT: u16 = 4;
     const FOOTER_HEIGHT: u16 = 1;
-    let input_height = COMPOSER_HEIGHT + FOOTER_HEIGHT;
-    let show_input = area.height >= 18;
+    // Full composer (border + two input rows) on normal terminals; a one-row
+    // composer on short ones so the user can always type; hidden only when
+    // there is no room left for the transcript as well.
+    let composer_height: u16 = if area.height >= 18 { 4 } else { 3 };
+    let input_height = composer_height + FOOTER_HEIGHT;
+    let show_input = area.height >= 10;
     // The header is a single status/brand row; the agent/plan switch lives in
     // the composer footer, so there is no second tab row to account for.
     let header_height = 1;
@@ -52,7 +55,7 @@ pub fn split(area: Rect, surface: PersonaView) -> AppLayout {
         let input_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(COMPOSER_HEIGHT),
+                Constraint::Length(composer_height),
                 Constraint::Length(FOOTER_HEIGHT),
             ])
             .split(input_band);
@@ -127,8 +130,15 @@ mod tests {
 
     #[test]
     fn hides_input_on_short_terminals() {
-        let layout = split(Rect::new(0, 0, 100, 14), PersonaView::Todo);
+        let layout = split(Rect::new(0, 0, 100, 8), PersonaView::Todo);
         assert!(!layout.show_input);
+    }
+
+    #[test]
+    fn keeps_a_one_row_composer_on_short_terminals() {
+        let layout = split(Rect::new(0, 0, 100, 14), PersonaView::Todo);
+        assert!(layout.show_input);
+        assert_eq!(layout.input.height, 3);
     }
 
     #[test]

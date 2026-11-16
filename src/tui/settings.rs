@@ -23,10 +23,9 @@ const BUDGET_RUN_TIME_VALUES: &[&str] = &["off", "5m", "15m", "30m", "60m"];
 const BUDGET_GENERATION_TIME_VALUES: &[&str] = &["off", "1m", "3m", "5m", "10m"];
 const BUDGET_OUTPUT_VALUES: &[&str] = &["off", "32k", "64k", "128k", "256k"];
 const BUDGET_TOOL_TIME_VALUES: &[&str] = &["off", "30s", "2m", "5m", "10m"];
-const BUDGET_SESSION_TOKEN_VALUES: &[&str] =
-    &["off", "100k", "250k", "500k", "1000k", "5000k", "10000k"];
+const BUDGET_SESSION_TOKEN_VALUES: &[&str] = &["off", "100k", "250k", "500k", "1M", "5M", "10M"];
 const BUDGET_SESSION_TURN_VALUES: &[&str] = &["off", "100", "250", "500", "1000"];
-const BUDGET_SESSION_OUTPUT_VALUES: &[&str] = &["off", "256k", "512k", "1000k", "2000k"];
+const BUDGET_SESSION_OUTPUT_VALUES: &[&str] = &["off", "256k", "512k", "1M", "2M"];
 const BUDGET_SESSION_TIME_VALUES: &[&str] = &["off", "30m", "60m", "120m", "240m"];
 const BUDGET_SESSION_COST_VALUES: &[&str] = &["off", "$1", "$5", "$10", "$25", "$50"];
 
@@ -398,20 +397,23 @@ fn parse_duration_seconds(label: &str) -> Option<u64> {
     number.parse::<u64>().ok()?.checked_mul(multiplier)
 }
 
+/// Split a `250k` / `5M` label into its number and multiplier.
+fn split_magnitude(label: &str) -> Option<(u64, u64)> {
+    if let Some(number) = label.strip_suffix('k') {
+        Some((number.parse().ok()?, 1_000))
+    } else {
+        Some((label.strip_suffix('M')?.parse().ok()?, 1_000_000))
+    }
+}
+
 fn parse_output_chars(label: &str) -> Option<usize> {
-    label
-        .strip_suffix('k')?
-        .parse::<usize>()
-        .ok()?
-        .checked_mul(1_000)
+    let (number, multiplier) = split_magnitude(label)?;
+    usize::try_from(number.checked_mul(multiplier)?).ok()
 }
 
 fn parse_token_count(label: &str) -> Option<u64> {
-    label
-        .strip_suffix('k')?
-        .parse::<u64>()
-        .ok()?
-        .checked_mul(1_000)
+    let (number, multiplier) = split_magnitude(label)?;
+    number.checked_mul(multiplier)
 }
 
 fn parse_cost_micros(label: &str) -> Option<u64> {

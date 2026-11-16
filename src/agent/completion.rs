@@ -459,7 +459,7 @@ pub enum CompletionGap {
 }
 
 impl CompletionGap {
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::PendingTodos(count) => format!("{count} todo(s) pending"),
             Self::InProgressTodos(count) => format!("{count} todo(s) in progress"),

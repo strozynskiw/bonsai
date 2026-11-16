@@ -864,7 +864,16 @@ impl AgentRunOutcome {
                                 "Agent stopped after {turns} turns without progress."
                             ));
                         }
-                        None => "Agent stopped with work still unfinished.",
+                        None => match failure.gaps.first() {
+                            // Name the first gap so the line says what is left.
+                            Some(gap) => {
+                                return Some(format!(
+                                    "Agent stopped with work still unfinished: {}.",
+                                    gap.label()
+                                ));
+                            }
+                            None => "Agent stopped with work still unfinished.",
+                        },
                     }
                 }
             },
@@ -1753,7 +1762,7 @@ mod tests {
             )
             .status_line()
             .as_deref(),
-            Some("Agent stopped with work still unfinished.")
+            Some("Agent stopped with work still unfinished: 1 todo(s) pending.")
         );
         // An empty gap list must not degrade into an empty line.
         assert_eq!(

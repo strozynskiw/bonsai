@@ -225,9 +225,23 @@ fn render_bonsai_todo(f: &mut Frame, area: Rect, app: &AppState) {
     if inner.height < 2 {
         return;
     }
+    // Session facts (changed files, background work, queue) take the top of the
+    // card when there is anything to report; the tree keeps the rest.
+    let facts = session_fact_lines(app, inner.width as usize);
+    let facts_height = (facts.len() as u16).min(inner.height.saturating_sub(12));
+    if facts_height > 0 {
+        f.render_widget(
+            Paragraph::new(facts[..facts_height as usize].to_vec()),
+            Rect {
+                height: facts_height,
+                ..inner
+            },
+        );
+    }
     // Bottom row is reserved for the hint; the tree gets the rest.
     let tree_area = Rect {
-        height: inner.height - 1,
+        y: inner.y + facts_height,
+        height: inner.height - 1 - facts_height,
         ..inner
     };
     let progress = app.bonsai_progress(&app.sidebar_bonsai);
@@ -249,6 +263,85 @@ fn render_bonsai_todo(f: &mut Frame, area: Rect, app: &AppState) {
         )));
         f.render_widget(hint, hint_area);
     }
+}
+
+/// Compact "what happened here" lines for the idle sidebar: files touched by
+/// this session's tool calls, running background tasks, and queued messages.
+fn session_fact_lines(app: &AppState, width: usize) -> Vec<Line<'static>> {
+    use std::collections::BTreeMap;
+
+    let mut changed: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for item in app.transcript.iter() {
+        let crate::tui::transcript::TranscriptItem::ExecutionGroup(group) = item else {
+            continue;
+        };
+        for activity in &group.tools {
+            if let Some(diff) = &activity.diff {
+                let entry = changed.entry(diff.path.clone()).or_default();
+                entry.0 += diff.added_lines;
+                entry.1 += diff.removed_lines;
+            }
+        }
+    }
+    let running = app.background_tasks.len();
+    let queued = app.queue.queued_inputs.len();
+    if changed.is_empty() && running == 0 && queued == 0 {
+        return Vec::new();
+    }
+
+    let heading = |text: &str| {
+        Line::from(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(theme::palette().tool)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ))
+    };
+    let body = |text: String| {
+        Line::from(Span::styled(
+            text,
+            Style::default().fg(theme::palette().text),
+        ))
+    };
+    let mut lines = Vec::new();
+    if !changed.is_empty() {
+        lines.push(heading(&format!("Changed · {}", changed.len())));
+        let cwd = std::env::current_dir().ok();
+        for (path, (added, removed)) in changed.iter().take(5) {
+            let shown = cwd
+                .as_deref()
+                .and_then(|cwd| std::path::Path::new(path).strip_prefix(cwd).ok())
+                .map_or_else(|| path.clone(), |p| p.display().to_string());
+            let stats = format!(" +{added} -{removed}");
+            let room = width.saturating_sub(stats.chars().count() + 1).max(4);
+            let mut name: String = shown
+                .chars()
+                .rev()
+                .take(room)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if name.chars().count() < shown.chars().count() {
+                name = format!("…{}", name.chars().skip(1).collect::<String>());
+            }
+            lines.push(Line::from(vec![
+                Span::styled(name, Style::default().fg(theme::palette().text)),
+                Span::styled(stats, Style::default().fg(theme::palette().dim)),
+            ]));
+        }
+        if changed.len() > 5 {
+            lines.push(body(format!("+{} more", changed.len() - 5)));
+        }
+    }
+    if running > 0 {
+        lines.push(heading(&format!("Background · {running}")));
+    }
+    if queued > 0 {
+        lines.push(heading(&format!("Queued · {queued}")));
+    }
+    lines.push(Line::from(""));
+    lines
 }
 
 fn todo_status_style(status: TodoStatus) -> (&'static str, Color, Style) {

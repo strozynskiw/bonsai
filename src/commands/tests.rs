@@ -1865,6 +1865,13 @@ fn complete_command_rejects_non_command_input() {
 }
 
 #[test]
+fn completion_preview_does_not_double_wrap_bracketed_hints() {
+    let preview = command_completion_preview("/authorize").expect("authorize has a preview");
+    assert!(preview.ends_with("[provider]"), "{preview}");
+    assert!(!preview.contains("[["), "{preview}");
+}
+
+#[test]
 fn command_metadata_builds_completion_preview() {
     assert_eq!(command_description("/MODEL"), Some("Switch model"));
     assert_eq!(
@@ -1885,7 +1892,7 @@ fn command_metadata_builds_completion_preview() {
     );
     assert_eq!(
         command_completion_preview("/cost").as_deref(),
-        Some("Show performance and usage")
+        Some("Alias of /perf: performance and usage")
     );
     assert_eq!(
         command_completion_preview("/yolo").as_deref(),

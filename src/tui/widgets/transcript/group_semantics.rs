@@ -123,8 +123,18 @@ pub(super) fn summarize_group(group: &ExecutionGroup) -> ExecutionGroupSemantics
             edited_files.insert(path);
         }
 
-        if activity.name == "bash" && bash_command_from_args(&activity.arguments).is_some() {
-            push_unique(&mut command_labels, tool_activity_display_name(activity));
+        if activity.name == "bash"
+            && let Some(command) = bash_command_from_args(&activity.arguments)
+        {
+            // Workflow-aware names ("test", "lint") win; a plain shell call falls
+            // back to the program it ran instead of the generic "bash".
+            let name = tool_activity_display_name(activity);
+            let label = if name == "bash" {
+                command_label(&command)
+            } else {
+                name
+            };
+            push_unique(&mut command_labels, label);
         }
     }
 
@@ -218,11 +228,44 @@ fn group_duration(group: &ExecutionGroup) -> Option<Duration> {
     Some(finished_at.saturating_duration_since(started_at))
 }
 
+/// Short, human label for a shell command: the program, plus its subcommand
+/// for the usual multiplexers (`cargo test`, `git status`).
+fn command_label(command: &str) -> String {
+    let mut tokens = command.split_whitespace();
+    let Some(program) = tokens.next() else {
+        return "bash".to_string();
+    };
+    let program = program.rsplit('/').next().unwrap_or(program);
+    let multiplexer = matches!(
+        program,
+        "cargo" | "git" | "npm" | "pnpm" | "yarn" | "go" | "make" | "just" | "docker" | "gh"
+    );
+    match tokens.next() {
+        Some(sub) if multiplexer && !sub.starts_with('-') => format!("{program} {sub}"),
+        _ => program.to_string(),
+    }
+}
+
+/// Render a path relative to the process working directory (the project root
+/// in normal use); fall back to the original text.
+fn project_relative(path: &str) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            std::path::Path::new(path)
+                .strip_prefix(&cwd)
+                .ok()
+                .map(|relative| relative.display().to_string())
+        })
+        .filter(|relative| !relative.is_empty())
+        .unwrap_or_else(|| path.to_string())
+}
+
 fn file_summary(verb: &str, files: &BTreeSet<String>) -> String {
     if files.len() == 1
         && let Some(path) = files.iter().next()
     {
-        return format!("{verb} {}", compact_text(path, 48));
+        return format!("{verb} {}", compact_text(&project_relative(path), 48));
     }
     format!("{verb} {}", plural_count(files.len(), "file", "files"))
 }
@@ -250,6 +293,14 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_label_names_program_and_subcommand() {
+        assert_eq!(command_label("ls -la && git status"), "ls");
+        assert_eq!(command_label("cargo test --locked"), "cargo test");
+        assert_eq!(command_label("/usr/bin/git -C x log"), "git");
+        assert_eq!(command_label("   "), "bash");
+    }
 
     #[test]
     fn formats_subsecond_group_duration() {
