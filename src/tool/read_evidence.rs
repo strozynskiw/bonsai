@@ -223,6 +223,24 @@ impl ReadWindow {
     }
 }
 
+/// The stored columns of one read-evidence row, before they are split into an
+/// observation and a freshness baseline.
+#[derive(Debug)]
+pub(crate) struct PersistedReadParts {
+    pub(crate) display_path: String,
+    pub(crate) canonical_path: PathBuf,
+    pub(crate) window: ReadWindow,
+    pub(crate) coverage: ReadCoverage,
+    pub(crate) visible_digest: blake3::Hash,
+    pub(crate) visible_chars: usize,
+    pub(crate) file_digest_at_read: Option<blake3::Hash>,
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) len: u64,
+    pub(crate) current_file_digest: Option<blake3::Hash>,
+    pub(crate) status: ReadFreshness,
+    pub(crate) observation_is_current: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadObservation {
     display_path: String,
@@ -343,21 +361,21 @@ impl ReadEvidence {
         &self.observation
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_persisted_parts(
-        display_path: String,
-        canonical_path: PathBuf,
-        window: ReadWindow,
-        coverage: ReadCoverage,
-        visible_digest: blake3::Hash,
-        visible_chars: usize,
-        file_digest_at_read: Option<blake3::Hash>,
-        modified: Option<SystemTime>,
-        len: u64,
-        current_file_digest: Option<blake3::Hash>,
-        status: ReadFreshness,
-        observation_is_current: bool,
-    ) -> Self {
+    pub(crate) fn from_persisted_parts(parts: PersistedReadParts) -> Self {
+        let PersistedReadParts {
+            display_path,
+            canonical_path,
+            window,
+            coverage,
+            visible_digest,
+            visible_chars,
+            file_digest_at_read,
+            modified,
+            len,
+            current_file_digest,
+            status,
+            observation_is_current,
+        } = parts;
         Self {
             observation: ReadObservation {
                 display_path,

@@ -575,23 +575,23 @@ impl Controller {
                 wake: wake.clone(),
             }
         });
-        loaded.worker = Some(tokio::spawn(execute(
-            loaded.core.clone(),
-            loaded.sink.clone(),
-            loaded.control.clone(),
-            self.storage.clone(),
+        loaded.worker = Some(tokio::spawn(execute(TurnJob {
+            core: loaded.core.clone(),
+            sink: loaded.sink.clone(),
+            control: loaded.control.clone(),
+            storage: self.storage.clone(),
             id,
-            run.clone(),
-            prompt.to_owned(),
-            request.to_owned(),
-            goal,
-            receiver,
+            run: run.clone(),
+            prompt: prompt.to_owned(),
+            request: request.to_owned(),
+            initial_goal: goal,
+            queued_messages: receiver,
             wake,
-            loaded.goal_clock.clone(),
-            loaded.cancellation.clone(),
-            loaded.busy.clone(),
-            loaded.services.clone(),
-        )));
+            goal_clock: loaded.goal_clock.clone(),
+            cancel: loaded.cancellation.clone(),
+            busy: loaded.busy.clone(),
+            services: loaded.services.clone(),
+        })));
         Ok(crate::storage::ServerCommand {
             run_id: run,
             state: "accepted".into(),
@@ -985,8 +985,8 @@ fn validate_answer(request: &InteractionRequest, answer: &InteractionOutcome) ->
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn execute(
+/// Everything one spawned server turn owns, moved into the worker task.
+struct TurnJob {
     core: Arc<Mutex<RuntimeCore>>,
     sink: Arc<SessionSink>,
     control: Arc<Mutex<ControlSnapshot>>,
@@ -996,13 +996,33 @@ async fn execute(
     prompt: String,
     request: String,
     initial_goal: Option<crate::goal::GoalRunLease>,
-    mut queued_messages: mpsc::UnboundedReceiver<crate::agent::QueuedUserMessageCommand>,
+    queued_messages: mpsc::UnboundedReceiver<crate::agent::QueuedUserMessageCommand>,
     wake: Arc<tokio::sync::Notify>,
     goal_clock: SharedGoalClock,
     cancel: CancellationToken,
     busy: crate::storage::SharedBusyFlag,
-    _services: Arc<SessionServices>,
-) {
+    /// Held for the turn's lifetime so session services outlive the worker.
+    services: Arc<SessionServices>,
+}
+
+async fn execute(job: TurnJob) {
+    let TurnJob {
+        core,
+        sink,
+        control,
+        storage,
+        id,
+        run,
+        prompt,
+        request,
+        initial_goal,
+        mut queued_messages,
+        wake,
+        goal_clock,
+        cancel,
+        busy,
+        services: _services,
+    } = job;
     let mut core = core.lock().await;
     let result = execute_turn(
         &mut core,

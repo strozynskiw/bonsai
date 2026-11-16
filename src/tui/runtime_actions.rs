@@ -1926,20 +1926,20 @@ fn load_composer_edit_state(path: &Path, is_global: bool) -> anyhow::Result<Agen
     let parsed = crate::resource::frontmatter::parse_frontmatter::<
         crate::resource::frontmatter::AgentFrontmatter,
     >(&content)?;
-    let mut state = AgentComposerState::edit(
-        parsed.frontmatter.name,
-        parsed.frontmatter.description,
+    let mut state = AgentComposerState::edit(crate::tui::agent_composer::ExistingAgent {
+        name: parsed.frontmatter.name,
+        description: parsed.frontmatter.description,
         is_global,
-        parsed.frontmatter.tools.as_deref(),
-        parsed.frontmatter.model.as_deref(),
-        parsed.frontmatter.effort.as_deref(),
-        parsed.frontmatter.fallback_model.as_deref(),
-        parsed.frontmatter.fallback_effort.as_deref(),
-        parsed.frontmatter.color.as_deref(),
-        parsed.frontmatter.view.as_deref(),
-        parsed.body,
-        path.to_path_buf(),
-    );
+        tools: parsed.frontmatter.tools.as_deref(),
+        model: parsed.frontmatter.model.as_deref(),
+        effort: parsed.frontmatter.effort.as_deref(),
+        fallback_model: parsed.frontmatter.fallback_model.as_deref(),
+        fallback_effort: parsed.frontmatter.fallback_effort.as_deref(),
+        color: parsed.frontmatter.color.as_deref(),
+        view: parsed.frontmatter.view.as_deref(),
+        prompt: parsed.body,
+        source_path: path.to_path_buf(),
+    });
     // Preserve reserved frontmatter the composer doesn't surface, so an edit-save
     // never silently drops it.
     state.preserved_permission = parsed.frontmatter.permission;

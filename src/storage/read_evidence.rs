@@ -1,7 +1,8 @@
 use super::*;
 use crate::tool::read_evidence::{
-    InspectionEventRecord, InspectionOutcome, InspectionReason, ReadAdmissionMetadata,
-    ReadCoverage, ReadEvidence, ReadEvidenceRecord, ReadFreshness, ReadProvenance, ReadWindow,
+    InspectionEventRecord, InspectionOutcome, InspectionReason, PersistedReadParts,
+    ReadAdmissionMetadata, ReadCoverage, ReadEvidence, ReadEvidenceRecord, ReadFreshness,
+    ReadProvenance, ReadWindow,
 };
 
 impl Storage {
@@ -237,10 +238,10 @@ fn read_evidence_record_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReadEvi
     let baseline_file_digest = optional_digest(row.try_get("baseline_file_digest")?)?;
     let canonical_path = PathBuf::from(row.try_get::<String, _>("canonical_path")?);
 
-    let evidence = ReadEvidence::from_persisted_parts(
-        row.try_get("display_path")?,
+    let evidence = ReadEvidence::from_persisted_parts(PersistedReadParts {
+        display_path: row.try_get("display_path")?,
         canonical_path,
-        ReadWindow {
+        window: ReadWindow {
             requested_offset: nonnegative_usize(&row, "requested_offset")?,
             requested_limit: nonnegative_usize(&row, "requested_limit")?,
             start_line: nonnegative_usize(&row, "displayed_start_line")?,
@@ -249,15 +250,16 @@ fn read_evidence_record_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ReadEvi
         },
         coverage,
         visible_digest,
-        nonnegative_usize(&row, "visible_chars")?,
+        visible_chars: nonnegative_usize(&row, "visible_chars")?,
         file_digest_at_read,
-        row.try_get::<Option<i64>, _>("baseline_modified_ms")?
+        modified: row
+            .try_get::<Option<i64>, _>("baseline_modified_ms")?
             .and_then(system_time_from_ms),
-        nonnegative_u64(&row, "baseline_len")?,
-        baseline_file_digest,
-        freshness,
-        row.try_get::<i64, _>("observation_is_current")? != 0,
-    );
+        len: nonnegative_u64(&row, "baseline_len")?,
+        current_file_digest: baseline_file_digest,
+        status: freshness,
+        observation_is_current: row.try_get::<i64, _>("observation_is_current")? != 0,
+    });
 
     Ok(ReadEvidenceRecord {
         source_id: row.try_get("source_id")?,

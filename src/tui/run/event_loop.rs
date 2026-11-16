@@ -2165,6 +2165,16 @@ async fn maybe_start_peer_wake(
     true
 }
 
+/// Handles a `/clear` or `/new` rotation needs besides the app state.
+#[derive(Clone, Copy)]
+struct SessionRotationDeps<'a> {
+    storage: &'a Storage,
+    active_session_id: &'a SharedActiveSessionId,
+    project_root: &'a Path,
+    plan_store: &'a SharedPlanStore,
+    agent: &'a Arc<Mutex<Agent>>,
+}
+
 /// If `command` clears the transcript (`/clear`, `/new`), flush the outgoing
 /// session's dirty app snapshots, clear the plan, rotate to a fresh persisted
 /// session, and reset the snapshot signatures. Shared by the top-of-loop
@@ -2172,19 +2182,21 @@ async fn maybe_start_peer_wake(
 /// so neither path can clear the in-app transcript without also rotating the
 /// persisted session — otherwise a `clear_transcript: true` catalog-reload
 /// outcome would strand the outgoing session's edits.
-#[allow(clippy::too_many_arguments)]
 async fn rotate_persisted_session_on_clear(
     command: &CommandOutcomeEvent,
     tasks: &TaskController,
-    storage: &Storage,
-    active_session_id: &SharedActiveSessionId,
-    project_root: &Path,
-    plan_store: &SharedPlanStore,
+    rotation: SessionRotationDeps<'_>,
     app: &mut AppState,
     current_session_id: &mut SessionId,
     persisted_signatures: &mut PersistedSnapshotSignatures,
-    agent: &Arc<Mutex<Agent>>,
 ) {
+    let SessionRotationDeps {
+        storage,
+        active_session_id,
+        project_root,
+        plan_store,
+        agent,
+    } = rotation;
     if !matches!(
         command,
         CommandOutcomeEvent::Applied {
@@ -2354,6 +2366,18 @@ struct RuntimeEventDrainDeps<'a> {
     memory: &'a Option<Arc<crate::memory::MemoryService>>,
 }
 
+impl<'a> RuntimeEventDrainDeps<'a> {
+    fn rotation(&self) -> SessionRotationDeps<'a> {
+        SessionRotationDeps {
+            storage: self.storage,
+            active_session_id: self.active_session_id,
+            project_root: self.project_root,
+            plan_store: self.plan_store,
+            agent: self.agent,
+        }
+    }
+}
+
 /// Mutable loop state bundled for [`drain_runtime_events_for_frame`].
 struct RuntimeDrainState<'a> {
     current_session_id: &'a mut SessionId,
@@ -2396,14 +2420,10 @@ async fn drain_runtime_events_for_frame(
             rotate_persisted_session_on_clear(
                 command,
                 tasks,
-                deps.storage,
-                deps.active_session_id,
-                deps.project_root,
-                deps.plan_store,
+                deps.rotation(),
                 app,
                 state.current_session_id,
                 state.persisted_signatures,
-                deps.agent,
             )
             .await;
         }
@@ -2548,14 +2568,10 @@ async fn drain_runtime_events_for_frame(
                 rotate_persisted_session_on_clear(
                     command,
                     tasks,
-                    deps.storage,
-                    deps.active_session_id,
-                    deps.project_root,
-                    deps.plan_store,
+                    deps.rotation(),
                     app,
                     state.current_session_id,
                     state.persisted_signatures,
-                    deps.agent,
                 )
                 .await;
             }

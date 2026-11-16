@@ -798,14 +798,16 @@ async fn clear_rotation_persists_hard_boundary_and_isolates_episode_ledger() {
     rotate_persisted_session_on_clear(
         &command,
         &tasks,
-        &storage,
-        &active_session_id,
-        temp_dir.path(),
-        &plan_store,
+        SessionRotationDeps {
+            storage: &storage,
+            active_session_id: &active_session_id,
+            project_root: temp_dir.path(),
+            plan_store: &plan_store,
+            agent: &agent,
+        },
         &mut app,
         &mut current_session_id,
         &mut signatures,
-        &agent,
     )
     .await;
 
@@ -921,14 +923,16 @@ async fn clear_rotation_flushes_dirty_edit_made_since_the_last_periodic_flush() 
     rotate_persisted_session_on_clear(
         &command,
         &tasks,
-        &storage,
-        &active_session_id,
-        temp_dir.path(),
-        &plan_store,
+        SessionRotationDeps {
+            storage: &storage,
+            active_session_id: &active_session_id,
+            project_root: temp_dir.path(),
+            plan_store: &plan_store,
+            agent: &agent,
+        },
         &mut app,
         &mut current_session_id,
         &mut signatures,
-        &agent,
     )
     .await;
 

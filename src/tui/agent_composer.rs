@@ -377,6 +377,26 @@ pub(crate) struct AgentComposerState {
     pub error: Option<String>,
 }
 
+/// The saved fields of an existing agent, used to pre-populate the composer
+/// for editing.
+#[derive(Debug, Default)]
+pub(crate) struct ExistingAgent<'a> {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) is_global: bool,
+    pub(crate) tools: Option<&'a [String]>,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) effort: Option<&'a str>,
+    pub(crate) fallback_model: Option<&'a str>,
+    pub(crate) fallback_effort: Option<&'a str>,
+    pub(crate) color: Option<&'a str>,
+    pub(crate) view: Option<&'a str>,
+    /// The full body read fresh from disk.
+    pub(crate) prompt: String,
+    /// Overwritten on save.
+    pub(crate) source_path: PathBuf,
+}
+
 impl AgentComposerState {
     /// A fresh composer for creating an agent.
     pub(crate) fn new() -> Self {
@@ -411,21 +431,21 @@ impl AgentComposerState {
 
     /// A composer pre-populated from an existing agent, for editing. `prompt` is
     /// the full body read fresh from disk. `source_path` is overwritten on save.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn edit(
-        name: String,
-        description: String,
-        is_global: bool,
-        tools: Option<&[String]>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        fallback_model: Option<&str>,
-        fallback_effort: Option<&str>,
-        color: Option<&str>,
-        view: Option<&str>,
-        prompt: String,
-        source_path: PathBuf,
-    ) -> Self {
+    pub(crate) fn edit(source: ExistingAgent<'_>) -> Self {
+        let ExistingAgent {
+            name,
+            description,
+            is_global,
+            tools,
+            model,
+            effort,
+            fallback_model,
+            fallback_effort,
+            color,
+            view,
+            prompt,
+            source_path,
+        } = source;
         let effort_index = effort
             .and_then(|effort| EFFORT_CHOICES.iter().position(|choice| *choice == effort))
             .unwrap_or(0);
@@ -487,20 +507,17 @@ impl AgentComposerState {
         settings: &crate::subagent::BuiltinSubagentSettings,
         legacy_path: Option<PathBuf>,
     ) -> Self {
-        let mut state = Self::edit(
-            id.as_str().to_string(),
-            description.to_string(),
-            true,
-            None,
-            settings.primary_model.as_deref(),
-            settings.primary_effort.as_deref(),
-            settings.fallback_model.as_deref(),
-            settings.fallback_effort.as_deref(),
-            None,
-            None,
-            instructions.to_string(),
-            PathBuf::new(),
-        );
+        let mut state = Self::edit(ExistingAgent {
+            name: id.as_str().to_string(),
+            description: description.to_string(),
+            is_global: true,
+            model: settings.primary_model.as_deref(),
+            effort: settings.primary_effort.as_deref(),
+            fallback_model: settings.fallback_model.as_deref(),
+            fallback_effort: settings.fallback_effort.as_deref(),
+            prompt: instructions.to_string(),
+            ..ExistingAgent::default()
+        });
         state.field = AgentComposerField::Model;
         state.edit_target = AgentEditTarget::BuiltinSubagent { id, legacy_path };
         state.builtin_enabled = Some(settings.enabled);
@@ -1482,20 +1499,15 @@ mod tests {
             // A name that resolves to nothing is not carried over.
             "bogus_tool".to_string(),
         ];
-        let state = AgentComposerState::edit(
-            "Issuer".to_string(),
-            "d".to_string(),
-            true,
-            Some(&declared),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "prompt".to_string(),
-            PathBuf::from("/tmp/issuer.md"),
-        );
+        let state = AgentComposerState::edit(ExistingAgent {
+            name: "Issuer".to_string(),
+            description: "d".to_string(),
+            is_global: true,
+            tools: Some(&declared),
+            prompt: "prompt".to_string(),
+            source_path: PathBuf::from("/tmp/issuer.md"),
+            ..ExistingAgent::default()
+        });
 
         // A declared MCP grant outside the built-in catalog gets its own row, so
         // an edit-save round-trip never silently drops it.
