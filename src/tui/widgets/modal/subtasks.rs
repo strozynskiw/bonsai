@@ -31,7 +31,7 @@ pub(super) fn render_subtask_list(
             split: ListDetailSplit::Horizontal,
             detail_focused: pane == SubtaskListPane::Detail,
             footer_lines,
-            modal_scroll: app.modal_scroll,
+            modal_scroll: app.modal_ui.modal_scroll,
         },
         |frame, table_area, detail_area| {
             let columns = subtask_columns(table_area.width as usize);

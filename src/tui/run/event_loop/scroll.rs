@@ -13,13 +13,13 @@ pub(super) fn clamp_scrolls(app: &mut AppState, area: Rect) {
 
     // Take the request unconditionally so it never lingers when the sidebar is
     // hidden (it would otherwise fire on a later frame against a stale list).
-    let scroll_todo = std::mem::take(&mut app.scroll_todo_in_progress_into_view);
+    let scroll_todo = std::mem::take(&mut app.scroll.scroll_todo_in_progress_into_view);
     app.todo_focus_available = regions.sidebar.is_some();
     if let Some(sidebar) = regions.sidebar {
         let sidebar_max = crate::tui::widgets::sidebar::max_todo_scroll(app, sidebar);
         app.clamp_sidebar_scroll(sidebar_max);
         if scroll_todo {
-            app.sidebar_scroll =
+            app.scroll.sidebar_scroll =
                 crate::tui::widgets::sidebar::todo_in_progress_scroll(app, sidebar, sidebar_max);
         }
     } else if app.focus == Focus::Todo {
@@ -29,7 +29,7 @@ pub(super) fn clamp_scrolls(app: &mut AppState, area: Rect) {
     resolve_question_scroll(app, area);
     reconcile_model_picker_offsets(app, area);
     if let Some(max_scroll) = crate::tui::widgets::modal::max_modal_scroll(app, area) {
-        app.modal_scroll = app.modal_scroll.min(max_scroll);
+        app.modal_ui.modal_scroll = app.modal_ui.modal_scroll.min(max_scroll);
     }
     resolve_context_scroll(app, area);
     resolve_composer_scroll(app, regions.input);
@@ -73,21 +73,23 @@ fn resolve_context_scroll(app: &mut AppState, area: Rect) {
     let Some(metrics) = crate::tui::widgets::modal::context_modal_metrics(app, area) else {
         return;
     };
-    app.modal_scroll = app.modal_scroll.min(metrics.max_scroll);
+    app.modal_ui.modal_scroll = app.modal_ui.modal_scroll.min(metrics.max_scroll);
     if app.context_state.manual_scroll {
         return;
     }
     let Some(selected_line) = metrics.selected_line else {
         return;
     };
-    if selected_line < app.modal_scroll {
-        app.modal_scroll = selected_line;
+    if selected_line < app.modal_ui.modal_scroll {
+        app.modal_ui.modal_scroll = selected_line;
     } else {
         let bottom = app
+            .modal_ui
             .modal_scroll
             .saturating_add(metrics.body_height.saturating_sub(1));
         if selected_line > bottom {
-            app.modal_scroll = selected_line.saturating_sub(metrics.body_height.saturating_sub(1));
+            app.modal_ui.modal_scroll =
+                selected_line.saturating_sub(metrics.body_height.saturating_sub(1));
         }
     }
     // A row was just expanded: also pull its opened block (sources, preview,
@@ -96,23 +98,24 @@ fn resolve_context_scroll(app: &mut AppState, area: Rect) {
     if reveal_expanded && let Some(block_end) = metrics.selected_block_end {
         let last_block_line = block_end.saturating_sub(1);
         let bottom = app
+            .modal_ui
             .modal_scroll
             .saturating_add(metrics.body_height.saturating_sub(1));
         if last_block_line > bottom {
-            app.modal_scroll = last_block_line
+            app.modal_ui.modal_scroll = last_block_line
                 .saturating_sub(metrics.body_height.saturating_sub(1))
                 .min(selected_line);
         }
     }
-    app.modal_scroll = app.modal_scroll.min(metrics.max_scroll);
+    app.modal_ui.modal_scroll = app.modal_ui.modal_scroll.min(metrics.max_scroll);
 }
 
 fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll: usize) {
-    if !app.scroll_transcript_focus_into_view {
+    if !app.scroll.scroll_transcript_focus_into_view {
         return;
     }
-    app.scroll_transcript_focus_into_view = false;
-    app.transcript_autoscroll = false;
+    app.scroll.scroll_transcript_focus_into_view = false;
+    app.scroll.transcript_autoscroll = false;
     let Some(index) = app.transcript_focus else {
         return;
     };
@@ -125,7 +128,7 @@ fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll:
     if viewport == 0 {
         return;
     }
-    let current = app.transcript_scroll;
+    let current = app.scroll.transcript_scroll;
     let next = if start < current {
         start
     } else if end > current.saturating_add(viewport) {
@@ -133,7 +136,7 @@ fn scroll_transcript_focus_into_view(app: &mut AppState, area: Rect, max_scroll:
     } else {
         current
     };
-    app.transcript_scroll = next.min(max_scroll);
+    app.scroll.transcript_scroll = next.min(max_scroll);
 }
 
 fn resolve_question_scroll(app: &mut AppState, area: Rect) {
@@ -167,8 +170,8 @@ fn resolve_question_scroll(app: &mut AppState, area: Rect) {
     );
     if app.pending_question_visibility {
         app.pending_question_visibility = false;
-        let current = app.modal_scroll;
-        app.modal_scroll = if metrics.selected_start < current {
+        let current = app.modal_ui.modal_scroll;
+        app.modal_ui.modal_scroll = if metrics.selected_start < current {
             metrics.selected_start
         } else if metrics.selected_end > current.saturating_add(metrics.body_height) {
             metrics.selected_end.saturating_sub(metrics.body_height)
@@ -176,7 +179,7 @@ fn resolve_question_scroll(app: &mut AppState, area: Rect) {
             current
         };
     }
-    app.modal_scroll = app.modal_scroll.min(metrics.max_scroll);
+    app.modal_ui.modal_scroll = app.modal_ui.modal_scroll.min(metrics.max_scroll);
 }
 
 /// Resolve any pending composer scroll/extend actions using the live
@@ -190,12 +193,12 @@ fn resolve_composer_scroll(app: &mut AppState, input_area: Rect) {
     let body_visible = input::body_visible_rows(input_area) as usize;
     let content_width = input::body_content_width(input_area) as usize;
 
-    if let Some(delta) = app.pending_composer_page.take() {
+    if let Some(delta) = app.scroll.pending_composer_page.take() {
         let row_delta = delta * body_visible as i16;
-        app.composer_scroll = clamped_scroll(app.composer_scroll, row_delta);
+        app.scroll.composer_scroll = clamped_scroll(app.scroll.composer_scroll, row_delta);
     }
 
-    if let Some(delta) = app.pending_composer_extend.take() {
+    if let Some(delta) = app.scroll.pending_composer_extend.take() {
         let char_step = (delta.unsigned_abs() as usize) * body_visible * content_width;
         let signed = if delta < 0 {
             -(char_step as i32)

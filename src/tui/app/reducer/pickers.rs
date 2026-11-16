@@ -704,7 +704,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 let max = rows.len().saturating_sub(1);
                 *cursor = move_index(*cursor, delta, max);
                 // Changing selection resets the detail pane to the top.
-                app.modal_scroll = 0;
+                app.modal_ui.modal_scroll = 0;
             }
         }
         action => return ActionResult::unhandled(action),

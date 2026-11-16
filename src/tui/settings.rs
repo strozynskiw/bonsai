@@ -49,7 +49,7 @@ pub(crate) fn seed_settings_rows(
         id: SettingId::Autonomy,
         key: "level",
         values: AUTONOMY_VALUES,
-        current: index_of(AUTONOMY_VALUES, app.approval_level.label()),
+        current: index_of(AUTONOMY_VALUES, app.modes.approval_level.label()),
         note: None,
     });
 
@@ -58,7 +58,7 @@ pub(crate) fn seed_settings_rows(
         id: SettingId::SelfReview,
         key: "mode",
         values: SELF_REVIEW_VALUES,
-        current: index_of(SELF_REVIEW_VALUES, app.self_review_mode.label()),
+        current: index_of(SELF_REVIEW_VALUES, app.modes.self_review_mode.label()),
         note: self_review_note(app),
     });
 
@@ -89,7 +89,7 @@ pub(crate) fn seed_settings_rows(
         id: SettingId::Serenity,
         key: "serenity",
         values: TOGGLE_VALUES,
-        current: usize::from(app.serenity_mode),
+        current: usize::from(app.modes.serenity_mode),
         note: None,
     });
 
@@ -98,7 +98,7 @@ pub(crate) fn seed_settings_rows(
         id: SettingId::SupportLog,
         key: "support log",
         values: TOGGLE_VALUES,
-        current: usize::from(app.support_log_enabled),
+        current: usize::from(app.modes.support_log_enabled),
         note: Some("redacted lifecycle log for /bug bundles".to_string()),
     });
     rows.push(SettingsRow::Action {
@@ -423,9 +423,9 @@ fn parse_cost_micros(label: &str) -> Option<u64> {
 }
 
 fn self_review_note(app: &AppState) -> Option<String> {
-    match app.self_review_mode {
+    match app.modes.self_review_mode {
         crate::self_review::SelfReviewMode::Auto
-            if app.approval_level >= crate::tool::ApprovalLevel::AutoAccept =>
+            if app.modes.approval_level >= crate::tool::ApprovalLevel::AutoAccept =>
         {
             Some("on at current autonomy".to_string())
         }
@@ -490,8 +490,8 @@ mod tests {
     #[test]
     fn autonomy_smol_and_serenity_track_state() {
         let mut app = app();
-        app.approval_level = crate::tool::ApprovalLevel::Yolo;
-        app.serenity_mode = true;
+        app.modes.approval_level = crate::tool::ApprovalLevel::Yolo;
+        app.modes.serenity_mode = true;
         let rows = seed_settings_rows(&app, smol_profile(crate::smol::SmolPreference::On));
         assert_eq!(
             choice_current(&rows, SettingId::Autonomy),
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(choice_current(&rows, SettingId::Smol), Some(1));
         assert_eq!(choice_current(&rows, SettingId::Serenity), Some(1));
 
-        app.serenity_mode = false;
+        app.modes.serenity_mode = false;
         let rows_off = seed_settings_rows(&app, smol_profile(crate::smol::SmolPreference::Off));
         assert_eq!(choice_current(&rows_off, SettingId::Smol), Some(0));
         assert_eq!(choice_current(&rows_off, SettingId::Serenity), Some(0));

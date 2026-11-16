@@ -522,15 +522,15 @@ pub(crate) fn header_status_pill(app: &AppState) -> Vec<Span<'static>> {
             theme::pill(theme::palette().success),
         ));
     }
-    if !app.approval_level.is_ask() {
+    if !app.modes.approval_level.is_ask() {
         spans.push(Span::styled("  ", theme::base()));
-        spans.push(approval_status_pill(app.approval_level));
+        spans.push(approval_status_pill(app.modes.approval_level));
     }
-    if app.smol_mode {
+    if app.modes.smol_mode {
         spans.push(Span::styled("  ", theme::base()));
         spans.push(smol_status_pill());
     }
-    if app.serenity_mode {
+    if app.modes.serenity_mode {
         spans.push(Span::styled("  ", theme::base()));
         spans.push(serenity_status_pill());
     }
@@ -669,7 +669,7 @@ mod tests {
         );
         app.current_session_summary = "Accessible run".to_string();
         app.task_state = crate::tui::event::TaskState::Running;
-        app.reduced_motion = true;
+        app.modes.reduced_motion = true;
 
         app.tick = 0;
         let first = terminal_title(&app);
@@ -1469,8 +1469,8 @@ mod tests {
         );
 
         // Scroll up: the pill appears with a count of the unseen replies.
-        app.transcript_autoscroll = false;
-        app.transcript_scroll = 0;
+        app.scroll.transcript_autoscroll = false;
+        app.scroll.transcript_scroll = 0;
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(
@@ -1665,7 +1665,7 @@ mod tests {
             "bonsai".to_string(),
             Some("master".to_string()),
         );
-        app.smol_mode = true;
+        app.modes.smol_mode = true;
 
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -1684,7 +1684,7 @@ mod tests {
                 "bonsai".to_string(),
                 Some("master".to_string()),
             );
-            app.mouse_capture = mouse_capture;
+            app.modes.mouse_capture = mouse_capture;
             terminal.draw(|frame| draw(frame, &app)).unwrap();
             buffer_text(&terminal.backend().buffer().clone())
         };
@@ -1709,7 +1709,7 @@ mod tests {
             "bonsai".to_string(),
             Some("master".to_string()),
         );
-        app.serenity_mode = true;
+        app.modes.serenity_mode = true;
 
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -1826,7 +1826,7 @@ mod tests {
             "bonsai".to_string(),
             Some("master".to_string()),
         );
-        app.approval_level = crate::tool::ApprovalLevel::AutoAccept;
+        app.modes.approval_level = crate::tool::ApprovalLevel::AutoAccept;
 
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -1854,7 +1854,7 @@ mod tests {
             "bonsai".to_string(),
             Some("master".to_string()),
         );
-        app.serenity_mode = true;
+        app.modes.serenity_mode = true;
 
         terminal.draw(|frame| draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer().clone();

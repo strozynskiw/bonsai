@@ -24,7 +24,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.insert_char(ch);
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -32,7 +32,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.insert_newline();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -64,7 +64,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                     } else {
                         app.composer.insert_text(&text);
                     }
-                    app.composer_follow = true;
+                    app.scroll.composer_follow = true;
                     app.recompute_completion();
                 }
             }
@@ -84,7 +84,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                         width,
                         height,
                     });
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -96,7 +96,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.backspace();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -104,21 +104,21 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.delete_forward();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
         AppAction::ComposerUndo => {
             if app.focus == Focus::Input {
                 app.composer.undo();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
         AppAction::ComposerRedo => {
             if app.focus == Focus::Input {
                 app.composer.redo();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -174,7 +174,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.delete_word_back();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -182,7 +182,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.delete_to_line_start();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -190,7 +190,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.delete_to_line_end();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -255,7 +255,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         } => {
             app.transcript_selection = None;
             app.transcript_focus = None;
-            app.scroll_transcript_focus_into_view = false;
+            app.scroll.scroll_transcript_focus_into_view = false;
             app.active_group_tool_selection = None;
             app.focus = Focus::Input;
             app.apply_composer_click(char_index, kind);
@@ -311,7 +311,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         }
         AppAction::QueueDeferredCommand { input, label } => {
             let id = app.next_deferred_command_id();
-            app.deferred_commands.push(DeferredCommand {
+            app.queue.deferred_commands.push(DeferredCommand {
                 id,
                 input,
                 label: label.clone(),
@@ -329,7 +329,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             selection,
         } => {
             let id = app.next_deferred_command_id();
-            app.deferred_commands.push(DeferredCommand {
+            app.queue.deferred_commands.push(DeferredCommand {
                 id,
                 input,
                 label: label.clone(),
@@ -342,7 +342,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.maybe_scroll_to_bottom_current();
         }
         AppAction::RemoveDeferredCommand { id } => {
-            app.deferred_commands.retain(|command| command.id != id);
+            app.queue
+                .deferred_commands
+                .retain(|command| command.id != id);
         }
         AppAction::CancelQueuedInput { id } => {
             app.remove_queued_input(id);
@@ -355,19 +357,19 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         AppAction::WithdrawQueuedInput => {
             if app.focus == Focus::Input
                 && app.input().is_empty()
-                && let Some(queued) = app.queued_inputs.last().cloned()
+                && let Some(queued) = app.queue.queued_inputs.last().cloned()
             {
                 app.remove_queued_input(queued.id);
                 // Restore the exact draft, chips included, not just the display
                 // text — a withdrawn message must be editable as it was.
                 app.composer.restore_content(queued.content);
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
         AppAction::DropQueuedInput => {
-            if !app.queued_inputs.is_empty() {
-                app.queued_inputs.clear();
+            if !app.queue.queued_inputs.is_empty() {
+                app.queue.queued_inputs.clear();
                 app.transcript
                     .retain(|item| !matches!(item, TranscriptItem::QueuedUserMessage { .. }));
                 if let Some(index) = app.transcript_focus {
@@ -383,14 +385,14 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         AppAction::HistoryPrev => {
             if app.focus == Focus::Input {
                 app.composer.history_prev();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
         AppAction::HistoryNext => {
             if app.focus == Focus::Input {
                 app.composer.history_next();
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }
@@ -399,7 +401,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 if replacement != app.composer.text {
                     app.composer.reset_navigation();
                     app.composer.replace_text_keep_chips(replacement);
-                    app.composer_follow = true;
+                    app.scroll.composer_follow = true;
                 }
                 if app
                     .composer
@@ -422,7 +424,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if app.focus == Focus::Input {
                 app.composer.reset_navigation();
                 app.composer.replace_range(start, end, &replacement);
-                app.composer_follow = true;
+                app.scroll.composer_follow = true;
                 app.recompute_completion();
             }
         }

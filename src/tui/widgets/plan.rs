@@ -46,7 +46,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         .map(|line| wrapped_rows_for_line(line, content_width))
         .sum::<usize>()
         .saturating_sub(viewport_height) as u16;
-    let scroll = app.plan_scroll.min(max_scroll);
+    let scroll = app.scroll.plan_scroll.min(max_scroll);
 
     let title = if !app.plan.title.is_empty() {
         format!("Plan · {}", app.plan.title)
@@ -119,7 +119,9 @@ pub(crate) fn position_at(
 
     let content_width = area.width.saturating_sub(4).max(20) as usize;
     let lines = canvas_lines(app, content_width);
-    let target_visual_row = row.saturating_sub(inner.y).saturating_add(app.plan_scroll) as usize;
+    let target_visual_row = row
+        .saturating_sub(inner.y)
+        .saturating_add(app.scroll.plan_scroll) as usize;
     let mut visual_row = 0usize;
     for (line_index, line) in lines.iter().enumerate() {
         let rows = wrapped_rows_for_line(line, content_width);
@@ -1487,12 +1489,12 @@ mod tests {
         let long = "b".repeat(300);
         app.plan.edit().add_task(&long);
         let area = Rect::new(0, 0, 60, 12);
-        app.plan_scroll = u16::MAX;
+        app.scroll.plan_scroll = u16::MAX;
         app.clamp_plan_scroll(crate::tui::widgets::plan::max_plan_scroll(&app, area));
         let content_width = 60_usize.saturating_sub(4);
         let wrapped = wrapped_line_count(&app, content_width);
         let viewport = viewport_height(area);
-        let last_visible = app.plan_scroll as usize + viewport - 1;
+        let last_visible = app.scroll.plan_scroll as usize + viewport - 1;
         assert!(
             last_visible >= wrapped - 1,
             "auto-follow must reach the last wrapped row: last_visible={last_visible}, wrapped={wrapped}"

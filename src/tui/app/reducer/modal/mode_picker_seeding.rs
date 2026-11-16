@@ -50,8 +50,8 @@ fn mode_picker_current_index(app: &AppState, value_def: &ModeValueDef) -> usize 
 /// per-row owned strings.
 fn mode_picker_current_label(app: &AppState, axis: ModeAxisId) -> &'static str {
     match axis {
-        ModeAxisId::Autonomy => app.approval_level.label(),
-        ModeAxisId::SelfReview => app.self_review_mode.label(),
+        ModeAxisId::Autonomy => app.modes.approval_level.label(),
+        ModeAxisId::SelfReview => app.modes.self_review_mode.label(),
         ModeAxisId::SandboxConfinement => match app.sandbox.as_ref() {
             Some(sandbox) if sandbox.is_enabled() => "on",
             _ => "off",
@@ -69,9 +69,9 @@ fn mode_picker_current_label(app: &AppState, axis: ModeAxisId) -> &'static str {
 fn mode_picker_note_for(app: &AppState, axis: ModeAxisId) -> Option<&'static str> {
     match axis {
         ModeAxisId::Autonomy => None,
-        ModeAxisId::SelfReview => match app.self_review_mode {
+        ModeAxisId::SelfReview => match app.modes.self_review_mode {
             crate::self_review::SelfReviewMode::Auto
-                if app.approval_level >= crate::tool::ApprovalLevel::Balanced =>
+                if app.modes.approval_level >= crate::tool::ApprovalLevel::Balanced =>
             {
                 Some("on at current autonomy")
             }
@@ -129,7 +129,7 @@ mod tests {
             crate::tool::ApprovalLevel::AutoAccept,
             crate::tool::ApprovalLevel::Yolo,
         ] {
-            application.approval_level = level;
+            application.modes.approval_level = level;
             let rows = seed_mode_picker_rows(&application);
             let autonomy_value = rows.iter().find_map(|row| match row {
                 ModeRow::Value {
@@ -158,7 +158,7 @@ mod tests {
             crate::self_review::SelfReviewMode::Ask,
             crate::self_review::SelfReviewMode::On,
         ] {
-            application.self_review_mode = mode;
+            application.modes.self_review_mode = mode;
             let rows = seed_mode_picker_rows(&application);
             let self_review_value = rows.iter().find_map(|row| match row {
                 ModeRow::Value {

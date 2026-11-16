@@ -40,7 +40,7 @@ pub(super) fn render_refresh(
             split: ListDetailSplit::Refresh,
             detail_focused: false,
             footer_lines,
-            modal_scroll: app.modal_scroll,
+            modal_scroll: app.modal_ui.modal_scroll,
         },
         |frame, table_area, _detail_area| {
             let columns = refresh_columns();

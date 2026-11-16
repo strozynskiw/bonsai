@@ -96,7 +96,7 @@ async fn queued_follow_up_warns_before_starting_after_current_run() {
     .await;
 
     assert!(!started);
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(matches!(
         app.modal,
         Some(ModalKind::Picker(
@@ -400,9 +400,9 @@ fn app() -> AppState {
 fn safe_plan_start_confirmation_accepts_only_exact_scoped_words_once() {
     for input in ["go", "GO", " continue "] {
         let mut app = app();
-        app.pending_safe_plan_start_confirmation = true;
+        app.plan_run.pending_safe_plan_start_confirmation = true;
         assert!(take_safe_plan_start_confirmation(&mut app, input));
-        assert!(!app.pending_safe_plan_start_confirmation);
+        assert!(!app.plan_run.pending_safe_plan_start_confirmation);
         assert!(
             !take_safe_plan_start_confirmation(&mut app, input),
             "confirmation authority must be one-shot"
@@ -417,9 +417,9 @@ fn safe_plan_start_confirmation_accepts_only_exact_scoped_words_once() {
         "approve",
     ] {
         let mut app = app();
-        app.pending_safe_plan_start_confirmation = true;
+        app.plan_run.pending_safe_plan_start_confirmation = true;
         assert!(!take_safe_plan_start_confirmation(&mut app, input));
-        assert!(!app.pending_safe_plan_start_confirmation);
+        assert!(!app.plan_run.pending_safe_plan_start_confirmation);
     }
 }
 
@@ -585,7 +585,7 @@ async fn self_review_set_updates_state_and_confirms_in_transcript() {
     let mut app = app();
     let agent = test_agent(Box::new(CompleteProvider));
     assert_eq!(
-        app.self_review_mode,
+        app.modes.self_review_mode,
         crate::self_review::SelfReviewMode::Auto
     );
 
@@ -611,7 +611,7 @@ async fn self_review_set_updates_state_and_confirms_in_transcript() {
     .await;
 
     assert_eq!(
-        app.self_review_mode,
+        app.modes.self_review_mode,
         crate::self_review::SelfReviewMode::Off
     );
     assert_eq!(
@@ -1333,7 +1333,7 @@ async fn start_new_plan_save_failure_keeps_coding_and_skips_continuation() {
     let agent = test_agent(Box::new(CompleteProvider));
     let mut app = app();
     app.active_saved_plan_session_id = Some(missing_saved_plan_id);
-    app.pending_start_new_plan = true;
+    app.plan_run.pending_start_new_plan = true;
     let mut repo_map = empty_repo_map_injector();
 
     let started = maybe_start_new_plan(
@@ -1353,7 +1353,7 @@ async fn start_new_plan_save_failure_keeps_coding_and_skips_continuation() {
     assert_eq!(app.active_mode(), AgentMode::Coding);
     assert_eq!(app.task_state, TaskState::Idle);
     assert!(!tasks.is_busy());
-    assert!(!app.pending_start_new_plan);
+    assert!(!app.plan_run.pending_start_new_plan);
     assert_eq!(app.plan, plan);
     assert_eq!(*plan_store.lock().await, plan);
     assert_eq!(
@@ -2123,7 +2123,7 @@ async fn running_enter_queues_normal_text_for_next_turn() {
     assert_eq!(app.input(), "");
     assert_eq!(app.composer.text, "");
     assert!(matches!(
-        app.queued_inputs.as_slice(),
+        app.queue.queued_inputs.as_slice(),
         [QueuedInput {
             id: 1,
             text,
@@ -2356,7 +2356,7 @@ async fn running_escape_interrupts_for_queued_message_without_sending_draft() {
     assert_eq!(app.task_state, TaskState::Cancelling);
     assert_eq!(app.input(), "unsent draft");
     assert!(matches!(
-        app.queued_inputs.as_slice(),
+        app.queue.queued_inputs.as_slice(),
         [QueuedInput {
             text,
             delivery: FollowUpDelivery::Steer,
@@ -2399,7 +2399,7 @@ async fn running_escape_without_queued_message_keeps_foreground_active() {
 
     assert_eq!(app.task_state, TaskState::Running);
     assert_eq!(app.input(), "unsent draft");
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(tasks.is_busy());
     tasks.abort();
 }
@@ -2433,7 +2433,7 @@ async fn escape_steer_reduces_old_completion_before_starting_replacement() {
 
     assert!(!tasks.is_busy());
     assert!(matches!(
-        app.queued_inputs.as_slice(),
+        app.queue.queued_inputs.as_slice(),
         [QueuedInput {
             delivery: FollowUpDelivery::Steer,
             ..
@@ -2491,7 +2491,7 @@ async fn running_follow_up_does_not_accept_slash_commands() {
 
     assert_eq!(app.input(), "/clear");
     assert_eq!(app.composer.text, "/clear");
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(matches!(
         app.transcript.last(),
         Some(TranscriptItem::CommandOutput {
@@ -2609,7 +2609,7 @@ async fn running_model_command_opens_picker_without_user_message() {
 
     assert!(handled);
     assert!(app.input().is_empty());
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(
         !app.transcript
             .iter()
@@ -2678,8 +2678,8 @@ async fn running_model_selection_command_opens_queue_modal() {
     .await;
 
     assert!(handled);
-    assert!(app.queued_inputs.is_empty());
-    assert!(app.deferred_commands.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
+    assert!(app.queue.deferred_commands.is_empty());
     assert!(matches!(
         app.modal,
         Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
@@ -3244,7 +3244,7 @@ async fn running_sessions_command_opens_picker() {
         app.modal,
         Some(ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { ref sessions, cursor: 0 })) if sessions.is_empty()
     ));
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
 }
 
 #[tokio::test]
@@ -3412,7 +3412,7 @@ async fn running_compact_command_is_blocked_without_mutation() {
 
     assert!(handled);
     assert!(app.input().is_empty());
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(matches!(
         app.modal,
         Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
@@ -3471,7 +3471,7 @@ async fn running_yolo_command_updates_state_without_user_message() {
 
     assert!(handled);
     assert!(yolo_mode.is_enabled());
-    assert_eq!(app.approval_level, crate::tool::ApprovalLevel::Yolo);
+    assert_eq!(app.modes.approval_level, crate::tool::ApprovalLevel::Yolo);
     assert!(
         !app.transcript
             .iter()
@@ -3584,7 +3584,7 @@ async fn running_smol_on_applies_preference_mid_run() {
     };
     let mut app = app();
     app.task_state = TaskState::Running;
-    app.smol_mode = false;
+    app.modes.smol_mode = false;
     let yolo_mode = crate::yolo::YoloMode::new();
 
     let handled = handle_running_slash_command(
@@ -3609,7 +3609,7 @@ async fn running_smol_on_applies_preference_mid_run() {
 
     assert!(handled);
     assert!(
-        app.smol_mode,
+        app.modes.smol_mode,
         "mid-run /smol on must flip the app mirror immediately"
     );
     assert_eq!(
@@ -3660,7 +3660,7 @@ async fn running_self_review_off_applies_mid_run() {
     let mut app = app();
     app.task_state = TaskState::Running;
     assert_eq!(
-        app.self_review_mode,
+        app.modes.self_review_mode,
         crate::self_review::SelfReviewMode::Auto
     );
     let yolo_mode = crate::yolo::YoloMode::new();
@@ -3687,7 +3687,7 @@ async fn running_self_review_off_applies_mid_run() {
 
     assert!(handled);
     assert_eq!(
-        app.self_review_mode,
+        app.modes.self_review_mode,
         crate::self_review::SelfReviewMode::Off,
         "mid-run /self-review off must apply to the app mirror"
     );
@@ -4310,9 +4310,9 @@ async fn model_picker_submit_while_running_queues_selected_model() {
 
     assert!(matches!(result, RuntimeActionResult::Handled));
     assert!(app.modal.is_none());
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(matches!(
-        app.deferred_commands.as_slice(),
+        app.queue.deferred_commands.as_slice(),
         [DeferredCommand {
             input,
             label,
@@ -4507,7 +4507,7 @@ async fn settings_cycle_persists_serenity_preference() {
     .await;
 
     assert!(matches!(result, RuntimeActionResult::Handled));
-    assert!(app.serenity_mode, "cycle should flip serenity on");
+    assert!(app.modes.serenity_mode, "cycle should flip serenity on");
     assert!(
         storage.serenity_mode().await.unwrap(),
         "settings cycle should persist the serenity preference"
@@ -4553,7 +4553,7 @@ async fn settings_cycle_persists_explicit_smol_preference() {
     .await;
 
     assert!(matches!(result, RuntimeActionResult::Handled));
-    assert!(app.smol_mode);
+    assert!(app.modes.smol_mode);
     assert_eq!(
         storage.smol_preference().await.unwrap(),
         crate::smol::SmolPreference::On
@@ -4817,7 +4817,7 @@ async fn running_commit_command_is_blocked_without_user_message() {
 
     assert!(handled);
     assert!(app.input().is_empty());
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(matches!(
         app.modal,
         Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
@@ -4880,7 +4880,7 @@ async fn running_pr_command_is_blocked_without_user_message() {
 
     assert!(handled);
     assert!(app.input().is_empty());
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert!(matches!(
         app.modal,
         Some(ModalKind::Detail(crate::tui::event::DetailModal::BusyCommand { ref input, ref rows, cursor: 0 }))
@@ -6136,7 +6136,7 @@ async fn cancel_queued_action_removes_message_from_active_task_queue() {
         &[vec!["initial".to_string(), "keep me".to_string()]]
     );
     assert!(matches!(
-        app.queued_inputs.as_slice(),
+        app.queue.queued_inputs.as_slice(),
         [QueuedInput { id: 2, text, .. }] if text == "keep me"
     ));
 }
@@ -6201,7 +6201,7 @@ async fn withdraw_queued_action_cancels_and_restores_most_recent_message() {
     assert_eq!(app.input(), "keep me");
     assert_eq!(app.composer.text, "keep me");
     assert!(matches!(
-        app.queued_inputs.as_slice(),
+        app.queue.queued_inputs.as_slice(),
         [QueuedInput { id: 1, text, .. }] if text == "tell me more"
     ));
 }
@@ -6231,7 +6231,7 @@ async fn pending_queued_input_dispatches_when_idle() {
     )
     .await;
 
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert_eq!(app.task_state, TaskState::Running);
     assert!(tasks.is_busy());
     assert!(matches!(
@@ -6353,7 +6353,8 @@ async fn pending_steer_dispatches_all_queued_messages_in_one_run() {
     // steer itself is pre-seeded into the same run instead of staying pending
     // for a later one.
     assert!(
-        !app.queued_inputs
+        !app.queue
+            .queued_inputs
             .iter()
             .any(|queued| queued.text == "later work")
     );
@@ -6421,7 +6422,7 @@ async fn pending_queued_image_is_rechecked_before_idle_run() {
     )
     .await;
 
-    assert!(app.queued_inputs.is_empty());
+    assert!(app.queue.queued_inputs.is_empty());
     assert_eq!(app.task_state, TaskState::Idle);
     assert!(!tasks.is_busy());
     assert!(matches!(
@@ -6454,7 +6455,7 @@ async fn deferred_model_command_applies_after_idle_drain() {
     });
 
     assert_eq!(app.model, "before-run");
-    assert_eq!(app.deferred_commands.len(), 1);
+    assert_eq!(app.queue.deferred_commands.len(), 1);
 
     app.task_state = TaskState::Idle;
     let started = start_next_deferred_command_if_idle(
@@ -6472,7 +6473,7 @@ async fn deferred_model_command_applies_after_idle_drain() {
     .await;
 
     assert!(started);
-    assert!(app.deferred_commands.is_empty());
+    assert!(app.queue.deferred_commands.is_empty());
     assert_eq!(app.task_state, TaskState::Command);
     assert_eq!(app.model, "before-run");
 
@@ -6497,7 +6498,7 @@ async fn deferred_command_waits_for_fresh_plan_transition() {
     let mut tasks = TaskController::new(runtime_tx);
     let agent = test_agent(Box::new(CompleteProvider));
     let mut app = app();
-    app.pending_start_new_plan = true;
+    app.plan_run.pending_start_new_plan = true;
     app.reduce(AppAction::QueueDeferredCommand {
         input: "/new-plan".to_string(),
         label: "/new-plan".to_string(),
@@ -6520,7 +6521,7 @@ async fn deferred_command_waits_for_fresh_plan_transition() {
     assert!(!started_deferred);
     assert_eq!(app.task_state, TaskState::Idle);
     assert!(!tasks.is_busy());
-    assert_eq!(app.deferred_commands.len(), 1);
+    assert_eq!(app.queue.deferred_commands.len(), 1);
 
     let mut repo_map = empty_repo_map_injector();
     let started_new_plan = maybe_start_new_plan(
@@ -6552,17 +6553,17 @@ async fn a_fresh_plan_that_produces_no_draft_is_reported_once() {
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
     let plan_store: SharedPlanStore = Arc::new(Mutex::new(crate::plan::PlanDoc::default()));
-    app.fresh_plan_awaiting_draft = true;
+    app.plan_run.fresh_plan_awaiting_draft = true;
 
     // The planning run is still going: the verdict has to wait for it.
     app.task_state = TaskState::Running;
     assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
-    assert!(app.fresh_plan_awaiting_draft);
+    assert!(app.plan_run.fresh_plan_awaiting_draft);
 
     // Idle with an empty canvas: say so, exactly once.
     app.task_state = TaskState::Idle;
     assert!(maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
-    assert!(!app.fresh_plan_awaiting_draft);
+    assert!(!app.plan_run.fresh_plan_awaiting_draft);
     assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
 }
 
@@ -6572,11 +6573,11 @@ async fn a_fresh_plan_parked_on_background_work_waits_for_the_draft() {
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
     let plan_store: SharedPlanStore = Arc::new(Mutex::new(crate::plan::PlanDoc::default()));
-    app.fresh_plan_awaiting_draft = true;
+    app.plan_run.fresh_plan_awaiting_draft = true;
     // A run that parks on background work reports `Idle` while the parked work
     // can still write the draft, so the verdict has to wait for it.
     app.task_state = TaskState::Idle;
-    app.waiting_for_background_work = Some(crate::background_wake::BackgroundWorkWait {
+    app.queue.waiting_for_background_work = Some(crate::background_wake::BackgroundWorkWait {
         subscription_id: 1,
         requester_generation: 1,
         target_kind: crate::storage::BackgroundWakeTargetKind::BackgroundTask,
@@ -6586,9 +6587,9 @@ async fn a_fresh_plan_parked_on_background_work_waits_for_the_draft() {
     });
 
     assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
-    assert!(app.fresh_plan_awaiting_draft);
+    assert!(app.plan_run.fresh_plan_awaiting_draft);
 
-    app.waiting_for_background_work = None;
+    app.queue.waiting_for_background_work = None;
     assert!(maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
 }
 
@@ -6598,12 +6599,12 @@ async fn a_drafted_fresh_plan_clears_the_watch_without_a_warning() {
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
     app.task_state = TaskState::Idle;
-    app.fresh_plan_awaiting_draft = true;
+    app.plan_run.fresh_plan_awaiting_draft = true;
     // The planning turn writes through the shared store, not `app.plan`.
     let plan_store: SharedPlanStore = Arc::new(Mutex::new(sample_plan("Fresh canvas")));
 
     assert!(!maybe_report_empty_fresh_plan(&mut app, &mut tasks, &plan_store).await);
-    assert!(!app.fresh_plan_awaiting_draft);
+    assert!(!app.plan_run.fresh_plan_awaiting_draft);
 }
 
 #[tokio::test]
@@ -6651,7 +6652,7 @@ async fn deferred_model_selection_preserves_reasoning_after_idle_drain() {
     .await;
 
     assert!(started);
-    assert!(app.deferred_commands.is_empty());
+    assert!(app.queue.deferred_commands.is_empty());
     assert_eq!(app.task_state, TaskState::Command);
     assert!(!tasks.is_busy());
 
@@ -6784,7 +6785,7 @@ async fn deferred_command_drains_before_queued_user_message() {
     assert_eq!(app.task_state, TaskState::Command);
     assert!(tasks.is_busy());
     assert!(matches!(
-        app.queued_inputs.as_slice(),
+        app.queue.queued_inputs.as_slice(),
         [QueuedInput { id: 7, text, .. }] if text == "queued user prompt"
     ));
     drain_tasks(&mut tasks).await;
@@ -6799,8 +6800,8 @@ async fn deferred_command_drains_before_phase_auto_advance() {
     let mut tasks = TaskController::new(runtime_tx);
     let mut app = app();
     app.plan = two_phase_plan();
-    app.plan_execution = Some(PlanExecution { phase_index: 0 });
-    app.phase_advance = Some(PhaseAdvance::Continue);
+    app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
+    app.plan_run.phase_advance = Some(PhaseAdvance::Continue);
     app.reduce(AppAction::QueueDeferredCommand {
         input: "/model codex:openai/gpt-5.5".to_string(),
         label: "/model codex:openai/gpt-5.5".to_string(),
@@ -6823,8 +6824,11 @@ async fn deferred_command_drains_before_phase_auto_advance() {
 
     assert!(started);
     assert_eq!(app.task_state, TaskState::Command);
-    assert_eq!(app.phase_advance, Some(PhaseAdvance::Continue));
-    assert_eq!(app.plan_execution, Some(PlanExecution { phase_index: 0 }));
+    assert_eq!(app.plan_run.phase_advance, Some(PhaseAdvance::Continue));
+    assert_eq!(
+        app.plan_run.plan_execution,
+        Some(PlanExecution { phase_index: 0 })
+    );
     drain_tasks(&mut tasks).await;
 }
 
@@ -8491,7 +8495,7 @@ fn question_move_keeps_selected_option_visible_in_compact_modal() {
     clamp_scrolls(&mut app, area);
 
     assert!(
-        app.modal_scroll > 0,
+        app.modal_ui.modal_scroll > 0,
         "moving to a lower option should scroll the compact question body"
     );
     assert!(!app.pending_question_visibility);
@@ -8522,7 +8526,10 @@ fn question_move_keeps_selected_option_visible_in_compact_modal() {
         *multiple,
         *cursor,
     );
-    let visible_bottom = app.modal_scroll.saturating_add(metrics.body_height);
+    let visible_bottom = app
+        .modal_ui
+        .modal_scroll
+        .saturating_add(metrics.body_height);
     assert!(
         metrics.selected_end <= visible_bottom,
         "selected option bottom should stay visible"
@@ -8587,16 +8594,19 @@ fn question_move_keeps_last_option_visible_in_tiny_modal() {
         *multiple,
         *cursor,
     );
-    let visible_bottom = app.modal_scroll.saturating_add(metrics.body_height);
+    let visible_bottom = app
+        .modal_ui
+        .modal_scroll
+        .saturating_add(metrics.body_height);
     assert!(
         metrics.selected_end <= visible_bottom,
         "last option (end {}) should stay visible above viewport bottom {}; scroll={}",
         metrics.selected_end,
         visible_bottom,
-        app.modal_scroll
+        app.modal_ui.modal_scroll
     );
     assert!(
-        app.modal_scroll > 0,
+        app.modal_ui.modal_scroll > 0,
         "scrolling to the last option should advance modal_scroll past 0"
     );
 }
@@ -8619,12 +8629,13 @@ fn clamp_scrolls_keeps_context_cursor_visible_below_header_lines() {
         .selected_line
         .expect("context ledger row should be selected");
     let visible_bottom = app
+        .modal_ui
         .modal_scroll
         .saturating_add(metrics.body_height.saturating_sub(1));
     assert!(
-        selected_line >= app.modal_scroll && selected_line <= visible_bottom,
+        selected_line >= app.modal_ui.modal_scroll && selected_line <= visible_bottom,
         "selected line {selected_line} should be within {}..={visible_bottom}",
-        app.modal_scroll
+        app.modal_ui.modal_scroll
     );
 }
 
@@ -8638,12 +8649,12 @@ fn clamp_scrolls_preserves_manual_context_modal_page_scroll() {
     app.context_state.cursor = 0;
 
     app.reduce(AppAction::ScrollModal(8));
-    let manual_scroll = app.modal_scroll;
+    let manual_scroll = app.modal_ui.modal_scroll;
     assert!(manual_scroll > 0, "fixture should scroll manually");
 
     clamp_scrolls(&mut app, Rect::new(0, 0, 90, 18));
 
-    assert_eq!(app.modal_scroll, manual_scroll);
+    assert_eq!(app.modal_ui.modal_scroll, manual_scroll);
     assert!(app.context_state.manual_scroll);
 }
 
@@ -8684,27 +8695,27 @@ fn clamp_scrolls_consumes_todo_scroll_request_and_reaches_in_progress() {
             },
         })
         .collect();
-    app.scroll_todo_in_progress_into_view = true;
+    app.scroll.scroll_todo_in_progress_into_view = true;
 
     clamp_scrolls(&mut app, Rect::new(0, 0, 120, 32));
 
     // The request is consumed and the view scrolled down toward the item.
-    assert!(!app.scroll_todo_in_progress_into_view);
-    assert!(app.sidebar_scroll > 0);
-    assert!(app.sidebar_scroll <= 60);
+    assert!(!app.scroll.scroll_todo_in_progress_into_view);
+    assert!(app.scroll.sidebar_scroll > 0);
+    assert!(app.scroll.sidebar_scroll <= 60);
 }
 
 #[test]
 fn clamp_scrolls_clears_todo_scroll_request_when_sidebar_hidden() {
     let mut app = app();
-    app.scroll_todo_in_progress_into_view = true;
+    app.scroll.scroll_todo_in_progress_into_view = true;
 
     // 80 cols hides the sidebar (see the focus test above).
     clamp_scrolls(&mut app, Rect::new(0, 0, 80, 24));
 
     // The request is dropped rather than lingering for a later frame.
-    assert!(!app.scroll_todo_in_progress_into_view);
-    assert_eq!(app.sidebar_scroll, 0);
+    assert!(!app.scroll.scroll_todo_in_progress_into_view);
+    assert_eq!(app.scroll.sidebar_scroll, 0);
 }
 
 #[test]
@@ -8743,11 +8754,14 @@ fn tool_detail_modal_scroll_is_clamped_to_rendered_content() {
     let max_scroll = crate::tui::widgets::modal::max_modal_scroll(&app, area)
         .expect("tool detail should report a max scroll");
     assert!(max_scroll > 0, "fixture should be scrollable");
-    assert!(app.modal_scroll > max_scroll, "fixture should overscroll");
+    assert!(
+        app.modal_ui.modal_scroll > max_scroll,
+        "fixture should overscroll"
+    );
 
     clamp_scrolls(&mut app, area);
 
-    assert_eq!(app.modal_scroll, max_scroll);
+    assert_eq!(app.modal_ui.modal_scroll, max_scroll);
 }
 
 #[test]
@@ -9131,7 +9145,7 @@ fn sync_plan_store_snapshot_auto_opens_new_review_findings() {
     assert_eq!(app.active_mode(), AgentMode::Planning);
     assert_eq!(app.task_state, TaskState::Running);
     assert_eq!(app.plan.findings.len(), 1);
-    assert_eq!(app.plan_scroll, u16::MAX);
+    assert_eq!(app.scroll.plan_scroll, u16::MAX);
 }
 
 #[test]
@@ -9194,17 +9208,17 @@ fn finished_planning_run_snaps_plan_canvas_to_top() {
         .set_section("Summary", "Ship the summary at the top.");
     sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Planning), &mut edited);
     assert!(edited, "a planning edit arms the plan-ready snap");
-    assert_eq!(app.plan_scroll, u16::MAX);
+    assert_eq!(app.scroll.plan_scroll, u16::MAX);
 
     assert!(
         !show_plan_top_when_ready(&mut app, Some(AgentMode::Planning), true, &mut edited),
         "a live run keeps auto-following the newest edit"
     );
-    assert_eq!(app.plan_scroll, u16::MAX);
+    assert_eq!(app.scroll.plan_scroll, u16::MAX);
 
     // The run ends: the ready plan opens on its summary, once.
     assert!(show_plan_top_when_ready(&mut app, None, false, &mut edited));
-    assert_eq!(app.plan_scroll, 0);
+    assert_eq!(app.scroll.plan_scroll, 0);
     assert!(!edited, "the arm is consumed");
 
     // Later idle frames must not fight a manual scroll.
@@ -9215,7 +9229,7 @@ fn finished_planning_run_snaps_plan_canvas_to_top() {
         false,
         &mut edited
     ));
-    assert_eq!(app.plan_scroll, 12);
+    assert_eq!(app.scroll.plan_scroll, 12);
 }
 
 // The snap is keyed on the run, not the visible pane: switching to the chat
@@ -9229,10 +9243,10 @@ fn finished_planning_run_snaps_top_from_the_agent_view() {
     let mut plan = app.plan.clone();
     plan.edit().set_section("Summary", "Summary first.");
     sync_plan_store_snapshot(&mut app, &plan, Some(AgentMode::Planning), &mut edited);
-    assert_eq!(app.plan_scroll, u16::MAX);
+    assert_eq!(app.scroll.plan_scroll, u16::MAX);
 
     assert!(show_plan_top_when_ready(&mut app, None, false, &mut edited));
-    assert_eq!(app.plan_scroll, 0);
+    assert_eq!(app.scroll.plan_scroll, 0);
 }
 
 #[test]
@@ -9240,7 +9254,7 @@ fn finished_non_planning_run_keeps_plan_scroll() {
     let mut app = app();
     app.reduce(AppAction::SetView(View::Agent));
     app.plan = sample_plan("Implementation plan");
-    app.plan_scroll = 9;
+    app.scroll.plan_scroll = 9;
 
     let mut edited = false;
     assert!(!show_plan_top_when_ready(
@@ -9253,7 +9267,7 @@ fn finished_non_planning_run_keeps_plan_scroll() {
         !show_plan_top_when_ready(&mut app, None, false, &mut edited),
         "only a finished planning run repositions the canvas"
     );
-    assert_eq!(app.plan_scroll, 9);
+    assert_eq!(app.scroll.plan_scroll, 9);
 }
 
 #[test]
@@ -9263,7 +9277,7 @@ fn planning_run_without_plan_edits_keeps_plan_scroll() {
     let mut app = app();
     app.reduce(AppAction::SetView(View::Plan));
     app.plan = sample_plan("Parked plan");
-    app.plan_scroll = 7;
+    app.scroll.plan_scroll = 7;
 
     let mut edited = false;
     assert!(!show_plan_top_when_ready(
@@ -9278,7 +9292,7 @@ fn planning_run_without_plan_edits_keeps_plan_scroll() {
         false,
         &mut edited
     ));
-    assert_eq!(app.plan_scroll, 7);
+    assert_eq!(app.scroll.plan_scroll, 7);
 }
 
 // A follow-on coding run (plan implementation, goal continuation) owns the
@@ -9308,14 +9322,14 @@ fn follow_on_coding_run_drops_a_stale_plan_ready_arm() {
         false,
         &mut edited
     ));
-    assert_eq!(app.plan_scroll, u16::MAX);
+    assert_eq!(app.scroll.plan_scroll, u16::MAX);
 }
 
 // Nothing to show the top of: an empty canvas consumes the arm without moving.
 #[test]
 fn finished_planning_run_with_empty_plan_keeps_scroll() {
     let mut app = app();
-    app.plan_scroll = 3;
+    app.scroll.plan_scroll = 3;
     let mut edited = true;
 
     assert!(!show_plan_top_when_ready(
@@ -9324,7 +9338,7 @@ fn finished_planning_run_with_empty_plan_keeps_scroll() {
         false,
         &mut edited
     ));
-    assert_eq!(app.plan_scroll, 3);
+    assert_eq!(app.scroll.plan_scroll, 3);
     assert!(!edited, "the arm is consumed even with nothing to show");
 }
 

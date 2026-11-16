@@ -29,7 +29,7 @@ pub(super) struct TranscriptRenderOptions<'a> {
 }
 
 pub(super) fn execution_group_expanded_for_item(app: &AppState, item: &TranscriptItem) -> bool {
-    if app.screen_reader_mode {
+    if app.modes.screen_reader_mode {
         return matches!(item, TranscriptItem::ExecutionGroup(_));
     }
     match item {
@@ -43,7 +43,7 @@ pub(super) fn serenity_reasoning_is_active(
     index: usize,
     item: &TranscriptItem,
 ) -> bool {
-    app.serenity_mode
+    app.modes.serenity_mode
         && app.task_state.is_busy()
         && matches!(item, TranscriptItem::ReasoningSummary { .. })
         && app.transcript.first_trailing_queued_index().checked_sub(1) == Some(index)

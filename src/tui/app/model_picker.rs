@@ -795,7 +795,7 @@ mod tests {
             "anthropic:claude-b".to_string(),
             ReasoningSelection::High,
         );
-        app.pending_composer_state = Some(Box::new(state));
+        app.modal_ui.pending_composer_state = Some(Box::new(state));
         app.model_picker.target = ModelPickerTarget::ComposerPrimary;
 
         app.reduce(AppAction::OpenModal(ModalKind::Picker(
@@ -835,7 +835,7 @@ mod tests {
         state.effort_index = 4;
         state
             .set_focused_model_selection("anthropic:claude-b".to_string(), ReasoningSelection::Low);
-        app.pending_composer_state = Some(Box::new(state));
+        app.modal_ui.pending_composer_state = Some(Box::new(state));
         app.model_picker.target = ModelPickerTarget::ComposerBackup;
         app.reduce(AppAction::OpenModal(ModalKind::Picker(
             crate::tui::event::PickerModal::ModelPicker {
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn composer_without_model_entries_keeps_reset_row() {
         let mut app = app();
-        app.pending_composer_state = Some(Box::new(
+        app.modal_ui.pending_composer_state = Some(Box::new(
             crate::tui::agent_composer::AgentComposerState::new(),
         ));
         app.model_picker.target = ModelPickerTarget::ComposerPrimary;

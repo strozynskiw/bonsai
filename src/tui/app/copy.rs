@@ -112,7 +112,7 @@ impl AppState {
 
     /// Copy the current modal text selection to the clipboard.
     pub(super) fn copy_modal_selection(&mut self) {
-        let Some(sel) = self.modal_selection else {
+        let Some(sel) = self.modal_ui.modal_selection else {
             return;
         };
         let (start, end) = sel.range();
@@ -120,7 +120,7 @@ impl AppState {
             return;
         }
         let text = {
-            let body_lines = self.modal_body_lines.borrow();
+            let body_lines = self.modal_ui.modal_body_lines.borrow();
             let plain = crate::tui::widgets::modal::modal_body_plain_text(&body_lines);
             crate::tui::widgets::modal::modal_text_range(&plain, start, end)
         };

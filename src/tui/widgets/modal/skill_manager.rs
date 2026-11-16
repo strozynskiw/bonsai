@@ -28,7 +28,7 @@ pub(super) fn render_skill_manager(
             split: ListDetailSplit::Horizontal,
             detail_focused: true,
             footer_lines,
-            modal_scroll: app.modal_scroll,
+            modal_scroll: app.modal_ui.modal_scroll,
         },
         |frame, list_area, _detail_area| {
             let list_lines: Vec<Line<'static>> = if rows.is_empty() {

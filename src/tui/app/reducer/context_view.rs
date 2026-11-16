@@ -7,10 +7,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
     match action {
         AppAction::OpenContextModal => {
             if let Some(report) = app.latest_context_report.clone() {
-                app.modal_scroll = 0;
+                app.modal_ui.modal_scroll = 0;
                 app.init_context_view_state(&report);
                 app.pending_question_visibility = false;
-                app.modal_return_focus = Some(app.focus);
+                app.modal_ui.modal_return_focus = Some(app.focus);
                 app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
                     Box::new(report),
                 )));
@@ -19,9 +19,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         }
         AppAction::OpenEpisodesModal => {
             if let Some(report) = app.latest_context_report.clone() {
-                app.modal_scroll = 0;
+                app.modal_ui.modal_scroll = 0;
                 app.pending_question_visibility = false;
-                app.modal_return_focus = Some(app.focus);
+                app.modal_ui.modal_return_focus = Some(app.focus);
                 app.modal = Some(ModalKind::Detail(
                     crate::tui::event::DetailModal::Episodes {
                         report: Box::new(report),
@@ -32,10 +32,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::OpenContextPreviewModal(report) => {
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.init_context_view_state(&report);
             app.pending_question_visibility = false;
-            app.modal_return_focus = Some(app.focus);
+            app.modal_ui.modal_return_focus = Some(app.focus);
             app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
                 Box::new(report),
             )));
@@ -176,7 +176,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 )))
             ) {
                 app.context_state.view_mode = app.context_state.view_mode.cycled();
-                app.modal_scroll = 0;
+                app.modal_ui.modal_scroll = 0;
                 app.context_state.manual_scroll = false;
             }
         }

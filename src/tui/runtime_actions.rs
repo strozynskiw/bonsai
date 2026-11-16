@@ -229,7 +229,7 @@ pub(super) async fn handle_runtime_action(
 ) -> RuntimeActionResult {
     match action {
         AppAction::CycleApprovalLevel => {
-            let next = app.approval_level.cycled();
+            let next = app.modes.approval_level.cycled();
             deps.yolo_mode.set_level(next);
             app.reduce(AppAction::SetApprovalLevel(next));
             persist_approval_level(app, deps.storage, next).await;
@@ -1818,7 +1818,7 @@ async fn open_model_picker_for_composer(app: &mut AppState, deps: RuntimeActionD
         AgentComposerField::BackupModel => crate::tui::app::ModelPickerTarget::ComposerBackup,
         _ => return,
     };
-    app.pending_composer_state = Some(state);
+    app.modal_ui.pending_composer_state = Some(state);
     app.model_picker.target = target;
     app.reduce(AppAction::OpenModal(ModalKind::Picker(
         crate::tui::event::PickerModal::ModelPicker { entries },
@@ -2474,7 +2474,7 @@ async fn override_selected_subtask_model(app: &mut AppState, deps: RuntimeAction
         );
         return;
     }
-    app.pending_agent_model_override = Some(agent.to_string());
+    app.modal_ui.pending_agent_model_override = Some(agent.to_string());
     app.reduce(AppAction::OpenModal(ModalKind::Picker(
         crate::tui::event::PickerModal::ModelPicker { entries },
     )));
@@ -2499,7 +2499,7 @@ async fn submit_model_picker(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     // Self-review target: `/self-review model` pins the reviewer lane's model.
     // Persisted under the SelfReview settings id (not the live name-keyed
     // override map) so it survives a restart, exactly like a `/subagents` model.
-    if std::mem::take(&mut app.pending_self_review_model) {
+    if std::mem::take(&mut app.modal_ui.pending_self_review_model) {
         let primary_effort = crate::model_catalog::parse_reasoning_effort(reasoning.as_str())
             .ok()
             .map(|_| reasoning.as_str().to_string());
@@ -2545,7 +2545,7 @@ async fn submit_model_picker(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     // agent's provider/model/effort. Record the override (no session mutation)
     // and return to the subagents view; the next delegation to that agent picks
     // it up.
-    if let Some(agent) = app.pending_agent_model_override.take() {
+    if let Some(agent) = app.modal_ui.pending_agent_model_override.take() {
         let connection_id = entry.connection_id.parse().ok();
         let model_id = entry
             .model_id
@@ -2659,9 +2659,9 @@ async fn start_refresh(app: &mut AppState, deps: RuntimeActionDeps<'_>) {
     }
 
     let generation = app.next_local_model_wizard_request_id();
-    app.modal_scroll = 0;
+    app.modal_ui.modal_scroll = 0;
     app.pending_question_visibility = false;
-    app.modal_return_focus = Some(app.focus);
+    app.modal_ui.modal_return_focus = Some(app.focus);
     app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Refresh {
         sources,
         cursor: 0,
@@ -2726,7 +2726,7 @@ fn submit_composer_model_picker(app: &mut AppState, entries: &[ModelOption]) -> 
         return false;
     }
     if app.model_picker_reset_selected() {
-        let Some(mut state) = app.pending_composer_state.take() else {
+        let Some(mut state) = app.modal_ui.pending_composer_state.take() else {
             return true;
         };
         match target {
@@ -2748,7 +2748,7 @@ fn submit_composer_model_picker(app: &mut AppState, entries: &[ModelOption]) -> 
     let reasoning = app.model_picker_selected_reasoning(&entry);
 
     // Composer-target mode writes only the explicitly targeted chain slot.
-    if let Some(mut state) = app.pending_composer_state.take() {
+    if let Some(mut state) = app.modal_ui.pending_composer_state.take() {
         let selector = format!("{}:{}", entry.connection_id, entry.display_model());
         match target {
             crate::tui::app::ModelPickerTarget::ComposerPrimary => {
@@ -3155,7 +3155,7 @@ async fn apply_mode_picker_axis(
             let Some(mode) = crate::self_review::SelfReviewMode::parse(label) else {
                 return;
             };
-            app.self_review_mode = mode;
+            app.modes.self_review_mode = mode;
         }
         crate::tui::event::ModeAxisId::SandboxConfinement => {
             let Some(sandbox) = app.sandbox.clone() else {
@@ -3367,7 +3367,7 @@ async fn apply_setting(
         // Flip the live gate first so the change takes effect this session;
         // persistence failing leaves the toggle active but unremembered.
         crate::logging::set_support_log_enabled(on);
-        app.support_log_enabled = on;
+        app.modes.support_log_enabled = on;
         if let Err(error) = deps.storage.set_support_log_enabled(on).await {
             push_command_message(
                 app,
@@ -3532,7 +3532,7 @@ mod tests {
         state.effort_index = 4;
         state.fallback_model.set_text("codex:backup".to_string());
         state.fallback_effort_index = 2;
-        app.pending_composer_state = Some(Box::new(state));
+        app.modal_ui.pending_composer_state = Some(Box::new(state));
         app.model_picker.target = crate::tui::app::ModelPickerTarget::ComposerBackup;
         app.model_picker.cursor = 0;
 
@@ -3560,7 +3560,7 @@ mod tests {
             .fallback_model
             .set_text("codex:old-backup".to_string());
         state.fallback_effort_index = 4;
-        app.pending_composer_state = Some(Box::new(state));
+        app.modal_ui.pending_composer_state = Some(Box::new(state));
         app.model_picker.target = crate::tui::app::ModelPickerTarget::ComposerBackup;
         app.model_picker.cursor = 1;
         app.model_picker.reasoning_cursor = 2;
@@ -3806,7 +3806,7 @@ mod tests {
         )
         .await;
         assert_eq!(yolo.level(), crate::tool::ApprovalLevel::Ask);
-        assert_eq!(app.approval_level, crate::tool::ApprovalLevel::Ask);
+        assert_eq!(app.modes.approval_level, crate::tool::ApprovalLevel::Ask);
         assert_eq!(
             storage.storage.approval_level().await.unwrap(),
             Some(crate::tool::ApprovalLevel::Ask)
@@ -3827,7 +3827,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            app.self_review_mode,
+            app.modes.self_review_mode,
             crate::self_review::SelfReviewMode::Ask
         );
     }

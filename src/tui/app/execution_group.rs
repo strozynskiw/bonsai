@@ -187,11 +187,11 @@ impl AppState {
     }
 
     pub(crate) fn execution_group_is_expanded(&self, group_id: u64) -> bool {
-        !self.serenity_mode || self.expanded_execution_groups.contains(&group_id)
+        !self.modes.serenity_mode || self.expanded_execution_groups.contains(&group_id)
     }
 
     pub(crate) fn toggle_execution_group_expansion(&mut self, group_id: u64) {
-        if !self.serenity_mode {
+        if !self.modes.serenity_mode {
             self.set_execution_group_tool_selection(group_id, 0);
             return;
         }

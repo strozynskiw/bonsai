@@ -19,8 +19,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.focus = Focus::Transcript;
                 app.active_group_tool_selection = None;
                 app.transcript_focus = Some(position.item);
-                app.transcript_autoscroll = false;
-                app.scroll_transcript_focus_into_view = false;
+                app.scroll.transcript_autoscroll = false;
+                app.scroll.scroll_transcript_focus_into_view = false;
                 match kind {
                     SelectionKind::Word => app.apply_transcript_word_select(position),
                     SelectionKind::Line => app.apply_transcript_line_select(position),
@@ -45,13 +45,14 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.focus = Focus::Transcript;
                 app.active_group_tool_selection = None;
                 app.transcript_focus = Some(position.item);
-                app.transcript_autoscroll = false;
-                app.scroll_transcript_focus_into_view = false;
+                app.scroll.transcript_autoscroll = false;
+                app.scroll.scroll_transcript_focus_into_view = false;
                 if scroll_delta != 0 {
-                    app.transcript_scroll = crate::tui::app::reducer::scroll::clamped_scroll_usize(
-                        app.transcript_scroll,
-                        scroll_delta,
-                    );
+                    app.scroll.transcript_scroll =
+                        crate::tui::app::reducer::scroll::clamped_scroll_usize(
+                            app.scroll.transcript_scroll,
+                            scroll_delta,
+                        );
                 }
                 app.apply_transcript_drag(position);
                 app.pointer_selecting = true;
@@ -104,8 +105,10 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.transcript_selection = None;
             app.active_group_tool_selection = None;
             if scroll_delta != 0 {
-                app.plan_scroll =
-                    crate::tui::app::reducer::scroll::clamped_scroll(app.plan_scroll, scroll_delta);
+                app.scroll.plan_scroll = crate::tui::app::reducer::scroll::clamped_scroll(
+                    app.scroll.plan_scroll,
+                    scroll_delta,
+                );
             }
             let anchor = app
                 .plan_selection
@@ -127,13 +130,13 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.transcript_selection = None;
             app.plan_selection = None;
             app.active_group_tool_selection = None;
-            let body_lines = app.modal_body_lines.borrow();
+            let body_lines = app.modal_ui.modal_body_lines.borrow();
             let plain = crate::tui::widgets::modal::modal_body_plain_text(&body_lines);
             match kind {
                 SelectionKind::Word => {
                     let (start, end) = crate::tui::text_bounds::word_bounds_at(&plain, offset);
                     if start != end {
-                        app.modal_selection = Some(ModalSelection {
+                        app.modal_ui.modal_selection = Some(ModalSelection {
                             anchor: start,
                             caret: end,
                         });
@@ -142,14 +145,14 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 SelectionKind::Line => {
                     let (start, end) = crate::tui::text_bounds::line_bounds_at(&plain, offset);
                     if start != end {
-                        app.modal_selection = Some(ModalSelection {
+                        app.modal_ui.modal_selection = Some(ModalSelection {
                             anchor: start,
                             caret: end,
                         });
                     }
                 }
                 SelectionKind::Position => {
-                    app.modal_selection = Some(ModalSelection {
+                    app.modal_ui.modal_selection = Some(ModalSelection {
                         anchor: offset,
                         caret: offset,
                     });
@@ -169,8 +172,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::ModalDrag { offset } => {
-            if let Some(sel) = app.modal_selection {
-                app.modal_selection = Some(ModalSelection {
+            if let Some(sel) = app.modal_ui.modal_selection {
+                app.modal_ui.modal_selection = Some(ModalSelection {
                     anchor: sel.anchor,
                     caret: offset,
                 });
@@ -184,7 +187,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // card, scrollbar drags, …) from re-copying a stale selection.
             if app.pointer_selecting {
                 app.pointer_selecting = false;
-                if app.modal_selection.is_some() {
+                if app.modal_ui.modal_selection.is_some() {
                     app.copy_modal_selection();
                 } else {
                     app.auto_copy_text_selection();
@@ -204,7 +207,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             }
         }
         AppAction::ClearSelection => {
-            app.modal_selection = None;
+            app.modal_ui.modal_selection = None;
             if matches!(app.focus, Focus::Input) {
                 app.composer.clear_selection();
             } else if matches!(app.focus, Focus::Plan) {
@@ -214,7 +217,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 if matches!(app.focus, Focus::Transcript) {
                     app.active_group_tool_selection = None;
                     app.transcript_focus = None;
-                    app.scroll_transcript_focus_into_view = false;
+                    app.scroll.scroll_transcript_focus_into_view = false;
                 }
             }
         }
@@ -253,14 +256,14 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                     _ => None,
                 };
                 if let Some(group_id) = group_id {
-                    if app.serenity_mode {
+                    if app.modes.serenity_mode {
                         app.toggle_execution_group_expansion(group_id);
                     } else {
                         app.set_execution_group_tool_selection(group_id, 0);
                     }
                 } else {
-                    app.modal_scroll = 0;
-                    app.modal_return_focus = Some(Focus::Transcript);
+                    app.modal_ui.modal_scroll = 0;
+                    app.modal_ui.modal_return_focus = Some(Focus::Transcript);
                     app.modal = if let Some(tool_id) = tool_id {
                         Some(ModalKind::Detail(
                             crate::tui::event::DetailModal::ToolDetail { tool_id },
@@ -278,13 +281,13 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if matches!(app.focus, Focus::Transcript) {
                 app.active_group_tool_selection = None;
                 app.transcript_focus = None;
-                app.scroll_transcript_focus_into_view = false;
+                app.scroll.scroll_transcript_focus_into_view = false;
             }
         }
         AppAction::OpenPlanFindings => {
             if !app.plan.findings.is_empty() {
-                app.modal_scroll = 0;
-                app.modal_return_focus = Some(Focus::Plan);
+                app.modal_ui.modal_scroll = 0;
+                app.modal_ui.modal_return_focus = Some(Focus::Plan);
                 app.modal = Some(ModalKind::Detail(
                     crate::tui::event::DetailModal::PlanFindingDetail { index: 0 },
                 ));
@@ -300,7 +303,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 if count > 0 {
                     let next = (index as i64 + delta as i64).clamp(0, count as i64 - 1) as usize;
                     if next != index {
-                        app.modal_scroll = 0;
+                        app.modal_ui.modal_scroll = 0;
                         app.modal = Some(ModalKind::Detail(
                             crate::tui::event::DetailModal::PlanFindingDetail { index: next },
                         ));
@@ -327,8 +330,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                                 .cloned()
                         });
                 if let Some(tool_id) = tool_id {
-                    app.modal_scroll = 0;
-                    app.modal_return_focus = Some(Focus::Plan);
+                    app.modal_ui.modal_scroll = 0;
+                    app.modal_ui.modal_return_focus = Some(Focus::Plan);
                     app.modal = Some(ModalKind::Detail(
                         crate::tui::event::DetailModal::ToolDetail { tool_id },
                     ));
@@ -337,13 +340,13 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         }
         AppAction::OpenToolDetail(tool_id) => {
             let focused_tool = app.focus_tool_for_activation(&tool_id);
-            app.modal_scroll = 0;
-            app.modal_return_focus = if focused_tool || app.inline_selection_matches_tool(&tool_id)
-            {
-                Some(Focus::Transcript)
-            } else {
-                None
-            };
+            app.modal_ui.modal_scroll = 0;
+            app.modal_ui.modal_return_focus =
+                if focused_tool || app.inline_selection_matches_tool(&tool_id) {
+                    Some(Focus::Transcript)
+                } else {
+                    None
+                };
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::ToolDetail { tool_id },
             ));
@@ -355,8 +358,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 .and_then(|activity| activity.diff.clone())
                 .is_some()
             {
-                app.modal_scroll = 0;
-                app.modal_return_focus = if app.inline_selection_matches_tool(&tool_id) {
+                app.modal_ui.modal_scroll = 0;
+                app.modal_ui.modal_return_focus = if app.inline_selection_matches_tool(&tool_id) {
                     Some(Focus::Transcript)
                 } else {
                     None

@@ -278,9 +278,9 @@ pub(super) fn resolved_scroll(
 fn ensure(state: &mut LayoutState, app: &AppState, width: usize) {
     let fingerprint = Fingerprint {
         width,
-        serenity_mode: app.serenity_mode,
-        reduced_motion: app.reduced_motion,
-        linear_output: app.screen_reader_mode,
+        serenity_mode: app.modes.serenity_mode,
+        reduced_motion: app.modes.reduced_motion,
+        linear_output: app.modes.screen_reader_mode,
         theme_generation: theme::generation(),
     };
     if state.fingerprint != Some(fingerprint) {
@@ -349,7 +349,7 @@ fn refresh_items(state: &mut LayoutState, app: &AppState, width: usize) {
             expanded,
             reasoning_active,
             group_tool_selected: group_tool_selection(app, item),
-            animated_tick: (!app.reduced_motion && item_is_animated(item, reasoning_active))
+            animated_tick: (!app.modes.reduced_motion && item_is_animated(item, reasoning_active))
                 .then_some(app.animation_tick()),
         };
         if state.items[index].key == Some(key) {
@@ -368,8 +368,8 @@ fn refresh_items(state: &mut LayoutState, app: &AppState, width: usize) {
                     selected,
                     focused,
                     active_group_tool_selection: app.active_group_tool_selection.as_ref(),
-                    serenity_mode: app.serenity_mode,
-                    linear_output: app.screen_reader_mode,
+                    serenity_mode: app.modes.serenity_mode,
+                    linear_output: app.modes.screen_reader_mode,
                     execution_group_expanded: expanded,
                     reasoning_active,
                     permission_command,

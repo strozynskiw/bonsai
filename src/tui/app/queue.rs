@@ -88,21 +88,26 @@ impl AppState {
     }
 
     pub fn next_queued_input_id(&mut self) -> u64 {
-        let id = self.next_queued_input_id;
-        self.next_queued_input_id = self.next_queued_input_id.saturating_add(1);
+        let id = self.queue.next_queued_input_id;
+        self.queue.next_queued_input_id = self.queue.next_queued_input_id.saturating_add(1);
         id
     }
 
     pub fn first_queued_input(&self) -> Option<&QueuedInput> {
-        self.queued_inputs.first()
+        self.queue.queued_inputs.first()
     }
 
     pub fn last_queued_input(&self) -> Option<&QueuedInput> {
-        self.queued_inputs.last()
+        self.queue.queued_inputs.last()
     }
 
     pub(super) fn promote_queued_input_to_steer(&mut self, id: u64) {
-        let Some(queued) = self.queued_inputs.iter_mut().find(|queued| queued.id == id) else {
+        let Some(queued) = self
+            .queue
+            .queued_inputs
+            .iter_mut()
+            .find(|queued| queued.id == id)
+        else {
             return;
         };
         queued.delivery = FollowUpDelivery::Steer;
@@ -121,12 +126,16 @@ impl AppState {
     }
 
     pub fn queued_input_ids(&self) -> Vec<u64> {
-        self.queued_inputs.iter().map(|queued| queued.id).collect()
+        self.queue
+            .queued_inputs
+            .iter()
+            .map(|queued| queued.id)
+            .collect()
     }
 
     pub fn next_deferred_command_id(&mut self) -> u64 {
-        let id = self.next_deferred_command_id;
-        self.next_deferred_command_id = self.next_deferred_command_id.saturating_add(1);
+        let id = self.queue.next_deferred_command_id;
+        self.queue.next_deferred_command_id = self.queue.next_deferred_command_id.saturating_add(1);
         id
     }
 
@@ -179,7 +188,7 @@ impl AppState {
         self.composer.reset_navigation();
         self.reset_composer_scroll();
         self.completion = CompletionState::default();
-        self.queued_inputs.push(QueuedInput {
+        self.queue.queued_inputs.push(QueuedInput {
             id,
             text: text.clone(),
             content,
@@ -199,13 +208,14 @@ impl AppState {
     }
 
     pub(super) fn mark_queued_user_message_sent(&mut self, id: u64, text: String) {
-        self.queued_inputs.retain(|queued| queued.id != id);
+        self.queue.queued_inputs.retain(|queued| queued.id != id);
         if let Some(index) = self
+            .queue
             .removed_queued_input_ids
             .iter()
             .position(|removed| *removed == id)
         {
-            self.removed_queued_input_ids.remove(index);
+            self.queue.removed_queued_input_ids.remove(index);
             self.set_session_toast(
                 "Message was already sent; cancellation arrived too late.".to_string(),
             );
@@ -224,15 +234,15 @@ impl AppState {
     }
 
     pub(super) fn remove_queued_input(&mut self, id: u64) {
-        let queue_len = self.queued_inputs.len();
-        self.queued_inputs.retain(|queued| queued.id != id);
-        let queue_changed = self.queued_inputs.len() != queue_len;
+        let queue_len = self.queue.queued_inputs.len();
+        self.queue.queued_inputs.retain(|queued| queued.id != id);
+        let queue_changed = self.queue.queued_inputs.len() != queue_len;
         if queue_changed {
             const MAX_REMOVED_IDS: usize = 128;
-            if self.removed_queued_input_ids.len() == MAX_REMOVED_IDS {
-                self.removed_queued_input_ids.pop_front();
+            if self.queue.removed_queued_input_ids.len() == MAX_REMOVED_IDS {
+                self.queue.removed_queued_input_ids.pop_front();
             }
-            self.removed_queued_input_ids.push_back(id);
+            self.queue.removed_queued_input_ids.push_back(id);
         }
 
         let Some(index) = self.transcript.iter().position(|item| {
@@ -289,7 +299,7 @@ mod tests {
         assert_eq!(app.input(), "");
         assert_eq!(app.composer.text, "");
         assert_eq!(
-            app.queued_inputs,
+            app.queue.queued_inputs,
             vec![QueuedInput {
                 id: 42,
                 text: "queued text".to_string(),
@@ -320,7 +330,7 @@ mod tests {
             text: "queued text".to_string(),
         }));
 
-        assert!(app.queued_inputs.is_empty());
+        assert!(app.queue.queued_inputs.is_empty());
         assert!(matches!(
             app.transcript.as_slice(),
             [TranscriptItem::UserMessage { text }] if text == "queued text"
@@ -347,7 +357,7 @@ mod tests {
         assert_eq!(app.input(), "");
         assert_eq!(app.composer.text, "");
         assert_eq!(
-            app.queued_inputs,
+            app.queue.queued_inputs,
             vec![
                 QueuedInput {
                     id: 1,
@@ -453,7 +463,7 @@ mod tests {
         app.reduce(AppAction::CancelQueuedInput { id: 1 });
 
         assert_eq!(
-            app.queued_inputs,
+            app.queue.queued_inputs,
             vec![QueuedInput {
                 id: 2,
                 text: "second".to_string(),
@@ -490,7 +500,7 @@ mod tests {
         app.reduce(AppAction::CancelFocusedQueuedInput);
 
         assert_eq!(
-            app.queued_inputs,
+            app.queue.queued_inputs,
             vec![QueuedInput {
                 id: 1,
                 text: "first".to_string(),
@@ -559,7 +569,7 @@ mod tests {
         assert_eq!(app.input(), "second");
         assert_eq!(app.composer.text, "second");
         assert_eq!(
-            app.queued_inputs,
+            app.queue.queued_inputs,
             vec![QueuedInput {
                 id: 1,
                 text: "first".to_string(),
@@ -586,7 +596,7 @@ mod tests {
 
         app.reduce(AppAction::DropQueuedInput);
 
-        assert!(app.queued_inputs.is_empty());
+        assert!(app.queue.queued_inputs.is_empty());
         assert!(app.transcript.is_empty());
     }
 }

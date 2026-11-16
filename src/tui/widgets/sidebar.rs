@@ -45,7 +45,7 @@ fn render_todo(f: &mut Frame, area: Rect, app: &AppState, width: usize) {
     }
     let lines = todo_lines(app, width);
     let line_count = lines.len();
-    let scroll = app.sidebar_scroll.min(max_scroll(line_count, area));
+    let scroll = app.scroll.sidebar_scroll.min(max_scroll(line_count, area));
     let paragraph = Paragraph::new(lines)
         .block(theme::frame(
             todo_panel_title(app),
@@ -101,7 +101,10 @@ fn todo_panel_title(app: &AppState) -> String {
         return "TODO".to_string();
     }
     let viewed = app.resolved_todo_phase().unwrap_or(0);
-    let active = app.plan_execution.map(|execution| execution.phase_index);
+    let active = app
+        .plan_run
+        .plan_execution
+        .map(|execution| execution.phase_index);
     if active.is_some() && Some(viewed) != active {
         format!("TODO · Phase {}/{total} (viewing)", viewed + 1)
     } else {
@@ -114,7 +117,7 @@ fn todo_panel_title(app: &AppState) -> String {
 /// The common path stays a borrow — only browsing a non-active phase clones.
 fn viewed_todo_items(app: &AppState) -> Cow<'_, [TodoItem]> {
     match app.resolved_todo_phase() {
-        Some(phase) if Some(phase) != app.plan_execution.map(|e| e.phase_index) => {
+        Some(phase) if Some(phase) != app.plan_run.plan_execution.map(|e| e.phase_index) => {
             Cow::Owned(app.plan.phase_todo_items(phase))
         }
         _ => Cow::Borrowed(app.todo.as_slice()),
@@ -195,7 +198,7 @@ fn todo_item(todo: &TodoItem, width: usize) -> Vec<Line<'static>> {
 /// Screen readers always get the textual card — colored half-blocks are noise
 /// to them.
 fn sidebar_bonsai_active(app: &AppState) -> bool {
-    if app.screen_reader_mode {
+    if app.modes.screen_reader_mode {
         return false;
     }
     viewed_todo_items(app).is_empty() || app.sidebar_bonsai.is_growing()
@@ -388,7 +391,7 @@ mod tests {
             "workspace".to_string(),
             None,
         );
-        app.screen_reader_mode = true;
+        app.modes.screen_reader_mode = true;
 
         terminal
             .draw(|frame| render(frame, area, &app))
@@ -434,15 +437,15 @@ mod tests {
         assert_eq!(todo_panel_title(&app), "TODO · Phase 1/4");
 
         // Phased run, phase 2 of 4 (1-based), not browsing.
-        app.plan_execution = Some(PlanExecution { phase_index: 1 });
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 1 });
         assert_eq!(todo_panel_title(&app), "TODO · Phase 2/4");
 
         // Browsing a non-active phase while running: marked `(viewing)`.
-        app.todo_phase_view = Some(3);
+        app.plan_run.todo_phase_view = Some(3);
         assert_eq!(todo_panel_title(&app), "TODO · Phase 4/4 (viewing)");
 
         // Browsing back to the active phase drops the marker.
-        app.todo_phase_view = Some(1);
+        app.plan_run.todo_phase_view = Some(1);
         assert_eq!(todo_panel_title(&app), "TODO · Phase 2/4");
 
         // A single-phase plan is not "multiple phases" — stays plain.
@@ -450,8 +453,8 @@ mod tests {
             phases: vec![phase("only")],
             ..Default::default()
         };
-        app.plan_execution = Some(PlanExecution { phase_index: 0 });
-        app.todo_phase_view = None;
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
+        app.plan_run.todo_phase_view = None;
         assert_eq!(todo_panel_title(&app), "TODO");
     }
 
@@ -486,20 +489,20 @@ mod tests {
             ..Default::default()
         };
         // Active phase 0 with a distinct live runtime list.
-        app.plan_execution = Some(PlanExecution { phase_index: 0 });
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
         app.todo = vec![TodoItem {
             content: "LIVE active item".to_string(),
             status: TodoStatus::InProgress,
         }];
         // Browsing phase 1 shows that phase's plan checklist, not `app.todo`.
-        app.todo_phase_view = Some(1);
+        app.plan_run.todo_phase_view = Some(1);
 
         let text = lines_text(&todo_lines(&app, 40));
         assert!(text.contains("phase two task"), "{text}");
         assert!(!text.contains("LIVE active item"), "{text}");
 
         // Following the active phase again shows the live list.
-        app.todo_phase_view = None;
+        app.plan_run.todo_phase_view = None;
         let text = lines_text(&todo_lines(&app, 40));
         assert!(text.contains("LIVE active item"), "{text}");
     }
@@ -570,14 +573,14 @@ mod tests {
             })
             .collect();
 
-        app.sidebar_scroll = u16::MAX;
+        app.scroll.sidebar_scroll = u16::MAX;
         let todo_area = area;
         let max = max_todo_scroll(&app, todo_area);
         app.clamp_sidebar_scroll(max);
         assert!(
-            app.sidebar_scroll <= max,
+            app.scroll.sidebar_scroll <= max,
             "sidebar_scroll {} should not exceed max_scroll {}",
-            app.sidebar_scroll,
+            app.scroll.sidebar_scroll,
             max
         );
         assert!(

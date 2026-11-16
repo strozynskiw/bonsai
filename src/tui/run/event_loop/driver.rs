@@ -186,7 +186,7 @@ impl TuiLoop {
                     error = %err,
                     "terminal raw mode was reset and could not be restored; disabled mouse capture"
                 );
-                if self.app.mouse_capture {
+                if self.app.modes.mouse_capture {
                     self.app.reduce(AppAction::ToggleMouseCapture);
                 }
             }

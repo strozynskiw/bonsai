@@ -42,8 +42,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 .selected_execution_group_tool()
                 .map(|activity| activity.id.clone())
             {
-                app.modal_scroll = 0;
-                app.modal_return_focus = Some(Focus::Transcript);
+                app.modal_ui.modal_scroll = 0;
+                app.modal_ui.modal_return_focus = Some(Focus::Transcript);
                 app.modal = Some(ModalKind::Detail(
                     crate::tui::event::DetailModal::ToolDetail { tool_id },
                 ));
@@ -56,8 +56,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 .filter(|activity| activity.diff.is_some())
                 .map(|activity| activity.id.clone())
             {
-                app.modal_scroll = 0;
-                app.modal_return_focus = Some(Focus::Transcript);
+                app.modal_ui.modal_scroll = 0;
+                app.modal_ui.modal_return_focus = Some(Focus::Transcript);
                 app.modal = Some(ModalKind::Detail(
                     crate::tui::event::DetailModal::DiffPreview { tool_id },
                 ));

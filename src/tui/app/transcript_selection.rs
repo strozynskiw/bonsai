@@ -194,8 +194,8 @@ impl AppState {
 
     pub(super) fn set_transcript_focus(&mut self, index: usize) {
         self.transcript_focus = Some(index);
-        self.transcript_autoscroll = false;
-        self.scroll_transcript_focus_into_view = true;
+        self.scroll.transcript_autoscroll = false;
+        self.scroll.scroll_transcript_focus_into_view = true;
     }
 
     pub(super) fn apply_transcript_word_select(&mut self, position: TranscriptPosition) {

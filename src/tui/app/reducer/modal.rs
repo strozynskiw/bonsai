@@ -38,9 +38,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 } else {
                     (app.background_tasks.clone(), 0)
                 };
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.pending_question_visibility = false;
-            app.modal_return_focus = Some(app.focus);
+            app.modal_ui.modal_return_focus = Some(app.focus);
             app.modal = Some(ModalKind::Manager(
                 crate::tui::event::ManagerModal::TaskList { tasks, cursor },
             ));
@@ -59,7 +59,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *cursor =
                     reconcile_cursor(current_tasks, previous_cursor, previous_id, |task| &task.id);
                 if current_tasks.is_empty() || previous_cursor != *cursor {
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }
@@ -73,7 +73,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
                     *cursor = next;
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }
@@ -95,9 +95,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 } else {
                     0
                 };
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.pending_question_visibility = false;
-            app.modal_return_focus = Some(app.focus);
+            app.modal_ui.modal_return_focus = Some(app.focus);
             app.modal = Some(ModalKind::Manager(
                 crate::tui::event::ManagerModal::PeerList { peers, cursor },
             ));
@@ -148,9 +148,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 } else {
                     UsageTab::Activity
                 };
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.pending_question_visibility = false;
-            app.modal_return_focus = Some(app.focus);
+            app.modal_ui.modal_return_focus = Some(app.focus);
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::UsageDashboard { dashboard, tab },
             ));
@@ -163,7 +163,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             })) = &mut app.modal
             {
                 *tab = tab.cycled(steps);
-                app.modal_scroll = 0;
+                app.modal_ui.modal_scroll = 0;
             }
         }
         AppAction::UsageDashboardSelectTab(selected) => {
@@ -174,7 +174,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 && *tab != selected
             {
                 *tab = selected;
-                app.modal_scroll = 0;
+                app.modal_ui.modal_scroll = 0;
             }
         }
         AppAction::RefreshMove(delta) => {
@@ -188,13 +188,13 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
                     *cursor = next;
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }
         AppAction::RefreshClose => {
             app.modal = None;
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.focus = Focus::Input;
         }
         AppAction::RefreshSourceUpdate {
@@ -236,9 +236,9 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 } else {
                     (app.subtasks.clone(), 0, SubtaskListPane::List)
                 };
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.pending_question_visibility = false;
-            app.modal_return_focus = Some(app.focus);
+            app.modal_ui.modal_return_focus = Some(app.focus);
             app.modal = Some(ModalKind::Manager(
                 crate::tui::event::ManagerModal::SubtaskList {
                     subtasks,
@@ -261,7 +261,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 *current = subtasks;
                 *cursor = reconcile_cursor(current, previous_cursor, previous_id, |sub| &sub.id);
                 if current.is_empty() || previous_cursor != *cursor {
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }
@@ -277,7 +277,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
                     *cursor = next;
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }
@@ -319,14 +319,14 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
                     *cursor = next;
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }
         AppAction::OpenModal(mut kind) => {
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.pending_question_visibility = false;
-            app.modal_return_focus = None;
+            app.modal_ui.modal_return_focus = None;
             if let ModalKind::Detail(crate::tui::event::DetailModal::Context(report)) = &kind {
                 app.init_context_view_state(report);
                 app.latest_context_report = Some((**report).clone());
@@ -342,29 +342,30 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.cached_model_choices = entries.clone();
                 app.model_picker.filter.clear();
                 app.model_picker.active_pane = ModelPickerPane::Model;
-                if app.pending_composer_state.is_none() {
-                    app.model_picker.target = if app.pending_agent_model_override.is_some()
-                        || app.pending_self_review_model
+                if app.modal_ui.pending_composer_state.is_none() {
+                    app.model_picker.target = if app.modal_ui.pending_agent_model_override.is_some()
+                        || app.modal_ui.pending_self_review_model
                     {
                         crate::tui::app::ModelPickerTarget::Subagent
                     } else {
                         crate::tui::app::ModelPickerTarget::Session
                     };
                 }
-                let composer_selection = app.pending_composer_state.as_ref().map(|state| {
-                    let (selector, effort) = match app.model_picker.target {
-                        crate::tui::app::ModelPickerTarget::ComposerPrimary => {
-                            (state.selected_model(), state.selected_effort())
-                        }
-                        crate::tui::app::ModelPickerTarget::ComposerBackup => (
-                            state.selected_fallback_model(),
-                            state.selected_fallback_effort(),
-                        ),
-                        crate::tui::app::ModelPickerTarget::Session
-                        | crate::tui::app::ModelPickerTarget::Subagent => (None, None),
-                    };
-                    (selector.map(str::to_string), effort.map(str::to_string))
-                });
+                let composer_selection =
+                    app.modal_ui.pending_composer_state.as_ref().map(|state| {
+                        let (selector, effort) = match app.model_picker.target {
+                            crate::tui::app::ModelPickerTarget::ComposerPrimary => {
+                                (state.selected_model(), state.selected_effort())
+                            }
+                            crate::tui::app::ModelPickerTarget::ComposerBackup => (
+                                state.selected_fallback_model(),
+                                state.selected_fallback_effort(),
+                            ),
+                            crate::tui::app::ModelPickerTarget::Session
+                            | crate::tui::app::ModelPickerTarget::Subagent => (None, None),
+                        };
+                        (selector.map(str::to_string), effort.map(str::to_string))
+                    });
                 let providers = AppState::model_picker_provider_rows(entries);
                 let selected_connection = composer_selection
                     .as_ref()
@@ -455,14 +456,14 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
         }
         AppAction::CloseModal => {
             app.modal = None;
-            app.modal_selection = None;
-            app.modal_body_lines.borrow_mut().clear();
-            app.modal_body_rect.set(None);
+            app.modal_ui.modal_selection = None;
+            app.modal_ui.modal_body_lines.borrow_mut().clear();
+            app.modal_ui.modal_body_rect.set(None);
             app.pending_question_visibility = false;
             // Drop any pending subtask model-override target: closing the picker
             // (Esc) must not leak into a later normal `/model` submit.
-            app.pending_agent_model_override = None;
-            app.pending_self_review_model = false;
+            app.modal_ui.pending_agent_model_override = None;
+            app.modal_ui.pending_self_review_model = false;
             app.task_list_status = None;
             app.provider_auth_form.clear(app.credential_persistence);
             app.model_picker.filter.clear();
@@ -470,11 +471,15 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.model_picker.provider_cursor = 0;
             app.model_picker.cursor = 0;
             app.model_picker.reasoning_cursor = 0;
-            app.focus = app.modal_return_focus.take().unwrap_or(Focus::Input);
+            app.focus = app
+                .modal_ui
+                .modal_return_focus
+                .take()
+                .unwrap_or(Focus::Input);
             // If the `/model` picker was open on behalf of the agent composer,
             // reopen the composer unchanged (cancel path). The submit path takes
             // this stash first, so it won't double-fire here.
-            if let Some(state) = app.pending_composer_state.take() {
+            if let Some(state) = app.modal_ui.pending_composer_state.take() {
                 app.modal = Some(ModalKind::Wizard(
                     crate::tui::event::WizardModal::AgentComposer { state },
                 ));
@@ -538,7 +543,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
                     *cursor = next;
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }

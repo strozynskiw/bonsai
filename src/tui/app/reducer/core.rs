@@ -38,8 +38,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             // (Enable/DisableMouseCapture) to this flag after the reduce. The
             // persistent meta-line marker tracks it; this transient notice
             // confirms the switch and reminds how to reverse it.
-            app.mouse_capture = !app.mouse_capture;
-            let text = if app.mouse_capture {
+            app.modes.mouse_capture = !app.modes.mouse_capture;
+            let text = if app.modes.mouse_capture {
                 "Mouse capture on — in-app scroll & click restored"
             } else {
                 "Mouse capture off — drag to select text; Ctrl+G or /select to re-enable"
@@ -57,7 +57,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
                 app.active_group_tool_selection = None;
             }
             app.normalize_hidden_focus();
-            app.transcript_autoscroll = true;
+            app.scroll.transcript_autoscroll = true;
         }
         AppAction::SetView(view) => {
             app.view = view;
@@ -65,7 +65,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if !matches!(app.view, View::Agent) {
                 app.active_group_tool_selection = None;
             }
-            app.transcript_autoscroll = true;
+            app.scroll.transcript_autoscroll = true;
             app.normalize_hidden_focus();
         }
         AppAction::ImplementPlan => {
@@ -94,7 +94,8 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             text,
         } => {
             if let Some(receipt) = delivery_receipt {
-                app.pending_peer_delivery_receipts
+                app.queue
+                    .pending_peer_delivery_receipts
                     .insert(receipt.message_id(), receipt);
             }
             // Inter-agent chat (peers P2): render the blue conversation
@@ -123,19 +124,19 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             app.scroll_to_bottom_current();
         }
         AppAction::PeerInboxChanged { count } => {
-            app.pending_peer_inbox = count;
+            app.queue.pending_peer_inbox = count;
         }
         AppAction::SetApprovalLevel(level) => {
-            app.approval_level = level;
+            app.modes.approval_level = level;
         }
         AppAction::SetSmolMode(on) => {
-            app.smol_mode = on;
+            app.modes.smol_mode = on;
         }
         AppAction::SetPureMode(on) => {
-            app.pure_mode = on;
+            app.modes.pure_mode = on;
         }
         AppAction::SetSerenityMode(on) => {
-            app.serenity_mode = on;
+            app.modes.serenity_mode = on;
             app.active_group_tool_selection = None;
             if !on {
                 app.expanded_execution_groups.clear();
@@ -163,7 +164,7 @@ pub(super) fn handle(app: &mut AppState, action: AppAction) -> ActionResult {
             if matches!(focus, Focus::Input) {
                 app.transcript_selection = None;
                 app.transcript_focus = None;
-                app.scroll_transcript_focus_into_view = false;
+                app.scroll.scroll_transcript_focus_into_view = false;
             }
             app.focus = focus;
         }

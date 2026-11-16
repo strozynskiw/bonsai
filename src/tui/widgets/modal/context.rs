@@ -309,7 +309,7 @@ pub(super) fn render_context(f: &mut Frame, area: Rect, app: &AppState, report: 
     render_modal_chrome(f, area, "Context window", &regions, &[], &footer);
     // The shared body renderer pre-wraps, clamps and draws the scrollbar, so the
     // clamp `context_modal_metrics` reports is the one this pane applies.
-    render_scroll_body(f, regions.body, &lines, None, app.modal_scroll);
+    render_scroll_body(f, regions.body, &lines, None, app.modal_ui.modal_scroll);
 }
 
 pub(super) fn context_view_selector_line(mode: ContextViewMode) -> Line<'static> {

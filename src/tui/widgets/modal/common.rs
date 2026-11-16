@@ -647,8 +647,8 @@ pub(crate) fn context_row_index_at(
     // The click lands in visual (wrapped) rows; convert to the logical line
     // the row walkers count in. Any segment of a wrapped line maps back to
     // that line's row.
-    let target_visual =
-        usize::from(app.modal_scroll).saturating_add(usize::from(row.saturating_sub(content.y)));
+    let target_visual = usize::from(app.modal_ui.modal_scroll)
+        .saturating_add(usize::from(row.saturating_sub(content.y)));
     let bar_width = (modal.width.saturating_sub(4) as usize).max(10);
     let lines = context_modal_lines(app, report, bar_width);
     let offsets = visual_line_offsets(&lines, content.width.max(1) as usize);

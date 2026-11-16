@@ -41,7 +41,7 @@ pub(super) fn item_selection_state(
         Some(item) => item,
         None => return ItemSelection::None,
     };
-    let selection_width = if app.screen_reader_mode {
+    let selection_width = if app.modes.screen_reader_mode {
         content_width
     } else {
         content_width.saturating_sub(4).max(8)

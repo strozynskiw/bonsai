@@ -79,12 +79,12 @@ pub(super) fn render_memory_manager(
             true,
             detail_lines,
             ModalScrollView {
-                scroll: app.modal_scroll,
-                selection: app.modal_selection.map(|s| s.range()),
+                scroll: app.modal_ui.modal_scroll,
+                selection: app.modal_ui.modal_selection.map(|s| s.range()),
             },
             ModalCaches {
-                body: &app.modal_body_lines,
-                body_rect: &app.modal_body_rect,
+                body: &app.modal_ui.modal_body_lines,
+                body_rect: &app.modal_ui.modal_body_rect,
             },
         );
     } else {
@@ -124,12 +124,12 @@ pub(super) fn render_memory_wizard(
         true,
         wizard_preview_lines(state),
         ModalScrollView {
-            scroll: app.modal_scroll,
-            selection: app.modal_selection.map(|s| s.range()),
+            scroll: app.modal_ui.modal_scroll,
+            selection: app.modal_ui.modal_selection.map(|s| s.range()),
         },
         ModalCaches {
-            body: &app.modal_body_lines,
-            body_rect: &app.modal_body_rect,
+            body: &app.modal_ui.modal_body_lines,
+            body_rect: &app.modal_ui.modal_body_rect,
         },
     );
 }

@@ -357,8 +357,8 @@ fn draw_tui_frame(terminal: &mut TerminalSession, app: &mut AppState) -> Result<
     // Reconcile the terminal's real mouse capture to the desired copy-mode
     // state before drawing. Idempotent (no-op unless they diverge) and
     // best-effort — a failed toggle must not abort the frame.
-    if terminal.mouse_capture() != app.mouse_capture
-        && let Err(err) = terminal.set_mouse_capture(app.mouse_capture)
+    if terminal.mouse_capture() != app.modes.mouse_capture
+        && let Err(err) = terminal.set_mouse_capture(app.modes.mouse_capture)
     {
         tracing::debug!(%err, "failed to reconcile mouse capture to copy-mode flag");
     }
@@ -474,7 +474,7 @@ fn show_plan_top_when_ready(
         }
         return false;
     }
-    if !std::mem::take(plan_edited) || app.plan.is_empty() || app.plan_scroll == 0 {
+    if !std::mem::take(plan_edited) || app.plan.is_empty() || app.scroll.plan_scroll == 0 {
         return false;
     }
     app.reduce(AppAction::SetPlanScroll(0));
@@ -498,8 +498,8 @@ fn sync_todo_snapshot(app: &mut AppState, todo_store: &SharedTodoStore) -> bool 
     // The model rewrote the list: stop browsing, follow the active phase again,
     // and bring its in-progress item into view at clamp time (resolved once the
     // sidebar size is known).
-    app.todo_phase_view = None;
-    app.scroll_todo_in_progress_into_view = true;
+    app.plan_run.todo_phase_view = None;
+    app.scroll.scroll_todo_in_progress_into_view = true;
     true
 }
 
@@ -601,7 +601,7 @@ fn selection_auto_scroll_surface(action: &AppAction) -> Option<SelectionAutoScro
 fn selection_surface_scroll(app: &AppState, surface: SelectionAutoScrollSurface) -> usize {
     match surface {
         SelectionAutoScrollSurface::Transcript => app.current_scroll(),
-        SelectionAutoScrollSurface::Plan => usize::from(app.plan_scroll),
+        SelectionAutoScrollSurface::Plan => usize::from(app.scroll.plan_scroll),
     }
 }
 
@@ -814,15 +814,15 @@ async fn submit_and_start_run(
     deps: RuntimeActionDeps<'_>,
     repo_map: &mut RepoMapInjector,
 ) -> bool {
-    if app.waiting_for_peer.is_some() {
+    if app.queue.waiting_for_peer.is_some() {
         if let Some(peer_bus) = deps.peer_bus
             && let Err(err) = peer_bus.cancel_own_wake_subscriptions().await
         {
             tracing::warn!(%err, "failed to cancel peer wait before a new turn");
         }
-        app.waiting_for_peer = None;
+        app.queue.waiting_for_peer = None;
     }
-    if let Some(wait) = app.waiting_for_background_work.take()
+    if let Some(wait) = app.queue.waiting_for_background_work.take()
         && let Some(session_id) = *deps.active_session_id.lock().await
         && let Err(err) = deps
             .storage
@@ -905,7 +905,7 @@ async fn submit_and_start_run(
         summarize_input(input)
     ))));
     maybe_seed_session_title(app, deps.storage, &transcript_text).await;
-    sync_agent_self_review_mode(app.self_review_mode, &deps.agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &deps.agent).await;
     if let Some(report) = repo_map.apply_before_turn(&deps.agent).await {
         app.latest_context_report = Some(report);
     }
@@ -1020,7 +1020,7 @@ fn take_budget_warning_submission(
 /// intentional: broader affirmative parsing would risk turning an answer to a
 /// permission or external-action prompt into authority for unrelated work.
 fn take_safe_plan_start_confirmation(app: &mut AppState, input: &str) -> bool {
-    let armed = std::mem::take(&mut app.pending_safe_plan_start_confirmation);
+    let armed = std::mem::take(&mut app.plan_run.pending_safe_plan_start_confirmation);
     armed
         && matches!(
             input.trim().to_ascii_lowercase().as_str(),
@@ -2054,7 +2054,10 @@ async fn maybe_recheck_peer_wait(
     let Some(recheck) = *pending else {
         return;
     };
-    if app.waiting_for_peer != Some(recheck.wait) || app.task_state.is_busy() || tasks.is_busy() {
+    if app.queue.waiting_for_peer != Some(recheck.wait)
+        || app.task_state.is_busy()
+        || tasks.is_busy()
+    {
         *pending = None;
         return;
     }
@@ -2125,12 +2128,12 @@ async fn maybe_start_peer_wake(
         return false;
     }
     let Some((pending_hop, solicited)) =
-        peer_wake_authority(&durable_messages, app.waiting_for_peer)
+        peer_wake_authority(&durable_messages, app.queue.waiting_for_peer)
     else {
         *pending_peer_wake = None;
         return false;
     };
-    if !peer_wake_gate_allows(solicited, app.approval_level, pending_hop) {
+    if !peer_wake_gate_allows(solicited, app.modes.approval_level, pending_hop) {
         *pending_peer_wake = None;
         return false;
     }
@@ -2144,12 +2147,12 @@ async fn maybe_start_peer_wake(
 
     *pending_peer_wake = None;
     if !solicited
-        && app.waiting_for_peer.is_some()
+        && app.queue.waiting_for_peer.is_some()
         && let Err(err) = peer_bus.cancel_own_wake_subscriptions().await
     {
         tracing::warn!(%err, "failed to cancel peer wait before an unrelated peer wake");
     }
-    app.waiting_for_peer = None;
+    app.queue.waiting_for_peer = None;
     peer_bus.begin_turn(crate::peer::TurnOrigin::PeerWake { hop: pending_hop });
     app.reduce(AppAction::SetTaskState(TaskState::Running));
     app.mark_run_started(Instant::now());
@@ -2483,7 +2486,8 @@ async fn drain_runtime_events_for_frame(
                                 .min(rows.len().saturating_sub(1));
                         }
                     }
-                    app.pending_peer_delivery_receipts
+                    app.queue
+                        .pending_peer_delivery_receipts
                         .insert(delivery.message.id, delivery.receipt);
                     continue;
                 }
@@ -2524,7 +2528,7 @@ async fn drain_runtime_events_for_frame(
             // Wake-on-done: this session's run just finished; if
             // no queued input immediately continues the work, notify every
             // subscriber. Single-shot claims make a double fire impossible.
-            if app.queued_inputs.is_empty() {
+            if app.queue.queued_inputs.is_empty() {
                 let bus = deps.peer_bus.clone();
                 state.background_spawns.spawn(async move {
                     match bus.fire_own_wake_subscriptions().await {
@@ -2862,14 +2866,14 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         app.has_authorized_provider = has_authorized_provider;
         app.reasoning = reasoning;
         app.refresh_agent_mirrors(&agent);
-        app.serenity_mode = serenity_mode;
-        app.support_log_enabled = support_log_enabled;
-        app.reduced_motion = accessibility.reduced_motion;
-        app.screen_reader_mode = accessibility.screen_reader;
+        app.modes.serenity_mode = serenity_mode;
+        app.modes.support_log_enabled = support_log_enabled;
+        app.modes.reduced_motion = accessibility.reduced_motion;
+        app.modes.screen_reader_mode = accessibility.screen_reader;
         // Seed the copy-mode flag from the terminal's real capture state (off in
         // screen-reader mode, on otherwise); the loop reconciles the two after
         // every toggle from here on.
-        app.mouse_capture = terminal.mouse_capture();
+        app.modes.mouse_capture = terminal.mouse_capture();
         app.run_budget = run_budget;
         app.credential_persistence = credential_persistence;
         app.provider_auth_form.credential_persistence = credential_persistence;
@@ -2998,7 +3002,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         cached_model_signature(&guard, &model_catalog)
     };
     let yolo_mode = agent.yolo_mode();
-    app.approval_level = yolo_mode.level();
+    app.modes.approval_level = yolo_mode.level();
     app.sandbox = Some(agent.sandbox());
     // Cloned out before the agent disappears behind its mutex: memory UI
     // (busy-path /memory, manager actions) must reach the service without the
@@ -3562,7 +3566,7 @@ struct ShutdownAppStats {
 fn shutdown_app_stats(app: &AppState) -> ShutdownAppStats {
     let mut stats = ShutdownAppStats {
         transcript_items: app.transcript.len(),
-        queued_inputs: app.queued_inputs.len(),
+        queued_inputs: app.queue.queued_inputs.len(),
         plan_sections: app.plan.sections.len(),
         plan_tasks: app.plan.tasks.len(),
         todos: app.todo.len(),
@@ -3802,7 +3806,7 @@ fn apply_interaction_request(
             origin,
         } => {
             app.pending_question_visibility = false;
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::PermissionPrompt {
                     request_id,
@@ -3823,7 +3827,7 @@ fn apply_interaction_request(
             kind,
         } => {
             app.pending_question_visibility = false;
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::SandboxEscalationPrompt {
                     request_id,
@@ -3842,7 +3846,7 @@ fn apply_interaction_request(
             origin,
         } => {
             app.pending_question_visibility = false;
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::WebDomainPrompt {
                     request_id,
@@ -3866,7 +3870,7 @@ fn apply_interaction_request(
             args_preview,
         } => {
             app.pending_question_visibility = false;
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::ExtensionToolPrompt {
                     request_id,
@@ -3890,7 +3894,7 @@ fn apply_interaction_request(
             action_preview,
         } => {
             app.pending_question_visibility = false;
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::HookTrustPrompt {
                     request_id,
@@ -3919,7 +3923,7 @@ fn apply_interaction_request(
             // start with its recommended set checked.
             let selected = options.iter().map(|option| option.preselected).collect();
             app.pending_question_visibility = false;
-            app.modal_scroll = 0;
+            app.modal_ui.modal_scroll = 0;
             app.modal = Some(ModalKind::Detail(
                 crate::tui::event::DetailModal::QuestionPrompt {
                     request_id,
@@ -3987,10 +3991,13 @@ async fn start_next_deferred_command_if_idle(
 ) -> bool {
     // A confirmed fresh plan must save the current canvas before a deferred
     // command such as `/new-plan` can clear it.
-    if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() || app.pending_start_new_plan {
+    if !matches!(app.task_state, TaskState::Idle)
+        || tasks.is_busy()
+        || app.plan_run.pending_start_new_plan
+    {
         return false;
     }
-    let Some(command) = app.deferred_commands.first().cloned() else {
+    let Some(command) = app.queue.deferred_commands.first().cloned() else {
         return false;
     };
 
@@ -4088,10 +4095,10 @@ async fn maybe_advance_plan_phase(
     ) {
         return false;
     }
-    let Some(advance) = app.phase_advance.take() else {
+    let Some(advance) = app.plan_run.phase_advance.take() else {
         return false;
     };
-    let Some(execution) = app.plan_execution else {
+    let Some(execution) = app.plan_run.plan_execution else {
         return false;
     };
     let current = execution.phase_index;
@@ -4142,12 +4149,12 @@ async fn maybe_advance_plan_phase(
         }
     }
     app.todo = todos;
-    app.plan_execution = Some(PlanExecution { phase_index: next });
+    app.plan_run.plan_execution = Some(PlanExecution { phase_index: next });
     // Auto-advance follows the new active phase and scrolls its in-progress
     // item into view, even if the user had been browsing another phase.
-    app.todo_phase_view = None;
-    app.resting_todo_phase = None;
-    app.scroll_todo_in_progress_into_view = true;
+    app.plan_run.todo_phase_view = None;
+    app.plan_run.resting_todo_phase = None;
+    app.scroll.scroll_todo_in_progress_into_view = true;
 
     let next_name = plan
         .phases
@@ -4160,7 +4167,7 @@ async fn maybe_advance_plan_phase(
     app.reduce(AppAction::Agent(UiEvent::Thinking(format!(
         "Implementing {next_name}"
     ))));
-    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &agent).await;
     if let Some(report) = repo_map.apply_before_turn(&agent).await {
         app.latest_context_report = Some(report);
     }
@@ -4172,7 +4179,7 @@ async fn maybe_advance_plan_phase(
         crate::agent::PlanContextMode::Keep,
     ) {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
-        app.plan_execution = None;
+        app.plan_run.plan_execution = None;
         return false;
     }
     true
@@ -4195,15 +4202,17 @@ async fn maybe_start_new_plan(
     current_session_id: SessionId,
     plan_store: SharedPlanStore,
 ) -> bool {
-    if !matches!(app.task_state, TaskState::Idle) || tasks.is_busy() || !app.pending_start_new_plan
+    if !matches!(app.task_state, TaskState::Idle)
+        || tasks.is_busy()
+        || !app.plan_run.pending_start_new_plan
     {
         return false;
     }
 
-    app.pending_start_new_plan = false;
+    app.plan_run.pending_start_new_plan = false;
     match protect_canvas_before_new_plan(app, storage, current_session_id, &plan_store).await {
         Ok(()) => {
-            app.fresh_plan_awaiting_draft = true;
+            app.plan_run.fresh_plan_awaiting_draft = true;
             app.reduce(AppAction::SetView(crate::tui::event::View::Plan));
             let persona = app.active_persona.clone();
             app.reduce(AppAction::ScrollBottom);
@@ -4212,12 +4221,12 @@ async fn maybe_start_new_plan(
             app.reduce(AppAction::Agent(UiEvent::Thinking(
                 "Starting a new plan on the canvas".to_string(),
             )));
-            sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+            sync_agent_self_review_mode(app.modes.self_review_mode, &agent).await;
             if let Some(report) = repo_map.apply_before_turn(&agent).await {
                 app.latest_context_report = Some(report);
             }
             if let Err(err) = tasks.start_persona_switch_continuation(agent, sink, persona) {
-                app.fresh_plan_awaiting_draft = false;
+                app.plan_run.fresh_plan_awaiting_draft = false;
                 app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
                 return false;
             }
@@ -4251,11 +4260,11 @@ async fn maybe_report_empty_fresh_plan(
     tasks: &mut TaskController,
     plan_store: &SharedPlanStore,
 ) -> bool {
-    if !app.fresh_plan_awaiting_draft
+    if !app.plan_run.fresh_plan_awaiting_draft
         || !matches!(app.task_state, TaskState::Idle)
         || tasks.is_busy()
-        || app.waiting_for_peer.is_some()
-        || app.waiting_for_background_work.is_some()
+        || app.queue.waiting_for_peer.is_some()
+        || app.queue.waiting_for_background_work.is_some()
     {
         return false;
     }
@@ -4266,7 +4275,7 @@ async fn maybe_report_empty_fresh_plan(
     let stored = plan_store.lock().await;
     let drafted = !stored.is_empty();
     drop(stored);
-    app.fresh_plan_awaiting_draft = false;
+    app.plan_run.fresh_plan_awaiting_draft = false;
     if drafted || !app.plan.is_empty() {
         return false;
     }
@@ -4313,6 +4322,7 @@ async fn start_pending_queued_run_if_idle(
         if record.state == crate::goal::GoalState::Paused
             && record.reason.as_deref() == Some(crate::goal::FOREGROUND_INTERRUPTED)
             && app
+                .queue
                 .queued_inputs
                 .iter()
                 .any(|input| input.delivery == FollowUpDelivery::Steer)
@@ -4344,6 +4354,7 @@ async fn start_pending_queued_run_if_idle(
     // chat in FIFO order in the same run, instead of leaving older Enter-queued
     // work pending behind the urgent instruction for a later run.
     let mut queued_messages = app
+        .queue
         .queued_inputs
         .iter()
         .map(|queued| {
@@ -4411,7 +4422,7 @@ async fn start_pending_queued_run_if_idle(
     // The first queued message is the run's opening turn; expand its snapshot to
     // the model payload (chips spliced in, images attached).
     let primary_input = queued.input;
-    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &agent).await;
     if let Some(report) = repo_map.apply_before_turn(&agent).await {
         app.latest_context_report = Some(report);
     }

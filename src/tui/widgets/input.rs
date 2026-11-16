@@ -58,8 +58,8 @@ pub fn render(f: &mut Frame, area: Rect, footer_area: Rect, app: &AppState) {
     let start = compute_visible_start(
         &display.text,
         display_cursor,
-        app.composer_scroll,
-        app.composer_follow,
+        app.scroll.composer_scroll,
+        app.scroll.composer_follow,
         total,
         keep,
         content_width,
@@ -160,8 +160,8 @@ fn composer_cursor_position(area: Rect, app: &AppState) -> Option<Position> {
     let start = compute_visible_start(
         &display.text,
         cursor,
-        app.composer_scroll,
-        app.composer_follow,
+        app.scroll.composer_scroll,
+        app.scroll.composer_follow,
         total_visual_rows,
         visible_lines.max(1),
         content_width,
@@ -559,28 +559,28 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
             theme::dim(),
         ));
     }
-    if app.smol_mode {
+    if app.modes.smol_mode {
         push_sep(&mut left, " · ");
         left.push(view::smol_marker_span());
     }
-    if app.pure_mode {
+    if app.modes.pure_mode {
         push_sep(&mut left, " · ");
         left.push(view::pure_marker_span());
     }
-    if app.serenity_mode {
+    if app.modes.serenity_mode {
         push_sep(&mut left, " · ");
         left.push(view::serenity_marker_span());
     }
     // Copy mode: capture is released, so flag that in-app mouse is off.
-    if !app.mouse_capture {
+    if !app.modes.mouse_capture {
         push_sep(&mut left, " · ");
         left.push(view::select_mode_marker_span());
     }
     // Only surface the approval level when it deviates from the quiet `ask`
     // default (the agent label already names the active agent).
-    if !app.approval_level.is_ask() {
+    if !app.modes.approval_level.is_ask() {
         push_sep(&mut left, " · ");
-        left.push(view::approval_marker_span(app.approval_level));
+        left.push(view::approval_marker_span(app.modes.approval_level));
     }
     // The sandbox is an execution boundary, so show its posture even when it is
     // off or unavailable.
@@ -590,12 +590,12 @@ fn meta_line(app: &AppState, width: usize, completion_open: bool) -> Line<'stati
     }
     left.extend(composer_chip_meta_spans(app));
 
-    if app.pending_peer_inbox > 0 {
+    if app.queue.pending_peer_inbox > 0 {
         // Parked peer messages waiting for the next turn (peers). Blue to match
         // the peer conversation lane; self-heals to 0 once a turn drains them.
         push_sep(&mut left, "  |  ");
         left.push(Span::styled(
-            format!("⇄ peers waiting: {}", app.pending_peer_inbox),
+            format!("⇄ peers waiting: {}", app.queue.pending_peer_inbox),
             Style::default().fg(theme::palette().peer),
         ));
     }
@@ -1166,12 +1166,12 @@ mod tests {
         assert!(!text.contains("peers waiting"));
 
         // Parked messages → badge with the count.
-        app.pending_peer_inbox = 2;
+        app.queue.pending_peer_inbox = 2;
         let text = line_text(&meta_line(&app, 130, false));
         assert!(text.contains("peers waiting: 2"));
 
         // Drained on the next turn → badge clears.
-        app.pending_peer_inbox = 0;
+        app.queue.pending_peer_inbox = 0;
         let text = line_text(&meta_line(&app, 130, false));
         assert!(!text.contains("peers waiting"));
     }
@@ -1201,7 +1201,7 @@ mod tests {
             "workspace".to_string(),
             None,
         );
-        app.approval_level = crate::tool::ApprovalLevel::AutoAccept;
+        app.modes.approval_level = crate::tool::ApprovalLevel::AutoAccept;
 
         let line = meta_line(&app, 130, false);
         let text = line_text(&line);
@@ -1224,7 +1224,7 @@ mod tests {
             "workspace".to_string(),
             None,
         );
-        app.approval_level = crate::tool::ApprovalLevel::Yolo;
+        app.modes.approval_level = crate::tool::ApprovalLevel::Yolo;
 
         let line = meta_line(&app, 130, false);
         let text = line_text(&line);
@@ -1368,8 +1368,8 @@ mod tests {
         );
         app.composer.set_text("first\nsecond".to_string());
         app.composer.cursor = 0;
-        app.composer_scroll = 1;
-        app.composer_follow = false;
+        app.scroll.composer_scroll = 1;
+        app.scroll.composer_follow = false;
 
         assert!(composer_cursor_position(area(40, 3), &app).is_none());
     }

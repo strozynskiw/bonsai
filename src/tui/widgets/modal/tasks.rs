@@ -27,7 +27,7 @@ pub(super) fn render_task_list(
             split: ListDetailSplit::Vertical,
             detail_focused: false,
             footer_lines,
-            modal_scroll: app.modal_scroll,
+            modal_scroll: app.modal_ui.modal_scroll,
         },
         |frame, table_area, _detail_area| {
             let columns = task_columns();

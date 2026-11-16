@@ -157,8 +157,8 @@ fn down_action(
             regions.input,
             &display.text,
             display.to_display(app.composer.cursor),
-            app.composer_scroll,
-            app.composer_follow,
+            app.scroll.composer_scroll,
+            app.scroll.composer_follow,
             column,
             row,
         ) {
@@ -210,7 +210,7 @@ fn down_action(
                 transcript::TranscriptHit::Group(transcript::ExecutionGroupRowHit::Summary {
                     group_id,
                 }) => {
-                    if app.serenity_mode {
+                    if app.modes.serenity_mode {
                         AppAction::ToggleExecutionGroup { group_id }
                     } else {
                         AppAction::OpenExecutionGroup { group_id }
@@ -265,8 +265,8 @@ fn drag_action(
             regions.input,
             &display.text,
             display.to_display(app.composer.cursor),
-            app.composer_scroll,
-            app.composer_follow,
+            app.scroll.composer_scroll,
+            app.scroll.composer_follow,
             column,
             row,
         ) {
@@ -400,12 +400,18 @@ fn selection_kind_from_count(count: u8) -> SelectionKind {
 /// Hit-test a modal body click: returns the flat grapheme offset if the
 /// `(column, row)` falls inside the body text area of a scrollable modal.
 fn modal_body_hit(app: &AppState, column: u16, row: u16) -> Option<usize> {
-    let body_lines = app.modal_body_lines.borrow();
-    let body_area = app.modal_body_rect.get()?;
+    let body_lines = app.modal_ui.modal_body_lines.borrow();
+    let body_area = app.modal_ui.modal_body_rect.get()?;
     if body_lines.is_empty() {
         return None;
     }
-    modal::modal_resolve_position(column, row, &body_lines, app.modal_scroll, body_area)
+    modal::modal_resolve_position(
+        column,
+        row,
+        &body_lines,
+        app.modal_ui.modal_scroll,
+        body_area,
+    )
 }
 
 fn scrollbar_action(
@@ -920,7 +926,7 @@ mod tests {
     #[test]
     fn serenity_left_click_group_summary_toggles_execution_group() {
         let mut app = app_with_focus();
-        app.serenity_mode = true;
+        app.modes.serenity_mode = true;
         app.transcript
             .push(TranscriptItem::ExecutionGroup(ExecutionGroup {
                 id: 1,
@@ -1001,8 +1007,8 @@ mod tests {
                 text: format!("reply {i}"),
             });
         }
-        app.transcript_autoscroll = false;
-        app.transcript_scroll = 0;
+        app.scroll.transcript_autoscroll = false;
+        app.scroll.transcript_scroll = 0;
         let area = Rect::new(0, 0, 80, 24);
         let regions = crate::tui::layout::split(area, app.surface());
         let (rect, _) = transcript::jump_to_bottom_pill(&app, regions.main)
@@ -1026,9 +1032,10 @@ mod tests {
         app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
         let area = Rect::new(0, 0, 140, 40);
         let modal_rect = modal::modal_area(area, app.modal.as_ref().unwrap());
-        *app.modal_body_lines.borrow_mut() = vec![ratatui::text::Line::from("hello world again")];
+        *app.modal_ui.modal_body_lines.borrow_mut() =
+            vec![ratatui::text::Line::from("hello world again")];
         let body = Rect::new(modal_rect.x + 1, modal_rect.y + 1, 40, 5);
-        app.modal_body_rect.set(Some(body));
+        app.modal_ui.modal_body_rect.set(Some(body));
 
         // Click on 'w' of "world": offset 6.
         let (col, row) = (body.x + 6, body.y);
@@ -1044,7 +1051,7 @@ mod tests {
         }
 
         assert_eq!(
-            app.modal_selection,
+            app.modal_ui.modal_selection,
             Some(crate::tui::app::ModalSelection {
                 anchor: 6,
                 caret: 11

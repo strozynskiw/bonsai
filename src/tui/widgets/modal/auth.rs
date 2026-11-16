@@ -57,8 +57,8 @@ pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, p
             footer: &footer,
         },
         ModalCaches {
-            body: &app.modal_body_lines,
-            body_rect: &app.modal_body_rect,
+            body: &app.modal_ui.modal_body_lines,
+            body_rect: &app.modal_ui.modal_body_rect,
         },
     );
     f.set_cursor_position(clamp_cursor(

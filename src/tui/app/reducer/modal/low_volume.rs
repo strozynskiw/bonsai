@@ -18,7 +18,7 @@ pub(super) fn handle(app: &mut AppState, action: ModalAction) -> ActionResult {
                 let next = move_index(*cursor, delta, max);
                 if next != *cursor {
                     *cursor = next;
-                    app.modal_scroll = 0;
+                    app.modal_ui.modal_scroll = 0;
                 }
             }
         }

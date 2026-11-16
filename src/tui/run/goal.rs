@@ -194,6 +194,7 @@ pub(super) async fn handle_goal_command(
 
 fn retire_queued_goal_input(app: &mut AppState, tasks: &TaskController) {
     let queued = app
+        .queue
         .queued_inputs
         .iter()
         .map(|input| (input.id, input.content.submission().transcript_text))
@@ -230,6 +231,7 @@ pub(super) async fn maybe_start_goal(
         "Working toward session goal".into(),
     )));
     let queued = app
+        .queue
         .queued_inputs
         .iter()
         .map(|input| {

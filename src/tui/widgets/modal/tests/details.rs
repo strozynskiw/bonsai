@@ -1220,7 +1220,7 @@ fn permission_prompt_terminal_size_matrix_keeps_footer_and_tail_reachable() {
         if width <= 60 {
             assert!(max_scroll > 0, "{width}x{height} should still clamp");
         }
-        app.modal_scroll = max_scroll;
+        app.modal_ui.modal_scroll = max_scroll;
         let buffer = render_full_modal(area, &app);
         let text = buffer_text(&buffer);
         assert!(text.contains("Permission"), "{width}x{height}:\n{text}");
@@ -1264,7 +1264,7 @@ fn question_prompt_terminal_size_matrix_keeps_selection_and_footer_visible() {
         assert!(modal.height >= MIN_MODAL_HEIGHT.min(area.height));
         let max_scroll = max_modal_scroll(&app, area).expect("question scroll metrics");
         assert!(max_scroll > 0, "{width}x{height} should scroll");
-        app.modal_scroll = max_scroll;
+        app.modal_ui.modal_scroll = max_scroll;
 
         let buffer = render_full_modal(area, &app);
         let text = buffer_text(&buffer);
@@ -1422,7 +1422,7 @@ fn review_scope_decisions_stay_reachable_at_every_size() {
     let short = Rect::new(0, 0, 60, 14);
     let max = max_modal_scroll(&app, short).expect("review scope scroll metrics");
     assert!(max > 0, "a short terminal needs to scroll");
-    app.modal_scroll = max;
+    app.modal_ui.modal_scroll = max;
     let text = buffer_text(&render_full_modal(short, &app));
     assert!(
         text.contains(scopes[last].label()),

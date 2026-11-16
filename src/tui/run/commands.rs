@@ -341,7 +341,7 @@ pub(in crate::tui::run) async fn apply_autonomy_command(
     let status_now = |app: &mut AppState| {
         push_transient_notice(
             app,
-            &crate::commands::autonomy_status_message(app.approval_level),
+            &crate::commands::autonomy_status_message(app.modes.approval_level),
         );
     };
 
@@ -361,7 +361,7 @@ pub(in crate::tui::run) async fn apply_autonomy_command(
                 set_level(app, yolo_mode, storage, ApprovalLevel::Ask).await
             }
             Ok(YoloCommandRequest::Toggle) => {
-                let target = if app.approval_level == ApprovalLevel::Yolo {
+                let target = if app.modes.approval_level == ApprovalLevel::Yolo {
                     ApprovalLevel::Ask
                 } else {
                     ApprovalLevel::Yolo
@@ -454,17 +454,17 @@ pub(in crate::tui::run) async fn apply_self_review_command(
             if sync_agent {
                 agent.lock().await.set_self_review_mode(mode);
             }
-            app.self_review_mode = mode;
+            app.modes.self_review_mode = mode;
             push_transient_notice(
                 app,
-                &crate::commands::self_review_set_message(mode, app.approval_level),
+                &crate::commands::self_review_set_message(mode, app.modes.approval_level),
             );
         }
         Ok(SelfReviewCommandRequest::Status) => {
-            let mode = app.self_review_mode;
+            let mode = app.modes.self_review_mode;
             push_transient_notice(
                 app,
-                &crate::commands::self_review_status_message(mode, app.approval_level),
+                &crate::commands::self_review_status_message(mode, app.modes.approval_level),
             );
         }
         Ok(SelfReviewCommandRequest::OpenModelPicker) => {
@@ -481,7 +481,7 @@ pub(in crate::tui::run) async fn apply_self_review_command(
                 );
                 return;
             }
-            app.pending_self_review_model = true;
+            app.modal_ui.pending_self_review_model = true;
             app.reduce(AppAction::OpenModal(ModalKind::Picker(
                 crate::tui::event::PickerModal::ModelPicker { entries },
             )));
@@ -541,7 +541,7 @@ pub(in crate::tui::run) async fn apply_smol_command(
     // moment the run releases the lock (the tokio mutex is FIFO, so a later
     // idle `/smol` can't be overtaken by this deferred sync).
     if !sync_agent {
-        let mirrored_preference = if app.smol_mode {
+        let mirrored_preference = if app.modes.smol_mode {
             crate::smol::SmolPreference::On
         } else {
             crate::smol::SmolPreference::Off
@@ -577,7 +577,7 @@ pub(in crate::tui::run) async fn apply_smol_command(
             }
             None => push_transient_notice(
                 app,
-                if app.smol_mode {
+                if app.modes.smol_mode {
                     "SMOL effective profile: on. Preference details are available while idle."
                 } else {
                     "SMOL effective profile: off. Preference details are available while idle."
@@ -629,7 +629,7 @@ pub(in crate::tui::run) async fn apply_pure_command(
             return;
         }
     };
-    let is_pure = app.pure_mode;
+    let is_pure = app.modes.pure_mode;
     let target = match request {
         crate::commands::PureCommandRequest::Toggle => {
             if is_pure {
@@ -673,7 +673,7 @@ pub(in crate::tui::run) async fn apply_serenity_command(
     storage: &crate::storage::Storage,
 ) {
     match crate::commands::serenity::parse_serenity_command(input) {
-        Ok(request) => match request.target_state(app.serenity_mode) {
+        Ok(request) => match request.target_state(app.modes.serenity_mode) {
             Some(on) => {
                 app.reduce(AppAction::SetSerenityMode(on));
                 // Global preference like the theme: the toggle survives
@@ -690,7 +690,7 @@ pub(in crate::tui::run) async fn apply_serenity_command(
             None => {
                 push_transient_notice(
                     app,
-                    crate::commands::serenity::serenity_status_message(app.serenity_mode),
+                    crate::commands::serenity::serenity_status_message(app.modes.serenity_mode),
                 );
             }
         },
@@ -1271,6 +1271,7 @@ fn context_preview_input(app: &AppState, include_draft: bool) -> ContextPreviewI
         .filter(|text| !text.is_empty() && !text.starts_with('/'));
     let target_mode = context_preview_target_mode(app);
     let queued_inputs = app
+        .queue
         .queued_inputs
         .iter()
         .map(|queued| ContextPreviewUserInput {
@@ -1555,7 +1556,7 @@ async fn start_focused_coding_workflow(
     app.reduce(AppAction::SetTaskState(TaskState::Running));
     app.mark_run_started(std::time::Instant::now());
     app.reduce(AppAction::Agent(UiEvent::Thinking(status.to_string())));
-    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &agent).await;
     if let Err(err) = tasks.start_focused_coding_run(agent, prompt, completion_contract, sink) {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
         return false;
@@ -1643,7 +1644,7 @@ async fn run_verification_profile(
         "Running {} verification",
         kind.label()
     ))));
-    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &agent).await;
     if let Err(err) = tasks.start_verification_run(agent, workflow, sink) {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
         return false;
@@ -1752,7 +1753,7 @@ pub(in crate::tui::run) async fn retry_last_turn(
     app.reduce(AppAction::Agent(UiEvent::Thinking(
         "Retrying latest turn".to_string(),
     )));
-    sync_agent_self_review_mode(app.self_review_mode, &deps.agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &deps.agent).await;
     let persona = app.active_persona.clone();
     if let Err(err) = tasks.start_agent_retry(deps.agent, deps.sink, persona) {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
@@ -1982,11 +1983,12 @@ pub(in crate::tui) async fn implement_plan_with_context(
         }
     }
     app.todo = todos;
-    app.plan_execution = phase.map(|phase_index| crate::tui::app::PlanExecution { phase_index });
+    app.plan_run.plan_execution =
+        phase.map(|phase_index| crate::tui::app::PlanExecution { phase_index });
     // A fresh phased run follows its own live phase; drop any resting phase left
     // over from a previous run so the card doesn't briefly show the old one.
-    app.resting_todo_phase = None;
-    app.phase_advance = None;
+    app.plan_run.resting_todo_phase = None;
+    app.plan_run.phase_advance = None;
 
     app.reduce(AppAction::SetView(View::Agent));
     if !plan.title.trim().is_empty() {
@@ -2000,12 +2002,12 @@ pub(in crate::tui) async fn implement_plan_with_context(
         None => "Implementing the plan".to_string(),
     };
     app.reduce(AppAction::Agent(UiEvent::Thinking(thinking)));
-    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &agent).await;
     if let Err(err) =
         tasks.start_implement_plan_with_context(agent, plan, sink, phase, context_mode)
     {
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(err)));
-        app.plan_execution = None;
+        app.plan_run.plan_execution = None;
         return false;
     }
     true
@@ -2086,7 +2088,7 @@ async fn review_changes_with_workflow(
         }
     };
     app.reduce(AppAction::Agent(UiEvent::Thinking(activity)));
-    sync_agent_self_review_mode(app.self_review_mode, &agent).await;
+    sync_agent_self_review_mode(app.modes.self_review_mode, &agent).await;
     let started = match workflow {
         ReviewCommandWorkflow::General => {
             tasks.start_review(app, agent, scope, sink, preflight).await
@@ -2574,7 +2576,7 @@ mod tests {
         // (the queue head's mode only drives dispatch, not the preview).
         app.view = View::Agent;
         app.active_persona = crate::agent::ActivePersona::Builtin(AgentMode::Coding);
-        app.queued_inputs.push(QueuedInput {
+        app.queue.queued_inputs.push(QueuedInput {
             id: 1,
             text: "draft a plan".to_string(),
             content: crate::tui::app::ComposerContent::default(),

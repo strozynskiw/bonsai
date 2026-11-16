@@ -82,7 +82,7 @@ fn unchanged_state_renders_nothing() {
 fn reduced_motion_keeps_running_items_stable_across_ticks() {
     let _guard = theme_guard();
     let mut app = test_app();
-    app.reduced_motion = true;
+    app.modes.reduced_motion = true;
     app.transcript
         .push(TranscriptItem::ToolActivity(running_tool("running")));
 
@@ -126,11 +126,11 @@ fn global_fingerprint_changes_rebuild_everything() {
     ));
     assert_eq!(fill(&app, 60), 2, "theme switch drops the cache");
 
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     assert_eq!(fill(&app, 60), 2, "serenity flip drops the cache");
 
-    app.screen_reader_mode = true;
-    app.reduced_motion = true;
+    app.modes.screen_reader_mode = true;
+    app.modes.reduced_motion = true;
     assert_eq!(
         fill(&app, 60),
         2,
@@ -159,7 +159,7 @@ fn group_expansion_and_inline_selection_are_item_precise() {
     // Expansion only gates rendering in serenity mode — outside it every
     // group reports expanded (`execution_group_is_expanded`), so the toggle
     // below would be a visual no-op and, correctly, also a cache no-op.
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.transcript
         .push(TranscriptItem::ExecutionGroup(execution_group(
             1,
@@ -335,9 +335,9 @@ fn window_slices_match_the_full_transcript() {
     let total = app.transcript_layout.total_rows(&app, width);
     assert_eq!(full.len(), total, "cached rows == cached lines");
 
-    app.transcript_autoscroll = false;
+    app.scroll.transcript_autoscroll = false;
     for scroll in 0..=total.saturating_sub(viewport) {
-        app.transcript_scroll = scroll;
+        app.scroll.transcript_scroll = scroll;
         let window = app.transcript_layout.view_window(&app, width, viewport);
         assert_eq!(window.scroll, scroll);
         assert_eq!(
@@ -449,14 +449,14 @@ fn scroll_domain_is_not_capped_at_u16_rows() {
     let total = 70_000;
     let bottom = total - viewport;
 
-    app.transcript_autoscroll = false;
-    app.transcript_scroll = bottom;
+    app.scroll.transcript_autoscroll = false;
+    app.scroll.transcript_scroll = bottom;
     let (scroll, max_scroll) = resolved_scroll(&app, total, viewport);
     assert_eq!(max_scroll, bottom);
     assert_eq!(scroll, bottom, "the newest rows must stay reachable");
 
     // Autoscroll follows to the true bottom.
-    app.transcript_autoscroll = true;
+    app.scroll.transcript_autoscroll = true;
     let (scroll, max_scroll) = resolved_scroll(&app, total, viewport);
     assert_eq!(max_scroll, bottom);
     assert_eq!(scroll, bottom);

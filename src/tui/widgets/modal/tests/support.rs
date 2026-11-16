@@ -24,7 +24,7 @@ pub(super) fn render_block_detail_to_buffer(
     app.transcript.push(TranscriptItem::AssistantMessage {
         text: text.to_string(),
     });
-    app.modal_scroll = scroll;
+    app.modal_ui.modal_scroll = scroll;
     terminal
         .draw(|frame| {
             render_block_detail(frame, area, &app, 0);
@@ -76,7 +76,7 @@ pub(super) fn render_tool_detail_activity_to_buffer(
             finished_at: Some(now),
             timing: Default::default(),
         }));
-    app.modal_scroll = scroll;
+    app.modal_ui.modal_scroll = scroll;
     terminal
         .draw(|frame| {
             render_tool_detail(frame, area, &app, "call-1");
@@ -108,7 +108,7 @@ pub(super) fn render_diff_preview_to_buffer(
             finished_at: Some(now),
             timing: Default::default(),
         }));
-    app.modal_scroll = scroll;
+    app.modal_ui.modal_scroll = scroll;
     terminal
         .draw(|frame| {
             render_diff_preview(frame, area, &app, "call-1");
@@ -153,7 +153,7 @@ pub(super) fn render_context_to_buffer(
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "gpt-5".to_string(), ".".to_string(), None);
-    app.modal_scroll = scroll;
+    app.modal_ui.modal_scroll = scroll;
     app.context_state.view_mode = view_mode;
     terminal
         .draw(|frame| {
@@ -172,7 +172,7 @@ pub(super) fn render_episodes_to_buffer(
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "gpt-5".to_string(), ".".to_string(), None);
-    app.modal_scroll = scroll;
+    app.modal_ui.modal_scroll = scroll;
     terminal
         .draw(|frame| {
             render_episodes(frame, area, &app, &report, cursor);
@@ -772,7 +772,7 @@ pub(super) fn render_subtasks_to_buffer(
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-    app.modal_scroll = scroll;
+    app.modal_ui.modal_scroll = scroll;
     if let Some((agent, over)) = override_for {
         app.subagent_model_overrides
             .lock()

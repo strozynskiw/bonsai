@@ -145,7 +145,7 @@ pub(super) fn open_provider_detail(app: &mut AppState, deps: &RuntimeActionDeps<
             detail: Box::new(detail),
         },
     )));
-    app.modal_scroll = 0;
+    app.modal_ui.modal_scroll = 0;
 }
 
 pub(super) fn provider_manager_remove_selected(app: &mut AppState, deps: RuntimeActionDeps<'_>) {

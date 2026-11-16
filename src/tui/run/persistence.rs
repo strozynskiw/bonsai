@@ -298,7 +298,7 @@ impl SnapshotFlushGate {
             || transcript_revision != self.transcript_revision
             || plan_revision != self.plan_revision
             || todo_signature != self.todo_signature
-            || !app.pending_peer_delivery_receipts.is_empty()
+            || !app.queue.pending_peer_delivery_receipts.is_empty()
             || agent_active;
         if changed {
             self.record(transcript_revision, plan_revision, todo_signature);
@@ -1152,14 +1152,14 @@ pub(in crate::tui::run) async fn open_saved_plan_clean(
     *deps.plan_store.lock().await = snapshot.plan.clone();
 
     app.transcript.clear();
-    app.queued_inputs.clear();
+    app.queue.queued_inputs.clear();
     app.todo.clear();
     app.plan = snapshot.plan;
     app.task_state = TaskState::Idle;
     app.view = View::Plan;
     app.focus = Focus::Input;
     app.modal = None;
-    app.modal_return_focus = None;
+    app.modal_ui.modal_return_focus = None;
     app.transcript_selection = None;
     app.transcript_focus = None;
     app.active_group_tool_selection = None;
@@ -1169,9 +1169,9 @@ pub(in crate::tui::run) async fn open_saved_plan_clean(
     app.active_tools.clear();
     app.current_phase = None;
     app.clear_run_timer();
-    app.transcript_autoscroll = true;
-    app.scroll_transcript_focus_into_view = false;
-    app.plan_scroll = 0;
+    app.scroll.transcript_autoscroll = true;
+    app.scroll.scroll_transcript_focus_into_view = false;
+    app.scroll.plan_scroll = 0;
     app.reduce(AppAction::SetActiveSavedPlan(Some(snapshot.summary.id)));
     refresh_session_completion_choices(app, deps.storage, deps.project_root, next_id).await;
 
@@ -1513,7 +1513,7 @@ pub(in crate::tui) async fn resume_session(
     app.task_state = TaskState::Idle;
     app.focus = Focus::Input;
     app.modal = None;
-    app.modal_return_focus = None;
+    app.modal_ui.modal_return_focus = None;
     app.transcript_selection = None;
     app.transcript_focus = None;
     app.active_group_tool_selection = None;
@@ -1522,8 +1522,8 @@ pub(in crate::tui) async fn resume_session(
     app.active_tools.clear();
     app.current_phase = None;
     app.clear_run_timer();
-    app.transcript_autoscroll = true;
-    app.scroll_transcript_focus_into_view = false;
+    app.scroll.transcript_autoscroll = true;
+    app.scroll.scroll_transcript_focus_into_view = false;
     app.reduce(AppAction::ScrollBottom);
     // The resume confirmation is a transient toast, not a transcript row: a
     // resumed session must not accumulate a "Resumed session #N" line every time
@@ -2139,7 +2139,7 @@ mod tests {
         // the writer acknowledges it on persist: the duplicate-delivery path
         // inserts one without touching the transcript, so the gate must never
         // skip past it — it keeps requesting a flush until the write acks it.
-        app.pending_peer_delivery_receipts.insert(
+        app.queue.pending_peer_delivery_receipts.insert(
             77,
             crate::storage::PeerDeliveryReceipt::for_tests(
                 77,
@@ -2152,7 +2152,7 @@ mod tests {
             gate.needs_flush(session, &app, false),
             "an unacknowledged delivery must not be skipped by the heartbeat"
         );
-        app.pending_peer_delivery_receipts.clear();
+        app.queue.pending_peer_delivery_receipts.clear();
         assert!(!gate.needs_flush(session, &app, false));
 
         // A rotated session must not inherit the previous fingerprints.

@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use ratatui::text::Line;
-
 use crate::agent::AgentMode;
 use crate::output::ToolCallStart;
 use crate::provider::ReasoningSelection;
@@ -30,6 +28,7 @@ mod mouse;
 mod provider_auth;
 mod queue;
 mod reducer;
+mod state_groups;
 mod tool_activity;
 mod transcript_selection;
 pub use crate::tui::transcript::{
@@ -44,6 +43,7 @@ pub use mouse::{LastMouseClick, MouseArea, next_mouse_click};
 pub use provider_auth::{ProviderAuthField, ProviderAuthForm};
 pub use queue::{DeferredCommand, DeferredCommandPayload, FollowUpDelivery, QueuedInput};
 pub(crate) use reducer::scroll::clamped_scroll;
+pub(crate) use state_groups::{ModalUiState, ModeFlags, PlanRunState, QueueState, ScrollState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanPosition {
@@ -230,22 +230,12 @@ pub struct AppState {
     pub(crate) agents_index_refresh_pending: bool,
     pub(crate) focus: Focus,
     pub(crate) modal: Option<ModalKind>,
-    pub(crate) modal_return_focus: Option<Focus>,
+    /// Modal body state: scroll, selection, render caches and picker hand-offs.
+    pub(crate) modal_ui: ModalUiState,
     /// Live per-agent subagent model overrides (set from `/subagents`). Shared with
     /// the provider factory: written here by the model picker, read there when a
     /// subagent is minted. Also read by the `/subagents` renderer for the badge.
     pub(crate) subagent_model_overrides: crate::subagent::SubagentModelOverrides,
-    /// The agent name awaiting a model-picker selection (set when the user presses
-    /// `m` on a `/subagents` row, consumed by the picker submit).
-    pub(crate) pending_agent_model_override: Option<String>,
-    /// Set while the `/self-review model` picker is open. On submit the choice is
-    /// persisted under `BuiltinSubagentId::SelfReview` (not the live name-keyed
-    /// override map) so the pinned reviewer model survives a restart.
-    pub(crate) pending_self_review_model: bool,
-    /// The agent composer, stashed while the `/model` picker is open on its behalf.
-    /// The picker submit writes the chosen model into it and reopens; picker cancel
-    /// (`CloseModal`) reopens it unchanged.
-    pub(crate) pending_composer_state: Option<Box<crate::tui::agent_composer::AgentComposerState>>,
     pub(crate) task_list_status: Option<String>,
     pub(crate) shutdown_notice: Option<String>,
     /// Self-update hint ("updated to vX — restart to apply" / "update vX
@@ -280,30 +270,8 @@ pub struct AppState {
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) reasoning: ReasoningSelection,
-    /// The autonomy / approval level (mirrors the shared `YoloMode` holder).
-    /// Set via `/autonomy`, `/yolo`, or Alt+M; surfaced in the status bar.
-    pub(crate) approval_level: crate::tool::ApprovalLevel,
-    /// Self-review-before-done policy, mirrored from the live agent for `/mode`.
-    pub(crate) self_review_mode: crate::self_review::SelfReviewMode,
-    /// Session-scoped SMOL profile mirrored from the live agent for status UI.
-    pub(crate) smol_mode: bool,
-    /// Session-scoped pure-mode mirror from the live agent.
-    pub(crate) pure_mode: bool,
-    /// TUI-only calm presentation mode: suppress reasoning rows and fold tool
-    /// groups by default without changing provider reasoning.
-    pub(crate) serenity_mode: bool,
-    /// Mirror of the opt-in support lifecycle log preference, for the
-    /// `/settings` row; the live gate is `crate::logging`'s atomic.
-    pub(crate) support_log_enabled: bool,
-    /// Freeze decorative animation while keeping real timers and expiry ticks live.
-    pub(crate) reduced_motion: bool,
-    /// Render a labelled, linear transcript for assistive terminal readers.
-    pub(crate) screen_reader_mode: bool,
-    /// Desired mouse-capture state (the "copy mode" toggle). `true` = in-app
-    /// mouse (scroll/click) is live; `false` = capture released so the terminal
-    /// handles native click-drag selection. The run loop reconciles the real
-    /// terminal to this flag; the meta line shows a marker while it is off.
-    pub(crate) mouse_capture: bool,
+    /// Session-scoped presentation/policy flags mirrored from the agent or settings.
+    pub(crate) modes: ModeFlags,
     /// Optional user-selected caps for future foreground runs.
     pub(crate) run_budget: crate::run_budget::RunBudget,
     /// Shared OS-sandbox handle, set by the run loop after construction. Read at
@@ -354,26 +322,8 @@ pub struct AppState {
     /// so rendering never has to take the async lock.
     pub(crate) plan: crate::plan::PlanDoc,
     pub(crate) task_state: TaskState,
-    /// When a phased plan is being implemented, which phase is currently
-    /// running. `None` for flat plans or when no plan run is in flight.
-    pub(crate) plan_execution: Option<PlanExecution>,
-    /// Set by the `AgentFinished` reducer when a phased run terminates, then
-    /// consumed by the event loop to auto-advance to the next phase or halt.
-    pub(crate) phase_advance: Option<PhaseAdvance>,
-    /// Set by the `AgentFinished` reducer when the coding agent asks to start a
-    /// fresh plan, then consumed by the event loop after it protects and clears
-    /// the old canvas. `None` on any other finish.
-    pub(crate) pending_start_new_plan: bool,
-    /// Armed by the fresh-plan transition and cleared by the first idle frame
-    /// that can see whether the planning agent actually wrote a draft. A canvas
-    /// that is still empty at that point means the turn produced no plan, which
-    /// used to pass silently: the previous canvas was already saved and cleared.
-    pub(crate) fresh_plan_awaiting_draft: bool,
-    /// One-shot authority for the literal natural-language confirmations
-    /// `go`/`continue` to enter the existing `/start` plan handoff. It is armed
-    /// only by a completed planning run and never applies to permission,
-    /// destructive, privileged, or external-action prompts.
-    pub(crate) pending_safe_plan_start_confirmation: bool,
+    /// Phased plan execution state and one-shot plan hand-off flags.
+    pub(crate) plan_run: PlanRunState,
     pub(crate) tick: u64,
     /// The bonsai in the empty todo sidebar. Fully grown at startup; `/bonsai`
     /// replants the tree and replays the growth.
@@ -385,50 +335,10 @@ pub struct AppState {
     pub(crate) session_toast: Option<SessionToast>,
     pub(crate) next_execution_group_id: u64,
     pub(crate) active_execution_group_id: Option<u64>,
-    pub(crate) transcript_scroll: usize,
-    pub(crate) sidebar_scroll: u16,
-    pub(crate) plan_scroll: u16,
-    pub(crate) modal_scroll: u16,
-    /// Active text selection inside the modal body. `None` when no selection
-    /// is in progress. Cleared on scroll, modal close, and modal switch.
-    pub(crate) modal_selection: Option<ModalSelection>,
-    /// Unwrapped body lines cached at render time so the mouse handler can
-    /// resolve screen coordinates to grapheme offsets without re-generating
-    /// content. Populated by `render_scrollable_modal` / `render_detail_pane`.
-    /// Interior-mutable because the draw path only holds `&AppState`.
-    pub(crate) modal_body_lines: std::cell::RefCell<Vec<Line<'static>>>,
-    /// The body-area rect cached at render time. The mouse handler reads this
-    /// instead of recomputing the layout (which would need the exact
-    /// header/footer line counts that only the renderer knows).
-    pub(crate) modal_body_rect: std::cell::Cell<Option<ratatui::layout::Rect>>,
-    pub(crate) composer_scroll: u16,
+    /// Scroll offsets, follow flags and pending scroll requests.
+    pub(crate) scroll: ScrollState,
     pub(crate) todo_focus_available: bool,
-    /// Which phase the todo card shows. `None` follows the active execution
-    /// phase; `Some(i)` means the user parked the view on phase `i` (Left/Right).
-    /// Reset to `None` whenever the model rewrites the todo list.
-    pub(crate) todo_phase_view: Option<usize>,
-    /// The phase the todo card rests on once `plan_execution` clears (a phased
-    /// run finished all phases, halted, or was interrupted). Without it the card
-    /// would snap back to Phase 1 the instant execution ends; instead it holds
-    /// the phase that was last active so the user still sees where work stopped.
-    /// Reset when a fresh phased run starts.
-    pub(crate) resting_todo_phase: Option<usize>,
-    pub(crate) composer_follow: bool,
-    pub(crate) pending_composer_page: Option<i16>,
-    pub(crate) pending_composer_extend: Option<i16>,
     pub(crate) pending_question_visibility: bool,
-    pub(crate) transcript_autoscroll: bool,
-    /// Count of assistant replies the user had already seen the last time the
-    /// transcript was sitting at the bottom. Frozen the moment they scroll up
-    /// so [`AppState::unseen_message_count`] can report how many new replies
-    /// arrived while they were reading back — drives the jump-to-latest pill.
-    pub(crate) transcript_seen_messages: usize,
-    pub(crate) scroll_transcript_focus_into_view: bool,
-    /// Pending request to scroll the in-progress todo item into view, resolved in
-    /// `clamp_scrolls` once the sidebar `Rect` is known. Mirrors
-    /// `scroll_transcript_focus_into_view`. Set when the model rewrites the todo
-    /// list or the user browses to another phase.
-    pub(crate) scroll_todo_in_progress_into_view: bool,
     /// Default storage selected for the next newly entered provider credential.
     pub(crate) credential_persistence: crate::session::CredentialPersistence,
     /// Active guided-setup checkpoint, retained while provider/model submodals
@@ -449,26 +359,8 @@ pub struct AppState {
     /// and the list scrolls only when it reaches an edge.
     pub(crate) authorize_provider_offset: std::cell::Cell<usize>,
     pub(crate) completion: CompletionState,
-    pub(crate) queued_inputs: Vec<QueuedInput>,
-    /// Recently withdrawn queue IDs, retained long enough to detect a late
-    /// acknowledgement from the running agent.
-    pub(crate) removed_queued_input_ids: VecDeque<u64>,
-    /// Peer messages that have arrived but await injection on the next turn
-    /// (peers). Drives the composer "peers waiting" badge; self-heals to 0 once
-    /// a turn drains the inbox.
-    pub(crate) pending_peer_inbox: usize,
-    /// UI delivery leases awaiting the same transaction that persists their
-    /// transcript items. Keyed by durable message id for replay deduplication.
-    pub(crate) pending_peer_delivery_receipts: BTreeMap<i64, crate::storage::PeerDeliveryReceipt>,
-    /// The peer this session's last run parked on (`wake_when_done`), if the
-    /// park is still pending. Structured state for the wake sweep and tests —
-    /// the "Waiting for peer #N" phase string is display only.
-    pub(crate) waiting_for_peer: Option<crate::agent::PeerWait>,
-    /// Exact process-local wait whose claimed version may resume this run.
-    pub(crate) waiting_for_background_work: Option<crate::background_wake::BackgroundWorkWait>,
-    pub(crate) deferred_commands: Vec<DeferredCommand>,
-    pub(crate) next_queued_input_id: u64,
-    pub(crate) next_deferred_command_id: u64,
+    /// Queued follow-up inputs, deferred commands and peer/background wait bookkeeping.
+    pub(crate) queue: QueueState,
     pub(crate) next_local_model_wizard_request_id: u64,
     /// Generation tag for command-style background work (auth/model/local-model
     /// commits) that runs on a raw `tokio::spawn` outside `TaskController`.
@@ -514,7 +406,7 @@ impl AppState {
     /// Tick used only for decorative rendering. State timers continue to use
     /// [`Self::tick`] even when motion is reduced.
     pub(crate) fn animation_tick(&self) -> u64 {
-        if self.reduced_motion || self.screen_reader_mode {
+        if self.modes.reduced_motion || self.modes.screen_reader_mode {
             0
         } else {
             self.tick
@@ -525,7 +417,7 @@ impl AppState {
     /// the event loop repaints at the poll cadence for the duration instead of
     /// the 1s idle interval, so the growth stays smooth.
     pub(crate) fn bonsai_growing(&self) -> bool {
-        if self.reduced_motion || self.screen_reader_mode {
+        if self.modes.reduced_motion || self.modes.screen_reader_mode {
             return false;
         }
         self.sidebar_bonsai.is_growing()
@@ -538,7 +430,7 @@ impl AppState {
         &self,
         growth: &crate::tui::widgets::bonsai::BonsaiGrowth,
     ) -> f64 {
-        if self.reduced_motion {
+        if self.modes.reduced_motion {
             1.0
         } else {
             growth.progress()
@@ -565,13 +457,19 @@ impl AppState {
             agents_index_refresh_pending: false,
             focus: Focus::Input,
             modal: None,
-            modal_return_focus: None,
+            modal_ui: ModalUiState {
+                modal_return_focus: None,
+                modal_scroll: 0,
+                modal_selection: None,
+                modal_body_lines: std::cell::RefCell::new(Vec::new()),
+                modal_body_rect: std::cell::Cell::new(None),
+                pending_agent_model_override: None,
+                pending_self_review_model: false,
+                pending_composer_state: None,
+            },
             subagent_model_overrides: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            pending_agent_model_override: None,
-            pending_self_review_model: false,
-            pending_composer_state: None,
             task_list_status: None,
             shutdown_notice: None,
             update_notice: None,
@@ -588,15 +486,17 @@ impl AppState {
             provider: provider_id.to_string(),
             model,
             reasoning: ReasoningSelection::default(),
-            approval_level: crate::tool::ApprovalLevel::default(),
-            self_review_mode: crate::self_review::SelfReviewMode::default(),
-            smol_mode: false,
-            pure_mode: false,
-            serenity_mode: false,
-            support_log_enabled: false,
-            reduced_motion: false,
-            screen_reader_mode: false,
-            mouse_capture: true,
+            modes: ModeFlags {
+                smol_mode: false,
+                pure_mode: false,
+                serenity_mode: false,
+                support_log_enabled: false,
+                reduced_motion: false,
+                screen_reader_mode: false,
+                mouse_capture: true,
+                self_review_mode: crate::self_review::SelfReviewMode::default(),
+                approval_level: crate::tool::ApprovalLevel::default(),
+            },
             run_budget: crate::run_budget::RunBudget::default(),
             sandbox: None,
             current_session_id: None,
@@ -623,36 +523,36 @@ impl AppState {
             delegated_models: std::collections::HashMap::new(),
             plan: crate::plan::PlanDoc::default(),
             task_state: TaskState::Idle,
-            plan_execution: None,
-            phase_advance: None,
-            pending_start_new_plan: false,
-            fresh_plan_awaiting_draft: false,
-            pending_safe_plan_start_confirmation: false,
+            plan_run: PlanRunState {
+                plan_execution: None,
+                phase_advance: None,
+                pending_start_new_plan: false,
+                fresh_plan_awaiting_draft: false,
+                pending_safe_plan_start_confirmation: false,
+                todo_phase_view: None,
+                resting_todo_phase: None,
+            },
             tick: 0,
             sidebar_bonsai: crate::tui::widgets::bonsai::BonsaiGrowth::sprout(),
             copy_notice: None,
             session_toast: None,
             next_execution_group_id: 1,
             active_execution_group_id: None,
-            transcript_scroll: 0,
-            sidebar_scroll: 0,
-            plan_scroll: 0,
-            modal_scroll: 0,
-            modal_selection: None,
-            modal_body_lines: std::cell::RefCell::new(Vec::new()),
-            modal_body_rect: std::cell::Cell::new(None),
-            composer_scroll: 0,
+            scroll: ScrollState {
+                transcript_scroll: 0,
+                sidebar_scroll: 0,
+                plan_scroll: 0,
+                composer_scroll: 0,
+                composer_follow: true,
+                pending_composer_page: None,
+                pending_composer_extend: None,
+                transcript_autoscroll: true,
+                transcript_seen_messages: 0,
+                scroll_transcript_focus_into_view: false,
+                scroll_todo_in_progress_into_view: false,
+            },
             todo_focus_available: false,
-            todo_phase_view: None,
-            resting_todo_phase: None,
-            composer_follow: true,
-            pending_composer_page: None,
-            pending_composer_extend: None,
             pending_question_visibility: false,
-            transcript_autoscroll: true,
-            transcript_seen_messages: 0,
-            scroll_transcript_focus_into_view: false,
-            scroll_todo_in_progress_into_view: false,
             credential_persistence: crate::session::CredentialPersistence::default(),
             first_run_step: None,
             first_run_model_selection_pending: None,
@@ -661,15 +561,17 @@ impl AppState {
             provider_manager_offset: std::cell::Cell::new(0),
             authorize_provider_offset: std::cell::Cell::new(0),
             completion: CompletionState::default(),
-            queued_inputs: Vec::new(),
-            removed_queued_input_ids: VecDeque::new(),
-            pending_peer_inbox: 0,
-            pending_peer_delivery_receipts: BTreeMap::new(),
-            waiting_for_peer: None,
-            waiting_for_background_work: None,
-            deferred_commands: Vec::new(),
-            next_queued_input_id: 1,
-            next_deferred_command_id: 1,
+            queue: QueueState {
+                queued_inputs: Vec::new(),
+                removed_queued_input_ids: VecDeque::new(),
+                next_queued_input_id: 1,
+                deferred_commands: Vec::new(),
+                next_deferred_command_id: 1,
+                pending_peer_inbox: 0,
+                pending_peer_delivery_receipts: BTreeMap::new(),
+                waiting_for_peer: None,
+                waiting_for_background_work: None,
+            },
             next_local_model_wizard_request_id: 1,
             command_generation: 0,
             composer: Composer::default(),
@@ -703,7 +605,8 @@ impl AppState {
     pub(crate) fn pending_peer_delivery_receipts(
         &self,
     ) -> Vec<crate::storage::PeerDeliveryReceipt> {
-        self.pending_peer_delivery_receipts
+        self.queue
+            .pending_peer_delivery_receipts
             .values()
             .cloned()
             .collect()
@@ -715,11 +618,13 @@ impl AppState {
     ) {
         for receipt in acknowledged {
             if self
+                .queue
                 .pending_peer_delivery_receipts
                 .get(&receipt.message_id())
                 == Some(receipt)
             {
-                self.pending_peer_delivery_receipts
+                self.queue
+                    .pending_peer_delivery_receipts
                     .remove(&receipt.message_id());
             }
         }
@@ -867,22 +772,22 @@ impl AppState {
     }
 
     pub fn current_scroll(&self) -> usize {
-        self.transcript_scroll
+        self.scroll.transcript_scroll
     }
 
     pub fn clamp_current_scroll(&mut self, max_scroll: usize) {
-        if self.transcript_autoscroll {
-            self.transcript_scroll = max_scroll;
-            self.transcript_seen_messages = self.assistant_message_count();
+        if self.scroll.transcript_autoscroll {
+            self.scroll.transcript_scroll = max_scroll;
+            self.scroll.transcript_seen_messages = self.assistant_message_count();
             return;
         }
 
-        if self.transcript_scroll > max_scroll {
-            self.transcript_scroll = max_scroll;
+        if self.scroll.transcript_scroll > max_scroll {
+            self.scroll.transcript_scroll = max_scroll;
         }
-        if self.transcript_scroll == max_scroll {
-            self.transcript_autoscroll = true;
-            self.transcript_seen_messages = self.assistant_message_count();
+        if self.scroll.transcript_scroll == max_scroll {
+            self.scroll.transcript_autoscroll = true;
+            self.scroll.transcript_seen_messages = self.assistant_message_count();
         }
     }
 
@@ -898,15 +803,15 @@ impl AppState {
     /// bottom of the transcript. Zero while auto-following (caught up) so the
     /// pill quietly disappears once the reader returns to the latest message.
     pub fn unseen_message_count(&self) -> usize {
-        if self.transcript_autoscroll {
+        if self.scroll.transcript_autoscroll {
             return 0;
         }
         self.assistant_message_count()
-            .saturating_sub(self.transcript_seen_messages)
+            .saturating_sub(self.scroll.transcript_seen_messages)
     }
 
     pub fn clamp_sidebar_scroll(&mut self, max_scroll: u16) {
-        self.sidebar_scroll = self.sidebar_scroll.min(max_scroll);
+        self.scroll.sidebar_scroll = self.scroll.sidebar_scroll.min(max_scroll);
     }
 
     /// Phase index the todo card should display, or `None` when the plan has
@@ -923,11 +828,17 @@ impl AppState {
         // clears, rest on the phase that was last active (`resting_todo_phase`)
         // rather than snapping back to Phase 1.
         let default = self
+            .plan_run
             .plan_execution
             .map(|execution| execution.phase_index)
-            .or(self.resting_todo_phase)
+            .or(self.plan_run.resting_todo_phase)
             .unwrap_or(0);
-        Some(self.todo_phase_view.unwrap_or(default).min(total - 1))
+        Some(
+            self.plan_run
+                .todo_phase_view
+                .unwrap_or(default)
+                .min(total - 1),
+        )
     }
 
     /// Clear phased-execution state, remembering the phase that was active so
@@ -935,33 +846,33 @@ impl AppState {
     /// back to Phase 1 the moment a phased run finishes, halts, or is
     /// interrupted. A no-op stash for flat runs (no `plan_execution`).
     pub fn clear_plan_execution(&mut self) {
-        if let Some(execution) = self.plan_execution.take() {
-            self.resting_todo_phase = Some(execution.phase_index);
+        if let Some(execution) = self.plan_run.plan_execution.take() {
+            self.plan_run.resting_todo_phase = Some(execution.phase_index);
         }
     }
 
     pub fn clamp_plan_scroll(&mut self, max_scroll: u16) {
-        self.plan_scroll = self.plan_scroll.min(max_scroll);
+        self.scroll.plan_scroll = self.scroll.plan_scroll.min(max_scroll);
     }
 
     /// Pin the composer scroll to the auto-follow value when `composer_follow`
     /// is set; otherwise clamp to `[0, max_scroll]` so a manual offset can't
     /// push past the end of the rendered lines.
     pub fn clamp_composer_scroll(&mut self, max_scroll: u16) {
-        if self.composer_follow {
+        if self.scroll.composer_follow {
             return;
         }
-        self.composer_scroll = self.composer_scroll.min(max_scroll);
+        self.scroll.composer_scroll = self.scroll.composer_scroll.min(max_scroll);
     }
 
     /// Reset the composer's scroll state to the default (auto-follow at the
     /// cursor). Called when the input is cleared or submitted so the next
     /// draft starts at the top.
     fn reset_composer_scroll(&mut self) {
-        self.composer_scroll = 0;
-        self.composer_follow = true;
-        self.pending_composer_page = None;
-        self.pending_composer_extend = None;
+        self.scroll.composer_scroll = 0;
+        self.scroll.composer_follow = true;
+        self.scroll.pending_composer_page = None;
+        self.scroll.pending_composer_extend = None;
     }
 
     fn normalize_hidden_focus(&mut self) {
@@ -1024,9 +935,9 @@ impl AppState {
     /// state without writing a mirror goes stale for at most one turn instead
     /// of forever.
     pub(crate) fn refresh_agent_mirrors(&mut self, agent: &crate::agent::Agent) {
-        self.smol_mode = agent.smol_mode();
-        self.pure_mode = agent.pure_mode();
-        self.self_review_mode = agent.self_review_mode();
+        self.modes.smol_mode = agent.smol_mode();
+        self.modes.pure_mode = agent.pure_mode();
+        self.modes.self_review_mode = agent.self_review_mode();
         self.loaded_skills = agent.loaded_skills().clone();
     }
 
@@ -1039,9 +950,10 @@ impl AppState {
         // swap sites with one chokepoint.
         let modal_before = self.modal.as_ref().map(modal_identity);
         reducer::reduce(self, action);
-        if self.modal_selection.is_some() && self.modal.as_ref().map(modal_identity) != modal_before
+        if self.modal_ui.modal_selection.is_some()
+            && self.modal.as_ref().map(modal_identity) != modal_before
         {
-            self.modal_selection = None;
+            self.modal_ui.modal_selection = None;
         }
     }
 
@@ -1256,11 +1168,11 @@ impl AppState {
     fn apply_runtime_event(&mut self, event: RuntimeEvent) {
         match event {
             RuntimeEvent::AgentStarted => {
-                self.pending_safe_plan_start_confirmation = false;
+                self.plan_run.pending_safe_plan_start_confirmation = false;
                 self.current_session_status = SessionStatus::Active;
                 self.current_terminal_reason = None;
-                self.waiting_for_peer = None;
-                self.waiting_for_background_work = None;
+                self.queue.waiting_for_peer = None;
+                self.queue.waiting_for_background_work = None;
             }
             // Completion reports remain available to headless and persistence
             // consumers, but are not interactive transcript cards.
@@ -1272,7 +1184,7 @@ impl AppState {
                     .as_ref()
                     .and_then(crate::agent::ActivePersona::builtin)
                     .unwrap_or_else(|| self.active_mode());
-                self.pending_safe_plan_start_confirmation =
+                self.plan_run.pending_safe_plan_start_confirmation =
                     matches!(&result, Ok(AgentRunOutcome::Completed))
                         && finished_mode == crate::agent::AgentMode::Planning;
                 let waiting_phase = match &result {
@@ -1287,13 +1199,13 @@ impl AppState {
                     ))) => Some(format!("Waiting for {}", wait.target_id)),
                     _ => None,
                 };
-                self.waiting_for_peer = match &result {
+                self.queue.waiting_for_peer = match &result {
                     Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::Peer(wait))) => {
                         Some(*wait)
                     }
                     _ => None,
                 };
-                self.waiting_for_background_work = match &result {
+                self.queue.waiting_for_background_work = match &result {
                     Ok(AgentRunOutcome::Waiting(crate::agent::WaitReason::BackgroundWork(
                         wait,
                     ))) => Some(wait.clone()),
@@ -1342,7 +1254,7 @@ impl AppState {
                     || matches!(&result, Ok(AgentRunOutcome::Interrupted))
                     || completion_cancelled;
                 // A fresh-plan transition is ignored after interruption.
-                self.pending_start_new_plan = matches!(
+                self.plan_run.pending_start_new_plan = matches!(
                     &result,
                     Ok(AgentRunOutcome::Waiting(
                         crate::agent::WaitReason::StartNewPlan
@@ -1404,8 +1316,8 @@ impl AppState {
                 // Signal the event loop to advance (or halt) a phased run. Only
                 // meaningful while a phased plan is executing; flat runs leave
                 // this `None` and behave exactly as before.
-                if self.plan_execution.is_some() && !waiting {
-                    self.phase_advance = Some(if run_failed || phase_interrupted {
+                if self.plan_run.plan_execution.is_some() && !waiting {
+                    self.plan_run.phase_advance = Some(if run_failed || phase_interrupted {
                         PhaseAdvance::Halt
                     } else {
                         PhaseAdvance::Continue
@@ -1442,7 +1354,7 @@ impl AppState {
                         self.active_execution_group_id = None;
                         self.active_tools.clear();
                         self.reset_next_execution_group_id();
-                        self.scroll_transcript_focus_into_view = false;
+                        self.scroll.scroll_transcript_focus_into_view = false;
                     }
                     for message in messages {
                         self.push_transcript_item(TranscriptItem::CommandOutput {
@@ -1570,7 +1482,7 @@ impl AppState {
                 // arm phase_advance on a later unrelated run and hijack it into a
                 // phase advance.
                 self.clear_plan_execution();
-                self.phase_advance = None;
+                self.plan_run.phase_advance = None;
                 self.push_transcript_item(TranscriptItem::Error { error: text });
                 self.maybe_scroll_to_bottom_current();
             }
@@ -1662,7 +1574,7 @@ impl AppState {
     fn maybe_scroll_to_bottom_current(&mut self) {}
 
     pub fn transcript_autoscroll_enabled(&self) -> bool {
-        self.transcript_autoscroll
+        self.scroll.transcript_autoscroll
     }
 }
 
@@ -1709,6 +1621,7 @@ mod tests {
     use crate::background::{BackgroundTaskSnapshot, BackgroundTaskStatus};
     use crate::provider::{ReasoningEffort, ReasoningSelection};
     use crate::tui::event::{ModeAxisId, ModeRow, SubtaskListPane};
+    use ratatui::text::Line;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
@@ -1730,11 +1643,11 @@ mod tests {
             AgentRunOutcome::Completed,
         ))));
 
-        assert!(app.pending_safe_plan_start_confirmation);
-        assert!(!app.pending_start_new_plan);
+        assert!(app.plan_run.pending_safe_plan_start_confirmation);
+        assert!(!app.plan_run.pending_start_new_plan);
 
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentStarted));
-        assert!(!app.pending_safe_plan_start_confirmation);
+        assert!(!app.plan_run.pending_safe_plan_start_confirmation);
     }
 
     #[test]
@@ -1750,7 +1663,7 @@ mod tests {
         ))));
 
         assert_eq!(app.current_session_status, SessionStatus::Interrupted);
-        assert!(!app.pending_safe_plan_start_confirmation);
+        assert!(!app.plan_run.pending_safe_plan_start_confirmation);
         // The guard detail is technical and must not reach the transcript.
         assert!(matches!(
             app.transcript.as_slice(),
@@ -1781,7 +1694,7 @@ mod tests {
             SessionStatus::from_db_str("unverified"),
             SessionStatus::Unverified
         );
-        assert!(!app.pending_safe_plan_start_confirmation);
+        assert!(!app.plan_run.pending_safe_plan_start_confirmation);
         assert!(matches!(
             app.transcript.as_slice(),
             [TranscriptItem::CommandOutput {
@@ -1816,10 +1729,10 @@ mod tests {
     #[test]
     fn toggle_mouse_capture_flips_flag_and_notifies() {
         let mut app = app();
-        assert!(app.mouse_capture, "capture is on by default");
+        assert!(app.modes.mouse_capture, "capture is on by default");
 
         app.reduce(AppAction::ToggleMouseCapture);
-        assert!(!app.mouse_capture, "toggle releases capture");
+        assert!(!app.modes.mouse_capture, "toggle releases capture");
         let notice = app.copy_notice.as_ref().expect("a notice is shown");
         assert!(
             notice.text.contains("select"),
@@ -1827,7 +1740,7 @@ mod tests {
         );
 
         app.reduce(AppAction::ToggleMouseCapture);
-        assert!(app.mouse_capture, "toggle again restores capture");
+        assert!(app.modes.mouse_capture, "toggle again restores capture");
         assert!(
             app.copy_notice
                 .as_ref()
@@ -1925,8 +1838,8 @@ mod tests {
 
         assert_eq!(app.task_state, TaskState::Idle);
         assert_eq!(app.current_session_status, SessionStatus::Completed);
-        assert!(app.pending_start_new_plan);
-        assert!(app.waiting_for_peer.is_none());
+        assert!(app.plan_run.pending_start_new_plan);
+        assert!(app.queue.waiting_for_peer.is_none());
     }
 
     #[test]
@@ -1946,7 +1859,7 @@ mod tests {
         assert_eq!(app.current_session_status, SessionStatus::Active);
         assert_eq!(app.current_phase.as_deref(), Some("Waiting for peer #45"));
         assert_eq!(
-            app.waiting_for_peer,
+            app.queue.waiting_for_peer,
             Some(crate::agent::PeerWait {
                 session_id: SessionId::from_raw(45),
                 subscription_id: 7,
@@ -1956,17 +1869,17 @@ mod tests {
 
         // The park's structured state clears when a new run starts…
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentStarted));
-        assert_eq!(app.waiting_for_peer, None);
+        assert_eq!(app.queue.waiting_for_peer, None);
 
         // …and never survives a non-waiting finish.
-        app.waiting_for_peer = Some(crate::agent::PeerWait {
+        app.queue.waiting_for_peer = Some(crate::agent::PeerWait {
             session_id: SessionId::from_raw(45),
             subscription_id: 7,
         });
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
             AgentRunOutcome::Completed,
         ))));
-        assert_eq!(app.waiting_for_peer, None);
+        assert_eq!(app.queue.waiting_for_peer, None);
     }
 
     #[test]
@@ -2007,15 +1920,15 @@ mod tests {
         assert_eq!(app.resolved_todo_phase(), Some(0));
 
         // Follows the active execution phase.
-        app.plan_execution = Some(PlanExecution { phase_index: 2 });
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 2 });
         assert_eq!(app.resolved_todo_phase(), Some(2));
 
         // A parked browse index wins over the active phase.
-        app.todo_phase_view = Some(1);
+        app.plan_run.todo_phase_view = Some(1);
         assert_eq!(app.resolved_todo_phase(), Some(1));
 
         // A stale parked index is clamped when the plan shrinks.
-        app.todo_phase_view = Some(9);
+        app.plan_run.todo_phase_view = Some(9);
         assert_eq!(app.resolved_todo_phase(), Some(2));
     }
 
@@ -2034,27 +1947,27 @@ mod tests {
 
         // A run finishes on phase 2 (done / halted / interrupted): the card
         // rests on that phase instead of snapping back to phase 0.
-        app.plan_execution = Some(PlanExecution { phase_index: 2 });
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 2 });
         app.clear_plan_execution();
-        assert_eq!(app.plan_execution, None);
-        assert_eq!(app.resting_todo_phase, Some(2));
+        assert_eq!(app.plan_run.plan_execution, None);
+        assert_eq!(app.plan_run.resting_todo_phase, Some(2));
         assert_eq!(app.resolved_todo_phase(), Some(2));
 
         // The user can still browse away from the resting phase.
-        app.todo_phase_view = Some(0);
+        app.plan_run.todo_phase_view = Some(0);
         assert_eq!(app.resolved_todo_phase(), Some(0));
 
         // A fresh phased run drops the resting phase and follows its own.
-        app.todo_phase_view = None;
-        app.resting_todo_phase = None;
-        app.plan_execution = Some(PlanExecution { phase_index: 1 });
+        app.plan_run.todo_phase_view = None;
+        app.plan_run.resting_todo_phase = None;
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 1 });
         assert_eq!(app.resolved_todo_phase(), Some(1));
 
         // Clearing with no execution in flight is a no-op stash (flat run).
         app.clear_plan_execution();
-        app.resting_todo_phase = None;
+        app.plan_run.resting_todo_phase = None;
         app.clear_plan_execution();
-        assert_eq!(app.resting_todo_phase, None);
+        assert_eq!(app.plan_run.resting_todo_phase, None);
     }
 
     fn background_task(id: &str, status: BackgroundTaskStatus) -> BackgroundTaskSnapshot {
@@ -2249,7 +2162,7 @@ mod tests {
         assert!(
             matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(ref modal_report))) if modal_report.as_ref() == &report)
         );
-        assert_eq!(app.modal_return_focus, Some(Focus::Todo));
+        assert_eq!(app.modal_ui.modal_return_focus, Some(Focus::Todo));
         assert_eq!(app.context_state.view_mode, ContextViewMode::Ledger);
     }
 
@@ -2270,7 +2183,7 @@ mod tests {
                 cursor: 0,
             })) if modal_report.as_ref() == &report
         ));
-        assert_eq!(app.modal_return_focus, Some(Focus::Todo));
+        assert_eq!(app.modal_ui.modal_return_focus, Some(Focus::Todo));
     }
 
     #[test]
@@ -2287,7 +2200,7 @@ mod tests {
         assert!(
             matches!(app.modal, Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(ref modal_report))) if modal_report.as_ref() == &preview)
         );
-        assert_eq!(app.modal_return_focus, Some(Focus::Todo));
+        assert_eq!(app.modal_ui.modal_return_focus, Some(Focus::Todo));
         assert_eq!(app.context_state.view_mode, ContextViewMode::Ledger);
     }
 
@@ -2297,7 +2210,7 @@ mod tests {
         let (clipboard, copied) = crate::copy::test_support::fake_clipboard();
         app.set_clipboard(clipboard);
         app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
-        *app.modal_body_lines.borrow_mut() = vec![Line::from("hello world")];
+        *app.modal_ui.modal_body_lines.borrow_mut() = vec![Line::from("hello world")];
 
         app.reduce(AppAction::ModalClick {
             offset: 7,
@@ -2307,7 +2220,7 @@ mod tests {
         });
 
         assert_eq!(
-            app.modal_selection,
+            app.modal_ui.modal_selection,
             Some(ModalSelection {
                 anchor: 6,
                 caret: 11
@@ -2322,7 +2235,7 @@ mod tests {
         let (clipboard, copied) = crate::copy::test_support::fake_clipboard();
         app.set_clipboard(clipboard);
         app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
-        *app.modal_body_lines.borrow_mut() = vec![Line::from("abc"), Line::from("def")];
+        *app.modal_ui.modal_body_lines.borrow_mut() = vec![Line::from("abc"), Line::from("def")];
 
         app.reduce(AppAction::ModalClick {
             offset: 1,
@@ -2342,7 +2255,7 @@ mod tests {
     fn modal_swap_clears_text_selection() {
         let mut app = app();
         app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Help));
-        app.modal_selection = Some(ModalSelection {
+        app.modal_ui.modal_selection = Some(ModalSelection {
             anchor: 0,
             caret: 3,
         });
@@ -2351,7 +2264,7 @@ mod tests {
         app.reduce(AppAction::OpenContextModal);
 
         assert!(
-            app.modal_selection.is_none(),
+            app.modal_ui.modal_selection.is_none(),
             "a selection must not survive into a different modal's body"
         );
     }
@@ -2363,20 +2276,20 @@ mod tests {
             Box::new(context_report(42)),
         )));
         app.context_state.view_mode = ContextViewMode::Ledger;
-        app.modal_scroll = 12;
+        app.modal_ui.modal_scroll = 12;
         app.context_state.manual_scroll = true;
 
         app.reduce(AppAction::ContextToggleView);
 
         assert_eq!(app.context_state.view_mode, ContextViewMode::Wire);
-        assert_eq!(app.modal_scroll, 0);
+        assert_eq!(app.modal_ui.modal_scroll, 0);
         assert!(!app.context_state.manual_scroll);
 
         app.reduce(AppAction::ScrollModal(5));
         app.reduce(AppAction::ContextToggleView);
 
         assert_eq!(app.context_state.view_mode, ContextViewMode::Turns);
-        assert_eq!(app.modal_scroll, 0);
+        assert_eq!(app.modal_ui.modal_scroll, 0);
 
         app.reduce(AppAction::ContextToggleView);
 
@@ -2465,14 +2378,14 @@ mod tests {
     #[test]
     fn peer_inbox_changed_updates_badge_count() {
         let mut app = app();
-        assert_eq!(app.pending_peer_inbox, 0);
+        assert_eq!(app.queue.pending_peer_inbox, 0);
 
         app.reduce(AppAction::PeerInboxChanged { count: 3 });
-        assert_eq!(app.pending_peer_inbox, 3);
+        assert_eq!(app.queue.pending_peer_inbox, 3);
 
         // Draining on the next turn brings it back to zero.
         app.reduce(AppAction::PeerInboxChanged { count: 0 });
-        assert_eq!(app.pending_peer_inbox, 0);
+        assert_eq!(app.queue.pending_peer_inbox, 0);
     }
 
     #[test]
@@ -2594,9 +2507,9 @@ mod tests {
         // A cancelled subtask model-override picker must not leak into a later
         // normal `/model` submit.
         let mut app = app();
-        app.pending_agent_model_override = Some("explore".to_string());
+        app.modal_ui.pending_agent_model_override = Some("explore".to_string());
         app.reduce(AppAction::CloseModal);
-        assert_eq!(app.pending_agent_model_override, None);
+        assert_eq!(app.modal_ui.pending_agent_model_override, None);
     }
 
     #[test]
@@ -2642,7 +2555,7 @@ mod tests {
         app.reduce(AppAction::SubtaskListMove(1));
 
         assert_eq!(app.selected_subtask().map(|s| s.id.as_ref()), Some("sub-2"));
-        assert_eq!(app.modal_scroll, 0);
+        assert_eq!(app.modal_ui.modal_scroll, 0);
         assert!(
             matches!(
                 app.modal,
@@ -3087,25 +3000,25 @@ mod tests {
 
         app.reduce(AppAction::ScrollCurrent(5));
 
-        assert_eq!(app.transcript_scroll, 5);
-        assert!(!app.transcript_autoscroll);
+        assert_eq!(app.scroll.transcript_scroll, 5);
+        assert!(!app.scroll.transcript_autoscroll);
 
         app.reduce(AppAction::ScrollCurrent(-20));
 
-        assert_eq!(app.transcript_scroll, 0);
+        assert_eq!(app.scroll.transcript_scroll, 0);
     }
 
     #[test]
     fn autoscroll_tracks_visible_bottom_before_manual_scroll() {
         let mut app = app();
-        app.transcript_autoscroll = true;
-        app.transcript_scroll = 12;
+        app.scroll.transcript_autoscroll = true;
+        app.scroll.transcript_scroll = 12;
 
         app.clamp_current_scroll(80);
         app.reduce(AppAction::ScrollCurrent(-3));
 
-        assert_eq!(app.transcript_scroll, 77);
-        assert!(!app.transcript_autoscroll);
+        assert_eq!(app.scroll.transcript_scroll, 77);
+        assert!(!app.scroll.transcript_autoscroll);
     }
 
     #[test]
@@ -3123,7 +3036,7 @@ mod tests {
 
         // Scroll up: stop auto-following. Nothing new has arrived yet.
         app.reduce(AppAction::ScrollCurrent(-5));
-        assert!(!app.transcript_autoscroll);
+        assert!(!app.scroll.transcript_autoscroll);
         assert_eq!(app.unseen_message_count(), 0);
 
         // Two more replies stream in while the reader is scrolled away.
@@ -3153,8 +3066,8 @@ mod tests {
         app.reduce(AppAction::ScrollSidebar(7));
         app.reduce(AppAction::ScrollPlan(11));
 
-        assert_eq!(app.sidebar_scroll, 7);
-        assert_eq!(app.plan_scroll, 11);
+        assert_eq!(app.scroll.sidebar_scroll, 7);
+        assert_eq!(app.scroll.plan_scroll, 11);
     }
 
     #[test]
@@ -3164,9 +3077,9 @@ mod tests {
         // reducer itself should accept the sentinel without panicking.
         let mut app = app();
         app.reduce(AppAction::SetPlanScroll(u16::MAX));
-        assert_eq!(app.plan_scroll, u16::MAX);
+        assert_eq!(app.scroll.plan_scroll, u16::MAX);
         app.clamp_plan_scroll(42);
-        assert_eq!(app.plan_scroll, 42);
+        assert_eq!(app.scroll.plan_scroll, 42);
     }
 
     #[test]
@@ -3180,8 +3093,11 @@ mod tests {
         }
 
         app.reduce(AppAction::ComposerPage(1));
-        assert_eq!(app.pending_composer_page, Some(1));
-        assert!(!app.composer_follow, "manual scroll disengages auto-follow");
+        assert_eq!(app.scroll.pending_composer_page, Some(1));
+        assert!(
+            !app.scroll.composer_follow,
+            "manual scroll disengages auto-follow"
+        );
     }
 
     #[test]
@@ -3193,10 +3109,10 @@ mod tests {
         app.reduce(AppAction::SetComposerScroll(7));
         app.reduce(AppAction::ExtendComposerByPage(1));
 
-        assert_eq!(app.pending_composer_page, None);
-        assert_eq!(app.pending_composer_extend, None);
-        assert_eq!(app.composer_scroll, 0);
-        assert!(app.composer_follow);
+        assert_eq!(app.scroll.pending_composer_page, None);
+        assert_eq!(app.scroll.pending_composer_extend, None);
+        assert_eq!(app.scroll.composer_scroll, 0);
+        assert!(app.scroll.composer_follow);
     }
 
     #[test]
@@ -3207,16 +3123,16 @@ mod tests {
             app.reduce(AppAction::InputChar(ch));
         }
         app.reduce(AppAction::ComposerPage(1));
-        app.composer_scroll = 5;
-        app.composer_follow = false;
-        app.pending_composer_extend = Some(-1);
+        app.scroll.composer_scroll = 5;
+        app.scroll.composer_follow = false;
+        app.scroll.pending_composer_extend = Some(-1);
 
         app.reduce(AppAction::ClearInput);
 
-        assert_eq!(app.composer_scroll, 0);
-        assert!(app.composer_follow);
-        assert_eq!(app.pending_composer_extend, None);
-        assert_eq!(app.pending_composer_page, None);
+        assert_eq!(app.scroll.composer_scroll, 0);
+        assert!(app.scroll.composer_follow);
+        assert_eq!(app.scroll.pending_composer_extend, None);
+        assert_eq!(app.scroll.pending_composer_page, None);
     }
 
     #[test]
@@ -3226,13 +3142,13 @@ mod tests {
         for ch in "hello".chars() {
             app.reduce(AppAction::InputChar(ch));
         }
-        app.composer_scroll = 4;
-        app.composer_follow = false;
+        app.scroll.composer_scroll = 4;
+        app.scroll.composer_follow = false;
 
         app.reduce(AppAction::SubmitInput(app.composer.text.clone()));
 
-        assert_eq!(app.composer_scroll, 0);
-        assert!(app.composer_follow);
+        assert_eq!(app.scroll.composer_scroll, 0);
+        assert!(app.scroll.composer_follow);
     }
 
     #[test]
@@ -3274,12 +3190,15 @@ mod tests {
         for ch in "hello".chars() {
             app.reduce(AppAction::InputChar(ch));
         }
-        app.composer_follow = false;
-        app.composer_scroll = 5;
+        app.scroll.composer_follow = false;
+        app.scroll.composer_scroll = 5;
 
         app.reduce(AppAction::InputChar('!'));
 
-        assert!(app.composer_follow, "text edits must re-engage auto-follow");
+        assert!(
+            app.scroll.composer_follow,
+            "text edits must re-engage auto-follow"
+        );
     }
 
     #[test]
@@ -3291,13 +3210,13 @@ mod tests {
         for ch in "hello world".chars() {
             app.reduce(AppAction::InputChar(ch));
         }
-        app.composer_follow = false;
-        app.composer_scroll = 5;
+        app.scroll.composer_follow = false;
+        app.scroll.composer_scroll = 5;
 
         app.reduce(AppAction::CursorLeft);
 
         assert!(
-            !app.composer_follow,
+            !app.scroll.composer_follow,
             "cursor moves should not re-engage auto-follow"
         );
     }
@@ -3315,9 +3234,9 @@ mod tests {
 
         app.reduce(AppAction::ExtendComposerByPage(-1));
 
-        assert_eq!(app.pending_composer_extend, Some(-1));
-        assert_eq!(app.pending_composer_page, Some(-1));
-        assert!(!app.composer_follow);
+        assert_eq!(app.scroll.pending_composer_extend, Some(-1));
+        assert_eq!(app.scroll.pending_composer_page, Some(-1));
+        assert!(!app.scroll.composer_follow);
         assert_eq!(
             app.composer.selection_anchor, start_anchor,
             "extend-by-page should not clear the existing anchor"
@@ -3328,12 +3247,12 @@ mod tests {
     fn set_composer_scroll_disengages_auto_follow() {
         let mut app = app();
         app.focus = Focus::Input;
-        app.composer_follow = true;
+        app.scroll.composer_follow = true;
 
         app.reduce(AppAction::SetComposerScroll(12));
 
-        assert_eq!(app.composer_scroll, 12);
-        assert!(!app.composer_follow);
+        assert_eq!(app.scroll.composer_scroll, 12);
+        assert!(!app.scroll.composer_follow);
     }
 
     #[test]
@@ -3444,7 +3363,7 @@ mod tests {
             app.reduce(AppAction::QuestionMove(1));
         }
 
-        assert_eq!(app.modal_scroll, 0);
+        assert_eq!(app.modal_ui.modal_scroll, 0);
         assert!(
             app.pending_question_visibility,
             "run-loop clamp resolves question visibility after layout is known"
@@ -3452,7 +3371,7 @@ mod tests {
 
         app.reduce(AppAction::QuestionMove(i16::MIN));
 
-        assert_eq!(app.modal_scroll, 0);
+        assert_eq!(app.modal_ui.modal_scroll, 0);
         assert!(app.pending_question_visibility);
     }
 
@@ -3461,25 +3380,25 @@ mod tests {
         let mut app = app();
 
         // Simulate the user scrolling up in the Agent view's wide chat column.
-        app.transcript_autoscroll = false;
-        app.transcript_scroll = 0;
+        app.scroll.transcript_autoscroll = false;
+        app.scroll.transcript_scroll = 0;
 
         // Switching to Plan re-engages autoscroll so the next clamp_current_scroll
         // lands the user at the bottom of the (narrower) Plan chat column.
         app.reduce(AppAction::SetView(View::Plan));
-        assert!(app.transcript_autoscroll);
+        assert!(app.scroll.transcript_autoscroll);
         let max_plan = 80usize;
         app.clamp_current_scroll(max_plan);
-        assert_eq!(app.transcript_scroll, max_plan);
+        assert_eq!(app.scroll.transcript_scroll, max_plan);
 
         // Scrolling up in Plan, then toggling back to Agent, must also reset.
-        app.transcript_autoscroll = false;
-        app.transcript_scroll = 5;
+        app.scroll.transcript_autoscroll = false;
+        app.scroll.transcript_scroll = 5;
         app.reduce(AppAction::ToggleView);
-        assert!(app.transcript_autoscroll);
+        assert!(app.scroll.transcript_autoscroll);
         let max_agent = 30usize;
         app.clamp_current_scroll(max_agent);
-        assert_eq!(app.transcript_scroll, max_agent);
+        assert_eq!(app.scroll.transcript_scroll, max_agent);
     }
 
     #[test]
@@ -3493,39 +3412,39 @@ mod tests {
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
             AgentRunOutcome::Completed,
         ))));
-        assert_eq!(app.phase_advance, None);
+        assert_eq!(app.plan_run.phase_advance, None);
         assert_eq!(app.current_session_status, SessionStatus::Completed);
 
         // Phased run, clean finish → advance to the next phase.
-        app.plan_execution = Some(PlanExecution { phase_index: 0 });
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
         app.task_state = TaskState::Running;
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
             AgentRunOutcome::Completed,
         ))));
-        assert_eq!(app.phase_advance, Some(PhaseAdvance::Continue));
+        assert_eq!(app.plan_run.phase_advance, Some(PhaseAdvance::Continue));
 
         // Phased run, error → halt.
-        app.phase_advance = None;
+        app.plan_run.phase_advance = None;
         app.task_state = TaskState::Running;
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Err(
             UiError::new("Agent failed", "boom"),
         ))));
-        assert_eq!(app.phase_advance, Some(PhaseAdvance::Halt));
+        assert_eq!(app.plan_run.phase_advance, Some(PhaseAdvance::Halt));
         assert_eq!(app.current_session_status, SessionStatus::Failed);
 
         // Phased run interrupted (Cancelling) reports Ok but must still halt.
-        app.phase_advance = None;
+        app.plan_run.phase_advance = None;
         app.task_state = TaskState::Cancelling;
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
             AgentRunOutcome::Completed,
         ))));
-        assert_eq!(app.phase_advance, Some(PhaseAdvance::Halt));
+        assert_eq!(app.plan_run.phase_advance, Some(PhaseAdvance::Halt));
 
         // Regression (Ctrl+C advanced phases): the run loop's
         // `UiEvent::Interrupted` resets Cancelling → Idle *before*
         // AgentFinished lands, so the state heuristic alone reads a Ctrl+C'd
         // phase as success. The outcome carried on the event must halt anyway.
-        app.phase_advance = None;
+        app.plan_run.phase_advance = None;
         app.task_state = TaskState::Cancelling;
         app.reduce(AppAction::Agent(UiEvent::Interrupted));
         assert_eq!(app.task_state, TaskState::Idle, "Interrupted resets state");
@@ -3533,20 +3452,20 @@ mod tests {
             AgentRunOutcome::Interrupted,
         ))));
         assert_eq!(
-            app.phase_advance,
+            app.plan_run.phase_advance,
             Some(PhaseAdvance::Halt),
             "an interrupted phase must never auto-advance"
         );
         assert_eq!(app.current_session_status, SessionStatus::Interrupted);
 
-        app.phase_advance = None;
+        app.plan_run.phase_advance = None;
         app.task_state = TaskState::Running;
         let reason = crate::run_budget::RunBudgetExhaustion::MaxTurns { limit: 25 };
         app.reduce(AppAction::Runtime(RuntimeEvent::AgentFinished(Ok(
             AgentRunOutcome::BudgetExhausted(reason),
         ))));
         assert_eq!(
-            app.phase_advance,
+            app.plan_run.phase_advance,
             Some(PhaseAdvance::Continue),
             "BudgetExhausted should auto-advance phases"
         );
@@ -3632,8 +3551,8 @@ mod tests {
         use crate::tui::event::UiError;
 
         let mut app = app();
-        app.plan_execution = Some(PlanExecution { phase_index: 1 });
-        app.phase_advance = Some(PhaseAdvance::Continue);
+        app.plan_run.plan_execution = Some(PlanExecution { phase_index: 1 });
+        app.plan_run.phase_advance = Some(PhaseAdvance::Continue);
         app.task_state = TaskState::Running;
 
         app.reduce(AppAction::Runtime(RuntimeEvent::TaskPanicked(
@@ -3642,10 +3561,10 @@ mod tests {
 
         assert_eq!(app.task_state, TaskState::Idle);
         assert!(
-            app.plan_execution.is_none(),
+            app.plan_run.plan_execution.is_none(),
             "a panic must clear stale phased-execution state"
         );
-        assert!(app.phase_advance.is_none());
+        assert!(app.plan_run.phase_advance.is_none());
     }
 
     #[test]
@@ -3792,7 +3711,7 @@ mod tests {
         // remove the same cells so no orphaned "Thinking" placeholder
         // survives a failed attempt.
         let mut app = app();
-        app.serenity_mode = true;
+        app.modes.serenity_mode = true;
         app.task_state = TaskState::Running;
         app.push_transcript_item(TranscriptItem::UserMessage {
             text: "prompt".to_string(),
@@ -4168,7 +4087,7 @@ mod tests {
             Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if tool_id == "call-1"
         ));
         assert_eq!(app.focus, Focus::Modal);
-        assert_eq!(app.modal_return_focus, Some(Focus::Transcript));
+        assert_eq!(app.modal_ui.modal_return_focus, Some(Focus::Transcript));
         assert_eq!(app.transcript_focus, Some(0));
         assert_eq!(app.active_group_tool_selection, None);
     }
@@ -4204,7 +4123,7 @@ mod tests {
     #[test]
     fn serenity_group_summary_toggle_expands_and_collapses_group() {
         let mut app = app();
-        app.serenity_mode = true;
+        app.modes.serenity_mode = true;
         app.focus = Focus::Input;
         app.transcript
             .push(TranscriptItem::ExecutionGroup(ExecutionGroup {
@@ -4243,7 +4162,7 @@ mod tests {
 
         app.reduce(AppAction::SetSerenityMode(true));
 
-        assert!(app.serenity_mode);
+        assert!(app.modes.serenity_mode);
         assert_eq!(app.active_group_tool_selection, None);
     }
 
@@ -4268,7 +4187,7 @@ mod tests {
             Some(ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { ref tool_id })) if tool_id == "call-2"
         ));
         assert_eq!(app.focus, Focus::Modal);
-        assert_eq!(app.modal_return_focus, Some(Focus::Transcript));
+        assert_eq!(app.modal_ui.modal_return_focus, Some(Focus::Transcript));
         assert_eq!(app.transcript_focus, Some(0));
         assert_eq!(
             app.active_group_tool_selection,
@@ -4303,17 +4222,17 @@ mod tests {
         let mut app = app();
         add_three_text_blocks(&mut app);
         app.focus = Focus::Transcript;
-        app.transcript_autoscroll = true;
+        app.scroll.transcript_autoscroll = true;
 
         app.reduce(AppAction::FocusTranscriptFirst);
         assert_eq!(app.transcript_focus, Some(0));
-        assert!(!app.transcript_autoscroll);
-        assert!(app.scroll_transcript_focus_into_view);
+        assert!(!app.scroll.transcript_autoscroll);
+        assert!(app.scroll.scroll_transcript_focus_into_view);
 
-        app.scroll_transcript_focus_into_view = false;
+        app.scroll.scroll_transcript_focus_into_view = false;
         app.reduce(AppAction::FocusTranscriptLast);
         assert_eq!(app.transcript_focus, Some(2));
-        assert!(app.scroll_transcript_focus_into_view);
+        assert!(app.scroll.scroll_transcript_focus_into_view);
     }
 
     #[test]
@@ -4334,14 +4253,14 @@ mod tests {
                 width: 80,
             },
         });
-        app.scroll_transcript_focus_into_view = true;
+        app.scroll.scroll_transcript_focus_into_view = true;
 
         app.reduce(AppAction::SetFocus(Focus::Input));
 
         assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.transcript_selection, None);
         assert_eq!(app.transcript_focus, None);
-        assert!(!app.scroll_transcript_focus_into_view);
+        assert!(!app.scroll.scroll_transcript_focus_into_view);
     }
 
     #[test]
@@ -4362,7 +4281,7 @@ mod tests {
                 width: 80,
             },
         });
-        app.scroll_transcript_focus_into_view = true;
+        app.scroll.scroll_transcript_focus_into_view = true;
 
         app.reduce(AppAction::ComposerClick {
             char_index: 0,
@@ -4374,7 +4293,7 @@ mod tests {
         assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.transcript_selection, None);
         assert_eq!(app.transcript_focus, None);
-        assert!(!app.scroll_transcript_focus_into_view);
+        assert!(!app.scroll.scroll_transcript_focus_into_view);
     }
 
     #[test]
@@ -5397,7 +5316,7 @@ mod tests {
     fn transcript_pointer_selection_does_not_schedule_focus_scroll() {
         let mut app = app();
         app.reduce(AppAction::SubmitInput("a".to_string()));
-        app.transcript_scroll = 12;
+        app.scroll.transcript_scroll = 12;
 
         app.reduce(AppAction::TranscriptClick {
             position: TranscriptPosition {
@@ -5411,10 +5330,10 @@ mod tests {
             row: 0,
         });
         assert_eq!(app.transcript_focus, Some(0));
-        assert_eq!(app.transcript_scroll, 12);
-        assert!(!app.scroll_transcript_focus_into_view);
+        assert_eq!(app.scroll.transcript_scroll, 12);
+        assert!(!app.scroll.scroll_transcript_focus_into_view);
 
-        app.scroll_transcript_focus_into_view = true;
+        app.scroll.scroll_transcript_focus_into_view = true;
         app.reduce(AppAction::TranscriptDrag {
             position: TranscriptPosition {
                 item: 0,
@@ -5424,15 +5343,15 @@ mod tests {
             scroll_delta: 0,
         });
         assert_eq!(app.transcript_focus, Some(0));
-        assert_eq!(app.transcript_scroll, 12);
-        assert!(!app.scroll_transcript_focus_into_view);
+        assert_eq!(app.scroll.transcript_scroll, 12);
+        assert!(!app.scroll.scroll_transcript_focus_into_view);
     }
 
     #[test]
     fn transcript_drag_applies_edge_scroll_delta() {
         let mut app = app();
         app.reduce(AppAction::SubmitInput("abcdef".to_string()));
-        app.transcript_scroll = 4;
+        app.scroll.transcript_scroll = 4;
 
         app.reduce(AppAction::TranscriptClick {
             position: TranscriptPosition {
@@ -5453,7 +5372,7 @@ mod tests {
             },
             scroll_delta: -1,
         });
-        assert_eq!(app.transcript_scroll, 3);
+        assert_eq!(app.scroll.transcript_scroll, 3);
 
         app.reduce(AppAction::TranscriptDrag {
             position: TranscriptPosition {
@@ -5463,14 +5382,14 @@ mod tests {
             },
             scroll_delta: 2,
         });
-        assert_eq!(app.transcript_scroll, 5);
+        assert_eq!(app.scroll.transcript_scroll, 5);
     }
 
     #[test]
     fn plan_drag_applies_edge_scroll_delta() {
         let mut app = app();
         app.plan.edit().add_task("copy this task");
-        app.plan_scroll = 2;
+        app.scroll.plan_scroll = 2;
         app.reduce(AppAction::PlanClick {
             position: PlanPosition {
                 line: 1,
@@ -5489,7 +5408,7 @@ mod tests {
             },
             scroll_delta: -1,
         });
-        assert_eq!(app.plan_scroll, 1);
+        assert_eq!(app.scroll.plan_scroll, 1);
     }
 
     #[test]
@@ -5759,18 +5678,18 @@ mod tests {
     #[test]
     fn scroll_delta_does_not_wrap_past_i16_range() {
         let mut app = app();
-        app.transcript_autoscroll = false;
-        app.transcript_scroll = 40_000;
+        app.scroll.transcript_autoscroll = false;
+        app.scroll.transcript_scroll = 40_000;
 
         app.reduce(AppAction::ScrollCurrent(1));
 
-        assert_eq!(app.transcript_scroll, 40_001);
+        assert_eq!(app.scroll.transcript_scroll, 40_001);
     }
 
     #[test]
     fn mode_picker_open_seeds_rows_from_current_state() {
         let mut app = app();
-        app.approval_level = crate::tool::ApprovalLevel::AutoAccept;
+        app.modes.approval_level = crate::tool::ApprovalLevel::AutoAccept;
         app.reduce(AppAction::OpenModal(ModalKind::Picker(
             crate::tui::event::PickerModal::ModePicker {
                 rows: Vec::new(),

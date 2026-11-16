@@ -1630,7 +1630,7 @@ mod tests {
     #[test]
     fn up_with_empty_input_withdraws_first_queued_message() {
         let mut app = input_app_with_text("");
-        app.queued_inputs.push(crate::tui::app::QueuedInput {
+        app.queue.queued_inputs.push(crate::tui::app::QueuedInput {
             id: 1,
             text: "queued edit".to_string(),
             content: crate::tui::app::ComposerContent::default(),

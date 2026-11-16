@@ -38,8 +38,8 @@ async fn maybe_advance_plan_phase_continues_to_next_phase() {
 
     let mut app = app();
     app.plan = plan;
-    app.plan_execution = Some(PlanExecution { phase_index: 0 });
-    app.phase_advance = Some(PhaseAdvance::Continue);
+    app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
+    app.plan_run.phase_advance = Some(PhaseAdvance::Continue);
     app.task_state = TaskState::Idle;
     let mut repo_map = empty_repo_map_injector();
 
@@ -55,10 +55,16 @@ async fn maybe_advance_plan_phase_continues_to_next_phase() {
     .await;
 
     assert!(advanced, "a pending next phase should advance");
-    assert_eq!(app.plan_execution, Some(PlanExecution { phase_index: 1 }));
+    assert_eq!(
+        app.plan_run.plan_execution,
+        Some(PlanExecution { phase_index: 1 })
+    );
     assert_eq!(app.task_state, TaskState::Running);
     assert!(tasks.is_busy(), "the next phase's run should be spawned");
-    assert!(app.phase_advance.is_none(), "phase_advance is consumed");
+    assert!(
+        app.plan_run.phase_advance.is_none(),
+        "phase_advance is consumed"
+    );
     assert!(
         plan_store.lock().await.phases[0]
             .tasks
@@ -93,8 +99,8 @@ async fn maybe_advance_plan_phase_halts_without_advancing() {
 
     let mut app = app();
     app.plan = plan;
-    app.plan_execution = Some(PlanExecution { phase_index: 0 });
-    app.phase_advance = Some(PhaseAdvance::Halt);
+    app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
+    app.plan_run.phase_advance = Some(PhaseAdvance::Halt);
     app.task_state = TaskState::Idle;
     let mut repo_map = empty_repo_map_injector();
 
@@ -110,7 +116,10 @@ async fn maybe_advance_plan_phase_halts_without_advancing() {
     .await;
 
     assert!(!advanced);
-    assert!(app.plan_execution.is_none(), "halt clears execution state");
+    assert!(
+        app.plan_run.plan_execution.is_none(),
+        "halt clears execution state"
+    );
     assert!(!tasks.is_busy(), "halt spawns no run");
     assert!(
         plan_store.lock().await.phases[0]
@@ -135,8 +144,8 @@ async fn maybe_advance_plan_phase_completes_after_final_phase() {
 
     let mut app = app();
     app.plan = plan;
-    app.plan_execution = Some(PlanExecution { phase_index: 0 });
-    app.phase_advance = Some(PhaseAdvance::Continue);
+    app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
+    app.plan_run.phase_advance = Some(PhaseAdvance::Continue);
     app.task_state = TaskState::Idle;
     let mut repo_map = empty_repo_map_injector();
 
@@ -152,7 +161,7 @@ async fn maybe_advance_plan_phase_completes_after_final_phase() {
     .await;
 
     assert!(!advanced, "no further phase to advance to");
-    assert!(app.plan_execution.is_none(), "execution completes");
+    assert!(app.plan_run.plan_execution.is_none(), "execution completes");
     assert!(!tasks.is_busy());
     assert!(
         plan_store.lock().await.phases[0]
@@ -190,8 +199,8 @@ async fn maybe_advance_plan_phase_preserves_signal_while_busy() {
 
     let mut app = app();
     app.plan = plan;
-    app.plan_execution = Some(PlanExecution { phase_index: 0 });
-    app.phase_advance = Some(PhaseAdvance::Continue);
+    app.plan_run.plan_execution = Some(PlanExecution { phase_index: 0 });
+    app.plan_run.phase_advance = Some(PhaseAdvance::Continue);
     app.task_state = TaskState::Idle;
     let mut repo_map = empty_repo_map_injector();
 
@@ -208,7 +217,7 @@ async fn maybe_advance_plan_phase_preserves_signal_while_busy() {
 
     assert!(!advanced, "must not advance while a run is in flight");
     assert_eq!(
-        app.phase_advance,
+        app.plan_run.phase_advance,
         Some(PhaseAdvance::Continue),
         "the signal is preserved, not consumed, so a later idle frame still advances"
     );

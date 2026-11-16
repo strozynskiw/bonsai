@@ -58,8 +58,8 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, column: u16, row: u16) -> Optio
                 group,
                 content_width,
                 row_in_item,
-                app.serenity_mode,
-                app.screen_reader_mode || app.execution_group_is_expanded(group.id),
+                app.modes.serenity_mode,
+                app.modes.screen_reader_mode || app.execution_group_is_expanded(group.id),
                 pending_permission_command(app),
                 app.animation_tick(),
             )
@@ -72,8 +72,8 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, column: u16, row: u16) -> Optio
             row_in_item,
             column,
             area,
-            !app.screen_reader_mode && !app.serenity_mode,
-            app.screen_reader_mode,
+            !app.modes.screen_reader_mode && !app.modes.serenity_mode,
+            app.modes.screen_reader_mode,
         ))),
     }
 }
@@ -172,8 +172,8 @@ pub(crate) fn position_at(
         row_in_item,
         column,
         area,
-        !app.screen_reader_mode && !app.serenity_mode,
-        app.screen_reader_mode,
+        !app.modes.screen_reader_mode && !app.modes.serenity_mode,
+        app.modes.screen_reader_mode,
     ))
 }
 
@@ -230,8 +230,8 @@ mod tests {
                 selected: ItemSelection::None,
                 focused: false,
                 active_group_tool_selection: None,
-                serenity_mode: app.serenity_mode,
-                linear_output: app.screen_reader_mode,
+                serenity_mode: app.modes.serenity_mode,
+                linear_output: app.modes.screen_reader_mode,
                 execution_group_expanded: execution_group_expanded_for_item(
                     app,
                     &app.transcript[index],

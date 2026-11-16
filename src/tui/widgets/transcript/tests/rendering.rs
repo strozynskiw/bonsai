@@ -543,8 +543,8 @@ fn transcript_lines_skip_suppressed_items() {
 fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
     let now = std::time::Instant::now();
     let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-    app.screen_reader_mode = true;
-    app.reduced_motion = true;
+    app.modes.screen_reader_mode = true;
+    app.modes.reduced_motion = true;
     app.transcript.push(TranscriptItem::UserMessage {
         text: "please inspect".to_string(),
     });
@@ -602,8 +602,8 @@ fn screen_reader_mode_uses_linear_labels_and_expands_tool_groups() {
 fn screen_reader_mode_does_not_change_active_theme() {
     let original = theme::current_theme_name();
     let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-    app.screen_reader_mode = true;
-    app.reduced_motion = true;
+    app.modes.screen_reader_mode = true;
+    app.modes.reduced_motion = true;
     app.transcript.push(TranscriptItem::AssistantMessage {
         text: "accessible output".to_string(),
     });

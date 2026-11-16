@@ -221,7 +221,7 @@ fn the_sandbox_popup_reaches_its_writable_paths_heading() {
 
     let modal = modal_area(area, &kind);
     assert!(modal.height <= area.height, "{modal:?}");
-    app.modal_scroll = max_modal_scroll(&app, area).unwrap_or(0);
+    app.modal_ui.modal_scroll = max_modal_scroll(&app, area).unwrap_or(0);
     let text = buffer_text(&render_app_to_buffer(area, &app));
     assert!(
         text.contains("Writable paths"),

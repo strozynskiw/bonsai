@@ -125,8 +125,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
     // support text selection repopulate it. Without this, swapping to a modal
     // that doesn't cache (pickers, context) would leave the previous modal's
     // body behind, and clicks would resolve against invisible text.
-    app.modal_body_lines.borrow_mut().clear();
-    app.modal_body_rect.set(None);
+    app.modal_ui.modal_body_lines.borrow_mut().clear();
+    app.modal_ui.modal_body_rect.set(None);
 
     // Reading surfaces (tool detail, diff) get a large window; everything
     // else stays a compact dialog.
@@ -224,7 +224,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             cursor,
         }) => render_provider_manager(f, modal, app, rows, filter, *searching, *cursor),
         ModalKind::Manager(crate::tui::event::ManagerModal::ProviderDetail { detail }) => {
-            render_provider_detail(f, modal, app, detail, app.modal_scroll)
+            render_provider_detail(f, modal, app, detail, app.modal_ui.modal_scroll)
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::ProviderRemove {
             display_name,
@@ -301,7 +301,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             modal,
             app,
             &permission_prompt(command, origin.as_deref()),
-            app.modal_scroll,
+            app.modal_ui.modal_scroll,
         ),
         ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt {
             command,
@@ -313,7 +313,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             modal,
             app,
             &sandbox_escalation_prompt(command, origin.as_deref(), *kind),
-            app.modal_scroll,
+            app.modal_ui.modal_scroll,
         ),
         ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt {
             url,
@@ -326,7 +326,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             modal,
             app,
             &web_domain_prompt(host, url, redirected_from.as_deref(), origin.as_deref()),
-            app.modal_scroll,
+            app.modal_ui.modal_scroll,
         ),
         ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt {
             id,
@@ -339,7 +339,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             modal,
             app,
             &extension_tool_prompt(id, server, capabilities, args_preview),
-            app.modal_scroll,
+            app.modal_ui.modal_scroll,
         ),
         ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt {
             name,
@@ -352,7 +352,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             modal,
             app,
             &hook_trust_prompt(name, event, action_kind, action_preview),
-            app.modal_scroll,
+            app.modal_ui.modal_scroll,
         ),
         ModalKind::Detail(crate::tui::event::DetailModal::QuestionPrompt {
             prompt,
@@ -375,7 +375,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
                 cursor: *cursor,
                 selected,
             },
-            app.modal_scroll,
+            app.modal_ui.modal_scroll,
         ),
     }
 }

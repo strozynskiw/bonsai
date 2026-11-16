@@ -503,7 +503,7 @@ fn execution_group_renders_summary_and_nested_tool_rows() {
 fn serenity_execution_group_keeps_authorization_out_of_the_transcript() {
     let now = std::time::Instant::now();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.transcript
         .push(TranscriptItem::ExecutionGroup(execution_group(
             1,
@@ -695,7 +695,7 @@ fn serenity_execution_group_collapses_nested_rows_by_default() {
         })
         .collect::<Vec<_>>();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.transcript
         .push(TranscriptItem::ExecutionGroup(execution_group(
             1,
@@ -733,7 +733,7 @@ fn serenity_expanded_execution_group_shows_nested_rows() {
         })
         .collect::<Vec<_>>();
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.expanded_execution_groups.insert(1);
     app.transcript
         .push(TranscriptItem::ExecutionGroup(execution_group(
@@ -758,7 +758,7 @@ fn serenity_expanded_execution_group_shows_nested_rows() {
 #[test]
 fn serenity_reasoning_summary_renders_thought_label_without_content() {
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.transcript.push(TranscriptItem::ReasoningSummary {
         text: "private chain".to_string(),
     });
@@ -787,7 +787,7 @@ fn serenity_thought_label_buckets_by_reasoning_volume() {
         (3200, "Took the scenic route"),
     ] {
         let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-        app.serenity_mode = true;
+        app.modes.serenity_mode = true;
         app.transcript.push(TranscriptItem::ReasoningSummary {
             text: "x".repeat(chars),
         });
@@ -807,7 +807,7 @@ fn serenity_thought_label_buckets_by_reasoning_volume() {
 #[test]
 fn serenity_only_trailing_reasoning_cell_animates_while_busy() {
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.task_state = crate::tui::event::TaskState::Running;
     app.tick = 12;
     // Two calls in one turn: the earlier cell's thinking is finished even
@@ -830,7 +830,7 @@ fn serenity_only_trailing_reasoning_cell_animates_while_busy() {
 #[test]
 fn serenity_active_reasoning_summary_renders_thinking_animation() {
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.task_state = crate::tui::event::TaskState::Running;
     app.tick = 12;
     app.transcript.push(TranscriptItem::ReasoningSummary {
@@ -847,7 +847,7 @@ fn serenity_active_reasoning_summary_renders_thinking_animation() {
 #[test]
 fn active_thinking_indicator_is_separated_from_the_previous_card() {
     let mut app = AppState::new("opencode", "test-model".to_string(), ".".to_string(), None);
-    app.serenity_mode = true;
+    app.modes.serenity_mode = true;
     app.task_state = crate::tui::event::TaskState::Running;
     app.tick = 12;
     // A preceding card, then the streaming reasoning indicator.

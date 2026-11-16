@@ -323,7 +323,8 @@ pub(super) async fn drain_background_work_wakes(
         return false;
     }
     let Some(wake_index) = pending_wakes.iter().position(|wake| {
-        app.waiting_for_background_work
+        app.queue
+            .waiting_for_background_work
             .as_ref()
             .is_some_and(|waiting| {
                 waiting.subscription_id == wake.wait.subscription_id
@@ -347,7 +348,7 @@ pub(super) async fn drain_background_work_wakes(
         pending_wakes.push(wake);
         return false;
     }
-    app.waiting_for_background_work = None;
+    app.queue.waiting_for_background_work = None;
     *pending_background_wake = None;
     match wake.wait.target_kind {
         crate::storage::BackgroundWakeTargetKind::BackgroundTask => {
@@ -465,7 +466,7 @@ pub(super) async fn maybe_start_background_wake(
     let Some(deadline) = *pending_background_wake else {
         return false;
     };
-    if app.waiting_for_background_work.is_some() {
+    if app.queue.waiting_for_background_work.is_some() {
         return false;
     }
     if Instant::now() < deadline {
