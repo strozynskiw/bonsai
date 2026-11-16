@@ -136,6 +136,81 @@ fn spawn_panicked(future: impl std::future::Future<Output = ()> + Send + 'static
     });
 }
 
+/// Advances the highlighted mode-picker row by `delta` and applies the new
+/// value. The runtime handler runs before the reducer, so the row is cycled
+/// here rather than waiting for the reducer's own `cycled()`.
+async fn cycle_mode_picker(
+    app: &mut AppState,
+    tasks: &TaskController,
+    deps: &RuntimeActionDeps<'_>,
+    delta: i16,
+) {
+    // The runtime handler runs before the reducer, so the reducer's
+    // `cycled()` mutation would be wasted — the handler would read the
+    // *old* `current` and re-apply the same label. Advance `current`
+    // in place here, then dispatch the resolved label through the
+    // shared holder. Mirrors the `CycleApprovalLevel` pattern.
+    let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker { rows, cursor })) =
+        &mut app.modal
+    else {
+        return;
+    };
+    let Some(row) = rows.get_mut(*cursor) else {
+        return;
+    };
+    *row = row.clone().cycled(delta);
+    let (axis, label) = match &rows[*cursor] {
+        crate::tui::event::ModeRow::Value {
+            axis,
+            values,
+            current,
+            ..
+        } => (*axis, values.get(*current).copied().unwrap_or("")),
+        crate::tui::event::ModeRow::Header(_) => return,
+    };
+    apply_mode_picker_axis(app, axis, label, &deps.yolo_mode, deps.storage).await;
+    if axis == crate::tui::event::ModeAxisId::SelfReview
+        && let Some(mode) = crate::self_review::SelfReviewMode::parse(label)
+        && !tasks.is_busy()
+    {
+        deps.agent.lock().await.set_self_review_mode(mode);
+    }
+}
+
+/// Toggles the sandbox setting under the cursor in the sandbox status modal.
+async fn toggle_sandbox_row(app: &mut AppState, storage: &Storage) {
+    let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { cursor })) =
+        &app.modal
+    else {
+        return;
+    };
+    let cursor = *cursor;
+    let Some(sandbox) = &app.sandbox else {
+        return;
+    };
+    let sandbox = sandbox.clone();
+    match cursor {
+        0 => {
+            let enable = !sandbox.is_enabled();
+            if enable && !sandbox.backend().is_available() {
+                push_command_message(
+                    app,
+                    CommandOutputKind::Error,
+                    &crate::commands::sandbox_unavailable_message(),
+                );
+            } else {
+                sandbox.set_enabled(enable);
+                persist_sandbox_enabled(app, storage, enable).await;
+            }
+        }
+        1 => {
+            sandbox.set_deny_network(!sandbox.deny_network());
+            persist_sandbox_deny_network(app, storage, sandbox.deny_network()).await;
+        }
+        _ => {}
+    }
+}
+
 pub(super) enum RuntimeActionResult {
     Handled,
     Unhandled(Box<AppAction>),
@@ -162,38 +237,7 @@ pub(super) async fn handle_runtime_action(
         AppAction::Modal(crate::tui::event::ModalAction::ModePicker(
             crate::tui::event::ModePickerAction::Cycle(delta),
         )) => {
-            // The runtime handler runs before the reducer, so the reducer's
-            // `cycled()` mutation would be wasted — the handler would read the
-            // *old* `current` and re-apply the same label. Advance `current`
-            // in place here, then dispatch the resolved label through the
-            // shared holder. Mirrors the `CycleApprovalLevel` pattern.
-            let Some(ModalKind::Picker(crate::tui::event::PickerModal::ModePicker {
-                rows,
-                cursor,
-            })) = &mut app.modal
-            else {
-                return RuntimeActionResult::Handled;
-            };
-            let Some(row) = rows.get_mut(*cursor) else {
-                return RuntimeActionResult::Handled;
-            };
-            *row = row.clone().cycled(delta);
-            let (axis, label) = match &rows[*cursor] {
-                crate::tui::event::ModeRow::Value {
-                    axis,
-                    values,
-                    current,
-                    ..
-                } => (*axis, values.get(*current).copied().unwrap_or("")),
-                crate::tui::event::ModeRow::Header(_) => return RuntimeActionResult::Handled,
-            };
-            apply_mode_picker_axis(app, axis, label, &deps.yolo_mode, deps.storage).await;
-            if axis == crate::tui::event::ModeAxisId::SelfReview
-                && let Some(mode) = crate::self_review::SelfReviewMode::parse(label)
-                && !tasks.is_busy()
-            {
-                deps.agent.lock().await.set_self_review_mode(mode);
-            }
+            cycle_mode_picker(app, tasks, &deps, delta).await;
         }
         AppAction::SettingsCycle(delta) => {
             cycle_setting(app, &deps, tasks, delta).await;
@@ -207,36 +251,7 @@ pub(super) async fn handle_runtime_action(
         AppAction::Modal(crate::tui::event::ModalAction::Sandbox(
             crate::tui::event::SandboxAction::Toggle,
         )) => {
-            let Some(ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { cursor })) =
-                &app.modal
-            else {
-                return RuntimeActionResult::Handled;
-            };
-            let cursor = *cursor;
-            let Some(sandbox) = &app.sandbox else {
-                return RuntimeActionResult::Handled;
-            };
-            let sandbox = sandbox.clone();
-            match cursor {
-                0 => {
-                    let enable = !sandbox.is_enabled();
-                    if enable && !sandbox.backend().is_available() {
-                        push_command_message(
-                            app,
-                            CommandOutputKind::Error,
-                            &crate::commands::sandbox_unavailable_message(),
-                        );
-                    } else {
-                        sandbox.set_enabled(enable);
-                        persist_sandbox_enabled(app, deps.storage, enable).await;
-                    }
-                }
-                1 => {
-                    sandbox.set_deny_network(!sandbox.deny_network());
-                    persist_sandbox_deny_network(app, deps.storage, sandbox.deny_network()).await;
-                }
-                _ => {}
-            }
+            toggle_sandbox_row(app, deps.storage).await;
         }
         AppAction::Modal(crate::tui::event::ModalAction::ThemePicker(
             crate::tui::event::ThemePickerAction::Move(delta),
