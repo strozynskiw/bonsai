@@ -409,7 +409,7 @@ impl BashTool {
             {
                 return;
             }
-            if workspace_fingerprint(&project_root) != key.workspace_fingerprint {
+            if workspace_fingerprint_async(&project_root).await != key.workspace_fingerprint {
                 tracing::debug!(%task_id, "background verification changed inputs; skipping cache");
                 return;
             }
@@ -539,6 +539,20 @@ fn structured_cargo_command(canonical: &str) -> String {
     } else {
         format!("{canonical} --message-format=json --quiet")
     }
+}
+
+/// Runs [`workspace_fingerprint`] on the blocking pool: the walk touches every
+/// file in the project and must not stall an async worker thread.
+async fn workspace_fingerprint_async(root: &Path) -> u64 {
+    let root = root.to_path_buf();
+    // A panicked walk yields a unique value so the cache is never trusted.
+    tokio::task::spawn_blocking(move || workspace_fingerprint(&root))
+        .await
+        .unwrap_or_else(|_| {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static POISON: AtomicU64 = AtomicU64::new(0);
+            POISON.fetch_add(1, Ordering::Relaxed)
+        })
 }
 
 fn workspace_fingerprint(root: &Path) -> u64 {
@@ -781,18 +795,20 @@ impl BashTool {
             anyhow::bail!(reason);
         }
 
-        let verification_cache_key = canonical_check
-            .as_ref()
-            .or_else(|| {
-                direct_verification
-                    .as_ref()
-                    .filter(|command| direct_verification_is_cacheable(command))
-            })
-            .map(|canonical| VerificationCacheKey {
+        let cacheable_command = canonical_check.as_ref().or_else(|| {
+            direct_verification
+                .as_ref()
+                .filter(|command| direct_verification_is_cacheable(command))
+        });
+        let verification_cache_key = match cacheable_command {
+            Some(canonical) => Some(VerificationCacheKey {
                 cwd: cwd.clone(),
                 command: canonical.clone(),
-                workspace_fingerprint: workspace_fingerprint(&self.canonical_project_root),
-            });
+                workspace_fingerprint: workspace_fingerprint_async(&self.canonical_project_root)
+                    .await,
+            }),
+            None => None,
+        };
         if !escape_sandbox
             && !interactive
             && let Some(key) = verification_cache_key.as_ref()
@@ -1016,7 +1032,9 @@ impl BashTool {
             // Cargo.lock rewrites or concurrent editor changes conservatively
             // invalidate this run instead of caching old evidence under the
             // post-command workspace.
-            if workspace_fingerprint(&self.canonical_project_root) == key.workspace_fingerprint {
+            if workspace_fingerprint_async(&self.canonical_project_root).await
+                == key.workspace_fingerprint
+            {
                 self.verification_cache.lock().await.insert(
                     key,
                     CachedVerificationOutput {
