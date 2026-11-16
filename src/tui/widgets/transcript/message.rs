@@ -19,9 +19,11 @@ pub(super) fn render_transcript_item(
         TranscriptItem::UserMessage { text } => render_block(
             "❯ you",
             text,
-            theme::palette().user,
-            theme::block(theme::palette().user, theme::palette().user_block),
-            theme::palette().user_block,
+            BlockStyle {
+                accent: theme::palette().user,
+                body_style: theme::block(theme::palette().user, theme::palette().user_block),
+                block_bg: theme::palette().user_block,
+            },
             width,
             options.selected,
             options.focused,
@@ -32,9 +34,11 @@ pub(super) fn render_transcript_item(
         TranscriptItem::AssistantMessage { text } => render_block(
             "● bonsai",
             text,
-            theme::palette().assistant,
-            theme::block(theme::palette().text, theme::palette().assistant_block),
-            theme::palette().assistant_block,
+            BlockStyle {
+                accent: theme::palette().assistant,
+                body_style: theme::block(theme::palette().text, theme::palette().assistant_block),
+                block_bg: theme::palette().assistant_block,
+            },
             width,
             options.selected,
             options.focused,
@@ -83,9 +87,11 @@ pub(super) fn render_transcript_item(
             render_block(
                 title,
                 text,
-                color,
-                theme::block(color, bg),
-                bg,
+                BlockStyle {
+                    accent: color,
+                    body_style: theme::block(color, bg),
+                    block_bg: bg,
+                },
                 width,
                 options.selected,
                 options.focused,
@@ -123,9 +129,11 @@ pub(super) fn render_transcript_item(
             render_block(
                 title,
                 &report.render_compact(),
-                color,
-                theme::block(color, bg),
-                bg,
+                BlockStyle {
+                    accent: color,
+                    body_style: theme::block(color, bg),
+                    block_bg: bg,
+                },
                 width,
                 options.selected,
                 options.focused,
@@ -134,9 +142,11 @@ pub(super) fn render_transcript_item(
         TranscriptItem::Error { error } => render_block(
             &format!("✗ {}", error.title),
             &error.detail,
-            theme::palette().error,
-            theme::block(theme::palette().error, theme::palette().error_block),
-            theme::palette().error_block,
+            BlockStyle {
+                accent: theme::palette().error,
+                body_style: theme::block(theme::palette().error, theme::palette().error_block),
+                block_bg: theme::palette().error_block,
+            },
             width,
             options.selected,
             options.focused,
@@ -144,9 +154,11 @@ pub(super) fn render_transcript_item(
         TranscriptItem::Edit { text } => render_block(
             "± edit",
             text,
-            theme::palette().edit,
-            theme::block(theme::palette().edit, theme::palette().edit_block),
-            theme::palette().edit_block,
+            BlockStyle {
+                accent: theme::palette().edit,
+                body_style: theme::block(theme::palette().edit, theme::palette().edit_block),
+                block_bg: theme::palette().edit_block,
+            },
             width,
             options.selected,
             options.focused,
@@ -154,9 +166,11 @@ pub(super) fn render_transcript_item(
         TranscriptItem::TodoUpdate { text } => render_block(
             "≡ todo",
             text,
-            theme::palette().todo,
-            theme::block(theme::palette().todo, theme::palette().todo_block),
-            theme::palette().todo_block,
+            BlockStyle {
+                accent: theme::palette().todo,
+                body_style: theme::block(theme::palette().todo, theme::palette().todo_block),
+                block_bg: theme::palette().todo_block,
+            },
             width,
             options.selected,
             options.focused,
@@ -164,9 +178,11 @@ pub(super) fn render_transcript_item(
         TranscriptItem::WorkLog { text } => render_block(
             "· note",
             text,
-            theme::palette().muted,
-            theme::block(theme::palette().muted, theme::palette().assistant_block),
-            theme::palette().assistant_block,
+            BlockStyle {
+                accent: theme::palette().muted,
+                body_style: theme::block(theme::palette().muted, theme::palette().assistant_block),
+                block_bg: theme::palette().assistant_block,
+            },
             width,
             options.selected,
             options.focused,
@@ -179,9 +195,11 @@ pub(super) fn render_transcript_item(
         } => render_block(
             &peer_message_title(*session_id, *outgoing),
             text,
-            theme::palette().peer,
-            theme::block(theme::palette().peer, theme::palette().peer_block),
-            theme::palette().peer_block,
+            BlockStyle {
+                accent: theme::palette().peer,
+                body_style: theme::block(theme::palette().peer, theme::palette().peer_block),
+                block_bg: theme::palette().peer_block,
+            },
             width,
             options.selected,
             options.focused,
@@ -257,9 +275,11 @@ fn render_reasoning_preview(
     let mut lines = render_block_lines(
         &reasoning_title(preview.folded_rows, inner_width, focused),
         Vec::new(),
-        accent,
-        theme::block(theme::palette().dim, bg),
-        bg,
+        BlockStyle {
+            accent,
+            body_style: theme::block(theme::palette().dim, bg),
+            block_bg: bg,
+        },
         width,
         selected,
         true,
@@ -496,9 +516,11 @@ fn render_serenity_reasoning_summary(
         lines.extend(render_block_lines(
             "",
             vec![serenity_thinking_line(options.tick)],
-            theme::palette().progress,
-            theme::block(theme::palette().muted, theme::palette().thinking_block),
-            theme::palette().thinking_block,
+            BlockStyle {
+                accent: theme::palette().progress,
+                body_style: theme::block(theme::palette().muted, theme::palette().thinking_block),
+                block_bg: theme::palette().thinking_block,
+            },
             width,
             options.selected,
             false,
@@ -511,9 +533,11 @@ fn render_serenity_reasoning_summary(
     render_block(
         "· serenity",
         label,
-        theme::palette().muted,
-        theme::block(theme::palette().muted, theme::palette().thinking_block),
-        theme::palette().thinking_block,
+        BlockStyle {
+            accent: theme::palette().muted,
+            body_style: theme::block(theme::palette().muted, theme::palette().thinking_block),
+            block_bg: theme::palette().thinking_block,
+        },
         width,
         options.selected,
         options.focused,
@@ -601,21 +625,41 @@ pub(crate) fn peer_message_title(session_id: i64, outgoing: bool) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Colors shared by every framed transcript block.
+#[derive(Clone, Copy)]
+pub(super) struct BlockStyle {
+    pub(super) accent: Color,
+    pub(super) body_style: Style,
+    pub(super) block_bg: Color,
+}
+
 pub(super) fn render_block(
     title: &str,
     body: &str,
-    accent: Color,
-    body_style: Style,
-    block_bg: Color,
+    style: BlockStyle,
     width: usize,
     selected: ItemSelection,
     focused: bool,
 ) -> Vec<Line<'static>> {
+    let BlockStyle {
+        accent,
+        body_style,
+        block_bg,
+    } = style;
     let inner_width = width.saturating_sub(4).max(8);
     let body_lines = render_markdown(body, inner_width);
     render_block_lines(
-        title, body_lines, accent, body_style, block_bg, width, selected, true, focused,
+        title,
+        body_lines,
+        BlockStyle {
+            accent,
+            body_style,
+            block_bg,
+        },
+        width,
+        selected,
+        true,
+        focused,
     )
 }
 
@@ -662,7 +706,17 @@ pub(super) fn render_queued_user_message(
 
     let body_lines = render_markdown(body, inner_width);
     lines.extend(render_block_lines(
-        "", body_lines, accent, body_style, block_bg, width, selected, false, focused,
+        "",
+        body_lines,
+        BlockStyle {
+            accent,
+            body_style,
+            block_bg,
+        },
+        width,
+        selected,
+        false,
+        focused,
     ));
 
     lines
@@ -691,18 +745,20 @@ pub(super) fn queued_title_line(
 
 /// Renders a card from pre-styled body lines. Spans that carry their own
 /// background (diff rows) keep it; everything else gets the card background.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_block_lines(
     title: &str,
     body_lines: Vec<Line<'static>>,
-    accent: Color,
-    body_style: Style,
-    block_bg: Color,
+    style: BlockStyle,
     width: usize,
     selected: ItemSelection,
     render_title: bool,
     focused: bool,
 ) -> Vec<Line<'static>> {
+    let BlockStyle {
+        accent,
+        body_style,
+        block_bg,
+    } = style;
     let inner_width = width.saturating_sub(4).max(8);
     let mut lines = if render_title {
         vec![Line::from("")]

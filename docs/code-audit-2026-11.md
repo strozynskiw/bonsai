@@ -1,6 +1,6 @@
 # Code audit — refactor, performance, improvements
 
-Date: 2026-11-16 · Base: `master` @ `18f3a9f1` (v0.5.1) · Scope: all of `src/`
+Date: 2026-11-16 · Base: `master` @ `18f3a9f1` (v0.5.1); status table below reflects `master` after the refactor series · Scope: all of `src/`
 
 ## Method and limits
 
@@ -30,12 +30,19 @@ The only concrete runtime-cost issue found is a synchronous whole-tree walk in
 | # | Finding | Status |
 |---|---------|--------|
 | 1 | Bash verification fingerprint on async path | **Done** (`spawn_blocking`) |
-| 6 | Release profile | **Done**, measured (-31% binary) |
+| 2 | `event_loop::run` (1,316 lines) | **Done**: startup extracted; the frame loop is `TuiLoop` (`event_loop/driver.rs`) with eight phases (`begin_frame` … `finish_frame`); key handling split into action / submit / mouse. Largest phase is now ~140 lines |
 | 3 | `execute_tool_calls` | **Partly done**: planning, scoped steering, binding release and skip-and-break extracted; result folding left (shares too much state) |
-| 4 | Provider stream state | **Done for opencode** (`ChatStreamState`). A shared accumulator across transports was *not* done: Anthropic content blocks and Codex Responses events have a different shape, so it would not earn its keep |
-| 9 | Re-measured | `modal_identity` dropped; `handle_runtime_action` still open |
+| 4 | Provider stream state | **Done** for opencode (`ChatStreamState`) and Anthropic (`AnthropicStreamState`). A shared accumulator across transports was *not* done: Anthropic content blocks and Codex Responses events have a different shape |
+| 5 | `too_many_arguments` suppressions | **34 `allow`s -> 13**: parameter structs (`ToolCallEnv`, `TurnJob`, `WakeHandles`, `ModalLines`/`ModalScrollView`/`ModalCaches`, `BlockStyle`, `ExistingAgent`, `PersistedReadParts`, ...) plus a `ProviderMetadata` builder. The remaining 13 are 8-9 parameter constructors and independent-handle helpers; they are now `#[expect(..., reason = ...)]`, so a stale one fails the build (5 further `expect`s predate this work) |
+| 6 | Release profile | **Done**, measured (-31% binary) |
+| 8 | `AppState` / `Agent` field groups | Open (large; best done per sub-struct as reducers are touched) |
+| 9 | `handle_runtime_action` | **Re-assessed**: it is a documented routing table (`#[expect(too_many_lines)]`); only the two bulky arms were extracted. `modal_identity` was mis-measured and dropped |
+| 10 | Large files | Open |
 | 11 | `Result<_, String>` | **Dropped**: ~40 sites are slash-command parsers whose `String` is the user-facing usage message; typed errors would add churn without callers that match on them |
-| 2, 5, 8, 10 | event loop, arg structs, state split, big files | Open (large, need interactive TUI verification) |
+
+All changes landed in small commits on `master`; `cargo fmt`, `clippy -D warnings`
+and the full `cargo test --locked` were green at each step, and the TUI was
+smoke-tested in tmux after the frame-loop changes.
 
 Operational note: after `tests/performance_baseline.rs`, check for orphaned
 `target/release/bonsai` processes; two left running at 500%+ CPU made

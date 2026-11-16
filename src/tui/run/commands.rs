@@ -433,7 +433,10 @@ pub(in crate::tui::run) async fn apply_sandbox_command(
 
 /// Apply a `/self-review` invocation against the live agent and mirror it into
 /// view state so reopening `/mode` shows the latest policy.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "command handler whose arguments are distinct shared handles resolved by the caller"
+)]
 pub(in crate::tui::run) async fn apply_self_review_command(
     input: &str,
     app: &mut AppState,

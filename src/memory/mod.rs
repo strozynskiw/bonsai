@@ -149,7 +149,10 @@ impl MemoryService {
 
     /// Move an entry between tiers, publishing only after both file mutations
     /// have completed. A user-tier notice is broad enough for either direction.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "moves one entry between tiers; the arguments are the entry fields themselves"
+    )]
     pub(crate) async fn move_entry(
         &self,
         from_tier: entry::MemoryTier,

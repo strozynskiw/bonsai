@@ -198,7 +198,10 @@ impl ReadOnlyCore {
 /// The write/apply_patch/edit trio bound to one read tracker (the parent's or
 /// a subagent's). Bash and rename stay at the call sites — their constructor
 /// inputs differ per registry.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wiring function: each argument is a distinct shared handle injected into the file-mutation tools"
+)]
 fn insert_file_mutation_tools(
     instances: &mut ToolInstances,
     project_root: &Path,

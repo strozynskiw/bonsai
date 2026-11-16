@@ -458,7 +458,10 @@ struct HeadlessProviderRuntime {
     retry_backoff: crate::agent::RetryBackoff,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "private entry point whose arguments are independent, already-resolved run inputs (config, sink, storage, roots, recovery); a bundle would be built and unpacked at one call site"
+)]
 async fn run_inner_with_provider_runtime(
     config: HeadlessConfig,
     sink: Arc<HeadlessSink>,

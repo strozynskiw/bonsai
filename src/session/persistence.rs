@@ -368,7 +368,10 @@ impl SessionStore {
     }
 
     /// Mirrors the persisted column set one-to-one, hence the argument count.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor that maps one-to-one onto the persisted fields; a parameter struct would only restate them"
+    )]
     pub(crate) fn from_persistent_parts(
         current_provider: String,
         active_connection_id: Option<ConnectionId>,

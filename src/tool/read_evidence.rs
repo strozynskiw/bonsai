@@ -325,7 +325,10 @@ pub struct ReadEvidence {
 }
 
 impl ReadEvidence {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor mapping onto the observation and freshness fields; see PersistedReadParts for the stored form"
+    )]
     pub fn new(
         display_path: impl Into<String>,
         canonical_path: PathBuf,

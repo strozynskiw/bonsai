@@ -586,7 +586,10 @@ pub struct ContextNode {
 }
 
 impl ContextNode {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "node constructor mirroring the ContextNode fields; call sites name every value positionally and a builder would restate the struct"
+    )]
     pub(crate) fn leaf(
         id: impl Into<ContextNodeId>,
         kind: ContextNodeKind,
@@ -614,7 +617,10 @@ impl ContextNode {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "node constructor mirroring the ContextNode fields; call sites name every value positionally and a builder would restate the struct"
+    )]
     pub(crate) fn parent(
         id: impl Into<ContextNodeId>,
         kind: ContextNodeKind,
@@ -717,7 +723,10 @@ impl<'a> NodeBuildContext<'a> {
     /// Build a parent node, absorbing `self.inclusion`, `self.row_metadata`,
     /// and `self.source`.
     #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "node constructor mirroring the ContextNode fields; call sites name every value positionally and a builder would restate the struct"
+    )]
     pub(crate) fn parent(
         &self,
         id: impl Into<ContextNodeId>,

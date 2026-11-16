@@ -471,7 +471,10 @@ impl VerificationScheduler {
 
     /// Execute the attempt as its producer, publish one terminal result, and
     /// hold the lease for as long as any subscriber still needs it.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "private helper of one scheduler path; the arguments come from different owners and are never reused together"
+    )]
     async fn produce<T, F>(
         &self,
         job_id: i64,

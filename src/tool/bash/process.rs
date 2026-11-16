@@ -235,7 +235,10 @@ fn format_command_duration(duration: std::time::Duration) -> String {
 }
 
 impl BashTool {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "process spawn entry point; timeout, sandbox escape, network and cancellation are independent knobs"
+    )]
     pub(super) async fn run_command(
         &self,
         command: &str,

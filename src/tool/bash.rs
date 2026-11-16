@@ -1085,7 +1085,10 @@ impl BashTool {
     /// exit-code frame, failure summary, sandbox-escape audit/nudge, and the
     /// command-summary footer. Pure string assembly — unit-testable without
     /// spawning a process.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "pure formatting helper over independent command-outcome values; no natural grouping beyond the outcome itself"
+    )]
     fn finalize_foreground(
         command: &str,
         body: &str,

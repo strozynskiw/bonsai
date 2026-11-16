@@ -133,7 +133,10 @@ pub(crate) struct CommandTaskDeps {
 
 impl CommandTaskDeps {
     /// Bind a command task to one coherent runtime snapshot.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor for the command-task dependency set; each field is a distinct shared handle"
+    )]
     pub(crate) fn new(
         agent: Arc<tokio::sync::Mutex<Agent>>,
         session_store: Arc<tokio::sync::Mutex<SessionStore>>,

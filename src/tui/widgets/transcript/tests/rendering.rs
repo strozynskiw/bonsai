@@ -8,9 +8,11 @@ fn render_block_stays_within_provided_width() {
     let lines = render_block(
         "[test]",
         body,
-        theme::palette().user,
-        md(theme::palette().text),
-        theme::palette().user_block,
+        BlockStyle {
+            accent: theme::palette().user,
+            body_style: md(theme::palette().text),
+            block_bg: theme::palette().user_block,
+        },
         60,
         ItemSelection::None,
         false,
@@ -45,9 +47,11 @@ fn partial_selection_preserves_rendered_block_layout() {
     let plain = render_block(
         "● bonsai",
         body,
-        theme::palette().assistant,
-        md(theme::palette().text),
-        theme::palette().assistant_block,
+        BlockStyle {
+            accent: theme::palette().assistant,
+            body_style: md(theme::palette().text),
+            block_bg: theme::palette().assistant_block,
+        },
         120,
         ItemSelection::None,
         false,
@@ -55,9 +59,11 @@ fn partial_selection_preserves_rendered_block_layout() {
     let selected = render_block(
         "● bonsai",
         body,
-        theme::palette().assistant,
-        md(theme::palette().text),
-        theme::palette().assistant_block,
+        BlockStyle {
+            accent: theme::palette().assistant,
+            body_style: md(theme::palette().text),
+            block_bg: theme::palette().assistant_block,
+        },
         120,
         ItemSelection::Range { start, end },
         false,
@@ -85,9 +91,11 @@ fn render_block_handles_narrow_terminals() {
         let lines = render_block(
             "[assistant]",
             body,
-            theme::palette().assistant,
-            md(theme::palette().text),
-            theme::palette().assistant_block,
+            BlockStyle {
+                accent: theme::palette().assistant,
+                body_style: md(theme::palette().text),
+                block_bg: theme::palette().assistant_block,
+            },
             width,
             ItemSelection::None,
             false,
@@ -115,9 +123,11 @@ fn render_block_keeps_wide_chars_within_width() {
         let lines = render_block(
             "[assistant]",
             body,
-            theme::palette().assistant,
-            md(theme::palette().text),
-            theme::palette().assistant_block,
+            BlockStyle {
+                accent: theme::palette().assistant,
+                body_style: md(theme::palette().text),
+                block_bg: theme::palette().assistant_block,
+            },
             width,
             ItemSelection::None,
             false,
@@ -320,9 +330,11 @@ fn markdown_inside_cards_never_leaks_the_panel_background() {
     let lines = render_block(
         "● bonsai",
         body,
-        theme::palette().assistant,
-        theme::block(theme::palette().text, theme::palette().assistant_block),
-        theme::palette().assistant_block,
+        BlockStyle {
+            accent: theme::palette().assistant,
+            body_style: theme::block(theme::palette().text, theme::palette().assistant_block),
+            block_bg: theme::palette().assistant_block,
+        },
         80,
         ItemSelection::None,
         false,
@@ -396,9 +408,11 @@ fn render_block_applies_selection_background() {
     let lines = render_block(
         "[user]",
         body,
-        theme::palette().user,
-        md(theme::palette().text),
-        theme::palette().user_block,
+        BlockStyle {
+            accent: theme::palette().user,
+            body_style: md(theme::palette().text),
+            block_bg: theme::palette().user_block,
+        },
         60,
         ItemSelection::Whole,
         false,
