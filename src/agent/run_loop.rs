@@ -6,6 +6,7 @@ mod coordinator;
 mod deferred_output;
 pub(super) mod recovery;
 mod tools;
+use tools::ToolCallEnv;
 mod verification;
 
 const REPEATED_INSPECTION_TURN_LIMIT: usize = 2;
@@ -1274,18 +1275,20 @@ impl Agent {
                 interrupted_tool_results(batch)
             } else {
                 Self::run_tool_batch(
-                    self.background_wakes.clone(),
                     batch,
-                    tool_registry,
-                    &tool_rejections,
-                    sink,
-                    &cancellation_token,
+                    &ToolCallEnv {
+                        background_wakes: self.background_wakes.clone(),
+                        tool_registry: tool_registry.clone(),
+                        tool_rejections: tool_rejections.clone(),
+                        sink: sink.clone(),
+                        cancellation_token: cancellation_token.clone(),
+                        hooks: self.hooks.clone(),
+                        tool_origin: self.tool_origin.clone(),
+                        max_tool_duration: self.budget.max_tool_duration,
+                        remaining_billed_tokens,
+                        timing: self.timing.clone(),
+                    },
                     &mut interrupted_mid_tools,
-                    &self.hooks,
-                    self.tool_origin.clone(),
-                    self.budget.max_tool_duration,
-                    remaining_billed_tokens,
-                    self.timing.clone(),
                 )
                 .await
             };
@@ -4402,19 +4405,21 @@ mod tests {
                 rejections.bound_verification_calls.insert("ready-1".into());
             }
             let (_, output, status) = Agent::execute_single_tool_call(
-                None,
+                ToolCallEnv {
+                    background_wakes: None,
+                    tool_registry: registry.clone(),
+                    tool_rejections: rejections,
+                    sink: Arc::new(crate::output::StdoutSink),
+                    cancellation_token: CancellationToken::new(),
+                    hooks: hooks.clone(),
+                    tool_origin: None,
+                    max_tool_duration: None,
+                    remaining_billed_tokens: None,
+                    timing: Arc::new(crate::timing::TimingLedger::system(
+                        crate::timing::TimingPolicy::ActiveCompute,
+                    )),
+                },
                 call("ready", r#"{"command":"echo original"}"#),
-                registry.clone(),
-                rejections,
-                Arc::new(crate::output::StdoutSink),
-                CancellationToken::new(),
-                hooks.clone(),
-                None,
-                None,
-                None,
-                Arc::new(crate::timing::TimingLedger::system(
-                    crate::timing::TimingPolicy::ActiveCompute,
-                )),
                 parallel,
             )
             .await;
@@ -4679,19 +4684,21 @@ mod tests {
         let started = std::time::Instant::now();
 
         let (_, output, status) = Agent::execute_single_tool_call(
-            None,
+            ToolCallEnv {
+                background_wakes: None,
+                tool_registry: Arc::new(registry),
+                tool_rejections: ToolRejections::default(),
+                sink,
+                cancellation_token: CancellationToken::new(),
+                hooks: Arc::new(crate::hooks::HookEngine::disabled()),
+                tool_origin: None,
+                max_tool_duration: Some(Duration::from_millis(10)),
+                remaining_billed_tokens: None,
+                timing: std::sync::Arc::new(crate::timing::TimingLedger::system(
+                    crate::timing::TimingPolicy::ActiveCompute,
+                )),
+            },
             call("slow", "{}"),
-            Arc::new(registry),
-            ToolRejections::default(),
-            sink,
-            CancellationToken::new(),
-            Arc::new(crate::hooks::HookEngine::disabled()),
-            None,
-            Some(Duration::from_millis(10)),
-            None,
-            std::sync::Arc::new(crate::timing::TimingLedger::system(
-                crate::timing::TimingPolicy::ActiveCompute,
-            )),
             false,
         )
         .await;
@@ -4714,19 +4721,21 @@ mod tests {
         registry.register(Arc::new(ReadyTool));
 
         let (_, output, status) = Agent::execute_single_tool_call(
-            None,
+            ToolCallEnv {
+                background_wakes: None,
+                tool_registry: Arc::new(registry),
+                tool_rejections: ToolRejections::default(),
+                sink: Arc::new(crate::output::StdoutSink),
+                cancellation_token: CancellationToken::new(),
+                hooks: Arc::new(crate::hooks::HookEngine::disabled()),
+                tool_origin: None,
+                max_tool_duration: Some(Duration::ZERO),
+                remaining_billed_tokens: None,
+                timing: std::sync::Arc::new(crate::timing::TimingLedger::system(
+                    crate::timing::TimingPolicy::ActiveCompute,
+                )),
+            },
             call("ready", "{}"),
-            Arc::new(registry),
-            ToolRejections::default(),
-            Arc::new(crate::output::StdoutSink),
-            CancellationToken::new(),
-            Arc::new(crate::hooks::HookEngine::disabled()),
-            None,
-            Some(Duration::ZERO),
-            None,
-            std::sync::Arc::new(crate::timing::TimingLedger::system(
-                crate::timing::TimingPolicy::ActiveCompute,
-            )),
             false,
         )
         .await;
@@ -6215,22 +6224,24 @@ mod tests {
         let mut results = Vec::new();
         for call in calls {
             let (_, output, status) = Agent::execute_single_tool_call(
-                None,
-                call,
-                registry.clone(),
-                ToolRejections {
-                    auto_background: selected.clone(),
-                    ..ToolRejections::default()
+                ToolCallEnv {
+                    background_wakes: None,
+                    tool_registry: registry.clone(),
+                    tool_rejections: ToolRejections {
+                        auto_background: selected.clone(),
+                        ..ToolRejections::default()
+                    },
+                    sink: Arc::new(crate::output::StdoutSink),
+                    cancellation_token: CancellationToken::new(),
+                    hooks: Arc::new(crate::hooks::HookEngine::disabled()),
+                    tool_origin: None,
+                    max_tool_duration: None,
+                    remaining_billed_tokens: None,
+                    timing: std::sync::Arc::new(crate::timing::TimingLedger::system(
+                        crate::timing::TimingPolicy::ActiveCompute,
+                    )),
                 },
-                Arc::new(crate::output::StdoutSink),
-                CancellationToken::new(),
-                Arc::new(crate::hooks::HookEngine::disabled()),
-                None,
-                None,
-                None,
-                std::sync::Arc::new(crate::timing::TimingLedger::system(
-                    crate::timing::TimingPolicy::ActiveCompute,
-                )),
+                call,
                 false,
             )
             .await;

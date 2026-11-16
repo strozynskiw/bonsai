@@ -12,26 +12,37 @@ fn verification_binding_arguments_changed(
         .any(|key| before.get(key) != after.get(key))
 }
 
+/// Everything a tool call needs besides the call itself. One value is built
+/// per batch and cloned per call, replacing a dozen positional parameters.
+#[derive(Clone)]
+pub(super) struct ToolCallEnv {
+    pub(super) background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
+    pub(super) tool_registry: Arc<ToolRegistry>,
+    pub(super) tool_rejections: ToolRejections,
+    pub(super) sink: SharedSink,
+    pub(super) cancellation_token: CancellationToken,
+    pub(super) hooks: Arc<crate::hooks::HookEngine>,
+    pub(super) tool_origin: Option<String>,
+    pub(super) max_tool_duration: Option<Duration>,
+    pub(super) remaining_billed_tokens: Option<u64>,
+    pub(super) timing: crate::timing::SharedTimingLedger,
+}
+
 impl Agent {
     /// Run one batch concurrently, selected against `cancellation_token` so a
     /// mid-batch cancel returns synthetic interrupted results instead of
     /// waiting out the slowest call. `*interrupted_mid_tools` is set on that
     /// path so the caller stops issuing further batches this turn.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_tool_batch(
-        background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
         batch: Vec<ToolCall>,
-        tool_registry: &Arc<ToolRegistry>,
-        tool_rejections: &ToolRejections,
-        sink: &SharedSink,
-        cancellation_token: &CancellationToken,
+        env: &ToolCallEnv,
         interrupted_mid_tools: &mut bool,
-        hooks: &Arc<crate::hooks::HookEngine>,
-        tool_origin: Option<String>,
-        max_tool_duration: Option<Duration>,
-        remaining_billed_tokens: Option<u64>,
-        timing: crate::timing::SharedTimingLedger,
     ) -> Vec<(ToolCall, ToolOutput, crate::output::ToolExecutionStatus)> {
+        let ToolCallEnv {
+            sink,
+            cancellation_token,
+            ..
+        } = env;
         let started_calls = batch
             .iter()
             .map(|tool_call| {
@@ -53,20 +64,7 @@ impl Agent {
                 crate::tool::AuthorizationCallContext::new(tool_call.id.clone(), sink.clone());
             crate::tool::with_authorization_call_context(
                 authorization_context,
-                Self::execute_single_tool_call(
-                    background_wakes.clone(),
-                    tool_call,
-                    tool_registry.clone(),
-                    tool_rejections.clone(),
-                    sink.clone(),
-                    cancellation_token.clone(),
-                    hooks.clone(),
-                    tool_origin.clone(),
-                    max_tool_duration,
-                    remaining_billed_tokens,
-                    timing.clone(),
-                    batch_is_parallel,
-                ),
+                Self::execute_single_tool_call(env.clone(), tool_call, batch_is_parallel),
             )
         }));
         tokio::select! {
@@ -83,21 +81,23 @@ impl Agent {
     /// or repeated-inspection budget), report it unknown, fail to parse its
     /// arguments, or execute it — in that order, each a guard clause rather
     /// than a further nesting level.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_single_tool_call(
-        background_wakes: Option<Arc<crate::background_wake::BackgroundWakeCoordinator>>,
+        env: ToolCallEnv,
         tool_call: ToolCall,
-        tool_registry: Arc<ToolRegistry>,
-        tool_rejections: ToolRejections,
-        sink: SharedSink,
-        cancellation_token: CancellationToken,
-        hooks: Arc<crate::hooks::HookEngine>,
-        tool_origin: Option<String>,
-        max_tool_duration: Option<Duration>,
-        remaining_billed_tokens: Option<u64>,
-        timing: crate::timing::SharedTimingLedger,
         batch_is_parallel: bool,
     ) -> (ToolCall, ToolOutput, crate::output::ToolExecutionStatus) {
+        let ToolCallEnv {
+            background_wakes,
+            tool_registry,
+            tool_rejections,
+            sink,
+            cancellation_token,
+            hooks,
+            tool_origin,
+            max_tool_duration,
+            remaining_billed_tokens,
+            timing,
+        } = env;
         sink.thinking(&format!("Running {}", tool_call.name));
 
         // Set only once execution is actually attempted, so `PostToolUse`
