@@ -2591,6 +2591,146 @@ async fn drain_runtime_events_for_frame(
     changed
 }
 
+/// Starts the long-lived background watchers and one-shot startup tasks.
+/// None of them block the first frame; failures are logged and non-fatal.
+fn spawn_startup_background_tasks(
+    project_root: &std::path::Path,
+    branch: &Option<String>,
+    peer_bus: &Arc<crate::peer::PeerBus>,
+    storage: &crate::storage::Storage,
+    update_config: &crate::config::UpdateConfig,
+    runtime_sender: &mpsc::UnboundedSender<RuntimeEvent>,
+    background_spawns: &mut tokio::task::JoinSet<()>,
+) {
+    // Keep the header's branch label in sync with `git checkout`/`switch` made
+    // outside the app; the initial value was read once into `branch` above.
+    spawn_branch_watcher(
+        project_root.to_path_buf(),
+        branch.clone(),
+        runtime_sender.clone(),
+        background_spawns,
+    );
+    // Inter-agent message watcher: claims inbound messages every
+    // couple of seconds and surfaces them as blue chat messages.
+    spawn_peer_watcher(peer_bus.clone(), runtime_sender.clone(), background_spawns);
+    // Boot-time retention for the message bus; failures are non-fatal.
+    {
+        let storage = storage.clone();
+        background_spawns.spawn(async move {
+            if let Err(err) = storage.purge_stale_peer_state().await {
+                tracing::debug!(%err, "peer message purge failed");
+            }
+        });
+    }
+    // Native self-update: check for a newer signed release in the background
+    // and surface at most one composer-meta notice. Startup is never blocked
+    // and failures stay silent (debug log only). The config clone outlives the
+    // block so `/update` reuses it without taking the agent lock.
+    {
+        let bonsai_home = storage.home_dir().to_path_buf();
+        let update_config = update_config.clone();
+        let update_sender = runtime_sender.clone();
+        background_spawns.spawn(async move {
+            let outcome = crate::update::run_startup_update(&bonsai_home, &update_config).await;
+            tracing::debug!(?outcome, "startup self-update finished");
+            if let Some(notice) = crate::update::startup_notice(&outcome) {
+                let _ = update_sender.send(RuntimeEvent::UpdateNotice(notice));
+            }
+        });
+    }
+}
+
+/// Persisted preferences and onboarding state read before the first frame.
+struct StartupSettings {
+    credential_persistence: crate::session::CredentialPersistence,
+    workspace_trust: crate::workspace_trust::WorkspaceTrustGate,
+    has_authorized_provider: bool,
+    first_run_step: Option<crate::onboarding::FirstRunStep>,
+    serenity_mode: bool,
+    support_log_enabled: bool,
+    run_budget: crate::run_budget::RunBudget,
+}
+
+async fn load_startup_settings(
+    storage: &crate::storage::Storage,
+    session_store: &Arc<Mutex<SessionStore>>,
+    registry: &ProviderRegistry,
+    session_project_root: &std::path::Path,
+) -> Result<StartupSettings> {
+    let credential_persistence_preference = storage.credential_persistence().await?;
+    let credential_persistence = credential_persistence_preference.unwrap_or_default();
+    let first_run_progress = storage.first_run_progress().await?;
+    let workspace_project_id = storage.ensure_project(session_project_root).await?;
+    let workspace_trust =
+        crate::workspace_trust::WorkspaceTrustGate::load(storage.clone(), workspace_project_id)
+            .await?;
+    let has_authorized_provider = {
+        let session = session_store.lock().await;
+        registry.all().iter().any(|factory| {
+            let provider_id = factory.metadata().id.as_ref();
+            factory.is_authorized(session.session(provider_id))
+        })
+    };
+    let first_run_step = crate::onboarding::initial_step(
+        first_run_progress,
+        credential_persistence_preference.is_some(),
+        has_authorized_provider,
+        workspace_trust.needs_prompt(),
+    );
+    // Presentation preference, restored before the first frame like the
+    // theme; a read failure degrades to the normal view rather than failing
+    // startup.
+    let serenity_mode = storage.serenity_mode().await.unwrap_or(false);
+    // Arm the opt-in lifecycle log as early as possible: the tracing layer is
+    // already installed, so flipping the gate is all "enabled" means.
+    let support_log_enabled = storage.support_log_enabled().await.unwrap_or(false);
+    crate::logging::set_support_log_enabled(support_log_enabled);
+    let run_budget = storage.run_budget().await.unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "failed to restore run budget preference");
+        // Unknown preference state: fall back to the soft-warning defaults so
+        // the session still cannot silently pass a warning threshold.
+        crate::run_budget::RunBudget::soft_alert_defaults()
+    });
+    Ok(StartupSettings {
+        credential_persistence,
+        workspace_trust,
+        has_authorized_provider,
+        first_run_step,
+        serenity_mode,
+        support_log_enabled,
+        run_budget,
+    })
+}
+
+/// Surfaces keyring recovery and config diagnostics once, up front.
+async fn push_startup_notices(
+    app: &mut AppState,
+    registry: &ProviderRegistry,
+    session_store: &Arc<Mutex<SessionStore>>,
+    agent: &Arc<Mutex<Agent>>,
+) {
+    if let Some(notice) = keyring_recovery_notice(registry, &*session_store.lock().await) {
+        push_command_message(app, CommandOutputKind::Status, &notice);
+    }
+
+    // Config diagnostics: a broken `.bonsai/config.toml` entry never
+    // fails startup, but it must not fail *silently* either — surface it once,
+    // up front, alongside the pointer to `/config validate` for detail.
+    let config_diagnostics = agent.lock().await.config().diagnostics.clone();
+    if !config_diagnostics.is_empty() {
+        let lines: Vec<String> = config_diagnostics.iter().map(ToString::to_string).collect();
+        push_command_message(
+            app,
+            CommandOutputKind::Status,
+            &format!(
+                "config: {} diagnostic(s) — see /config validate\n{}",
+                lines.len(),
+                lines.join("\n")
+            ),
+        );
+    }
+}
+
 pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     let TuiRuntime {
         mut agent,
@@ -2647,81 +2787,25 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
     // must never block the first frame. It is injected into the agent's context
     // via `RuntimeEvent::RepoMapReady` once ready.
     let repo_map_watch = spawn_repo_map_build(project_root.clone(), runtime_sender.clone());
-    // Keep the header's branch label in sync with `git checkout`/`switch` made
-    // outside the app; the initial value was read once into `branch` above.
-    spawn_branch_watcher(
-        project_root.clone(),
-        branch.clone(),
-        runtime_sender.clone(),
-        &mut background_spawns,
-    );
-    // Inter-agent message watcher: claims inbound messages every
-    // couple of seconds and surfaces them as blue chat messages.
-    spawn_peer_watcher(
-        peer_bus.clone(),
-        runtime_sender.clone(),
-        &mut background_spawns,
-    );
-    // Boot-time retention for the message bus; failures are non-fatal.
-    {
-        let storage = storage.clone();
-        background_spawns.spawn(async move {
-            if let Err(err) = storage.purge_stale_peer_state().await {
-                tracing::debug!(%err, "peer message purge failed");
-            }
-        });
-    }
-    // Native self-update: check for a newer signed release in the background
-    // and surface at most one composer-meta notice. Startup is never blocked
-    // and failures stay silent (debug log only). The config clone outlives the
-    // block so `/update` reuses it without taking the agent lock.
     let update_config = agent.config().update.clone();
-    {
-        let bonsai_home = storage.home_dir().to_path_buf();
-        let update_config = update_config.clone();
-        let update_sender = runtime_sender.clone();
-        background_spawns.spawn(async move {
-            let outcome = crate::update::run_startup_update(&bonsai_home, &update_config).await;
-            tracing::debug!(?outcome, "startup self-update finished");
-            if let Some(notice) = crate::update::startup_notice(&outcome) {
-                let _ = update_sender.send(RuntimeEvent::UpdateNotice(notice));
-            }
-        });
-    }
-    let credential_persistence_preference = storage.credential_persistence().await?;
-    let credential_persistence = credential_persistence_preference.unwrap_or_default();
-    let first_run_progress = storage.first_run_progress().await?;
-    let workspace_project_id = storage.ensure_project(&session_project_root).await?;
-    let workspace_trust =
-        crate::workspace_trust::WorkspaceTrustGate::load(storage.clone(), workspace_project_id)
-            .await?;
-    let has_authorized_provider = {
-        let session = session_store.lock().await;
-        registry.all().iter().any(|factory| {
-            let provider_id = factory.metadata().id.as_ref();
-            factory.is_authorized(session.session(provider_id))
-        })
-    };
-    let first_run_step = crate::onboarding::initial_step(
-        first_run_progress,
-        credential_persistence_preference.is_some(),
-        has_authorized_provider,
-        workspace_trust.needs_prompt(),
+    spawn_startup_background_tasks(
+        &project_root,
+        &branch,
+        &peer_bus,
+        &storage,
+        &update_config,
+        &runtime_sender,
+        &mut background_spawns,
     );
-    // Presentation preference, restored before the first frame like the
-    // theme; a read failure degrades to the normal view rather than failing
-    // startup.
-    let serenity_mode = storage.serenity_mode().await.unwrap_or(false);
-    // Arm the opt-in lifecycle log as early as possible: the tracing layer is
-    // already installed, so flipping the gate is all "enabled" means.
-    let support_log_enabled = storage.support_log_enabled().await.unwrap_or(false);
-    crate::logging::set_support_log_enabled(support_log_enabled);
-    let run_budget = storage.run_budget().await.unwrap_or_else(|error| {
-        tracing::warn!(error = %error, "failed to restore run budget preference");
-        // Unknown preference state: fall back to the soft-warning defaults so
-        // the session still cannot silently pass a warning threshold.
-        crate::run_budget::RunBudget::soft_alert_defaults()
-    });
+    let StartupSettings {
+        credential_persistence,
+        workspace_trust,
+        has_authorized_provider,
+        first_run_step,
+        serenity_mode,
+        support_log_enabled,
+        run_budget,
+    } = load_startup_settings(&storage, &session_store, &registry, &session_project_root).await?;
     let mut app = {
         let guard = session_store.lock().await;
         let provider = guard.current_kind_id().to_string();
@@ -3040,26 +3124,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         }
     }
 
-    if let Some(notice) = keyring_recovery_notice(&registry, &*session_store.lock().await) {
-        push_command_message(&mut app, CommandOutputKind::Status, &notice);
-    }
-
-    // Config diagnostics: a broken `.bonsai/config.toml` entry never
-    // fails startup, but it must not fail *silently* either — surface it once,
-    // up front, alongside the pointer to `/config validate` for detail.
-    let config_diagnostics = agent.lock().await.config().diagnostics.clone();
-    if !config_diagnostics.is_empty() {
-        let lines: Vec<String> = config_diagnostics.iter().map(ToString::to_string).collect();
-        push_command_message(
-            &mut app,
-            CommandOutputKind::Status,
-            &format!(
-                "config: {} diagnostic(s) — see /config validate\n{}",
-                lines.len(),
-                lines.join("\n")
-            ),
-        );
-    }
+    push_startup_notices(&mut app, &registry, &session_store, &agent).await;
 
     let result = 'run: loop {
         // Frame budget watch: everything between here and the event poll runs
