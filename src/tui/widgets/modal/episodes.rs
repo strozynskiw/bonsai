@@ -13,7 +13,7 @@ pub(super) fn render_episodes(
 ) {
     let footer_lines = vec![
         Line::from(Span::styled(episode_summary(report), theme::dim())),
-        footer_hint_line(&[("Up/Down", "move"), ("PgUp/PgDn", "page"), ("Esc", "close")]),
+        footer_hint_line(EPISODE_HINTS),
     ];
     render_list_detail_modal(
         f,
@@ -37,11 +37,13 @@ pub(super) fn render_episodes(
             } else {
                 let cursor = cursor.min(episodes.len().saturating_sub(1));
                 let visible_count = table_area.height.saturating_sub(1).max(1) as usize;
-                lines.extend(
-                    visible_picker_rows(episodes.len(), cursor, visible_count).map(|index| {
-                        table_row(&episodes[index], &columns, &widths, index == cursor)
-                    }),
-                );
+                lines.extend(table_body_lines(
+                    &episodes.iter().collect::<Vec<_>>(),
+                    &columns,
+                    &widths,
+                    cursor,
+                    visible_count,
+                ));
             }
             frame.render_widget(
                 Paragraph::new(lines)
@@ -111,9 +113,8 @@ fn episode_columns() -> Vec<TableColumn<EpisodeReport>> {
         TableColumn {
             header: "Title / goal",
             width: TableWidth::Flex { min: 0 },
-            render: CellRender::Fitted(|episode, width| {
-                truncate_ascii(&episode_title_or_goal(episode), width)
-            }),
+            // Prose: the full title matters, so it wraps instead of clipping.
+            render: CellRender::Wrapped(episode_title_or_goal),
             style: CellStyle::Text,
         },
     ]

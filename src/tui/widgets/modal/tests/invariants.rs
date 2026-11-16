@@ -3,7 +3,7 @@
 //! intact frame, a title, a visible footer, horizontally centred.
 
 use super::*;
-use crate::tui::event::{DetailModal, ManagerModal, PickerModal};
+use crate::tui::event::{ConfirmModal, DetailModal, ManagerModal, PickerModal};
 
 /// Tool sizes the matrix runs: a roomy terminal, a normal one, a laptop split and
 /// the smallest size the TUI claims to support.
@@ -148,6 +148,36 @@ fn fixture_kinds() -> Vec<ModalKind> {
             report: Box::new(context_report_with_rows(3)),
             cursor: 0,
         }),
+        ModalKind::Detail(DetailModal::ApiKeyPrompt {
+            provider_id: "codex".to_string(),
+            initial_form: None,
+        }),
+        ModalKind::Detail(DetailModal::PerfReport {
+            title: "/perf".to_string(),
+            lines: vec!["turn 1  1.2s  tools 3".to_string()],
+        }),
+        ModalKind::Picker(PickerModal::ThemePicker {
+            cursor: 0,
+            original_theme: "default".to_string(),
+        }),
+        ModalKind::Confirm(ConfirmModal::Unauthorize {
+            provider_id: "opencode".to_string(),
+            display_name: "OpenCode Go".to_string(),
+        }),
+        ModalKind::Confirm(ConfirmModal::PlanDelete {
+            plan: saved_plan(1, "Ship the modal system", Some("main"), "started"),
+        }),
+        ModalKind::Confirm(ConfirmModal::SessionDelete {
+            session: session_summary(1, "work", "codex", "gpt-5", "active", 3),
+        }),
+        ModalKind::Confirm(ConfirmModal::PlanDiscard {
+            saved_plan_id: crate::storage::SavedPlanId::from_raw(1),
+            title: "Ship the modal system".to_string(),
+        }),
+        ModalKind::Confirm(ConfirmModal::AgentDelete {
+            name: "reviewer".to_string(),
+            path: std::path::PathBuf::from("/tmp/agents/reviewer.md"),
+        }),
     ]
 }
 
@@ -158,6 +188,145 @@ fn every_popup_keeps_the_shell_contract_at_four_sizes() {
         for kind in fixture_kinds() {
             assert_chrome_contract(area, &kind);
         }
+    }
+}
+
+#[test]
+fn measured_popups_fit_the_height_they_asked_for() {
+    // 160x60 is far larger than any content-sized popup: when the height comes from
+    // the renderer's own builders there is nothing left to scroll. Reading surfaces
+    // report no clamp by design, so they are skipped rather than counted as a fit.
+    let area = Rect::new(0, 0, 160, 60);
+    for kind in fixture_kinds() {
+        let app = app_with_modal(kind.clone());
+        let Some(max_scroll) = max_modal_scroll(&app, area) else {
+            continue;
+        };
+        assert_eq!(
+            max_scroll, 0,
+            "{kind:?} does not fit the height it measured for itself"
+        );
+    }
+}
+
+#[test]
+fn the_sandbox_popup_reaches_its_writable_paths_heading() {
+    // The root list varies with policy, so the popup measures its stable rows and
+    // scrolls the rest; the heading and one entry have to be reachable at the clamp
+    // instead of being cropped by a windowed body.
+    let area = Rect::new(0, 0, 100, 24);
+    let kind = ModalKind::Manager(ManagerModal::SandboxStatus { cursor: 0 });
+    let mut app = app_with_modal(kind.clone());
+    app.sandbox = Some(crate::sandbox::CommandSandbox::disabled());
+
+    let modal = modal_area(area, &kind);
+    assert!(modal.height <= area.height, "{modal:?}");
+    app.modal_scroll = max_modal_scroll(&app, area).unwrap_or(0);
+    let text = buffer_text(&render_app_to_buffer(area, &app));
+    assert!(
+        text.contains("Writable paths"),
+        "the paths heading stays reachable: {text}"
+    );
+    assert!(text.contains("Sandbox"), "{text}");
+    assert!(text.contains("Esc close"), "{text}");
+}
+
+#[test]
+fn every_fixture_footer_draws_the_shared_hint_table() {
+    // The renderer must actually use the table: every pair it lists has to show up
+    // in the rows the popup draws its footer into.
+    let area = Rect::new(0, 0, 150, 45);
+    for kind in fixture_kinds() {
+        let app = app_with_modal(kind.clone());
+        let pairs = footer_hints(&app);
+        assert!(!pairs.is_empty(), "{kind:?} has no hint entry");
+        let buffer = render_app_to_buffer(area, &app);
+        let modal = modal_area(area, &kind);
+        let footer = (modal.y + modal.height.saturating_sub(5)..modal.y + modal.height)
+            .map(|y| row_text(&buffer, y))
+            .collect::<String>();
+        let squashed = footer.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (key, label) in pairs {
+            let expected = format!("{key} {label}");
+            let expected = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                squashed.contains(&expected),
+                "{kind:?} footer is missing {expected:?}: {footer:?}"
+            );
+        }
+    }
+}
+
+/// Every key a footer advertises, as the event the keymap would receive.
+fn hint_key_events(token: &str) -> Vec<ratatui::crossterm::event::KeyEvent> {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut events = Vec::new();
+    for part in token.split('/') {
+        let (modifiers, name) = if let Some(rest) = part.strip_prefix("Ctrl+") {
+            (KeyModifiers::CONTROL, rest)
+        } else if let Some(rest) = part.strip_prefix("Shift+") {
+            (KeyModifiers::SHIFT, rest)
+        } else {
+            (KeyModifiers::NONE, part)
+        };
+        let code = match name {
+            "Up" | "↑" => KeyCode::Up,
+            "Down" | "↓" => KeyCode::Down,
+            "Left" | "←" => KeyCode::Left,
+            "Right" | "→" => KeyCode::Right,
+            "Esc" => KeyCode::Esc,
+            "Enter" => KeyCode::Enter,
+            "Tab" => KeyCode::Tab,
+            "BackTab" => KeyCode::BackTab,
+            "Space" => KeyCode::Char(' '),
+            "PgUp" => KeyCode::PageUp,
+            "PgDn" => KeyCode::PageDown,
+            "Home" => KeyCode::Home,
+            "End" => KeyCode::End,
+            "Delete" | "Del" => KeyCode::Delete,
+            // Not keys: prose the footer uses as a label, or a key range.
+            "Type" | "Review" | "letter" | "1-6" | "d-click" => continue,
+            single if single.chars().count() == 1 => {
+                KeyCode::Char(single.chars().next().unwrap_or(' '))
+            }
+            _ => continue,
+        };
+        events.push(KeyEvent::new(code, modifiers));
+    }
+    events
+}
+
+#[test]
+fn every_hinted_key_of_every_fixture_binds_in_its_own_modal() {
+    // The reverse direction: a footer may not advertise a key the modal's map arm
+    // does not handle.
+    use crate::tui::keymap::{KeyIntent, map_key};
+
+    for kind in fixture_kinds() {
+        let app = app_with_modal(kind.clone());
+        for (token, _) in footer_hints(&app) {
+            for key in hint_key_events(token) {
+                assert!(
+                    !matches!(map_key(key, &app), KeyIntent::Noop),
+                    "{kind:?} advertises {token:?} but {key:?} does nothing"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_fixture_popup_advertises_hints() {
+    // The matrix and the hint table have to agree about what is on screen: a fixture
+    // whose popup had no entry would draw an empty footer row and nothing here would
+    // notice, because the drawers would agree on being empty.
+    for kind in fixture_kinds() {
+        let app = app_with_modal(kind.clone());
+        assert!(
+            !footer_hints(&app).is_empty(),
+            "{kind:?} has no hint entry in hints.rs"
+        );
     }
 }
 

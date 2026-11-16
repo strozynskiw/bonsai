@@ -1,6 +1,5 @@
 use super::picker_common::*;
 use super::*;
-use unicode_width::UnicodeWidthStr;
 
 pub(super) fn render_session_picker(
     f: &mut Frame,
@@ -10,13 +9,7 @@ pub(super) fn render_session_picker(
 ) {
     let footer = vec![
         Line::from(Span::styled("Current project only", theme::dim())),
-        footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("PgUp/PgDn", "page"),
-            ("Enter", "resume"),
-            ("Del", "delete"),
-            ("Esc", "close"),
-        ]),
+        footer_hint_line(SESSION_PICKER_HINTS),
     ];
     render_list_picker(f, area, "Sessions", &[], &footer, |body_area| {
         let columns = session_columns();
@@ -27,10 +20,13 @@ pub(super) fn render_session_picker(
         } else {
             let cursor = cursor.min(sessions.len().saturating_sub(1));
             let visible_count = body_area.height.saturating_sub(1).max(1) as usize;
-            lines.extend(
-                visible_picker_rows(sessions.len(), cursor, visible_count)
-                    .map(|index| table_row(&sessions[index], &columns, &widths, index == cursor)),
-            );
+            lines.extend(table_body_lines(
+                &sessions.iter().collect::<Vec<_>>(),
+                &columns,
+                &widths,
+                cursor,
+                visible_count,
+            ));
         }
         lines
     });
@@ -46,13 +42,7 @@ pub(super) fn render_plan_picker(
     let header = vec![modal_search_header(query, false)];
     let footer = vec![
         Line::from(Span::styled("Current project only", theme::dim())),
-        footer_hint_line(&[
-            ("Type", "search"),
-            ("Up/Down", "move"),
-            ("Enter", "open"),
-            ("Del", "delete"),
-            ("Esc", "close"),
-        ]),
+        footer_hint_line(PLAN_PICKER_HINTS),
     ];
 
     let filtered = AppState::plan_picker_filtered_plans(plans, query);
@@ -70,70 +60,16 @@ pub(super) fn render_plan_picker(
         } else {
             let cursor = cursor.min(filtered.len().saturating_sub(1));
             let visible_count = body_area.height.saturating_sub(1).max(1) as usize;
-            lines.extend(
-                visible_picker_rows(filtered.len(), cursor, visible_count)
-                    .map(|index| table_row(filtered[index], &columns, &widths, index == cursor)),
-            );
+            lines.extend(table_body_lines(
+                &filtered,
+                &columns,
+                &widths,
+                cursor,
+                visible_count,
+            ));
         }
         lines
     });
-}
-
-/// One `row_block` per decision option, with a blank row between blocks. Labels
-/// are padded to a shared column so the descriptions line up down the popup.
-pub(super) fn decision_body(
-    options: &[(String, String)],
-    cursor: usize,
-    inner_width: u16,
-) -> Vec<Line<'static>> {
-    let label_width = options
-        .iter()
-        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
-        .max()
-        .unwrap_or(0);
-    let mut lines = Vec::new();
-    for (index, (label, description)) in options.iter().enumerate() {
-        if index > 0 {
-            lines.push(Line::from(""));
-        }
-        let padded = pad_ascii(label, label_width);
-        lines.extend(row_block(
-            &RowBlock {
-                selected: index == cursor,
-                checkbox: None,
-                label: &padded,
-                description: Some(description.as_str()),
-            },
-            inner_width,
-        ));
-    }
-    lines
-}
-
-/// The width a decision popup's content wraps at.
-pub(super) fn decision_inner_width(area: Rect) -> u16 {
-    ModalFootprint::Prompt
-        .width(area)
-        .saturating_sub(MODAL_FRAME_COLUMNS)
-}
-
-/// Rows a decision popup draws, so `modal_area` sizes it from the same builders
-/// the renderer uses.
-pub(super) fn decision_rows(
-    header: &[Line<'static>],
-    body: &[Line<'static>],
-    footer: &[Line<'static>],
-    inner_width: u16,
-) -> u16 {
-    let wrap = inner_width.max(1) as usize;
-    let body_rows = body.iter().fold(0u16, |rows, line| {
-        rows.saturating_add(wrapped_line_count(line, wrap))
-    });
-    shell_modal_rows(
-        wrapped_lines_height(header, wrap) as u16,
-        body_rows,
-        wrapped_lines_height(footer, wrap) as u16,
-    )
 }
 
 /// Max scroll the shell clamp needs for a decision popup body, so a decision the
@@ -193,7 +129,7 @@ pub(super) fn plan_open_choice_layout(
     .collect::<Vec<_>>();
     let cursor = cursor.min(options.len().saturating_sub(1));
     let body = decision_body(&options, cursor, inner_width);
-    let footer = vec![footer_hint_line(&[("Enter", "open"), ("Esc", "cancel")])];
+    let footer = vec![footer_hint_line(PLAN_OPEN_CHOICE_HINTS)];
     (header, body, footer)
 }
 
@@ -236,7 +172,7 @@ pub(super) fn start_plan_choice_layout(
         cursor.min(options.len().saturating_sub(1)),
         inner_width,
     );
-    let footer = vec![footer_hint_line(&[("Enter", "start"), ("Esc", "cancel")])];
+    let footer = vec![footer_hint_line(START_PLAN_CHOICE_HINTS)];
     (header, body, footer)
 }
 
@@ -294,7 +230,7 @@ pub(super) fn budget_warning_layout(
     body.push(modal_subtitle(
         "Raise or disable thresholds in /settings under Session alerts.",
     ));
-    let footer = vec![footer_hint_line(&[("Enter", "choose"), ("Esc", "go back")])];
+    let footer = vec![footer_hint_line(BUDGET_WARNING_HINTS)];
     (header, body, footer)
 }
 
@@ -362,115 +298,120 @@ fn format_session_alert(alert: crate::run_budget::SessionBudgetAlertState, clock
     }
 }
 
+/// The delete-plan confirm's header, body and footer.
+fn plan_delete_layout(
+    plan: &crate::storage::SavedPlanSummary,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let body = vec![
+        Line::from(Span::styled(
+            format!("Delete \"{}\" from the saved plan library?", plan.title),
+            theme::body(theme::palette().text),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "The source and execution session transcripts stay on disk.",
+            theme::dim(),
+        )),
+    ];
+    (Vec::new(), body, vec![confirm_footer_hint()])
+}
+
+pub(super) fn plan_delete_confirm_rows(area: Rect, plan: &crate::storage::SavedPlanSummary) -> u16 {
+    let (header, body, footer) = plan_delete_layout(plan);
+    decision_rows(&header, &body, &footer, decision_inner_width(area))
+}
+
 pub(super) fn render_plan_delete_confirm(
     f: &mut Frame,
     area: Rect,
+    app: &AppState,
     plan: &crate::storage::SavedPlanSummary,
 ) {
-    let panel = theme::frame("Delete Plan", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
-        .split(inner);
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                format!("Delete \"{}\" from the saved plan library?", plan.title),
-                theme::body(theme::palette().text),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "The source and execution session transcripts stay on disk.",
-                theme::dim(),
-            )),
-        ])
-        .style(theme::panel())
-        .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "confirm"),
-            ("Esc/N", "cancel"),
-        ])),
-        chunks[1],
-    );
+    render_decision_popup(f, area, app, "Delete Plan", plan_delete_layout(plan));
+}
+
+/// The delete-session confirm's header, body and footer.
+fn session_delete_layout(
+    session: &crate::storage::SessionSummary,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let body = vec![
+        Line::from(Span::styled(
+            format!("Delete session \"{}\"?", session.name),
+            theme::body(theme::palette().text),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "The session transcript and all its data are permanently deleted.",
+            theme::dim(),
+        )),
+    ];
+    (Vec::new(), body, vec![confirm_footer_hint()])
+}
+
+pub(super) fn session_delete_confirm_rows(
+    area: Rect,
+    session: &crate::storage::SessionSummary,
+) -> u16 {
+    let (header, body, footer) = session_delete_layout(session);
+    decision_rows(&header, &body, &footer, decision_inner_width(area))
 }
 
 pub(super) fn render_session_delete_confirm(
     f: &mut Frame,
     area: Rect,
+    app: &AppState,
     session: &crate::storage::SessionSummary,
 ) {
-    let panel = theme::frame("Delete Session", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
-        .split(inner);
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                format!("Delete session \"{}\"?", session.name),
-                theme::body(theme::palette().text),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "The session transcript and all its data are permanently deleted.",
-                theme::dim(),
-            )),
-        ])
-        .style(theme::panel())
-        .wrap(Wrap { trim: false }),
-        chunks[0],
+    render_decision_popup(
+        f,
+        area,
+        app,
+        "Delete Session",
+        session_delete_layout(session),
     );
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "confirm"),
-            ("Esc/N", "cancel"),
-        ])),
-        chunks[1],
-    );
+}
+
+/// The discard-plan confirm's header, body and footer.
+fn plan_discard_layout(
+    saved_plan_id: crate::storage::SavedPlanId,
+    title: &str,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let body = vec![
+        Line::from(Span::styled(
+            format!("Discard \"{title}\" and clear the canvas?"),
+            theme::body(theme::palette().text),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("This also deletes saved plan #{saved_plan_id} from the library."),
+            theme::dim(),
+        )),
+    ];
+    (Vec::new(), body, vec![confirm_footer_hint()])
+}
+
+pub(super) fn plan_discard_confirm_rows(
+    area: Rect,
+    saved_plan_id: crate::storage::SavedPlanId,
+    title: &str,
+) -> u16 {
+    let (header, body, footer) = plan_discard_layout(saved_plan_id, title);
+    decision_rows(&header, &body, &footer, decision_inner_width(area))
 }
 
 pub(super) fn render_plan_discard_confirm(
     f: &mut Frame,
     area: Rect,
+    app: &AppState,
     saved_plan_id: crate::storage::SavedPlanId,
     title: &str,
 ) {
-    let panel = theme::frame("Discard Plan", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
-        .split(inner);
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                format!("Discard \"{title}\" and clear the canvas?"),
-                theme::body(theme::palette().text),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                format!("This also deletes saved plan #{saved_plan_id} from the library."),
-                theme::dim(),
-            )),
-        ])
-        .style(theme::panel())
-        .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "confirm"),
-            ("Esc/N", "cancel"),
-        ])),
-        chunks[1],
+    render_decision_popup(
+        f,
+        area,
+        app,
+        "Discard Plan",
+        plan_discard_layout(saved_plan_id, title),
     );
 }
 
@@ -485,7 +426,8 @@ fn session_columns() -> Vec<TableColumn<crate::storage::SessionSummary>> {
         TableColumn {
             header: "Session",
             width: TableWidth::Flex { min: 6 },
-            render: CellRender::Value(session_display_name),
+            // Prose: the session title is how a session is recognized, so it wraps.
+            render: CellRender::Wrapped(session_display_name),
             style: CellStyle::Text,
         },
         TableColumn {
@@ -572,7 +514,8 @@ fn plan_columns() -> Vec<TableColumn<crate::storage::SavedPlanSummary>> {
         TableColumn {
             header: "Plan",
             width: TableWidth::Flex { min: 8 },
-            render: CellRender::Value(|plan| plan.title.clone()),
+            // Prose: the plan title is how a plan is recognized, so it wraps.
+            render: CellRender::Wrapped(|plan| plan.title.clone()),
             style: CellStyle::Text,
         },
         TableColumn {

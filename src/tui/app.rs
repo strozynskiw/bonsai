@@ -39,7 +39,6 @@ pub use crate::tui::transcript::{
 pub use completion_state::{CompletionCandidate, CompletionState};
 pub use composer::{ChipPayload, Composer, ComposerContent, ComposerSubmission};
 pub use copy::{CopyNotice, CopyNoticeKind, SessionHint, SessionToast};
-pub(crate) use model_picker::reconcile_viewport;
 pub use model_picker::{ModelPickerPane, ModelPickerState, ModelPickerTarget};
 pub use mouse::{LastMouseClick, MouseArea, next_mouse_click};
 pub use provider_auth::{ProviderAuthField, ProviderAuthForm};

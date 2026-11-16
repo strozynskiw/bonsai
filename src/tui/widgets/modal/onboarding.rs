@@ -19,8 +19,10 @@ pub(super) fn render_onboarding(
     step: FirstRunStep,
     cursor: usize,
 ) {
-    let block = theme::frame("Welcome to Bonsai", true);
-    let inner = block.inner(area);
+    let inner = render_wizard_frame(f, area, "Welcome to Bonsai");
+    // Onboarding is one flowing column rather than a pinned-footer wizard: the hint
+    // row is the last line of the content, so it scrolls with it instead of taking
+    // a reserved band. That is why it draws the frame but not `render_wizard_chrome`.
     let mut lines = match step {
         FirstRunStep::CredentialStorage => credential_lines(cursor),
         FirstRunStep::Provider => provider_lines(),
@@ -33,13 +35,8 @@ pub(super) fn render_onboarding(
     lines.insert(0, setup_progress_line(step));
     lines.insert(1, Line::default());
     lines.push(Line::from(""));
-    lines.push(super::common::footer_hint_line(&[
-        ("Up/Down", "choose"),
-        ("Enter", "continue"),
-        ("Esc", "later"),
-    ]));
+    lines.push(super::common::footer_hint_line(ONBOARDING_HINTS));
 
-    f.render_widget(block, area);
     let show_tree = inner.width >= TREE_MIN_WIDTH + CONTENT_MIN_WIDTH
         && inner.height > crate::tui::widgets::bonsai::MIN_AREA.1;
     if show_tree {

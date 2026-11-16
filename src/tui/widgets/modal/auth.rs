@@ -42,11 +42,9 @@ pub(super) fn render_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, p
         app.provider_auth_form.credential_persistence.label(),
         theme::palette().text,
     ));
-    let footer = vec![footer_hint_line(&[
-        ("Ctrl+P", "storage"),
-        ("Enter", "submit"),
-        ("Esc", "cancel"),
-    ])];
+    // This renderer *is* the plain form, so it names its own slice rather than
+    // re-deriving the variant from app state.
+    let footer = vec![footer_hint_line(API_KEY_PLAIN)];
 
     let body_rect = render_form_shell(
         f,
@@ -115,13 +113,7 @@ fn render_origin_api_key_prompt(f: &mut Frame, area: Rect, app: &AppState, provi
         theme::palette().text,
     ));
     lines.push(Line::from(""));
-    lines.push(footer_hint_line(&[
-        ("Tab", "field"),
-        ("←/→", "origin"),
-        ("Ctrl+P", "storage"),
-        ("Enter", "submit"),
-        ("Esc", "cancel"),
-    ]));
+    lines.push(footer_hint_line(API_KEY_ORIGIN));
 
     f.render_widget(
         Paragraph::new(lines)
@@ -197,12 +189,7 @@ pub(super) fn render_openai_compatible_prompt(
     ));
 
     lines.push(Line::from(""));
-    lines.push(footer_hint_line(&[
-        ("Tab/Shift+Tab", "field"),
-        ("Ctrl+P", "storage"),
-        ("Enter", "submit"),
-        ("Esc", "cancel"),
-    ]));
+    lines.push(footer_hint_line(API_KEY_ENDPOINT));
 
     f.render_widget(
         Paragraph::new(lines)
@@ -343,11 +330,12 @@ mod tests {
 
     #[test]
     fn unauthorize_confirm_renders_provider_name_and_hints() {
-        let area = Rect::new(0, 0, 66, 8);
+        let area = Rect::new(0, 0, 66, 10);
+        let app = app();
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test backend should initialize");
         terminal
-            .draw(|frame| render_unauthorize_confirm(frame, area, "OpenCode Go"))
+            .draw(|frame| render_unauthorize_confirm(frame, area, &app, "OpenCode Go"))
             .expect("unauthorize confirm should render");
         let text = rendered_text(&terminal);
         assert!(text.contains("Clear Bonsai auth for OpenCode Go?"));
@@ -372,12 +360,7 @@ pub(super) fn render_authorize_provider_picker(
             Span::styled(" / ", theme::dim()),
             Span::styled("not authorized", theme::body(theme::palette().text)),
         ]),
-        footer_hint_line(&[
-            ("Type", "search"),
-            ("Up/Down", "move"),
-            ("Enter", "authorize"),
-            ("Esc", "cancel"),
-        ]),
+        footer_hint_line(AUTHORIZE_PICKER_HINTS),
     ];
     let filtered = crate::tui::pickers::filter_authorize_providers(providers, query);
     render_list_picker(
@@ -397,17 +380,25 @@ pub(super) fn render_authorize_provider_picker(
             }
             let cursor = cursor.min(filtered.len().saturating_sub(1));
             let columns = authorize_provider_columns_filtered(body_area.width as usize, &filtered);
-            let capacity = picker_body_height(body_area).max(1);
-            let offset = crate::tui::app::reconcile_viewport(
-                app.authorize_provider_offset.get(),
+            // The window spends terminal lines: a provider label that wraps costs the
+            // list a second line, so the row count is not the budget.
+            let lines = filtered
+                .iter()
+                .enumerate()
+                .map(|(idx, provider)| authorize_provider_line(provider, &columns, idx == cursor))
+                .collect::<Vec<_>>();
+            let heights = lines
+                .iter()
+                .map(|line| row_line_height(line, body_area.width, 0))
+                .collect::<Vec<_>>();
+            let window = sticky_rows(
+                &heights,
                 cursor,
-                filtered.len(),
-                capacity,
+                app.authorize_provider_offset.get(),
+                body_area.height as usize,
             );
-            app.authorize_provider_offset.set(offset);
-            (offset..(offset + capacity.min(filtered.len())).min(filtered.len()))
-                .map(|idx| authorize_provider_line(filtered[idx], &columns, idx == cursor))
-                .collect()
+            app.authorize_provider_offset.set(window.start);
+            lines[window].to_vec()
         },
     );
 }
@@ -421,12 +412,7 @@ pub(super) fn render_unauthorize_provider_picker(
     cursor: usize,
 ) {
     let header = vec![modal_search_header(query, false)];
-    let footer = vec![footer_hint_line(&[
-        ("Type", "search"),
-        ("Up/Down", "move"),
-        ("Enter", "unauthorize"),
-        ("Esc", "cancel"),
-    ])];
+    let footer = vec![footer_hint_line(UNAUTHORIZE_PICKER_HINTS)];
     let filtered = crate::tui::pickers::filter_authorize_providers(providers, query);
     render_list_picker(
         f,
@@ -445,53 +431,65 @@ pub(super) fn render_unauthorize_provider_picker(
             }
             let cursor = cursor.min(filtered.len().saturating_sub(1));
             let columns = authorize_provider_columns_filtered(body_area.width as usize, &filtered);
-            let capacity = picker_body_height(body_area).max(1);
-            // The two provider pickers are mutually exclusive, so they share
-            // the authorize picker's viewport offset cell.
-            let offset = crate::tui::app::reconcile_viewport(
-                app.authorize_provider_offset.get(),
+            // Line budget, not row budget: a wrapped label costs the list two lines.
+            let lines = filtered
+                .iter()
+                .enumerate()
+                .map(|(idx, provider)| authorize_provider_line(provider, &columns, idx == cursor))
+                .collect::<Vec<_>>();
+            let heights = lines
+                .iter()
+                .map(|line| row_line_height(line, body_area.width, 0))
+                .collect::<Vec<_>>();
+            // The two provider pickers are mutually exclusive, so they share the
+            // authorize picker's viewport offset cell.
+            let window = sticky_rows(
+                &heights,
                 cursor,
-                filtered.len(),
-                capacity,
+                app.authorize_provider_offset.get(),
+                body_area.height as usize,
             );
-            app.authorize_provider_offset.set(offset);
-            (offset..(offset + capacity.min(filtered.len())).min(filtered.len()))
-                .map(|idx| authorize_provider_line(filtered[idx], &columns, idx == cursor))
-                .collect()
+            app.authorize_provider_offset.set(window.start);
+            lines[window].to_vec()
         },
     );
 }
 
-pub(super) fn render_unauthorize_confirm(f: &mut Frame, area: Rect, display_name: &str) {
-    let panel = theme::frame("Unauthorize Provider", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
-        .split(inner);
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                format!("Clear Bonsai auth for {display_name}?"),
-                theme::body(theme::palette().text),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Stored credentials for this provider will be removed.",
-                theme::dim(),
-            )),
-        ])
-        .style(theme::panel())
-        .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-    f.render_widget(
-        Paragraph::new(footer_hint_line(&[
-            ("Enter/Y", "confirm"),
-            ("Esc/N", "cancel"),
-        ])),
-        chunks[1],
+/// The unauthorize confirm's header, body and footer.
+fn unauthorize_confirm_layout(
+    display_name: &str,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let body = vec![
+        Line::from(Span::styled(
+            format!("Clear Bonsai auth for {display_name}?"),
+            theme::body(theme::palette().text),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Stored credentials for this provider will be removed.",
+            theme::dim(),
+        )),
+    ];
+    (Vec::new(), body, vec![confirm_footer_hint()])
+}
+
+pub(super) fn unauthorize_confirm_rows(area: Rect, display_name: &str) -> u16 {
+    let (header, body, footer) = unauthorize_confirm_layout(display_name);
+    decision_rows(&header, &body, &footer, decision_inner_width(area))
+}
+
+pub(super) fn render_unauthorize_confirm(
+    f: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    display_name: &str,
+) {
+    render_decision_popup(
+        f,
+        area,
+        app,
+        "Unauthorize Provider",
+        unauthorize_confirm_layout(display_name),
     );
 }
 
@@ -513,11 +511,7 @@ pub(super) fn review_scope_layout(
         cursor.min(options.len().saturating_sub(1)),
         inner_width,
     );
-    let footer = vec![footer_hint_line(&[
-        ("Up/Down", "move"),
-        ("Enter", "review"),
-        ("Esc", "cancel"),
-    ])];
+    let footer = vec![footer_hint_line(REVIEW_SCOPE_HINTS)];
     (header, body, footer)
 }
 
@@ -606,6 +600,7 @@ pub(super) fn authorize_provider_detail_spans(
     meta_style: Style,
 ) -> Vec<Span<'static>> {
     if provider.provider_id.chars().count() > width {
+        // Provider id (metadata): an id wider than its column clips.
         return vec![Span::styled(
             truncate_ascii(&provider.provider_id, width),
             meta_style,

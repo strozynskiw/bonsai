@@ -32,40 +32,12 @@ pub(super) fn render_provider_manager(
             }
         })
         .unwrap_or_default();
-    // `d` is contextual: delete a custom provider, disable an enabled
-    // built-in, re-enable a disabled one.
-    let d_label = match selected {
-        Some(row) if row.origin == ProviderOrigin::Custom => "remove",
-        Some(row) if row.origin == ProviderOrigin::Project => "project config",
-        Some(row) if row.enabled => "disable",
-        _ => "enable",
-    };
-    // While typing, only the search-exit hint is relevant; otherwise show the
-    // management shortcuts plus how to start/clear a search.
-    let commands = if searching {
-        footer_hint_line(&[("Enter", "detail"), ("Esc", "done"), ("Type", "filter")])
-    } else if filter.is_empty() {
-        footer_hint_line(&[
-            ("/", "search"),
-            ("a", "add"),
-            ("e", "edit"),
-            ("d", d_label),
-            ("Esc", "close"),
-        ])
-    } else {
-        footer_hint_line(&[
-            ("/", "search"),
-            ("a", "add"),
-            ("e", "edit"),
-            ("d", d_label),
-            ("Esc", "clear"),
-        ])
-    };
-    // Fixed three-line bottom block — a spacer, the selected provider's detail
-    // line, and the command hints — so the list body keeps a constant height as
-    // the cursor moves between rows. Previously an unauthorized row added an
-    // auth-hint line here, growing the footer and shrinking the list mid-scroll.
-    // The auth hint still surfaces in the provider detail view (Enter).
+    // Fixed three-line bottom block — a spacer, the selected provider's detail line,
+    // and the shared hint row — so the list body keeps a constant height as the
+    // cursor moves between rows. The hint row comes from `hints.rs`, which also knows
+    // the searching and filtered variants this used to spell out inline.
+    let commands = footer_hint_line(provider_manager_hints(searching, filter));
+    // The hint row comes from `hints.rs`; only the status line is local.
     let footer = vec![
         Line::from(""),
         Line::from(Span::styled(detail, theme::dim())),
@@ -81,34 +53,44 @@ pub(super) fn render_provider_manager(
             return vec![Line::from(Span::styled(empty, theme::dim()))];
         }
         let cursor = cursor.min(filtered.len().saturating_sub(1));
-        // Model-picker viewport semantics: the cursor moves within the visible
-        // window and the list shifts only when the cursor crosses an edge,
-        // instead of scrolling on every keypress past the first page.
-        let capacity = picker_body_height(body_area).max(1);
-        let offset = crate::tui::app::reconcile_viewport(
-            app.provider_manager_offset.get(),
+        // Model-picker viewport semantics: the cursor moves within the visible window
+        // and the list shifts only when it crosses an edge, instead of scrolling on
+        // every keypress past the first page. The window spends terminal lines, so a
+        // provider whose name or tag wraps cannot push the cursor below the fold.
+        let lines = filtered
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| provider_manager_line(row, idx == cursor))
+            .collect::<Vec<_>>();
+        let heights = lines
+            .iter()
+            .map(|line| row_line_height(line, body_area.width, 0))
+            .collect::<Vec<_>>();
+        let window = sticky_rows(
+            &heights,
             cursor,
-            filtered.len(),
-            capacity,
+            app.provider_manager_offset.get(),
+            body_area.height as usize,
         );
-        app.provider_manager_offset.set(offset);
-        (offset..(offset + capacity.min(filtered.len())).min(filtered.len()))
-            .map(|idx| {
-                let row = filtered[idx];
-                let mut name = row.display_name.clone();
-                if row.current {
-                    name.push_str(" (current)");
-                }
-                let origin = match row.origin {
-                    ProviderOrigin::BuiltIn => "built-in",
-                    ProviderOrigin::Custom => "custom",
-                    ProviderOrigin::Project => "project",
-                };
-                let tag = format!("({origin}) {}", row.status_label());
-                picker_line(idx == cursor, name, Some(tag), row.enabled)
-            })
-            .collect()
+        app.provider_manager_offset.set(window.start);
+        lines[window].to_vec()
     });
+}
+
+/// One provider-manager row: the display name (with a current marker) and its
+/// origin/status tag.
+fn provider_manager_line(row: &ProviderManagerRow, selected: bool) -> Line<'static> {
+    let mut name = row.display_name.clone();
+    if row.current {
+        name.push_str(" (current)");
+    }
+    let origin = match row.origin {
+        ProviderOrigin::BuiltIn => "built-in",
+        ProviderOrigin::Custom => "custom",
+        ProviderOrigin::Project => "project",
+    };
+    let tag = format!("({origin}) {}", row.status_label());
+    row_line(selected, name, Some(tag), row.enabled)
 }
 
 /// The body region of the provider detail view (above the footer). Shared by
@@ -144,13 +126,7 @@ pub(super) fn render_provider_detail(
         &app.modal_body_rect,
     );
     f.render_widget(
-        Paragraph::new(footer_hint_line(&[
-            ("Up/Down", "scroll"),
-            ("PgUp/PgDn", "page"),
-            ("d-click", "copy word"),
-            ("Esc", "back"),
-        ]))
-        .style(theme::panel()),
+        Paragraph::new(footer_hint_line(PROVIDER_DETAIL_HINTS)).style(theme::panel()),
         chunks[1],
     );
 }
@@ -320,7 +296,7 @@ pub(super) fn render_provider_remove_confirm(
         ]),
         Line::from(Span::styled(note, theme::dim())),
         Line::from(""),
-        footer_hint_line(&[("Enter/Y", "confirm"), ("Esc/N", "cancel")]),
+        confirm_footer_hint(),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

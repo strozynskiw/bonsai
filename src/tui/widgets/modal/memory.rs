@@ -2,21 +2,20 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::memory::entry::MemoryEntry;
 use crate::tui::app::AppState;
 use crate::tui::memory_manager::{MemoryAddWizardState, MemoryWizardField, MemoryWizardStep};
 use crate::tui::theme;
 
-use super::common::{footer_hint_line, render_modal_chrome};
+use super::common::{footer_hint_line, render_modal_chrome, render_wizard_chrome};
+use super::hints::{MEMORY_MANAGER_HINTS, memory_wizard_hints};
 use super::list_detail::render_detail_pane;
 use super::list_detail::{ListDetailSplit, list_detail_panes, list_detail_shell_regions};
-use super::picker_common::{
-    FieldCaret, FormField, form_field_lines, picker_body_height, visible_picker_rows,
-};
+use super::picker_common::{FieldCaret, FormField, form_field_lines};
 use super::table::{
-    CellRender, CellStyle, TableColumn, TableWidth, table_header, table_row, table_widths,
+    CellRender, CellStyle, TableColumn, TableWidth, table_body_lines, table_header, table_widths,
 };
 
 const MANAGER_TITLE: &str = "Memory";
@@ -46,15 +45,7 @@ pub(super) fn render_memory_manager(
     rows: &[MemoryEntry],
     cursor: usize,
 ) {
-    let footer_lines = vec![footer_hint_line(&[
-        ("Up/Down", "move"),
-        ("PgUp/PgDn", "page detail"),
-        ("Space", "enable/disable"),
-        ("a", "add"),
-        ("e/Enter", "edit"),
-        ("d/Delete", "delete"),
-        ("Esc", "close"),
-    ])];
+    let footer_lines = vec![footer_hint_line(MEMORY_MANAGER_HINTS)];
     let shell = list_detail_shell_regions(area);
     render_modal_chrome(f, area, MANAGER_TITLE, &shell, &[], &footer_lines);
     let (list_area, detail_area) = list_detail_panes(shell.body, ListDetailSplit::Horizontal);
@@ -64,8 +55,11 @@ pub(super) fn render_memory_manager(
 
     let cursor = cursor.min(rows.len().saturating_sub(1));
     let header_lines = manager_header_lines(rows);
-    let list_lines =
-        manager_list_lines(rows, cursor, list_area.width, picker_body_height(list_area));
+    // The table gets the lines the header does not use. The header is drawn inside
+    // the same wrapping paragraph, so a header that wraps costs more than one row.
+    let header_rows = super::common::wrapped_lines_height(&header_lines, list_area.width as usize);
+    let list_height = (list_area.height as usize).saturating_sub(header_rows);
+    let list_lines = manager_list_lines(rows, cursor, list_area.width, list_height);
     let mut lines = header_lines;
     lines.extend(list_lines);
     f.render_widget(
@@ -99,22 +93,16 @@ pub(super) fn render_memory_wizard(
     app: &AppState,
     state: &MemoryAddWizardState,
 ) {
-    let panel = theme::frame(wizard_title(state), true).style(theme::panel());
-    f.render_widget(Clear, area);
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-    if inner.width == 0 || inner.height == 0 {
+    let footer = vec![footer_hint_line(memory_wizard_hints(state.step))];
+    let body = render_wizard_chrome(f, area, wizard_title(state), &footer);
+    if body.width == 0 || body.height == 0 {
         return;
     }
 
-    let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(2)])
-        .split(inner);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
-        .split(body[0]);
+        .split(body);
     let left = columns[0];
     let right = columns[1];
 
@@ -134,27 +122,6 @@ pub(super) fn render_memory_wizard(
         app.modal_selection.map(|s| s.range()),
         &app.modal_body_lines,
         &app.modal_body_rect,
-    );
-
-    let hints: &[(&str, &str)] = match state.step {
-        MemoryWizardStep::Details => &[
-            ("Tab", "body"),
-            ("Up/Down", "field"),
-            ("Space", "cycle"),
-            ("Enter", "body"),
-            ("Esc", "cancel"),
-        ],
-        MemoryWizardStep::Body => &[
-            ("Tab", "review"),
-            ("Enter", "newline"),
-            ("Shift+Tab", "details"),
-            ("Esc", "cancel"),
-        ],
-        MemoryWizardStep::Review => &[("Enter", "save"), ("Shift+Tab", "body"), ("Esc", "cancel")],
-    };
-    f.render_widget(
-        Paragraph::new(footer_hint_line(hints)).style(theme::panel()),
-        body[1],
     );
 }
 
@@ -194,12 +161,14 @@ fn manager_list_lines(
 
     let columns = memory_columns();
     let widths = table_widths(width as usize, rows, &columns);
-    let range = visible_picker_rows(rows.len(), cursor, visible_height.max(1));
-    let mut lines = Vec::with_capacity(1 + range.len());
-    lines.push(table_header(&columns, &widths));
-    for idx in range {
-        lines.push(table_row(&rows[idx], &columns, &widths, idx == cursor));
-    }
+    let mut lines = vec![table_header(&columns, &widths)];
+    lines.extend(table_body_lines(
+        &rows.iter().collect::<Vec<_>>(),
+        &columns,
+        &widths,
+        cursor,
+        visible_height.max(1),
+    ));
     lines
 }
 

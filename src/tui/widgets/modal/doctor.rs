@@ -10,30 +10,8 @@ use super::*;
 /// expanding to show their remediation inline so problems are self-explanatory
 /// without opening anything. View-only — arrows move, Esc/Enter/q close.
 pub(super) fn render_doctor(f: &mut Frame, area: Rect, report: &DoctorReport, cursor: usize) {
-    let palette = theme::palette();
-    let summary = &report.summary;
-
-    let header = vec![
-        Line::from(Span::styled(
-            format!(
-                "bonsai {} · {} · {}",
-                report.bonsai_version, report.os, report.arch
-            ),
-            theme::dim(),
-        )),
-        Line::from(vec![
-            count_span("✓", summary.passed, "passed", palette.success),
-            Span::styled("     ", theme::dim()),
-            count_span("▲", summary.warnings, "warning", palette.todo),
-            Span::styled("     ", theme::dim()),
-            count_span("✗", summary.failed, "failed", palette.error),
-        ]),
-    ];
-
-    let footer = vec![footer_hint_line(&[
-        ("Up/Down", "move"),
-        ("Enter/Esc", "close"),
-    ])];
+    let header = doctor_header(report);
+    let footer = doctor_footer();
 
     render_list_picker(f, area, "Doctor", &header, &footer, |body_area| {
         if report.checks.is_empty() {
@@ -56,6 +34,61 @@ pub(super) fn render_doctor(f: &mut Frame, area: Rect, report: &DoctorReport, cu
             .flat_map(|idx| groups[idx].clone())
             .collect()
     });
+}
+
+/// The environment line plus the aggregate pass/warn/fail counts.
+fn doctor_header(report: &DoctorReport) -> Vec<Line<'static>> {
+    let palette = theme::palette();
+    let summary = &report.summary;
+    vec![
+        Line::from(Span::styled(
+            format!(
+                "bonsai {} · {} · {}",
+                report.bonsai_version, report.os, report.arch
+            ),
+            theme::dim(),
+        )),
+        Line::from(vec![
+            count_span("✓", summary.passed, "passed", palette.success),
+            Span::styled("     ", theme::dim()),
+            count_span("▲", summary.warnings, "warning", palette.todo),
+            Span::styled("     ", theme::dim()),
+            count_span("✗", summary.failed, "failed", palette.error),
+        ]),
+    ]
+}
+
+fn doctor_footer() -> Vec<Line<'static>> {
+    vec![footer_hint_line(DOCTOR_HINTS)]
+}
+
+/// Rows the doctor popup needs. Each check is its own display block (status line
+/// plus wrapped remediation), so the body is measured from `check_lines` rather
+/// than assumed to be one row per check.
+pub(super) fn doctor_rows(area: Rect, report: &DoctorReport, cursor: usize) -> u16 {
+    let inner_width = ModalFootprint::Wide
+        .width(area)
+        .saturating_sub(MODAL_FRAME_COLUMNS);
+    let width = inner_width.max(1) as usize;
+    let header = doctor_header(report);
+    let footer = doctor_footer();
+    let body_rows = if report.checks.is_empty() {
+        1
+    } else {
+        let cursor = cursor.min(report.checks.len().saturating_sub(1));
+        let rows = report
+            .checks
+            .iter()
+            .enumerate()
+            .map(|(index, check)| check_lines(check, index == cursor, width).len())
+            .sum::<usize>();
+        rows.max(1) as u16
+    };
+    shell_modal_rows(
+        wrapped_lines_height(&header, width) as u16,
+        body_rows,
+        wrapped_lines_height(&footer, width) as u16,
+    )
 }
 
 /// `✓ 11 passed`, colored by status when the count is non-zero and dimmed when
@@ -114,6 +147,8 @@ fn check_lines(check: &DoctorCheck, selected: bool, width: usize) -> Vec<Line<'s
     ];
     if summary_budget >= 8 {
         spans.push(Span::styled(separator, theme::dim()));
+        // Check summary (metadata): this is a one-line list row, and the check's
+        // own `next_action` line below carries the detail.
         spans.push(Span::styled(
             truncate_ascii(&check.summary, summary_budget),
             theme::dim(),

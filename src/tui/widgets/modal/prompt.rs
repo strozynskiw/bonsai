@@ -25,17 +25,7 @@ pub(super) struct ConfirmPrompt {
 }
 
 pub(super) fn approval_footer(scopes: &ApprovalScopes) -> Vec<Line<'static>> {
-    let mut hints: Vec<(&str, &str)> = vec![("A/Enter", "once"), ("S", "session")];
-    if scopes.project {
-        hints.push(("P", "project"));
-    }
-    hints.push(("D/Esc", "deny"));
-    if scopes.project {
-        // "Never": the persistent-deny counterpart to "project". Placed after
-        // "deny" so the once/session/project allow tiers stay grouped.
-        hints.push(("N", "never"));
-    }
-    vec![footer_hint_line(&hints)]
+    vec![footer_hint_line(approval_hints(scopes.project))]
 }
 
 /// The fixed header above a confirm prompt: the decision, then its subtitles.
@@ -46,6 +36,17 @@ pub(super) fn confirm_prompt_header_lines(prompt: &ConfirmPrompt) -> Vec<Line<'s
     header_lines.push(prompt.heading.clone());
     header_lines.extend(prompt.subtitle.iter().cloned());
     header_lines
+}
+
+/// Rows an approval prompt needs, measured with the same header, body and footer
+/// builders the renderer draws through the shell.
+pub(super) fn confirm_prompt_rows(area: Rect, prompt: &ConfirmPrompt) -> u16 {
+    super::rows::decision_rows(
+        &confirm_prompt_header_lines(prompt),
+        &prompt.body,
+        &approval_footer(&prompt.scopes),
+        super::rows::decision_inner_width(area),
+    )
 }
 
 pub(super) fn render_confirm_prompt(
@@ -289,14 +290,7 @@ pub(super) fn render_question_prompt(
 }
 
 pub(super) fn question_prompt_footer_lines(multiple: bool) -> Vec<Line<'static>> {
-    let mut hints: Vec<(&str, &str)> = vec![("Up/Down", "move")];
-    if multiple {
-        hints.push(("Space", "toggle"));
-    }
-    hints.push(("Enter", "select"));
-    hints.push(("Tab", "hide · /questions to reopen"));
-    hints.push(("Esc", "cancel"));
-    vec![footer_hint_line(&hints)]
+    vec![footer_hint_line(question_hints(multiple))]
 }
 
 /// Builds the fixed header above a question's scrollable options: the one dim

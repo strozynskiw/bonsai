@@ -78,21 +78,12 @@ impl ModalFootprint {
             return area;
         }
         let (percent_x, percent_y) = self.percents();
-        // A content-sized popup may use the rows it measured even past the tier's
-        // percentage: the cap keeps prose surfaces from filling the screen, it must
-        // not clip the decision a short popup is asking for. Measurements stay
-        // inside the terminal either way.
-        let cap = match content_rows {
-            Some(_) => area.height.saturating_sub(1),
-            None => percentage_rows(area.height, percent_y),
-        };
-        centered_rect_capped_in(
-            area,
-            percent_x,
-            percent_y,
-            content_rows.unwrap_or(cap),
-            self.min_width(),
-        )
+        // The tier's percentage caps the height either way: a short popup shrinks to
+        // the rows it measured, and a long one stops at the cap and scrolls through
+        // the shell instead of filling the screen.
+        let cap = percentage_rows(area.height, percent_y).min(area.height.saturating_sub(1));
+        let rows = content_rows.map_or(cap, |rows| rows.min(cap));
+        centered_rect_capped_in(area, percent_x, percent_y, rows, self.min_width())
     }
 }
 
@@ -152,13 +143,68 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
             multiple,
             ..
         }) => question_prompt_area(area, prompt, origin.as_deref(), options, *multiple),
-        ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt { .. })
-        | ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt { .. })
-        | ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt { .. })
-        | ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt { .. })
-        | ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt { .. }) => {
-            ModalFootprint::Prompt.area(area, Some(12))
-        }
+        ModalKind::Detail(crate::tui::event::DetailModal::PermissionPrompt {
+            command,
+            origin,
+            ..
+        }) => ModalFootprint::Prompt.area(
+            area,
+            Some(confirm_prompt_rows(
+                area,
+                &permission_prompt(command, origin.as_deref()),
+            )),
+        ),
+        ModalKind::Detail(crate::tui::event::DetailModal::SandboxEscalationPrompt {
+            command,
+            origin,
+            kind,
+            ..
+        }) => ModalFootprint::Prompt.area(
+            area,
+            Some(confirm_prompt_rows(
+                area,
+                &sandbox_escalation_prompt(command, origin.as_deref(), *kind),
+            )),
+        ),
+        ModalKind::Detail(crate::tui::event::DetailModal::WebDomainPrompt {
+            url,
+            host,
+            redirected_from,
+            origin,
+            ..
+        }) => ModalFootprint::Prompt.area(
+            area,
+            Some(confirm_prompt_rows(
+                area,
+                &web_domain_prompt(host, url, redirected_from.as_deref(), origin.as_deref()),
+            )),
+        ),
+        ModalKind::Detail(crate::tui::event::DetailModal::ExtensionToolPrompt {
+            id,
+            server,
+            capabilities,
+            args_preview,
+            ..
+        }) => ModalFootprint::Prompt.area(
+            area,
+            Some(confirm_prompt_rows(
+                area,
+                &extension_tool_prompt(id, server, capabilities, args_preview),
+            )),
+        ),
+        ModalKind::Detail(crate::tui::event::DetailModal::HookTrustPrompt {
+            name,
+            event,
+            action_kind,
+            action_preview,
+            ..
+        }) => ModalFootprint::Prompt.area(
+            area,
+            Some(confirm_prompt_rows(
+                area,
+                &hook_trust_prompt(name, event, action_kind, action_preview),
+            )),
+        ),
         ModalKind::Detail(crate::tui::event::DetailModal::CommandHelp) => {
             ModalFootprint::Wide.area(area, None)
         }
@@ -179,15 +225,30 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
             let rows = (providers.len().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
             ModalFootprint::Picker.area(area, Some(rows))
         }
-        ModalKind::Confirm(crate::tui::event::ConfirmModal::Unauthorize { .. }) => {
-            ModalFootprint::Prompt.area(area, Some(8))
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::Unauthorize {
+            display_name, ..
+        }) => ModalFootprint::Prompt.area(area, Some(unauthorize_confirm_rows(area, display_name))),
+        ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries }) => {
+            // Measured from the panes' own row counts, so a short catalog gets a
+            // short popup instead of inheriting the tier's 92%.
+            let rows = model_picker_rows(area, entries);
+            ModalFootprint::Wide.area(area, Some(rows))
         }
-        ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { .. })
-        | ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager { .. }) => {
-            ModalFootprint::Wide.area(area, None)
+        ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
+            rows,
+            filter,
+            searching,
+            ..
+        }) => {
+            // Measured from the renderer's own bands: an optional search header, one
+            // row per provider, and the three-line detail/hint footer. A short catalog
+            // must not take the whole 92% the tier allows.
+            let header_rows = u16::from(*searching || !filter.is_empty());
+            let rows = shell_modal_rows(header_rows, rows.len().max(1) as u16, 3);
+            ModalFootprint::Wide.area(area, Some(rows))
         }
-        ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { .. }) => {
-            ModalFootprint::Wide.area(area, None)
+        ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { rows, cursor }) => {
+            ModalFootprint::Wide.area(area, Some(mcp_servers_rows(area, rows, *cursor)))
         }
         ModalKind::Picker(crate::tui::event::PickerModal::SessionPicker { .. }) => {
             ModalFootprint::Form.area(area, None)
@@ -209,15 +270,19 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
             let rows = budget_warning_rows(area, *usage, *cursor);
             ModalFootprint::Prompt.area(area, Some(rows))
         }
-        ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { .. }) => {
-            ModalFootprint::Prompt.area(area, Some(8))
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { plan }) => {
+            ModalFootprint::Prompt.area(area, Some(plan_delete_confirm_rows(area, plan)))
         }
-        ModalKind::Confirm(crate::tui::event::ConfirmModal::SessionDelete { .. }) => {
-            ModalFootprint::Prompt.area(area, Some(8))
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::SessionDelete { session }) => {
+            ModalFootprint::Prompt.area(area, Some(session_delete_confirm_rows(area, session)))
         }
-        ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDiscard { .. }) => {
-            ModalFootprint::Prompt.area(area, Some(8))
-        }
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDiscard {
+            saved_plan_id,
+            title,
+        }) => ModalFootprint::Prompt.area(
+            area,
+            Some(plan_discard_confirm_rows(area, *saved_plan_id, title)),
+        ),
         ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor }) => {
             let rows = review_scope_rows(area, *cursor);
             ModalFootprint::Prompt.area(area, Some(rows))
@@ -249,17 +314,16 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         ModalKind::Wizard(crate::tui::event::WizardModal::AgentComposer { .. }) => {
             ModalFootprint::Form.area(area, None)
         }
-        ModalKind::Confirm(crate::tui::event::ConfirmModal::AgentDelete { .. }) => {
-            ModalFootprint::Prompt.area(area, Some(7))
+        ModalKind::Confirm(crate::tui::event::ConfirmModal::AgentDelete { name, path }) => {
+            ModalFootprint::Prompt.area(area, Some(agent_delete_confirm_rows(area, name, path)))
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { .. }) => {
-            ModalFootprint::Prompt.area(area, Some(16))
+            ModalFootprint::Prompt.area(area, Some(sandbox_status_rows(area)))
         }
-        ModalKind::Manager(crate::tui::event::ManagerModal::Doctor { report, .. }) => {
-            // Chrome plus one row per check, capped by the wide tier so a long
-            // check list scrolls internally instead of filling the screen.
-            let rows = (report.checks.len().max(1) as u16).saturating_add(MODAL_CHROME_ROWS);
-            ModalFootprint::Wide.area(area, Some(rows))
+        ModalKind::Manager(crate::tui::event::ManagerModal::Doctor { report, cursor }) => {
+            // Measured from `check_lines`: a check with remediation is more than
+            // one row, so counting checks would under-size the popup.
+            ModalFootprint::Wide.area(area, Some(doctor_rows(area, report, *cursor)))
         }
         ModalKind::Picker(crate::tui::event::PickerModal::ThemePicker { .. }) => {
             let rows_height =
@@ -297,6 +361,30 @@ pub(crate) fn modal_area(area: Rect, kind: &ModalKind) -> Rect {
         // remove confirm.
         _ => ModalFootprint::Prompt.area(area, None),
     }
+}
+
+/// Rows the model picker needs for its widest pane: the filter row, the pane's
+/// content rows (one per provider and per model, plus the model-chain reset
+/// slot) with the two border rows every pane draws, and the two footer rows,
+/// inside the frame. Capped at the wide tier's percentage so a large catalog
+/// still windows its panes instead of growing past the footprint.
+fn model_picker_rows(area: Rect, entries: &[ModelOption]) -> u16 {
+    // The same dedupe key the provider pane uses (`model_picker_provider_rows`),
+    // counted without cloning the entries on every frame.
+    let mut seen = std::collections::HashSet::new();
+    let providers = entries
+        .iter()
+        .filter(|entry| seen.insert(entry.provider_id.as_str()))
+        .count();
+    let models = entries.len().saturating_add(1);
+    // A content row that lands on a pane's border is not a row the list can show.
+    let body = models.max(providers).saturating_add(2).max(4) as u16;
+    let rows = 2u16 // frame
+        .saturating_add(1) // filter
+        .saturating_add(body)
+        .saturating_add(2); // footer
+    let (_, percent_y) = ModalFootprint::Wide.percents();
+    rows.min(percentage_rows(area.height, percent_y))
 }
 
 pub(crate) fn max_modal_scroll(app: &AppState, area: Rect) -> Option<u16> {
@@ -450,7 +538,17 @@ pub(crate) fn max_modal_scroll(app: &AppState, area: Rect) -> Option<u16> {
             let layout = review_scope_layout(*cursor, decision_inner_width(modal));
             Some(decision_max_scroll(modal, layout))
         }
-        ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { .. }) => None,
+        // The picker windows each pane against its own body height, so its modal
+        // body never scrolls; an explicit zero keeps a stale offset from the
+        // modal that preceded it out of the mouse hit-test.
+        ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { .. }) => Some(0),
+        ModalKind::Manager(crate::tui::event::ManagerModal::SandboxStatus { cursor }) => Some(
+            sandbox_lines(app, *cursor)
+                .map(|(header, body, footer)| {
+                    scrollable_modal_max_scroll(modal, &header, &footer, &body)
+                })
+                .unwrap_or(0),
+        ),
         _ => None,
     }
 }
@@ -500,7 +598,7 @@ pub(crate) fn context_modal_metrics(app: &AppState, area: Rect) -> Option<Contex
         return None;
     };
     let modal = modal_area(area, app.modal.as_ref()?);
-    let (body_area, _footer_area) = context_modal_regions(modal);
+    let body_area = context_body_regions(app, modal).body;
     let body_height = body_area.height.max(1);
     // All metrics are in *visual* (wrapped) rows — the same space the body
     // paragraph scrolls in. The row walkers count logical lines; the shared
@@ -533,7 +631,7 @@ pub(crate) fn context_row_index_at(
         return None;
     };
     let modal = modal_area(area, app.modal.as_ref()?);
-    let (content, _footer_area) = context_modal_regions(modal);
+    let content = context_body_regions(app, modal).body;
     if !content.contains((column, row).into()) {
         return None;
     }
@@ -789,6 +887,57 @@ pub(super) fn render_windowed_body(f: &mut Frame, body_area: Rect, body_lines: &
     );
 }
 
+/// The chrome every wizard shares: a cleared frame titled with the step, and the
+/// inner rect the wizard lays its own bands out in. Onboarding, the agent composer,
+/// the local-model wizard and the memory form all open this way, so the frame, its
+/// style and the `Clear` behind it have one owner.
+pub(super) fn render_wizard_frame(f: &mut Frame, area: Rect, title: &str) -> Rect {
+    let panel = theme::frame(title.to_string(), true);
+    let inner = panel.inner(area);
+    f.render_widget(Clear, area);
+    f.render_widget(panel.style(theme::panel()), area);
+    inner
+}
+
+/// The same frame with the wizard's hint rows pinned to its bottom edge. Returns
+/// the body rect between the title band and the footer, so a wizard only lays out
+/// its own steps.
+pub(super) fn render_wizard_chrome(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    footer: &[Line<'static>],
+) -> Rect {
+    let inner = render_wizard_frame(f, area, title);
+    let (body, footer_area) = wizard_body_regions(inner, footer);
+    if footer_area.height == 0 {
+        return body;
+    }
+    f.render_widget(
+        Paragraph::new(footer.to_vec())
+            .style(theme::panel())
+            .wrap(Wrap { trim: false }),
+        footer_area,
+    );
+    body
+}
+
+/// Split a wizard's inner rect into its body and its pinned hint band. Pure, so a
+/// wizard that needs the body rect for cursor placement measures the same band the
+/// chrome draws — including the rows a wrapped hint adds.
+pub(super) fn wizard_body_regions(inner: Rect, footer: &[Line<'static>]) -> (Rect, Rect) {
+    if inner.height == 0 || inner.width == 0 {
+        return (Rect::default(), Rect::default());
+    }
+    let rows = wrapped_lines_height(footer, inner.width as usize)
+        .clamp(1, usize::from(inner.height)) as u16;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(rows)])
+        .split(inner);
+    (chunks[0], chunks[1])
+}
+
 /// Draw a form popup through the shared shell and return its body rect, so the
 /// caller can place a caret inside the body. Forms do not scroll: their fields
 /// are already wrapped to the body width.
@@ -901,6 +1050,12 @@ pub(super) fn footer_hint_line(pairs: &[(&str, &str)]) -> Line<'static> {
         spans.push(Span::styled(format!(" {label}{separator}"), theme::dim()));
     }
     Line::from(spans)
+}
+
+/// The confirm/cancel hint pair every yes/no popup shares, so the wording and the
+/// key list cannot drift between them.
+pub(super) fn confirm_footer_hint() -> Line<'static> {
+    footer_hint_line(hints::YES_NO)
 }
 
 /// The shared styled section label for modal reading surfaces. The accent bar
@@ -1395,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_manager_uses_wide_picker_footprint() {
+    fn provider_manager_measures_its_rows_instead_of_taking_the_whole_tier() {
         let area = Rect::new(0, 0, 120, 50);
         let kind = ModalKind::Manager(crate::tui::event::ManagerModal::ProviderManager {
             rows: Vec::new(),
@@ -1404,7 +1559,10 @@ mod tests {
             cursor: 0,
         });
 
-        assert_eq!(modal_area(area, &kind), Rect::new(5, 2, 110, 46));
+        // No search header, one empty-list row, a three-line footer: frame 2 +
+        // header 0 + body 1 + footer 3 + spacer 1. A short catalog no longer takes
+        // the wide tier's 46 rows.
+        assert_eq!(modal_area(area, &kind), Rect::new(5, 21, 110, 7));
     }
 
     // ── Modal text selection tests ────────────────────────────────────────
@@ -1540,5 +1698,29 @@ mod tests {
             caret: 7,
         };
         assert_eq!(sel2.range(), (3, 7));
+    }
+
+    #[test]
+    fn model_picker_measures_its_rows_instead_of_taking_the_wide_tier() {
+        let area = Rect::new(0, 0, 120, 20);
+        // 92% of a 20-row terminal is 18 rows; a short catalog must not claim it.
+        let entries = (0..4)
+            .map(|index| {
+                crate::tui::test_utils::model_option("codex", "Codex", &format!("model-{index}"))
+            })
+            .collect::<Vec<_>>();
+        let kind = ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries });
+        let modal = modal_area(area, &kind);
+        assert!(
+            modal.height < 18,
+            "a short catalog gets a short popup, not the wide tier: {modal:?}"
+        );
+        // The measurement must budget each pane's own border rows, or the pane
+        // windows out a model the popup was sized to show.
+        let (_, model_capacity, _) = crate::tui::widgets::modal::model_picker_capacities(modal);
+        assert!(
+            model_capacity >= 4,
+            "all four models fit: capacity {model_capacity}, modal {modal:?}"
+        );
     }
 }

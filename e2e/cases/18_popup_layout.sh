@@ -41,6 +41,30 @@ popup_pass() {
   tui_keys Escape
   wait_for '(Coding|Planning) ·' 5 || true
   expect_meta "$label back in chat after help" "Coding ·"
+
+  echo "[$label] /providers manager:"
+  tui_keys "/providers" Enter
+  expect "$label provider manager title"    "Providers"
+  expect "$label provider manager footer"   "Esc"
+  tui_keys Escape
+  wait_for '(Coding|Planning) ·' 5 || true
+  expect_meta "$label back in chat after providers" "Coding ·"
+
+  echo "[$label] /ctx reading surface:"
+  tui_keys "/ctx" Enter
+  expect "$label context title"             "Context window"
+  expect "$label context footer"            "Esc"
+  tui_keys Escape
+  wait_for '(Coding|Planning) ·' 5 || true
+  expect_meta "$label back in chat after ctx" "Coding ·"
+
+  echo "[$label] /usage dashboard:"
+  tui_keys "/usage" Enter
+  expect "$label usage title"               "Usage"
+  expect "$label usage footer"              "Esc"
+  tui_keys Escape
+  wait_for '(Coding|Planning) ·' 5 || true
+  expect_meta "$label back in chat after usage" "Coding ·"
 }
 
 tui_start 150 45 || e2e_done

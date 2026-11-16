@@ -18,11 +18,7 @@ pub(super) fn render_busy_command(
     cursor: usize,
 ) {
     let header = busy_command_header(input);
-    let footer = vec![footer_hint_line(&[
-        ("Up/Down", "move"),
-        ("Enter", "select"),
-        ("Esc", "close"),
-    ])];
+    let footer = vec![footer_hint_line(BUSY_HINTS)];
     render_list_picker(f, area, "Busy command", &header, &footer, |body_area| {
         if rows.is_empty() {
             return vec![Line::from(Span::styled(
@@ -37,8 +33,24 @@ pub(super) fn render_busy_command(
             |row| row.label.to_string(),
         );
         let cursor = cursor.min(rows.len().saturating_sub(1));
-        visible_picker_rows(rows.len(), cursor, picker_body_height(body_area))
-            .map(|idx| busy_command_line(idx == cursor, &rows[idx], label_width))
+        let lines = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                row_line(
+                    idx == cursor,
+                    pad_ascii(row.label, label_width),
+                    Some(row.description.to_string()),
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        let heights = lines
+            .iter()
+            .map(|line| row_line_height(line, body_area.width, 0))
+            .collect::<Vec<_>>();
+        visible_rows(body_area, &heights, cursor)
+            .map(|idx| lines[idx].clone())
             .collect()
     });
 }
@@ -56,21 +68,4 @@ pub(super) fn busy_command_rows(
         rows.len().max(1) as u16,
         1,
     )
-}
-
-fn busy_command_line(
-    selected: bool,
-    row: &crate::tui::event::BusyCommandRow,
-    label_width: usize,
-) -> Line<'static> {
-    let marker = if selected { "> " } else { "  " };
-    Line::from(vec![
-        Span::styled(marker, row_marker_style()),
-        Span::styled(
-            pad_ascii(row.label, label_width),
-            theme::body(theme::palette().text),
-        ),
-        Span::styled("  ", theme::dim()),
-        Span::styled(row.description, theme::dim()),
-    ])
 }

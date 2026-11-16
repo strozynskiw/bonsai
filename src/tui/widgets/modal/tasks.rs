@@ -15,12 +15,7 @@ pub(super) fn render_task_list(
         .unwrap_or_else(|| "Del stops and removes the selected task.".to_string());
     let footer_lines = vec![
         Line::from(Span::styled(status, theme::dim())),
-        footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("PgUp/PgDn", "page"),
-            ("Del", "remove"),
-            ("Esc", "close"),
-        ]),
+        footer_hint_line(TASK_HINTS),
     ];
     render_list_detail_modal(
         f,
@@ -46,10 +41,13 @@ pub(super) fn render_task_list(
             } else {
                 let cursor = cursor.min(tasks.len().saturating_sub(1));
                 let visible_count = table_area.height.saturating_sub(1).max(1) as usize;
-                table_lines.extend(
-                    visible_picker_rows(tasks.len(), cursor, visible_count)
-                        .map(|index| table_row(&tasks[index], &columns, &widths, index == cursor)),
-                );
+                table_lines.extend(table_body_lines(
+                    &tasks.iter().collect::<Vec<_>>(),
+                    &columns,
+                    &widths,
+                    cursor,
+                    visible_count,
+                ));
             }
             frame.render_widget(
                 Paragraph::new(table_lines)
@@ -100,7 +98,9 @@ fn task_columns() -> Vec<TableColumn<BackgroundTaskSnapshot>> {
         TableColumn {
             header: "Command",
             width: TableWidth::Flex { min: 0 },
-            render: CellRender::Fitted(|task, width| task.compact_command(width)),
+            // Prose: a backgrounded command is read to recognize it, so it wraps
+            // rather than losing its tail.
+            render: CellRender::Wrapped(|task| task.compact_command(usize::MAX)),
             style: CellStyle::Text,
         },
     ]

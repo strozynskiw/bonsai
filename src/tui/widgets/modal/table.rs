@@ -18,12 +18,22 @@ pub(super) enum TableWidth {
 }
 
 /// How a cell's text is produced.
+///
+/// **Prose wraps, metadata clips.** A cell whose full text matters — a title, a
+/// command, a source name, a description — is [`CellRender::Wrapped`], and its
+/// column is [`TableWidth::Flex`] so the text wraps inside whatever width the
+/// layout gives it. A cell whose content is metadata — an id, age, price, count,
+/// badge, key or header — stays a single `Fit`/`Exact` cell and is clipped by
+/// `truncate_ascii`; that loss is deliberate, because such a row is a summary and
+/// the full value lives in the detail pane. Choose by what the reader needs, not
+/// by how long the string happens to be.
 pub(super) enum CellRender<T> {
     /// A raw value the builder pads to the column width.
     Value(fn(&T) -> String),
-    /// A value that already fits the column width (e.g. a width-aware command
-    /// truncator); rendered as-is, not padded.
-    Fitted(fn(&T, usize) -> String),
+    /// Prose that wraps onto continuation rows instead of clipping. Requires a
+    /// [`TableWidth::Flex`] column: the width comes from the layout, so measuring
+    /// the text itself could not size it.
+    Wrapped(fn(&T) -> String),
 }
 
 /// The style a cell's text carries.
@@ -47,7 +57,12 @@ impl<T> TableColumn<T> {
     fn value(&self, item: &T, width: usize) -> String {
         match &self.render {
             CellRender::Value(f) => pad_ascii(&f(item), width),
-            CellRender::Fitted(f) => f(item, width),
+            // Wrapped cells never reach this path: `table_rows` renders them
+            // itself. A silent width mismatch would be worse than a loud bug.
+            CellRender::Wrapped(f) => {
+                debug_assert!(false, "a wrapped cell is rendered by `table_rows`");
+                f(item)
+            }
         }
     }
 }
@@ -59,13 +74,21 @@ pub(super) fn table_widths<T>(total: usize, items: &[T], columns: &[TableColumn<
     let mut flex = None;
     let mut fixed = TABLE_MARKER_WIDTH + gaps;
     for (index, column) in columns.iter().enumerate() {
+        // Wrapping decides a column's width from the layout, so a wrapped column
+        // measured by its own text would be circular.
+        debug_assert!(
+            !matches!(column.render, CellRender::Wrapped(_))
+                || matches!(column.width, TableWidth::Flex { .. }),
+            "table column `{}` wraps prose, so it must be TableWidth::Flex",
+            column.header
+        );
         match column.width {
             TableWidth::Fit { cap } => {
-                // A Fitted column is width-aware and belongs in the flex slot;
-                // measuring it here would need a width it doesn't have.
+                // A wrapped column takes its width from the layout, so it is never
+                // measured by its own text.
                 let value: fn(&T) -> String = match &column.render {
                     CellRender::Value(f) => *f,
-                    CellRender::Fitted(_) => |_: &T| String::new(),
+                    CellRender::Wrapped(_) => |_: &T| String::new(),
                 };
                 let w = column_width(items, column.header, cap, value);
                 widths[index] = w;
@@ -127,28 +150,112 @@ pub(super) fn table_header<T>(columns: &[TableColumn<T>], widths: &[usize]) -> L
     Line::from(spans)
 }
 
-/// One data row: `> ` marker, then each column's cell separated by two spaces.
-pub(super) fn table_row<T>(
+/// One data row, or several when a wrapped column's prose does not fit: `> `
+/// marker, then each column's cell separated by two spaces. Continuation rows
+/// blank-pad the columns that already finished, so a wrapped cell stays under its
+/// own column instead of sliding left.
+pub(super) fn table_rows<T>(
     item: &T,
     columns: &[TableColumn<T>],
     widths: &[usize],
     selected: bool,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let meta = theme::muted();
-    let marker = if selected { "> " } else { "  " };
-    let mut spans = vec![Span::styled(marker, meta)];
+    let mut cells: Vec<Vec<Line<'static>>> = Vec::with_capacity(columns.len());
     for (index, column) in columns.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled("  ", meta));
-        }
+        // A zero-width column cannot wrap; let it show one cell rather than
+        // emitting a line wider than the cell claims to be.
+        let width = widths[index].max(1);
         let style = match &column.style {
             CellStyle::Meta => meta,
             CellStyle::Text => theme::body(theme::palette().text),
             CellStyle::Custom(f) => f(item),
         };
-        spans.push(Span::styled(column.value(item, widths[index]), style));
+        let block = match &column.render {
+            CellRender::Wrapped(text) => {
+                wrap_line(&Line::from(Span::styled(text(item), style)), width.max(1))
+                    .into_iter()
+                    .map(|line| pad_line(line, width))
+                    .collect::<Vec<_>>()
+            }
+            _ => vec![Line::from(Span::styled(column.value(item, width), style))],
+        };
+        cells.push(block);
     }
+    let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    (0..height)
+        .map(|row| {
+            // The marker marks the row, not every line it wraps onto.
+            let marker = if selected && row == 0 { "> " } else { "  " };
+            let mut spans = vec![Span::styled(marker, meta)];
+            for (index, _column) in columns.iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled("  ", meta));
+                }
+                match cells[index].get(row) {
+                    Some(line) => spans.extend(line.spans.iter().cloned()),
+                    None => spans.push(Span::raw(" ".repeat(widths[index]))),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Widen a rendered cell to exactly `width` cells, so the columns after it stay
+/// aligned on every wrapped row.
+fn pad_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let used = line.width();
+    if used >= width {
+        return line;
+    }
+    let mut spans = line.spans;
+    spans.push(Span::raw(" ".repeat(width - used)));
     Line::from(spans)
+}
+
+/// Lines one item's row occupies: the tallest column block. Windowing counts these
+/// instead of assuming one line per row, which is what keeps a wrapped row's
+/// cursor on screen.
+pub(super) fn table_row_height<T>(item: &T, columns: &[TableColumn<T>], widths: &[usize]) -> usize {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| match &column.render {
+            CellRender::Wrapped(text) => usize::from(wrapped_line_count(
+                &Line::from(Span::raw(text(item))),
+                widths[index].max(1),
+            ))
+            .max(1),
+            CellRender::Value(_) => 1,
+        })
+        .max()
+        .unwrap_or(1)
+}
+
+/// The table's visible rows, windowed by *line count* so a wrapped row can never
+/// push the cursor below the fold. `visible_lines` is the body's own line budget,
+/// header excluded.
+pub(super) fn table_body_lines<T>(
+    items: &[&T],
+    columns: &[TableColumn<T>],
+    widths: &[usize],
+    cursor: usize,
+    visible_lines: usize,
+) -> Vec<Line<'static>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let heights = items
+        .iter()
+        .map(|item| table_row_height(*item, columns, widths))
+        .collect::<Vec<_>>();
+    let cursor = cursor.min(items.len().saturating_sub(1));
+    let mut lines = Vec::new();
+    for index in visible_weighted_rows(&heights, cursor, visible_lines.max(1)) {
+        lines.extend(table_rows(items[index], columns, widths, index == cursor));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -211,9 +318,10 @@ mod tests {
         let items = vec![Row { name: "界界" }];
         let w = table_widths(40, &items, &cols());
         let header = table_header(&cols(), &w);
-        let row = table_row(&items[0], &cols(), &w, true);
+        let rows = table_rows(&items[0], &cols(), &w, true);
+        assert_eq!(rows.len(), 1, "a single-line row stays one row");
         // Header and row render to the same display width, so columns line up.
-        assert_eq!(header.width(), row.width());
+        assert_eq!(header.width(), rows[0].width());
     }
 
     #[test]
@@ -238,5 +346,77 @@ mod tests {
             );
             assert!(row.width() <= 20 + 8, "no row past the cell: {text:?}");
         }
+    }
+
+    fn prose_columns() -> Vec<TableColumn<Row>> {
+        vec![
+            TableColumn {
+                header: "ID",
+                width: TableWidth::Fit { cap: 4 },
+                render: CellRender::Value(|r| r.name.to_string()),
+                style: CellStyle::Meta,
+            },
+            TableColumn {
+                header: "Body",
+                width: TableWidth::Flex { min: 6 },
+                render: CellRender::Wrapped(|r| r.name.to_string()),
+                style: CellStyle::Text,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_wrapped_cell_spans_rows_and_stays_under_its_own_column() {
+        let items = vec![Row {
+            name: "a command that needs more than one row of prose",
+        }];
+        let columns = prose_columns();
+        let widths = table_widths(30, &items, &columns);
+        let rows = table_rows(&items[0], &columns, &widths, false);
+        assert!(rows.len() > 1, "the prose wraps onto continuation rows");
+        let body_column = TABLE_MARKER_WIDTH + widths[0] + TABLE_GAP_WIDTH;
+        let text = |row: &Line<'static>| -> String {
+            row.spans.iter().map(|span| span.content.as_ref()).collect()
+        };
+        for row in &rows {
+            assert_eq!(row.width(), 30, "every row fills the table exactly");
+        }
+        for row in rows.iter().skip(1) {
+            let line = text(row);
+            assert!(
+                line.chars().take(body_column).all(char::is_whitespace),
+                "a continuation row blanks the columns that finished: {line:?}"
+            );
+            assert!(
+                !line.trim().is_empty(),
+                "a continuation row carries the wrapped prose: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_row_keeps_the_cursor_inside_the_line_budget() {
+        let items = (0..8)
+            .map(|_| Row {
+                name: "a description long enough to wrap onto several rows",
+            })
+            .collect::<Vec<_>>();
+        let columns = prose_columns();
+        let widths = table_widths(30, &items, &columns);
+        let refs = items.iter().collect::<Vec<_>>();
+        let visible_lines = 6;
+        let lines = table_body_lines(&refs, &columns, &widths, 7, visible_lines);
+        assert!(
+            lines.len() <= visible_lines,
+            "the window spends a line budget, not a row count: {} lines",
+            lines.len()
+        );
+        assert!(
+            lines.iter().any(|line| line
+                .spans
+                .first()
+                .is_some_and(|span| span.content.as_ref() == "> ")),
+            "the selected row stays inside the window"
+        );
     }
 }

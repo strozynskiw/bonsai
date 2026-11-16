@@ -14,22 +14,16 @@ pub(super) fn render_agent_browser(
         .unwrap_or_default();
     let footer = vec![
         Line::from(Span::styled(description, theme::dim())),
-        footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("Enter/e", "edit"),
-            ("Space/t", "enable/disable"),
-            ("a", "add"),
-            ("d/Delete", "delete"),
-            ("Esc", "close"),
-        ]),
+        footer_hint_line(AGENT_BROWSER_HINTS),
     ];
     render_list_picker(f, area, "Agents & Subagents", &[], &footer, |body_area| {
         if rows.is_empty() {
             return modal_empty_body("No agent or subagent definitions are installed.");
         }
-        visible_picker_rows(rows.len(), cursor, picker_body_height(body_area).max(1))
-            .map(|idx| {
-                let row = &rows[idx];
+        let lines = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
                 let mut tag = format!("({} · {}", row.origin.label(), row.definition_kind.label());
                 if let Some(model) = &row.model {
                     tag.push_str(" · ");
@@ -39,33 +33,54 @@ pub(super) fn render_agent_browser(
                 if !row.enabled {
                     tag.push_str(" disabled");
                 }
-                picker_line(idx == cursor, row.name.clone(), Some(tag), row.enabled)
+                row_line(idx == cursor, row.name.clone(), Some(tag), row.enabled)
             })
+            .collect::<Vec<_>>();
+        let heights = lines
+            .iter()
+            .map(|line| row_line_height(line, body_area.width, 0))
+            .collect::<Vec<_>>();
+        visible_rows(body_area, &heights, cursor)
+            .map(|idx| lines[idx].clone())
             .collect()
     });
 }
 
-pub(super) fn render_agent_delete_confirm(
-    f: &mut Frame,
-    area: Rect,
+/// The agent-delete confirm's header, body and footer.
+fn agent_delete_layout(
     name: &str,
     path: &std::path::Path,
-) {
-    let panel = theme::frame("Delete Agent", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
-
-    let lines = vec![
+) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let body = vec![
         Line::from(vec![
             Span::styled("Delete ", theme::body(theme::palette().text)),
             Span::styled(name.to_string(), theme::body(theme::palette().error)),
             Span::styled("?", theme::body(theme::palette().text)),
         ]),
         Line::from(Span::styled(path.display().to_string(), theme::dim())),
-        Line::from(""),
-        footer_hint_line(&[("Enter/Y", "confirm"), ("Esc/N", "cancel")]),
     ];
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    (Vec::new(), body, vec![confirm_footer_hint()])
+}
+
+pub(super) fn agent_delete_confirm_rows(area: Rect, name: &str, path: &std::path::Path) -> u16 {
+    let (header, body, footer) = agent_delete_layout(name, path);
+    decision_rows(&header, &body, &footer, decision_inner_width(area))
+}
+
+pub(super) fn render_agent_delete_confirm(
+    f: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    name: &str,
+    path: &std::path::Path,
+) {
+    render_decision_popup(
+        f,
+        area,
+        app,
+        "Delete Agent",
+        agent_delete_layout(name, path),
+    );
 }
 
 #[cfg(test)]

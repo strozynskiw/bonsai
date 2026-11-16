@@ -22,24 +22,39 @@ pub(super) fn render_command_help(f: &mut Frame, area: Rect) {
         chunks[0],
     );
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
-    let split = crate::commands::COMMANDS.len().div_ceil(2);
-    for (area, commands) in [
-        (columns[0], &crate::commands::COMMANDS[..split]),
-        (columns[1], &crate::commands::COMMANDS[split..]),
-    ] {
+    // Two command columns need room for a legible description beside each label;
+    // below this width the board reads better as one wider column.
+    const TWO_COLUMN_MIN_WIDTH: u16 = 110;
+    if chunks[1].width < TWO_COLUMN_MIN_WIDTH {
         f.render_widget(
-            Paragraph::new(command_help_lines(commands, area.width as usize)).style(theme::panel()),
-            area,
+            Paragraph::new(command_help_lines(
+                crate::commands::COMMANDS,
+                chunks[1].width as usize,
+            ))
+            .style(theme::panel()),
+            chunks[1],
         );
+    } else {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1]);
+        let split = crate::commands::COMMANDS.len().div_ceil(2);
+        for (area, commands) in [
+            (columns[0], &crate::commands::COMMANDS[..split]),
+            (columns[1], &crate::commands::COMMANDS[split..]),
+        ] {
+            f.render_widget(
+                Paragraph::new(command_help_lines(commands, area.width as usize))
+                    .style(theme::panel()),
+                area,
+            );
+        }
     }
 
     f.render_widget(
         Paragraph::new(vec![
-            footer_hint_line(&[("Tab", "complete"), ("Enter", "run"), ("Esc", "close")]),
+            footer_hint_line(COMMAND_HELP_HINTS),
             Line::from(Span::styled(
                 "Type / to filter commands inline.",
                 theme::dim(),
@@ -60,6 +75,8 @@ pub(super) fn command_help_lines(
     lines.push(Line::from(vec![
         Span::styled(pad_ascii("Command", label_width), theme::muted()),
         Span::raw(" ".repeat(gap_width)),
+        // Header label (metadata): clipping it is intentional — the column's own
+        // cells carry the detail.
         Span::styled(truncate_ascii("Action", detail_width), theme::muted()),
     ]));
     for command in commands {
@@ -201,10 +218,7 @@ pub(super) fn render_help(f: &mut Frame, area: Rect, app: &AppState) {
         "Shortcuts",
         &[],
         &lines,
-        &[footer_hint_line(&[
-            ("d-click", "copy word"),
-            ("Esc", "close"),
-        ])],
+        &[footer_hint_line(HELP_KEYS_HINTS)],
         app.modal_scroll,
         app.modal_selection.map(|s| s.range()),
         &app.modal_body_lines,

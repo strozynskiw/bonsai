@@ -15,22 +15,31 @@ fn theme_source_suffix(source: ThemeSource) -> &'static str {
 pub(super) fn render_theme_picker(f: &mut Frame, area: Rect, cursor: usize) {
     let footer = vec![
         Line::from(Span::styled("Preview updates while moving.", theme::dim())),
-        footer_hint_line(&[("Up/Down", "move"), ("Enter", "save"), ("Esc", "cancel")]),
+        footer_hint_line(THEME_HINTS),
     ];
     render_list_picker(f, area, "Themes", &[], &footer, |body_area| {
         let themes = theme::theme_overview();
         let cursor = cursor.min(themes.len().saturating_sub(1));
         let current = theme::current_theme_index();
-        visible_picker_rows(themes.len(), cursor, picker_body_height(body_area))
-            .map(|idx| {
-                let option = themes[idx];
+        let rows = themes
+            .iter()
+            .enumerate()
+            .map(|(idx, option)| {
                 let mut detail = option.blurb.to_string();
                 detail.push_str(theme_source_suffix(option.source));
                 if idx == current {
                     detail.push_str(" · current");
                 }
-                picker_line(idx == cursor, option.name.to_string(), Some(detail), true)
+                row_line(idx == cursor, option.name.to_string(), Some(detail), true)
             })
+            .collect::<Vec<_>>();
+        let heights = rows
+            .iter()
+            .map(|line| row_line_height(line, body_area.width, 0))
+            .collect::<Vec<_>>();
+        // Blurbs are prose and wrap: the window spends lines, not rows.
+        visible_rows(body_area, &heights, cursor)
+            .map(|idx| rows[idx].clone())
             .collect()
     });
 }

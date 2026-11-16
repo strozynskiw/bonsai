@@ -13,23 +13,7 @@ pub(super) fn render_subtask_list(
     cursor: usize,
     pane: SubtaskListPane,
 ) {
-    let focus_hint = if pane == SubtaskListPane::Detail {
-        footer_hint_line(&[
-            ("Up/Down", "scroll"),
-            ("PgUp/PgDn", "page"),
-            ("Tab/Left", "list"),
-            ("Esc", "close"),
-        ])
-    } else {
-        footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("PgUp/PgDn", "page"),
-            ("Tab/Right", "detail"),
-            ("m", "model"),
-            ("d", "default"),
-            ("Esc", "close"),
-        ])
-    };
+    let focus_hint = footer_hint_line(subtask_hints(pane));
     let footer_lines = vec![
         Line::from(Span::styled(
             "Read-only subagents delegated via the agent tool.",
@@ -58,11 +42,13 @@ pub(super) fn render_subtask_list(
             } else {
                 let cursor = cursor.min(subtasks.len().saturating_sub(1));
                 let visible_lines = table_area.height.saturating_sub(1).max(1) as usize;
-                table_lines.extend(
-                    visible_picker_rows(subtasks.len(), cursor, visible_lines).map(|index| {
-                        table_row(&subtasks[index], &columns, &widths, index == cursor)
-                    }),
-                );
+                table_lines.extend(table_body_lines(
+                    &subtasks.iter().collect::<Vec<_>>(),
+                    &columns,
+                    &widths,
+                    cursor,
+                    visible_lines,
+                ));
             }
             frame.render_widget(
                 Paragraph::new(table_lines)

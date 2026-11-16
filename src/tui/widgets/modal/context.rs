@@ -114,13 +114,6 @@ pub(super) fn visual_line_offsets(lines: &[Line<'static>], width: usize) -> Vec<
     offsets
 }
 
-pub(super) fn visual_line_total(lines: &[Line<'static>], width: usize) -> usize {
-    lines
-        .iter()
-        .map(|line| wrapped_line_count_usize(line, width))
-        .sum()
-}
-
 fn context_role_color(role: crate::agent::ContextRole) -> ratatui::style::Color {
     use crate::agent::ContextRole;
     let p = theme::palette();
@@ -308,46 +301,15 @@ fn count_wire_breakpoints(section: &crate::provider::ProviderWireSection) -> usi
 
 pub(super) fn render_context(f: &mut Frame, area: Rect, app: &AppState, report: &ContextReport) {
     let bar_width = (area.width.saturating_sub(4) as usize).max(10);
+    // The header lines are part of the scrollable body (they read as context, not
+    // as chrome), so the shell reserves no fixed header — only the hint footer.
     let lines = context_modal_lines(app, report, bar_width);
-    let footer_line = context_footer_line(app);
-
-    let frame = theme::frame("Context window", true);
-    let (content_area, footer_area) = context_modal_regions(area);
-    f.render_widget(
-        Paragraph::new(Vec::new())
-            .block(frame)
-            .style(theme::panel()),
-        area,
-    );
-
-    let viewport_height = content_area.height.max(1) as usize;
-    // The body paragraph wraps, so scroll limits must count *visual* (wrapped)
-    // rows — a logical count under-measures whenever any line wraps and the
-    // cursor auto-follow then leaves the selection below the fold.
-    let content_width = content_area.width.max(1) as usize;
-    let total_visual_lines = visual_line_total(&lines, content_width);
-    let max_scroll = total_visual_lines.saturating_sub(viewport_height) as u16;
-    let scroll = app.modal_scroll.min(max_scroll);
-    let panel = Paragraph::new(lines)
-        .style(theme::panel())
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(panel, content_area);
-
-    if max_scroll > 0 {
-        let mut state = ScrollbarState::new(max_scroll as usize + 1)
-            .position(scroll as usize)
-            .viewport_content_length(viewport_height);
-        let scrollbar = theme::scrollbar(ScrollbarOrientation::VerticalRight);
-        f.render_stateful_widget(scrollbar, content_area, &mut state);
-    }
-
-    if footer_area.height > 0 {
-        let footer = Paragraph::new(vec![footer_line])
-            .style(theme::panel())
-            .wrap(Wrap { trim: false });
-        f.render_widget(footer, footer_area);
-    }
+    let footer = context_footer_lines(app);
+    let regions = context_body_regions(app, area);
+    render_modal_chrome(f, area, "Context window", &regions, &[], &footer);
+    // The shared body renderer pre-wraps, clamps and draws the scrollbar, so the
+    // clamp `context_modal_metrics` reports is the one this pane applies.
+    render_scroll_body(f, regions.body, &lines, None, app.modal_scroll);
 }
 
 pub(super) fn context_view_selector_line(mode: ContextViewMode) -> Line<'static> {
@@ -718,39 +680,20 @@ pub(super) fn wire_token_estimate(text: &str) -> usize {
 }
 
 pub(super) fn context_footer_line(app: &AppState) -> Line<'static> {
-    match app.context_state.view_mode {
-        ContextViewMode::Wire => footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("Enter", "expand/collapse"),
-            ("Tab/Shift+Tab", "turns"),
-            ("Esc", "close"),
-        ]),
-        ContextViewMode::Turns => footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("Enter", "expand/collapse"),
-            ("Tab/Shift+Tab", "ledger"),
-            ("Esc", "close"),
-        ]),
-        ContextViewMode::Ledger => footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("Enter", "expand/collapse"),
-            ("p/d/s/r", "edit"),
-            ("Tab/Shift+Tab", "wire"),
-            ("Esc", "close"),
-        ]),
-    }
+    footer_hint_line(context_hints(app))
 }
 
-pub(super) fn context_modal_regions(area: Rect) -> (Rect, Rect) {
-    let inner = theme::frame(String::new(), true).inner(area);
-    if inner.height <= 1 {
-        return (inner, Rect::default());
-    }
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(inner);
-    (chunks[0], chunks[1])
+/// The context modal's hint footer, in the shape the shell split measures.
+pub(super) fn context_footer_lines(app: &AppState) -> Vec<Line<'static>> {
+    vec![context_footer_line(app)]
+}
+
+/// The one body/footer split the context modal uses: no fixed header (its header
+/// lines scroll with the body), one hint row plus the shell's spacer above it.
+/// Renderer, scroll metrics and mouse hit-test all derive their geometry here, so
+/// a click can never resolve against a split the pane did not draw.
+pub(super) fn context_body_regions(app: &AppState, area: Rect) -> ScrollableRegions {
+    split_scrollable_modal_lines(area, &[], &context_footer_lines(app))
 }
 
 pub(super) fn context_control_markers(
@@ -1052,9 +995,9 @@ mod tests {
             Line::from("x".repeat(25)), // wraps to 3 visual rows at width 10
             Line::from("tail"),
         ];
+        // Entry `i` is line `i`'s first visual row; the last entry is the total.
         let offsets = visual_line_offsets(&lines, 10);
         assert_eq!(offsets, vec![0, 1, 4, 5]);
-        assert_eq!(visual_line_total(&lines, 10), 5);
     }
 
     #[test]

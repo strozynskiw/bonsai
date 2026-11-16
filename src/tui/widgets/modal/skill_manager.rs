@@ -16,13 +16,7 @@ pub(super) fn render_skill_manager(
     let hint = rows.get(cursor).map(action_hint).unwrap_or_default();
     let footer_lines = vec![
         Line::from(Span::styled(hint, theme::dim())),
-        footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("PgUp/PgDn", "page"),
-            ("Space", "enable/disable"),
-            ("Enter/l", "load/unload"),
-            ("Esc", "close"),
-        ]),
+        footer_hint_line(SKILL_HINTS),
     ];
     render_list_detail_modal(
         f,
@@ -40,16 +34,24 @@ pub(super) fn render_skill_manager(
             let list_lines: Vec<Line<'static>> = if rows.is_empty() {
                 vec![Line::from(Span::styled("No skills", theme::dim()))]
             } else {
-                visible_picker_rows(rows.len(), cursor, picker_body_height(list_area).max(1))
-                    .map(|index| {
-                        let row = &rows[index];
-                        picker_line(
+                let lines = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        row_line(
                             index == cursor,
                             row.name.clone(),
                             Some(list_row_tag(row)),
                             row.kind.is_advertised(),
                         )
                     })
+                    .collect::<Vec<_>>();
+                let heights = lines
+                    .iter()
+                    .map(|line| row_line_height(line, list_area.width, 0))
+                    .collect::<Vec<_>>();
+                visible_rows(list_area, &heights, cursor)
+                    .map(|index| lines[index].clone())
                     .collect()
             };
             frame.render_widget(Paragraph::new(list_lines).style(theme::panel()), list_area);

@@ -1,16 +1,12 @@
-//! The modal row vocabulary: one selectable row, and one label-plus-description
-//! block.
+//! The modal row vocabulary: one selectable row, one label-plus-description block,
+//! one keyed prefix, and the decision-popup builders every choice popup shares.
 //!
-//! Every popup draws its rows through these two primitives so markers, aligned
+//! Every popup draws its rows through these primitives so markers, aligned
 //! description columns and wrapped continuations cannot drift between modals.
-//! [`row_block`] and [`row_height`] share [`row_geometry`], so measuring a row
-//! (for windowing or content-sized heights) always agrees with drawing it.
+//! [`row_block`] shares [`row_geometry`] with the row it draws, so a measured row
+//! always agrees with the drawn one.
 
-// `row_line` is consumed today; `row_block`/`row_heights` are the vocabulary the
-// decision-popup and manager migrations move onto next, so the primitives (and
-// their tests) land first.
-#![allow(dead_code)]
-
+use super::picker_common::pad_ascii;
 use super::*;
 
 /// Width of the `> ` / `  ` selection marker every row starts with.
@@ -28,6 +24,11 @@ pub(super) const ROW_DESCRIPTION_MIN_WIDTH: usize = 28;
 pub(super) const ROW_LABEL_COLUMN_PERCENT: usize = 40;
 /// Indent of a stacked description under its own label.
 pub(super) const ROW_STACKED_INDENT: usize = 2;
+/// Indent of an axis value row under its section header.
+const ROW_AXIS_INDENT: usize = 4;
+/// Everything [`row_key_prefix`] spends before the key: marker, indent and gap.
+/// Exported so a fits-or-collapses decision sizes the prefix the vocabulary draws.
+pub(super) const ROW_AXIS_PREFIX_WIDTH: usize = ROW_MARKER_WIDTH + ROW_AXIS_INDENT + ROW_COLUMN_GAP;
 
 /// One row's content, before geometry turns it into lines.
 #[derive(Debug, Clone, Copy)]
@@ -199,15 +200,97 @@ fn indented_description(description: &str, geometry: &RowGeometry) -> Vec<Line<'
     .collect()
 }
 
-/// Line count of one row block at `width` — the measurement half of the shared
-/// geometry, so windowing and content sizing can never disagree with the draw.
-pub(super) fn row_height(row: &RowBlock<'_>, width: u16) -> u16 {
-    row_block(row, width).len() as u16
+/// A row whose value carries its own colour: marker, label, a `·` separator, the
+/// value, and an optional parenthesised note. The sandbox toggles colour their
+/// state rather than their label, which `row_line` cannot express.
+pub(super) fn row_value_line(
+    selected: bool,
+    label: &str,
+    value: &str,
+    value_color: Color,
+    note: Option<&str>,
+) -> Line<'static> {
+    let marker = if selected { "> " } else { "  " };
+    let mut spans = vec![
+        Span::styled(marker, row_marker_style()),
+        Span::styled(label.to_string(), theme::body(theme::palette().text)),
+        Span::styled("  ·  ", theme::dim()),
+        Span::styled(value.to_string(), theme::body(value_color)),
+    ];
+    if let Some(note) = note {
+        spans.push(Span::styled(format!("  ({note})"), theme::dim()));
+    }
+    Line::from(spans)
 }
 
-/// Line count per row block, in row order.
-pub(super) fn row_heights(rows: &[RowBlock<'_>], width: u16) -> Vec<u16> {
-    rows.iter().map(|row| row_height(row, width)).collect()
+/// The keyed prefix a mode or settings row starts with: marker, indent, the key
+/// padded to its column, then the gap before the value column.
+pub(super) fn row_key_prefix(selected: bool, key: &str, key_width: usize) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(if selected { "> " } else { "  " }, row_marker_style()),
+        Span::styled(" ".repeat(ROW_AXIS_INDENT), theme::muted()),
+        Span::styled(format!("{key:<key_width$}"), theme::dim()),
+        Span::styled(" ".repeat(ROW_COLUMN_GAP), theme::muted()),
+    ]
+}
+
+/// One `row_block` per decision option, with a blank row between blocks. Labels
+/// are padded to a shared column so the descriptions line up down the popup.
+pub(super) fn decision_body(
+    options: &[(String, String)],
+    cursor: usize,
+    inner_width: u16,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+
+    let label_width = options
+        .iter()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (index, (label, description)) in options.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        let padded = pad_ascii(label, label_width);
+        lines.extend(row_block(
+            &RowBlock {
+                selected: index == cursor,
+                checkbox: None,
+                label: &padded,
+                description: Some(description.as_str()),
+            },
+            inner_width,
+        ));
+    }
+    lines
+}
+
+/// The width a decision popup's content wraps at.
+pub(super) fn decision_inner_width(area: Rect) -> u16 {
+    ModalFootprint::Prompt
+        .width(area)
+        .saturating_sub(MODAL_FRAME_COLUMNS)
+}
+
+/// Rows a decision popup draws, so `modal_area` sizes it from the same builders
+/// the renderer uses.
+pub(super) fn decision_rows(
+    header: &[Line<'static>],
+    body: &[Line<'static>],
+    footer: &[Line<'static>],
+    inner_width: u16,
+) -> u16 {
+    let wrap = inner_width.max(1) as usize;
+    let body_rows = body.iter().fold(0u16, |rows, line| {
+        rows.saturating_add(wrapped_line_count(line, wrap))
+    });
+    shell_modal_rows(
+        wrapped_lines_height(header, wrap) as u16,
+        body_rows,
+        wrapped_lines_height(footer, wrap) as u16,
+    )
 }
 
 #[cfg(test)]
@@ -345,18 +428,6 @@ mod tests {
         // Measurement with an empty selection stays valid only if the checkbox
         // width does not depend on its state.
         assert_eq!(checked[0].width(), unchecked[0].width());
-    }
-
-    #[test]
-    fn row_heights_match_the_rendered_blocks() {
-        let long = "wrapping ".repeat(20);
-        let rows = vec![row("Alpha", Some("one line")), row("Beta", Some(&long))];
-        let heights = row_heights(&rows, 60);
-        assert_eq!(heights.len(), rows.len());
-        for (index, row) in rows.iter().enumerate() {
-            assert_eq!(heights[index], row_block(row, 60).len() as u16);
-        }
-        assert!(heights[1] > heights[0]);
     }
 
     #[test]

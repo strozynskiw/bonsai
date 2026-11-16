@@ -13,37 +13,40 @@ const METADATA_TOOLS_LABEL: &str = " tools ";
 /// Label-column pad for the Setup-step form fields.
 const WIZARD_LABEL_PAD: usize = 13;
 
-/// The header / body / footer split of the wizard, shared by the renderer and
-/// the cursor placement so the two can't drift as the constraints change.
-fn wizard_regions(area: Rect) -> (Rect, Rect, Rect) {
-    let inner = theme::frame(String::new(), true).inner(area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(6),
-            Constraint::Length(4),
-        ])
-        .split(inner);
-    (chunks[0], chunks[1], chunks[2])
-}
-
 pub(super) fn render_local_model_wizard(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
     let title = format!("Local Model Wizard - {}", state.step.title());
-    let panel = theme::frame(&title, true).style(theme::panel());
-    f.render_widget(panel, area);
-
-    let (header_area, body_area, footer_area) = wizard_regions(area);
+    let footer = wizard_footer_lines(state);
+    let body = render_wizard_chrome(f, area, &title, &footer);
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+    let (header_area, step_area) = step_bands(body);
 
     render_wizard_header(f, header_area, state);
     match state.step {
-        LocalModelWizardStep::Setup => render_setup_step(f, body_area, state),
-        LocalModelWizardStep::SelectModels => render_select_step(f, body_area, state),
-        LocalModelWizardStep::Metadata => render_metadata_step(f, body_area, state),
-        LocalModelWizardStep::Review => render_review_step(f, body_area, state),
+        LocalModelWizardStep::Setup => render_setup_step(f, step_area, state),
+        LocalModelWizardStep::SelectModels => render_select_step(f, step_area, state),
+        LocalModelWizardStep::Metadata => render_metadata_step(f, step_area, state),
+        LocalModelWizardStep::Review => render_review_step(f, step_area, state),
     }
-    render_wizard_footer(f, footer_area, state);
     set_wizard_cursor(f, area, state);
+}
+
+/// The header band and the step band inside a wizard body, shared by the renderer
+/// and the cursor placement so the two cannot drift.
+fn step_bands(body: Rect) -> (Rect, Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(4)])
+        .split(body);
+    (chunks[0], chunks[1])
+}
+
+/// Where the chrome puts the wizard body: the frame inner minus the pinned hint
+/// band. Pure, so the cursor math and the renderer cannot disagree.
+fn wizard_body_area(area: Rect, state: &LocalModelWizardState) -> Rect {
+    let inner = theme::frame(String::new(), true).inner(area);
+    wizard_body_regions(inner, &wizard_footer_lines(state)).0
 }
 
 fn render_wizard_header(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
@@ -173,25 +176,29 @@ fn render_select_step(f: &mut Frame, area: Rect, state: &LocalModelWizardState) 
         ));
     }
 
-    let visible = visible_picker_rows(
-        state.models.len(),
-        state.model_cursor,
-        picker_body_height(chunks[1]),
-    );
     let lines = if state.models.is_empty() {
         vec![Line::from(Span::styled("No fetched models", theme::dim()))]
     } else {
-        visible
-            .map(|idx| {
-                let model = &state.models[idx];
+        let rows = state
+            .models
+            .iter()
+            .enumerate()
+            .map(|(idx, model)| {
                 let checkbox = if model.selected { "[x] " } else { "[ ] " };
-                picker_line(
+                row_line(
                     idx == state.model_cursor,
                     format!("{checkbox}{}", model.remote_model),
                     None,
                     true,
                 )
             })
+            .collect::<Vec<_>>();
+        let heights = rows
+            .iter()
+            .map(|line| row_line_height(line, pane_body(chunks[1]).width, TABLE_MARKER_WIDTH))
+            .collect::<Vec<_>>();
+        visible_rows(pane_body(chunks[1]), &heights, state.model_cursor)
+            .map(|idx| rows[idx].clone())
             .collect()
     };
     render_picker_column(f, chunks[1], "Fetched Models", true, lines);
@@ -342,36 +349,10 @@ fn render_review_step(f: &mut Frame, area: Rect, state: &LocalModelWizardState) 
     );
 }
 
-fn render_wizard_footer(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
-    let submit = match state.step {
-        LocalModelWizardStep::Setup => "test connection / load models",
-        LocalModelWizardStep::SelectModels => "metadata",
-        LocalModelWizardStep::Metadata => "review",
-        LocalModelWizardStep::Review => "write",
-    };
-    let mut lines = vec![footer_hint_line(&[
-        ("Enter", submit),
-        ("Esc", "cancel"),
-        ("Left", "back"),
-    ])];
-    let second = match state.step {
-        LocalModelWizardStep::Setup => footer_hint_line(&[
-            ("Tab/Up/Down", "field"),
-            ("←/→", "cursor / option"),
-            ("Home/End", "text start/end"),
-        ]),
-        LocalModelWizardStep::SelectModels => footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("Space", "select"),
-            ("Type", "add manual model"),
-        ]),
-        LocalModelWizardStep::Metadata => footer_hint_line(&[
-            ("Up/Down", "model"),
-            ("Tab", "field"),
-            ("Space", "toggle tools"),
-        ]),
-        LocalModelWizardStep::Review => footer_hint_line(&[("Review", "only")]),
-    };
+/// The wizard's hint rows, pinned to the bottom edge of its chrome.
+fn wizard_footer_lines(state: &LocalModelWizardState) -> Vec<Line<'static>> {
+    let mut lines = vec![footer_hint_line(local_model_base_hints(state.step))];
+    let second = footer_hint_line(local_model_step_hints(state.step));
     if state.loading {
         lines.push(Line::from(Span::styled("Working...", theme::dim())));
     } else {
@@ -380,7 +361,7 @@ fn render_wizard_footer(f: &mut Frame, area: Rect, state: &LocalModelWizardState
     if let Some(hint) = wizard_hint(state) {
         lines.push(Line::from(Span::styled(hint, theme::dim())));
     }
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    lines
 }
 
 /// Step-specific guidance for the field being edited. The metadata step is
@@ -437,9 +418,10 @@ fn set_wizard_cursor(f: &mut Frame, area: Rect, state: &LocalModelWizardState) {
             .unwrap_or(0),
         LocalModelMetadataField::ToolCalls => 0,
     };
-    // Derive the body rect from the same split the renderer uses, instead of
-    // re-encoding the header/footer/border offsets as magic numbers.
-    let (_, body_area, _) = wizard_regions(area);
+    // The same two splits the renderer makes: the chrome's body, then the step band
+    // under the header row pair.
+    let body = wizard_body_area(area, state);
+    let (_, body_area) = step_bands(body);
     let body_height = body_area.height as usize;
     let visible = visible_picker_rows(indices.len(), state.model_cursor, body_height);
     let row = state.model_cursor.saturating_sub(visible.start);

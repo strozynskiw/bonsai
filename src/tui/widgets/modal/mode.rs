@@ -77,11 +77,11 @@ fn mode_picker_row_line(
             note,
             ..
         } => {
-            let mut spans = axis_row_prefix(marker, key, key_width);
+            let mut spans = row_key_prefix(focused, key, key_width);
 
             // Show every option when the whole row fits; otherwise fall back to
             // just the selected one so a narrow panel never wraps mid-row.
-            let prefix_width = AXIS_MARKER_WIDTH + AXIS_VALUE_INDENT + key_width + AXIS_KEY_GAP;
+            let prefix_width = ROW_AXIS_PREFIX_WIDTH + key_width;
             let note_width = note.map_or(0, |note| note.len() + 4);
             if prefix_width + axis_options_width(values) + note_width <= body_width {
                 push_axis_options(&mut spans, values, *current);
@@ -104,11 +104,7 @@ fn mode_picker_footer() -> Vec<Line<'static>> {
             "Cycle posture axes. Confinement=off makes network a no-op.",
             theme::dim(),
         )),
-        super::common::footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("Left/Right", "cycle"),
-            ("Enter/Esc", "close"),
-        ]),
+        super::common::footer_hint_line(MODE_HINTS),
     ]
 }
 

@@ -40,6 +40,7 @@ mod detail;
 mod doctor;
 mod episodes;
 mod help;
+mod hints;
 mod list_detail;
 mod local_model;
 mod mcp;
@@ -78,6 +79,7 @@ use detail::*;
 use doctor::*;
 use episodes::*;
 use help::*;
+use hints::*;
 use list_detail::*;
 use local_model::*;
 use mcp::*;
@@ -175,7 +177,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         }) => render_unauthorize_provider_picker(f, modal, app, providers, query, *cursor),
         ModalKind::Confirm(crate::tui::event::ConfirmModal::Unauthorize {
             display_name, ..
-        }) => render_unauthorize_confirm(f, modal, display_name),
+        }) => render_unauthorize_confirm(f, modal, app, display_name),
         ModalKind::Picker(crate::tui::event::PickerModal::ModelPicker { entries }) => {
             render_model_picker(f, modal, app, entries)
         }
@@ -197,15 +199,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             usage, cursor, ..
         }) => render_budget_warning(f, modal, app, *usage, *cursor),
         ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDelete { plan }) => {
-            render_plan_delete_confirm(f, modal, plan)
+            render_plan_delete_confirm(f, modal, app, plan)
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::SessionDelete { session }) => {
-            render_session_delete_confirm(f, modal, session)
+            render_session_delete_confirm(f, modal, app, session)
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::PlanDiscard {
             saved_plan_id,
             title,
-        }) => render_plan_discard_confirm(f, modal, *saved_plan_id, title),
+        }) => render_plan_discard_confirm(f, modal, app, *saved_plan_id, title),
         ModalKind::Picker(crate::tui::event::PickerModal::ReviewScopePicker { cursor }) => {
             render_review_scope_picker(f, modal, app, *cursor)
         }
@@ -251,7 +253,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             render_agent_composer(f, modal, state)
         }
         ModalKind::Confirm(crate::tui::event::ConfirmModal::AgentDelete { name, path }) => {
-            render_agent_delete_confirm(f, modal, name, path)
+            render_agent_delete_confirm(f, modal, app, name, path)
         }
         ModalKind::Manager(crate::tui::event::ManagerModal::McpServers { rows, cursor }) => {
             render_mcp_servers(f, modal, app, rows, *cursor)

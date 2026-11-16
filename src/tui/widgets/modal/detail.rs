@@ -36,13 +36,11 @@ pub(super) fn render_tool_detail(f: &mut Frame, area: Rect, app: &AppState, tool
 /// no-ops otherwise), and sharing the builder keeps the measured body height
 /// equal to the drawn one when the hints wrap on a narrow modal.
 pub(super) fn tool_detail_footer(activity: &ToolActivity) -> Line<'static> {
-    let mut hints: Vec<(&str, &str)> = vec![("Up/Down", "scroll")];
-    if activity.diff.is_some() {
-        hints.push(("d", "diff"));
-    }
-    hints.push(("d-click", "copy word"));
-    hints.push(("Esc", "close"));
-    footer_hint_line(&hints)
+    footer_hint_line(if activity.diff.is_some() {
+        SCROLL_DIFF_COPY
+    } else {
+        SCROLL_COPY
+    })
 }
 
 pub(super) fn render_block_detail(f: &mut Frame, area: Rect, app: &AppState, item_index: usize) {
@@ -71,11 +69,7 @@ pub(super) fn render_block_detail(f: &mut Frame, area: Rect, app: &AppState, ite
         body_lines.push(Line::from(Span::styled("(empty)", theme::dim())));
     }
 
-    let footer_lines = vec![footer_hint_line(&[
-        ("Up/Down", "scroll"),
-        ("d-click", "copy word"),
-        ("Esc", "close"),
-    ])];
+    let footer_lines = vec![footer_hint_line(footer_hints(app))];
     render_scrollable_modal(
         f,
         area,
@@ -243,11 +237,7 @@ pub(super) fn render_diff_preview(f: &mut Frame, area: Rect, app: &AppState, too
     } else {
         format!("Diff: {} files", diff.file_count())
     };
-    let footer_lines = vec![footer_hint_line(&[
-        ("Up/Down", "scroll"),
-        ("d-click", "copy word"),
-        ("Esc", "close"),
-    ])];
+    let footer_lines = vec![footer_hint_line(SCROLL_COPY)];
     render_scrollable_modal(
         f,
         area,
@@ -263,11 +253,7 @@ pub(super) fn render_diff_preview(f: &mut Frame, area: Rect, app: &AppState, too
 }
 
 pub(super) fn max_diff_preview_scroll(area: Rect, diff: &FileDiff) -> u16 {
-    let footer_lines = vec![footer_hint_line(&[
-        ("Up/Down", "scroll"),
-        ("d-click", "copy word"),
-        ("Esc", "close"),
-    ])];
+    let footer_lines = vec![footer_hint_line(SCROLL_COPY)];
     scrollable_modal_max_scroll(area, &[], &footer_lines, &diff_lines(diff))
 }
 

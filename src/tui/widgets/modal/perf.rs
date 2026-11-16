@@ -9,7 +9,7 @@ pub(super) fn render_perf_report(
     lines: &[String],
 ) {
     let body_lines = perf_report_lines(lines);
-    let footer_lines = vec![footer_hint_line(&[("Up/Down", "scroll"), ("Esc", "close")])];
+    let footer_lines = vec![footer_hint_line(SCROLL_CLOSE)];
     render_scrollable_modal(
         f,
         area,
@@ -26,7 +26,7 @@ pub(super) fn render_perf_report(
 
 pub(super) fn perf_report_max_scroll(area: Rect, lines: &[String]) -> u16 {
     let body_lines = perf_report_lines(lines);
-    let footer_lines = vec![footer_hint_line(&[("Up/Down", "scroll"), ("Esc", "close")])];
+    let footer_lines = vec![footer_hint_line(SCROLL_CLOSE)];
     scrollable_modal_max_scroll(area, &[], &footer_lines, &body_lines)
 }
 

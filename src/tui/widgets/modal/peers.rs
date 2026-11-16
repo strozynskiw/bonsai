@@ -14,7 +14,7 @@ pub(super) fn render_peer_list(f: &mut Frame, area: Rect, peers: &[PeerOverview]
             "Read-only view. Message peers with the peers tool.",
             theme::dim(),
         )),
-        footer_hint_line(&[("Up/Down", "move"), ("Esc", "close")]),
+        footer_hint_line(PEERS_HINTS),
     ];
     render_list_picker(
         f,

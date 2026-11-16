@@ -365,7 +365,7 @@ fn context_wire_mouse_hit_testing_counts_wrapped_rows() {
         area,
         app.modal.as_ref().expect("context modal should be open"),
     );
-    let (content, _footer) = context_modal_regions(modal);
+    let content = context_body_regions(&app, modal).body;
     let click_column = content.x.saturating_add(2);
 
     assert_eq!(
@@ -373,6 +373,50 @@ fn context_wire_mouse_hit_testing_counts_wrapped_rows() {
         Some(1),
         "clicking the visible + on System should target the System wire row"
     );
+}
+
+#[test]
+fn context_click_inside_the_shell_body_resolves_to_the_row_the_shell_drew() {
+    let area = Rect::new(0, 0, 90, 30);
+    let report = context_report_with_rows(3);
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+    let mut app = AppState::new("codex", "gpt-5".to_string(), ".".to_string(), None);
+    app.modal = Some(ModalKind::Detail(crate::tui::event::DetailModal::Context(
+        Box::new(report),
+    )));
+    app.context_state.view_mode = ContextViewMode::Ledger;
+    terminal
+        .draw(|frame| {
+            render(frame, area, &app);
+        })
+        .expect("context modal should render");
+    let buffer = terminal.backend().buffer().clone();
+
+    let modal = modal_area(
+        area,
+        app.modal.as_ref().expect("context modal should be open"),
+    );
+    let body = context_body_regions(&app, modal).body;
+    let drawn_row = (body.y..body.bottom())
+        .find(|row| row_text(&buffer, *row).contains("Message 1"))
+        .expect("the second ledger row is drawn inside the shell body");
+    let click_column = body.x.saturating_add(2);
+
+    assert_eq!(
+        context_row_index_at(&app, area, click_column, drawn_row),
+        Some(1),
+        "a click inside the shell body resolves to the row drawn on that line"
+    );
+    // The pinned hint row sits below the body, so it is not a row target.
+    let hint_row = body.bottom().saturating_add(1);
+    if hint_row < modal.bottom() {
+        assert_eq!(
+            context_row_index_at(&app, area, click_column, hint_row),
+            None,
+            "the hint footer is not part of the body"
+        );
+    }
 }
 
 #[test]
@@ -1166,8 +1210,14 @@ fn permission_prompt_terminal_size_matrix_keeps_footer_and_tail_reachable() {
         assert!(modal.width >= MIN_MODAL_WIDTH.min(area.width));
         assert!(modal.height >= MIN_MODAL_HEIGHT.min(area.height));
 
+        // The narrow sizes cannot show a 600-character command, so the clamp has to
+        // carry its tail; a roomy terminal measures enough height to fit it and then
+        // scrolling to the clamp is a no-op. Either way the tail and the footer must
+        // be on screen after scrolling.
         let max_scroll = max_modal_scroll(&app, area).expect("permission scroll metrics");
-        assert!(max_scroll > 0, "{width}x{height} should scroll");
+        if width <= 60 {
+            assert!(max_scroll > 0, "{width}x{height} should still clamp");
+        }
         app.modal_scroll = max_scroll;
         let buffer = render_full_modal(area, &app);
         let text = buffer_text(&buffer);

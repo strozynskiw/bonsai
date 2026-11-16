@@ -36,13 +36,7 @@ pub(super) fn render_permissions_manager(
     };
 
     let counts = rule_counts_line(rows);
-    let commands = if searching {
-        footer_hint_line(&[("Esc/Enter", "done"), ("Type", "filter")])
-    } else if filter.is_empty() {
-        footer_hint_line(&[("/", "search"), ("d", "delete"), ("Esc", "close")])
-    } else {
-        footer_hint_line(&[("/", "search"), ("d", "delete"), ("Esc", "clear")])
-    };
+    let commands = footer_hint_line(permissions_hints(searching, filter));
     // Fixed two-line footer so the list body keeps a constant height as the
     // cursor moves: a summary count line and the command hints.
     let footer = vec![counts, commands];
@@ -57,11 +51,20 @@ pub(super) fn render_permissions_manager(
             return vec![Line::from(Span::styled(empty, theme::dim()))];
         }
         let cursor = cursor.min(filtered.len().saturating_sub(1));
-        let capacity = picker_body_height(body_area).max(1);
-        let range = visible_picker_rows(filtered.len(), cursor, capacity);
         let width = body_area.width.max(1) as usize;
-        range
-            .flat_map(|idx| render_rule_lines(filtered[idx], idx == cursor, width))
+        // A rule already renders as its own wrapped block, so the window counts the
+        // lines each block spends.
+        let blocks = filtered
+            .iter()
+            .enumerate()
+            .map(|(idx, rule)| render_rule_lines(rule, idx == cursor, width))
+            .collect::<Vec<_>>();
+        let heights = blocks
+            .iter()
+            .map(|block| block.len().max(1))
+            .collect::<Vec<_>>();
+        visible_rows(body_area, &heights, cursor)
+            .flat_map(|idx| blocks[idx].clone())
             .collect()
     });
 }

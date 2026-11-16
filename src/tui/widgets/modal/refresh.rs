@@ -27,7 +27,7 @@ pub(super) fn render_refresh(
     };
     let footer_lines = vec![
         Line::from(Span::styled(status_line, theme::dim())),
-        footer_hint_line(&[("Up/Down", "move"), ("Esc/Enter", "close")]),
+        footer_hint_line(REFRESH_HINTS),
     ];
 
     render_list_detail_modal(
@@ -54,11 +54,13 @@ pub(super) fn render_refresh(
             } else {
                 let cursor = cursor.min(sources.len().saturating_sub(1));
                 let visible_count = table_area.height.saturating_sub(1).max(1) as usize;
-                table_lines.extend(
-                    visible_picker_rows(sources.len(), cursor, visible_count).map(|index| {
-                        table_row(&sources[index], &columns, &widths, index == cursor)
-                    }),
-                );
+                table_lines.extend(table_body_lines(
+                    &sources.iter().collect::<Vec<_>>(),
+                    &columns,
+                    &widths,
+                    cursor,
+                    visible_count,
+                ));
             }
             frame.render_widget(
                 Paragraph::new(table_lines).style(theme::panel()),
@@ -85,7 +87,8 @@ fn refresh_columns() -> Vec<TableColumn<RefreshSourceState>> {
         TableColumn {
             header: "Source",
             width: TableWidth::Flex { min: 0 },
-            render: CellRender::Value(|source| source.display_name.clone()),
+            // Prose: a catalog source name is read in full, so it wraps.
+            render: CellRender::Wrapped(|source| source.display_name.clone()),
             style: CellStyle::Text,
         },
         TableColumn {

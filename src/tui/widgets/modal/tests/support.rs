@@ -487,14 +487,24 @@ pub(super) fn render_question_to_buffer(area: Rect, scroll: u16) -> ratatui::buf
 
 /// Render any modal kind through the real `render` dispatch, so one fixture set
 /// can assert the shared chrome invariants without a bespoke helper per popup.
-pub(super) fn render_kind_to_buffer(area: Rect, kind: ModalKind) -> ratatui::buffer::Buffer {
-    let backend = TestBackend::new(area.width, area.height);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+pub(super) fn app_with_modal(kind: ModalKind) -> AppState {
     let mut app = AppState::new("codex", "gpt-5".to_string(), ".".to_string(), None);
     app.modal = Some(kind);
+    app
+}
+
+pub(super) fn render_kind_to_buffer(area: Rect, kind: ModalKind) -> ratatui::buffer::Buffer {
+    render_app_to_buffer(area, &app_with_modal(kind))
+}
+
+/// Render an already-prepared app, for fixtures that need more than a modal kind
+/// (sandbox state, mcp rows, tool activity).
+pub(super) fn render_app_to_buffer(area: Rect, app: &AppState) -> ratatui::buffer::Buffer {
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     terminal
         .draw(|frame| {
-            render(frame, area, &app);
+            render(frame, area, app);
         })
         .expect("modal should render");
     terminal.backend().buffer().clone()
@@ -586,10 +596,21 @@ pub(super) fn render_model_picker_to_buffer(
     entries: &[ModelOption],
     provider_cursor: usize,
 ) -> ratatui::buffer::Buffer {
+    render_model_picker_pane_to_buffer(area, entries, provider_cursor, ModelPickerPane::Provider)
+}
+
+/// The same picker with an explicit active pane, for assertions about the cues
+/// that belong to one column.
+pub(super) fn render_model_picker_pane_to_buffer(
+    area: Rect,
+    entries: &[ModelOption],
+    provider_cursor: usize,
+    pane: ModelPickerPane,
+) -> ratatui::buffer::Buffer {
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
-    app.model_picker.active_pane = ModelPickerPane::Provider;
+    app.model_picker.active_pane = pane;
     app.model_picker.provider_cursor = provider_cursor;
     terminal
         .draw(|frame| {

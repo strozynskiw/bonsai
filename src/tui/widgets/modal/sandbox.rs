@@ -1,11 +1,42 @@
 use super::*;
 
+/// The subtitle every sandbox popup carries.
+const SANDBOX_SUBTITLE: &str = "OS-level confinement for this session, independent of approvals.";
+/// What the file-system toggle does.
+const SANDBOX_DESC: &str =
+    "OS kernel blocks writes outside the paths below, independent of approvals.";
+/// What the network toggle does.
+const SANDBOX_NETWORK_DESC: &str = "Blocks outbound internet connections.";
+
 pub(super) fn render_sandbox_status(f: &mut Frame, area: Rect, app: &AppState, cursor: usize) {
-    let Some(sandbox) = &app.sandbox else {
+    let Some((header, body, footer)) = sandbox_lines(app, cursor) else {
         render_modal_notice(f, area, "Sandbox", "Sandbox state is unavailable.");
         return;
     };
+    // A scrollable body, not a windowed one: the writable-root list can outgrow the
+    // popup, and a list the user cannot reach is worse than a scrollbar.
+    render_scrollable_modal(
+        f,
+        area,
+        "Sandbox",
+        &header,
+        &body,
+        &footer,
+        app.modal_scroll,
+        app.modal_selection.map(|s| s.range()),
+        &app.modal_body_lines,
+        &app.modal_body_rect,
+    );
+}
 
+/// Header, body and footer of the sandbox popup, built once so the renderer, the
+/// height it asks for and the scroll clamp all resolve the same lines. `None` when
+/// the session has no sandbox state to describe.
+pub(super) fn sandbox_lines(
+    app: &AppState,
+    cursor: usize,
+) -> Option<(Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>)> {
+    let sandbox = app.sandbox.as_ref()?;
     let p = theme::palette();
     let backend_available = sandbox.backend().is_available();
     let is_enabled = sandbox.is_enabled();
@@ -13,99 +44,93 @@ pub(super) fn render_sandbox_status(f: &mut Frame, area: Rect, app: &AppState, c
     let net_unenforced = deny_network && !sandbox.backend().supports_network_deny();
     let policy = sandbox.policy();
 
-    // ── header: backend info ──────────────────────────────────────────────
     let backend_style = if backend_available {
         theme::body(p.success)
     } else {
         theme::dim()
     };
     let header = vec![
-        modal_subtitle("OS-level confinement for this session, independent of approvals."),
+        modal_subtitle(SANDBOX_SUBTITLE),
         Line::from(vec![
             Span::styled("Backend  ", theme::muted()),
             Span::styled(sandbox.backend().label(), backend_style),
         ]),
     ];
 
-    // ── interactive rows ──────────────────────────────────────────────────
-    let desc =
-        |text: &'static str| Line::from(vec![Span::raw("    "), Span::styled(text, theme::dim())]);
-    let option_rows = vec![
-        sandbox_option_line(
+    let mut body = vec![
+        row_value_line(
             cursor == 0,
             "Sandbox ",
             if is_enabled { "on " } else { "off" },
             if is_enabled { p.success } else { p.muted },
-            if !backend_available && is_enabled {
-                Some("no backend")
-            } else {
-                None
-            },
+            (!backend_available && is_enabled).then_some("no backend"),
         ),
-        desc("OS kernel blocks writes outside the paths below, independent of approvals."),
-        sandbox_option_line(
+        sandbox_description(SANDBOX_DESC),
+        row_value_line(
             cursor == 1,
             "Network ",
             if deny_network { "blocked" } else { "allowed" },
             if deny_network { p.error } else { p.success },
-            if net_unenforced {
-                Some("unenforced")
-            } else {
-                None
-            },
+            net_unenforced.then_some("unenforced"),
         ),
-        desc("Blocks outbound internet connections."),
+        sandbox_description(SANDBOX_NETWORK_DESC),
+        Line::from(""),
+        section_header("Writable paths"),
     ];
-
-    // ── writable roots ────────────────────────────────────────────────────
-    let mut info_lines: Vec<Line<'static>> = vec![Line::from(""), section_header("Writable paths")];
     for root in &policy.writable_roots {
-        info_lines.push(Line::from(vec![
+        body.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(root.display().to_string(), theme::dim()),
         ]));
     }
 
-    // ── body and footer through the shared shell ──────────────────────────
-    let footer_lines = vec![footer_hint_line(&[
-        ("Up/Down", "move"),
-        ("Left/Right", "toggle"),
-        ("Esc", "close"),
-    ])];
-    let mut body_lines: Vec<Line<'static>> = option_rows;
-    body_lines.extend(info_lines);
-
-    render_form_shell(
-        f,
-        area,
-        "Sandbox",
-        &header,
-        &body_lines,
-        &footer_lines,
-        &app.modal_body_lines,
-        &app.modal_body_rect,
-    );
+    let footer = vec![footer_hint_line(SANDBOX_HINTS)];
+    Some((header, body, footer))
 }
 
-fn sandbox_option_line(
-    selected: bool,
-    label: &'static str,
-    value: &'static str,
-    value_color: Color,
-    note: Option<&'static str>,
-) -> Line<'static> {
-    let p = theme::palette();
-    let marker = if selected { "> " } else { "  " };
-    // Marker-only selection (house style): the `> ` marker signals the row, the
-    // label keeps body text rather than recoloring.
-    let mut spans = vec![
-        Span::styled(marker, theme::muted()),
-        Span::styled(label, theme::body(p.text)),
-        Span::styled("  ·  ", theme::dim()),
-        Span::styled(value, theme::body(value_color)),
+/// Rows the sandbox popup asks for: the chrome, both toggles with their
+/// descriptions and the writable-paths heading, plus one root. The measurement
+/// uses the widest wording each row can carry, and further roots scroll — so the
+/// heading and its first entry are always on screen and nothing is unreachable.
+pub(super) fn sandbox_status_rows(area: Rect) -> u16 {
+    let inner_width = ModalFootprint::Prompt
+        .width(area)
+        .saturating_sub(MODAL_FRAME_COLUMNS);
+    let width = inner_width.max(1) as usize;
+    let palette = theme::palette();
+    let header = vec![
+        modal_subtitle(SANDBOX_SUBTITLE),
+        Line::from(vec![
+            Span::styled("Backend  ", theme::muted()),
+            Span::styled("macos seatbelt", theme::dim()),
+        ]),
     ];
-    if let Some(note) = note {
-        spans.push(Span::styled(format!("  ({note})"), theme::dim()));
-    }
-    Line::from(spans)
+    let body = vec![
+        row_value_line(false, "Sandbox ", "off ", palette.muted, Some("no backend")),
+        sandbox_description(SANDBOX_DESC),
+        row_value_line(
+            false,
+            "Network ",
+            "blocked",
+            palette.error,
+            Some("unenforced"),
+        ),
+        sandbox_description(SANDBOX_NETWORK_DESC),
+        Line::from(""),
+        section_header("Writable paths"),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("/tmp/project-roots", theme::dim()),
+        ]),
+    ];
+    shell_modal_rows(
+        wrapped_lines_height(&header, width) as u16,
+        wrapped_lines_height(&body, width) as u16,
+        1,
+    )
+}
+
+/// The dim explanation indented under a toggle.
+fn sandbox_description(text: &'static str) -> Line<'static> {
+    Line::from(vec![Span::raw("    "), Span::styled(text, theme::dim())])
 }

@@ -289,6 +289,8 @@ fn settings_row_line(
                 push_axis_options(&mut spans, values, *current);
             } else {
                 let value = values.get(*current).copied().unwrap_or("?");
+                // Control value (metadata): the control column has a fixed width,
+                // and the full option set is listed when it fits.
                 spans.push(Span::styled(
                     truncate_ascii(value, table.control_width),
                     axis_selected_style(),
@@ -308,6 +310,7 @@ fn settings_row_line(
         }
         SettingsRow::Action { key, value, .. } => {
             let mut spans = settings_row_prefix(marker, key, table.key_width);
+            // Action value (metadata): the control column has a fixed width.
             let value = truncate_ascii(value, table.control_width);
             let value_width = UnicodeWidthStr::width(value.as_str());
             spans.push(Span::styled(value, axis_selected_style()));
@@ -321,6 +324,7 @@ fn settings_row_line(
 }
 
 fn settings_row_prefix(marker: &'static str, key: &str, key_width: usize) -> Vec<Span<'static>> {
+    // Key label (metadata): the key column has a fixed width.
     let key = truncate_ascii(key, key_width);
     let key_padding = key_width.saturating_sub(UnicodeWidthStr::width(key.as_str()));
     vec![
@@ -352,12 +356,7 @@ fn settings_footer() -> Vec<Line<'static>> {
             "Changes apply live. Model/Theme open a picker with Enter.",
             theme::dim(),
         )),
-        super::common::footer_hint_line(&[
-            ("Up/Down", "move"),
-            ("Left/Right", "cycle"),
-            ("Space/Enter", "change"),
-            ("Esc", "close"),
-        ]),
+        super::common::footer_hint_line(SETTINGS_HINTS),
     ]
 }
 

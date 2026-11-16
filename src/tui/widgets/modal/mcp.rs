@@ -1,14 +1,13 @@
+use super::list_detail::{
+    ListDetailSplit, detail_pane_inner, list_detail_panes, render_detail_pane,
+};
 use super::picker_common::*;
 use super::*;
 use crate::tui::mcp::{McpServerRow, McpServerStateKind};
 
-struct McpRegions {
-    header: Rect,
-    body: Rect,
-    list: Rect,
-    detail: Rect,
-    footer: Rect,
-}
+/// Below this body width the list and the detail stack instead of sharing a row:
+/// a three-column list squeezed beside a detail pane leaves neither readable.
+const MCP_STACKED_BELOW_WIDTH: u16 = 72;
 
 pub(super) fn render_mcp_servers(
     f: &mut Frame,
@@ -17,169 +16,140 @@ pub(super) fn render_mcp_servers(
     rows: &[McpServerRow],
     cursor: usize,
 ) {
-    let panel = theme::frame("MCP Servers", true).style(theme::panel());
-    f.render_widget(Clear, area);
-    f.render_widget(panel, area);
-
-    let regions = mcp_regions(area);
-    if regions.body.width == 0 || regions.body.height == 0 {
+    let header = mcp_header(rows);
+    let footer = mcp_footer();
+    // The shell owns the frame, the header gap and the pinned footer; mcp adds
+    // only the list/detail panes below them.
+    let shell = split_scrollable_modal_lines(area, &header, &footer);
+    render_modal_chrome(f, area, "MCP Servers", &shell, &header, &footer);
+    if shell.body.width == 0 || shell.body.height == 0 {
         return;
     }
 
-    if regions.header.height > 0 {
-        f.render_widget(
-            Paragraph::new(mcp_header_lines(rows))
-                .style(theme::panel())
-                .wrap(Wrap { trim: false }),
-            regions.header,
-        );
-    }
-
+    let (list_area, detail_area) = mcp_panes(shell.body);
     if rows.is_empty() {
         f.render_widget(
-            Paragraph::new(vec![Line::from(Span::styled(
-                "No MCP servers detected.",
-                theme::dim(),
-            ))])
-            .style(theme::panel()),
-            regions.body,
+            Paragraph::new(modal_empty_body("No MCP servers detected."))
+                .style(theme::panel())
+                .wrap(Wrap { trim: false }),
+            list_area,
         );
-        render_mcp_footer(f, regions.footer);
         return;
     }
 
     let cursor = cursor.min(rows.len().saturating_sub(1));
     f.render_widget(
-        Paragraph::new(mcp_server_list_lines(rows, cursor, regions.list))
+        Paragraph::new(mcp_server_list_lines(rows, cursor, list_area))
             .style(theme::panel())
             .wrap(Wrap { trim: false }),
-        regions.list,
+        list_area,
     );
 
-    if regions.detail.width > 0 && regions.detail.height > 0 {
-        render_mcp_detail(f, regions.detail, app, &rows[cursor]);
+    if detail_area.width > 0 && detail_area.height > 0 {
+        render_detail_pane(
+            f,
+            detail_area,
+            "Detail",
+            true,
+            mcp_detail_lines(&rows[cursor]),
+            app.modal_scroll,
+            app.modal_selection.map(|s| s.range()),
+            &app.modal_body_lines,
+            &app.modal_body_rect,
+        );
     }
-
-    render_mcp_footer(f, regions.footer);
 }
 
 pub(super) fn mcp_detail_max_scroll(area: Rect, rows: &[McpServerRow], cursor: usize) -> u16 {
     let Some(row) = rows.get(cursor.min(rows.len().saturating_sub(1))) else {
         return 0;
     };
-    let detail = mcp_regions(area).detail;
-    if detail.width == 0 || detail.height == 0 {
+    // Split exactly as the renderer does, then measure the framed pane's inner
+    // rect: the clamp and the drawn body share one geometry.
+    let shell = split_scrollable_modal_lines(area, &mcp_header(rows), &mcp_footer());
+    let (_, detail_area) = mcp_panes(shell.body);
+    if detail_area.width == 0 || detail_area.height == 0 {
         return 0;
     }
-    detail_max_scroll(detail, &mcp_detail_lines(row))
+    detail_max_scroll(detail_pane_inner(detail_area), &mcp_detail_lines(row))
 }
 
-fn mcp_regions(area: Rect) -> McpRegions {
-    let inner = theme::frame("MCP Servers", true).inner(area);
-    if inner.width == 0 || inner.height == 0 {
-        return McpRegions {
-            header: Rect::default(),
-            body: Rect::default(),
-            list: Rect::default(),
-            detail: Rect::default(),
-            footer: Rect::default(),
-        };
-    }
-
-    let footer_height = 2.min(inner.height);
-    let header_height = if inner.height > footer_height + 3 {
-        2
-    } else {
-        0
-    };
-    let vertical = if header_height > 0 {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(header_height),
-                Constraint::Min(1),
-                Constraint::Length(footer_height),
-            ])
-            .split(inner)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
-            .split(inner)
-    };
-
-    let (header, body, footer) = if header_height > 0 {
-        (vertical[0], vertical[1], vertical[2])
-    } else {
-        (Rect::default(), vertical[0], vertical[1])
-    };
-    let (list, detail) = split_mcp_body(body);
-
-    McpRegions {
-        header,
-        body,
-        list,
-        detail,
-        footer,
-    }
+fn mcp_header(rows: &[McpServerRow]) -> Vec<Line<'static>> {
+    vec![modal_subtitle(mcp_status_summary(rows))]
 }
 
-fn split_mcp_body(body: Rect) -> (Rect, Rect) {
-    if body.width >= 72 {
-        let max_list_width = body.width.saturating_sub(24).clamp(1, 42);
-        let min_list_width = 28.min(max_list_width);
-        let proposed = body.width.saturating_mul(34) / 100;
-        let list_width = proposed.clamp(min_list_width, max_list_width);
-        let gap_width = body.width.saturating_sub(list_width).min(2);
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(list_width),
-                Constraint::Length(gap_width),
-                Constraint::Min(1),
-            ])
-            .split(body);
-        (chunks[0], chunks[2])
-    } else {
-        let gap_height = body.height.saturating_sub(1).min(1);
-        let max_list_height = body.height.saturating_sub(4).clamp(1, 10);
-        let min_list_height = 3.min(max_list_height);
-        let proposed = body.height / 2;
-        let list_height = proposed.clamp(min_list_height, max_list_height);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(list_height),
-                Constraint::Length(gap_height),
-                Constraint::Min(1),
-            ])
-            .split(body);
-        (chunks[0], chunks[2])
+/// Rows the MCP manager needs: the shell chrome, the subtitle, the taller of the
+/// two panes and the hint footer. Pane widths depend on the body width alone, so
+/// they are known before the height is measured.
+pub(super) fn mcp_servers_rows(area: Rect, rows: &[McpServerRow], cursor: usize) -> u16 {
+    let header = mcp_header(rows);
+    let footer = mcp_footer();
+    let inner_width = ModalFootprint::Wide
+        .width(area)
+        .saturating_sub(MODAL_FRAME_COLUMNS);
+    let width = inner_width.max(1) as usize;
+    // The header and the six-pair footer wrap on a narrow terminal, and each costs
+    // the popup a row when they do.
+    let header_rows = wrapped_lines_height(&header, width) as u16;
+    let footer_rows = wrapped_lines_height(&footer, width) as u16;
+    if rows.is_empty() {
+        return shell_modal_rows(header_rows, 1, footer_rows);
     }
+    let (_, detail_area) = mcp_panes(Rect::new(0, 0, inner_width, 1));
+    let detail_width = detail_pane_inner(detail_area).width.max(1) as usize;
+    let cursor = cursor.min(rows.len().saturating_sub(1));
+    let detail_rows = mcp_detail_lines(&rows[cursor])
+        .iter()
+        .map(|line| usize::from(wrapped_line_count(line, detail_width)))
+        .sum::<usize>()
+        // The detail pane draws its own frame inside the body.
+        .saturating_add(2);
+    let body_rows = rows.len().max(detail_rows).max(1) as u16;
+    shell_modal_rows(header_rows, body_rows, footer_rows)
 }
 
-fn mcp_header_lines(rows: &[McpServerRow]) -> Vec<Line<'static>> {
+fn mcp_footer() -> Vec<Line<'static>> {
+    vec![footer_hint_line(MCP_HINTS)]
+}
+
+fn mcp_status_summary(rows: &[McpServerRow]) -> String {
     let enabled = rows
         .iter()
         .filter(|row| row.state == McpServerStateKind::Enabled)
         .count();
     let methods: usize = rows.iter().map(|row| row.tools.len()).sum();
-    vec![
-        Line::from(vec![
-            Span::styled(
-                count_label(rows.len(), "server"),
-                theme::body(theme::palette().text),
-            ),
-            Span::styled("  ", theme::dim()),
-            Span::styled(
-                format!("{enabled} enabled"),
-                theme::body(theme::palette().success),
-            ),
-            Span::styled("  ", theme::dim()),
-            Span::styled(count_label(methods, "method"), theme::dim()),
-        ]),
-        Line::from(""),
-    ]
+    format!(
+        "{} · {enabled} enabled · {}",
+        count_label(rows.len(), "server"),
+        count_label(methods, "method"),
+    )
+}
+
+/// The mcp panes: the shared list/detail split with MCP's own width policy on top
+/// — the list carries three short columns, so columns past the cap belong to the
+/// detail. Pure over the body rect, so the renderer and
+/// [`mcp_detail_max_scroll`] cannot measure different panes.
+fn mcp_panes(body: Rect) -> (Rect, Rect) {
+    let horizontal = body.width >= MCP_STACKED_BELOW_WIDTH;
+    let split = if horizontal {
+        ListDetailSplit::Horizontal
+    } else {
+        ListDetailSplit::Vertical
+    };
+    let (list, detail) = list_detail_panes(body, split);
+    let cap = body.width.saturating_sub(24).clamp(1, 42);
+    if !horizontal || list.width <= cap {
+        return (list, detail);
+    }
+    let surplus = list.width - cap;
+    (
+        Rect { width: cap, ..list },
+        Rect {
+            x: list.x + cap,
+            width: detail.width.saturating_add(surplus),
+            ..detail
+        },
+    )
 }
 
 fn mcp_server_list_lines(rows: &[McpServerRow], cursor: usize, area: Rect) -> Vec<Line<'static>> {
@@ -223,55 +193,6 @@ fn mcp_server_line(selected: bool, row: &McpServerRow, width: u16) -> Line<'stat
             theme::dim(),
         ),
     ])
-}
-
-fn render_mcp_detail(f: &mut Frame, area: Rect, app: &AppState, row: &McpServerRow) {
-    let lines = mcp_detail_lines(row);
-    let max_scroll = detail_max_scroll(area, &lines);
-    let scroll = app.modal_scroll.min(max_scroll);
-
-    // Cache the unwrapped detail lines and pane rect so mouse clicks resolve
-    // to text positions for selection/copy.
-    *app.modal_body_lines.borrow_mut() = lines.clone();
-    app.modal_body_rect.set(Some(area));
-
-    let highlighted: Vec<Line<'static>>;
-    let render_lines = if let Some((start, end)) = app
-        .modal_selection
-        .map(|s| s.range())
-        .filter(|(s, e)| s != e)
-    {
-        highlighted = modal_selection_highlight(&lines, start, end);
-        &highlighted
-    } else {
-        &lines
-    };
-    // Pre-wrap char-granular (like the shared detail pane) so the on-screen
-    // rows match the selection resolver and the scroll metric.
-    let wrap_width = area.width.max(1) as usize;
-    let mut wrapped: Vec<Line<'static>> = Vec::new();
-    for line in render_lines {
-        if line.width() <= wrap_width {
-            wrapped.push(line.clone());
-        } else {
-            wrapped.extend(wrap_line(line, wrap_width));
-        }
-    }
-    f.render_widget(
-        Paragraph::new(wrapped)
-            .style(theme::panel())
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        area,
-    );
-
-    if max_scroll > 0 {
-        let mut state = ScrollbarState::new(max_scroll as usize + 1)
-            .position(scroll as usize)
-            .viewport_content_length(area.height.max(1) as usize);
-        let scrollbar = theme::scrollbar(ScrollbarOrientation::VerticalRight);
-        f.render_stateful_widget(scrollbar, area, &mut state);
-    }
 }
 
 fn mcp_detail_lines(row: &McpServerRow) -> Vec<Line<'static>> {
@@ -341,26 +262,6 @@ fn state_detail_span(row: &McpServerRow) -> Span<'static> {
         .unwrap_or_else(|| Span::raw(""))
 }
 
-fn render_mcp_footer(f: &mut Frame, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let hints = footer_hint_line(&[
-        ("Up/Down", "servers"),
-        ("Space", "toggle"),
-        ("r", "reload"),
-        ("a", "authorize"),
-        ("PgUp/PgDn", "methods"),
-        ("Esc", "close"),
-    ]);
-    let footer = if area.height == 1 {
-        vec![hints]
-    } else {
-        vec![Line::from(""), hints]
-    };
-    f.render_widget(Paragraph::new(footer).style(theme::panel()), area);
-}
-
 fn method_count(count: usize) -> String {
     count_label(count, "method")
 }
@@ -380,5 +281,122 @@ fn state_style(state: McpServerStateKind) -> Style {
         McpServerStateKind::Disabled => theme::dim(),
         McpServerStateKind::Failed => theme::body(palette.error),
         McpServerStateKind::Degraded => theme::body(palette.progress),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::mcp::McpToolRow;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn row_with_tools(count: usize) -> McpServerRow {
+        McpServerRow {
+            name: "filesystem".to_string(),
+            state: McpServerStateKind::Enabled,
+            state_label: "enabled".to_string(),
+            state_detail: None,
+            source: "project".to_string(),
+            capabilities: vec!["tools".to_string()],
+            batching: "serialized-access".to_string(),
+            risk: "read + write".to_string(),
+            detail: String::new(),
+            tools: (0..count)
+                .map(|index| McpToolRow {
+                    name: format!("tool-{index:02}"),
+                    description: "does a thing".to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn render(app: &AppState, area: Rect, rows: &[McpServerRow]) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test backend should initialize");
+        terminal
+            .draw(|frame| render_mcp_servers(frame, area, app, rows, 0))
+            .expect("mcp modal should render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn narrow_footers_keep_the_close_hint() {
+        // A 90x20 terminal gives the wide tier an 82x18 popup; the hint row is
+        // wider than the frame there, so it has to wrap rather than clip.
+        let area = Rect::new(0, 0, 82, 18);
+        let rows = vec![row_with_tools(2)];
+        let app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+        let text = render(&app, area, &rows);
+        assert!(
+            text.contains("Esc"),
+            "the footer keeps its close key: {text}"
+        );
+        assert!(
+            text.contains("close"),
+            "the footer keeps its close label: {text}"
+        );
+    }
+
+    #[test]
+    fn detail_scroll_measures_the_framed_pane_it_draws() {
+        let area = Rect::new(0, 0, 100, 20);
+        let rows = vec![row_with_tools(20)];
+        let max_scroll = mcp_detail_max_scroll(area, &rows, 0);
+        assert!(max_scroll > 0, "a long method list scrolls");
+
+        let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+        let top = render(&app, area, &rows);
+        assert!(top.contains("tool-00"), "the first method draws: {top}");
+        assert!(
+            !top.contains("tool-19"),
+            "the last method starts below the fold: {top}"
+        );
+
+        app.modal_scroll = max_scroll;
+        let bottom = render(&app, area, &rows);
+        assert!(
+            bottom.contains("tool-19"),
+            "the reported clamp reaches the last method: {bottom}"
+        );
+    }
+
+    #[test]
+    fn narrow_bodies_stack_the_list_above_the_detail() {
+        let stacked = mcp_panes(Rect::new(0, 0, 60, 20));
+        assert!(
+            stacked.1.y > stacked.0.y,
+            "the detail sits below the list: {stacked:?}"
+        );
+        assert_eq!(stacked.0.width, 60, "the stacked list spans the body");
+
+        let side_by_side = mcp_panes(Rect::new(0, 0, 120, 20));
+        assert_eq!(
+            side_by_side.0.y, side_by_side.1.y,
+            "wide bodies share one row: {side_by_side:?}"
+        );
+        assert!(
+            side_by_side.0.width <= 42,
+            "the list keeps its column cap: {side_by_side:?}"
+        );
+        assert_eq!(
+            side_by_side.0.width + side_by_side.1.width,
+            120,
+            "the panes still fill the body"
+        );
+    }
+
+    #[test]
+    fn an_empty_registry_states_it_in_the_list_pane() {
+        let area = Rect::new(0, 0, 90, 16);
+        let app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+        let text = render(&app, area, &[]);
+        assert!(text.contains("No MCP servers detected."), "{text}");
+        assert_eq!(mcp_detail_max_scroll(area, &[], 0), 0);
     }
 }

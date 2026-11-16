@@ -1,8 +1,6 @@
 use super::*;
 use crate::tui::event::{ModeAxisId, ModeRow, SettingId, SettingsRow};
-use crate::tui::widgets::modal::picker_common::{
-    picker_line, visible_picker_rows, visible_weighted_rows,
-};
+use crate::tui::widgets::modal::picker_common::{visible_picker_rows, visible_weighted_rows};
 
 fn smol_off() -> crate::smol::SmolProfile {
     crate::smol::SmolProfile::resolve(crate::smol::SmolPreference::Off, 128_000)
@@ -228,14 +226,29 @@ fn model_picker_shows_shortcut_badges_for_assigned_letters() {
         ),
     ];
 
-    let buffer = render_model_picker_to_buffer(area, &[entry], 0);
+    let entries = vec![entry];
+    let buffer = render_model_picker_to_buffer(area, &entries, 0);
     let text = buffer_text(&buffer);
 
     assert!(text.contains("a/m/z"), "{text}");
-    // Reasoning pane's assignment cue plus the footer's invocation hint.
-    assert!(text.contains("press "), "{text}");
-    assert!(text.contains("letter"), "{text}");
     assert!(text.contains("shortcut usage: /a /m /z"), "{text}");
+    // The assignment cue moved out of the Reasoning pane's bottom row and into
+    // the footer, where it shows only while that pane is the active one.
+    // The picker states what a bare letter does in the focused pane: it filters here,
+    // and assigns a shortcut once the Reasoning pane is active.
+    assert!(text.contains("letter filter"), "{text}");
+
+    let reasoning = super::support::render_model_picker_pane_to_buffer(
+        area,
+        &entries,
+        0,
+        crate::tui::app::ModelPickerPane::Reasoning,
+    );
+    let reasoning_text = buffer_text(&reasoning);
+    assert!(
+        reasoning_text.contains("letter assign shortcut"),
+        "the active Reasoning pane advertises letter assignment: {reasoning_text}"
+    );
 }
 
 #[test]
@@ -261,8 +274,8 @@ fn command_help_renders_command_board_with_provider_manager() {
 fn picker_selection_is_arrow_only_without_row_highlight() {
     // Selection is signalled by the `> ` marker alone; the label carries no
     // reversed-row highlight and its style is identical whether selected or not.
-    let selected = picker_line(true, "row".to_string(), None, true);
-    let unselected = picker_line(false, "row".to_string(), None, true);
+    let selected = row_line(true, "row".to_string(), None, true);
+    let unselected = row_line(false, "row".to_string(), None, true);
     assert_eq!(selected.spans[0].content.as_ref(), "> ");
     assert_eq!(unselected.spans[0].content.as_ref(), "  ");
     assert_eq!(selected.spans[1].style, unselected.spans[1].style);
@@ -439,11 +452,11 @@ fn session_picker_renders_dense_header_and_single_row_sessions() {
 }
 
 #[test]
-fn session_picker_truncates_long_columns_with_ascii_ellipsis() {
-    let area = Rect::new(0, 0, 60, 12);
+fn session_picker_wraps_a_long_title_instead_of_clipping_it() {
+    let area = Rect::new(0, 0, 60, 16);
     let sessions = vec![session_summary(
         42,
-        "This session title is intentionally long enough to truncate",
+        "This session title is intentionally long enough to wrap onto another row",
         "minimax-coding-plan",
         "a-very-long-model-name-that-will-not-fit",
         "completed",
@@ -455,8 +468,25 @@ fn session_picker_truncates_long_columns_with_ascii_ellipsis() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("..."));
-    assert!(!text.contains("intentionally long enough to truncate"));
+    // Prose wraps: the tail of the title survives onto continuation rows instead
+    // of being elided at the column edge.
+    let rows = text.lines().collect::<Vec<_>>();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("This session ti"))
+        .expect("the title's first fragment renders");
+    assert!(
+        rows[first + 1..]
+            .iter()
+            .any(|row| row.contains("wrap onto another")),
+        "the end of a long title stays readable: {text}"
+    );
+    for row in text.lines() {
+        assert!(
+            row.chars().count() <= area.width as usize,
+            "a wrapped row never runs past the frame: {row:?}"
+        );
+    }
 }
 
 #[test]
@@ -568,9 +598,9 @@ fn task_list_preserves_full_task_ids() {
 }
 
 #[test]
-fn task_list_truncates_long_commands_in_rows() {
+fn task_list_wraps_a_long_command_instead_of_clipping_it() {
     let area = Rect::new(0, 0, 70, 20);
-    let long_command = format!("printf {}", "very-long-command ".repeat(20));
+    let long_command = format!("printf {}", "very-long-command ".repeat(6));
     let tasks = vec![task_snapshot(
         "bg-1",
         &long_command,
@@ -580,13 +610,21 @@ fn task_list_truncates_long_commands_in_rows() {
     let rows = (0..area.height)
         .map(|y| row_text(&buffer, y))
         .collect::<Vec<_>>();
+    let text = rows.join("\n");
 
-    let row = rows
-        .iter()
-        .find(|row| row.contains("bg-1") && row.contains("running"))
-        .expect("task row should render");
-    assert!(row.contains("..."));
-    assert!(row.chars().count() <= area.width as usize);
+    // Prose wraps: the command's own characters continue across rows rather than
+    // being elided at the column edge, so the text survives even mid-word.
+    let squashed = text
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+    assert!(
+        squashed.matches("verylongcommand").count() >= 3,
+        "the command's text is carried across rows, not clipped: {text}"
+    );
+    for row in &rows {
+        assert!(row.chars().count() <= area.width as usize);
+    }
 }
 
 #[test]

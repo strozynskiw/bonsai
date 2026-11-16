@@ -16,27 +16,30 @@ pub(super) fn render_agent_composer(f: &mut Frame, area: Rect, state: &AgentComp
         "New Agent"
     };
     let title = format!("{verb} - {}", state.step.title());
-    let panel = theme::frame(&title, true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
+    let footer = footer_lines(state);
+    let body = render_wizard_chrome(f, area, &title, &footer);
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+    let (header_area, page_area) = page_bands(body);
 
+    render_header(f, header_area, state);
+    match state.step {
+        AgentComposerStep::Details => render_details(f, page_area, state),
+        AgentComposerStep::Tools => render_tools(f, page_area, state),
+        AgentComposerStep::Prompt => render_prompt(f, page_area, state),
+        AgentComposerStep::Review => render_review(f, page_area, state),
+    }
+}
+
+/// The header band and the page band inside the composer body, so the chrome and
+/// the pages agree on where the content starts.
+fn page_bands(body: Rect) -> (Rect, Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(6),
-            Constraint::Length(3),
-        ])
-        .split(inner);
-
-    render_header(f, chunks[0], state);
-    match state.step {
-        AgentComposerStep::Details => render_details(f, chunks[1], state),
-        AgentComposerStep::Tools => render_tools(f, chunks[1], state),
-        AgentComposerStep::Prompt => render_prompt(f, chunks[1], state),
-        AgentComposerStep::Review => render_review(f, chunks[1], state),
-    }
-    render_footer(f, chunks[2], state);
+        .constraints([Constraint::Length(2), Constraint::Min(6)])
+        .split(body);
+    (chunks[0], chunks[1])
 }
 
 fn render_header(f: &mut Frame, area: Rect, state: &AgentComposerState) {
@@ -266,7 +269,7 @@ fn render_tools(f: &mut Frame, area: Rect, state: &AgentComposerState) {
     ))];
     for (idx, tool) in state.tools.iter().enumerate() {
         let checkbox = if tool.selected { "[x] " } else { "[ ] " };
-        lines.push(picker_line(
+        lines.push(row_line(
             idx == state.tools_cursor,
             format!("{checkbox}{}", tool.name),
             None,
@@ -416,7 +419,7 @@ fn review_line(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
-fn render_footer(f: &mut Frame, area: Rect, state: &AgentComposerState) {
+fn footer_lines(state: &AgentComposerState) -> Vec<Line<'static>> {
     let progress = if state.is_builtin_subagent() {
         match state.step {
             AgentComposerStep::Details => "Step 1/2 · Model chain — durable built-in assignment",
@@ -435,45 +438,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &AgentComposerState) {
             }
         }
     };
-    let controls = if state.is_builtin_subagent() {
-        match state.step {
-            AgentComposerStep::Details => {
-                footer_hint_line(&[("Enter", "choose"), ("d", "delete"), ("Tab", "review")])
-            }
-            AgentComposerStep::Review => {
-                footer_hint_line(&[("Enter", "save"), ("Shift+Tab", "back"), ("Esc", "cancel")])
-            }
-            AgentComposerStep::Tools | AgentComposerStep::Prompt => Line::default(),
-        }
-    } else {
-        match state.step {
-            AgentComposerStep::Details => match state.field {
-                AgentComposerField::Name | AgentComposerField::Description => {
-                    footer_hint_line(&[("Left/Right", "edit"), ("Tab", "tools")])
-                }
-                AgentComposerField::Model | AgentComposerField::BackupModel => {
-                    footer_hint_line(&[("Enter", "choose"), ("d", "delete"), ("Tab", "tools")])
-                }
-                AgentComposerField::Location
-                | AgentComposerField::DefinitionKind
-                | AgentComposerField::Color
-                | AgentComposerField::View => {
-                    footer_hint_line(&[("Left/Right", "cycle"), ("Tab", "tools")])
-                }
-            },
-            AgentComposerStep::Tools => {
-                footer_hint_line(&[("Up/Down", "move"), ("Space", "toggle"), ("Tab", "prompt")])
-            }
-            AgentComposerStep::Prompt => footer_hint_line(&[
-                ("Enter", "newline"),
-                ("Ctrl+G", "extend description"),
-                ("Tab", "review"),
-            ]),
-            AgentComposerStep::Review => {
-                footer_hint_line(&[("Enter", "save"), ("Shift+Tab", "back"), ("Esc", "cancel")])
-            }
-        }
-    };
+    let controls = footer_hint_line(agent_composer_hints(state));
     let help = if state.is_builtin_subagent() {
         match state.field {
             AgentComposerField::Model => {
@@ -507,7 +472,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &AgentComposerState) {
     } else {
         lines.push(controls);
     }
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    lines
 }
 
 fn focused_field_help(field: AgentComposerField) -> &'static str {

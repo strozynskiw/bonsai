@@ -8,25 +8,8 @@ pub(super) fn render_model_picker(
     entries: &[ModelOption],
 ) {
     let panel = theme::frame("Models", true).style(theme::panel());
-    let inner = panel.inner(area);
     f.render_widget(panel, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(4),
-            Constraint::Length(2),
-        ])
-        .split(inner);
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(28),
-            Constraint::Percentage(48),
-            Constraint::Percentage(24),
-        ])
-        .split(chunks[1]);
+    let layout = model_picker_layout(area);
 
     // Shape the whole picker once; the three panes read from this view instead
     // of re-deriving provider rows and the filtered list per pane.
@@ -46,26 +29,23 @@ pub(super) fn render_model_picker(
     let reasoning_choices = selected_model
         .map(AppState::model_picker_reasoning_choices)
         .unwrap_or_default();
-    // The Model column reserves its bottom row for the selected model's price,
-    // mirroring the Reasoning column's shortcut-assignment hint below.
-    let model_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(columns[1]);
-    let provider_capacity = picker_body_height(columns[0]);
-    let model_capacity = picker_body_height(model_area[0]);
+    // Every pane takes the full body height: the price and the shortcut cue live
+    // in the footer, so no pane reserves a bottom row of its own.
+    let provider_capacity = pane_line_budget(layout.panes[MODEL_PICKER_PANE_PROVIDER]);
+    let model_capacity = pane_line_budget(layout.panes[MODEL_PICKER_PANE_MODEL]);
+    let reasoning_capacity = pane_line_budget(layout.panes[MODEL_PICKER_PANE_REASONING]);
 
     f.render_widget(
         Paragraph::new(model_picker_filter_line(
             &app.model_picker.filter,
-            chunks[0].width as usize,
+            layout.filter.width as usize,
         )),
-        chunks[0],
+        layout.filter,
     );
 
     render_picker_column(
         f,
-        columns[0],
+        layout.panes[MODEL_PICKER_PANE_PROVIDER],
         "Provider",
         app.model_picker.active_pane == ModelPickerPane::Provider,
         picker_viewport_rows(
@@ -76,7 +56,7 @@ pub(super) fn render_model_picker(
         )
         .map(|idx| {
             let entry = &provider_rows[idx];
-            picker_line(
+            row_line(
                 idx == provider_cursor,
                 entry.provider_label.clone(),
                 None,
@@ -90,7 +70,7 @@ pub(super) fn render_model_picker(
         let mut lines = view
             .reset_label
             .map(|reset_label| {
-                picker_line(
+                row_line(
                     true,
                     reset_label.to_string(),
                     Some("clear this composer slot".to_string()),
@@ -107,7 +87,9 @@ pub(super) fn render_model_picker(
         lines.push(Line::from(Span::styled(empty_message, theme::dim())));
         lines
     } else {
-        let inner_width = model_area[0].width.saturating_sub(2) as usize;
+        let inner_width = layout.panes[MODEL_PICKER_PANE_MODEL]
+            .width
+            .saturating_sub(2) as usize;
         picker_viewport_rows(
             model_row_count,
             model_cursor,
@@ -118,7 +100,7 @@ pub(super) fn render_model_picker(
             if let Some(reset_label) = view.reset_label
                 && idx == 0
             {
-                return picker_line(
+                return row_line(
                     idx == model_cursor,
                     reset_label.to_string(),
                     Some("clear this composer slot".to_string()),
@@ -126,43 +108,30 @@ pub(super) fn render_model_picker(
                 );
             }
             let entry_index = idx.saturating_sub(usize::from(view.reset_label.is_some()));
-            model_picker_line(idx == model_cursor, model_rows[entry_index], inner_width)
+            model_row_line(idx == model_cursor, model_rows[entry_index], inner_width)
         })
         .collect()
     };
     render_picker_column(
         f,
-        model_area[0],
+        layout.panes[MODEL_PICKER_PANE_MODEL],
         "Model",
         app.model_picker.active_pane == ModelPickerPane::Model,
         model_lines,
     );
-    f.render_widget(
-        Paragraph::new(selected_model_price_line(
-            selected_model,
-            model_area[1].width as usize,
-        )),
-        model_area[1],
-    );
 
-    // Reserve the bottom row of the reasoning column for the shortcut-assignment
-    // hint, leaving the rest for the reasoning list.
-    let reasoning_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(columns[2]);
     let effort_lines = selected_model
         .map(|entry| {
             picker_viewport_rows(
                 reasoning_choices.len(),
                 app.model_picker.reasoning_cursor,
                 app.model_picker.reasoning_offset,
-                picker_body_height(reasoning_area[0]),
+                reasoning_capacity,
             )
             .map(|idx| {
                 let reasoning = reasoning_choices[idx];
                 let detail = reasoning_picker_detail(entry, reasoning);
-                picker_line(
+                row_line(
                     idx == app.model_picker.reasoning_cursor,
                     reasoning.to_string(),
                     detail,
@@ -174,21 +143,13 @@ pub(super) fn render_model_picker(
         .unwrap_or_else(|| vec![Line::from(Span::styled("default", theme::dim()))]);
     render_picker_column(
         f,
-        reasoning_area[0],
+        layout.panes[MODEL_PICKER_PANE_REASONING],
         "Reasoning",
         app.model_picker.active_pane == ModelPickerPane::Reasoning,
         effort_lines,
     );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("press ", theme::dim()),
-            Span::styled("letter", theme::body(theme::palette().text)),
-            Span::styled(" → shortcut", theme::dim()),
-        ])),
-        reasoning_area[1],
-    );
 
-    let footer_width = chunks[2].width as usize;
+    let footer_width = layout.footer.width as usize;
     let summary = view
         .reset_label
         .filter(|_| view.reset_selected)
@@ -206,25 +167,50 @@ pub(super) fn render_model_picker(
             }
             .to_string()
         });
-    let hints = footer_hint_line(&[
-        ("Left/Right/Tab", "pane"),
-        ("Up/Down", "move"),
-        ("Enter", "select"),
-        ("Esc", "cancel"),
-    ]);
+    // Only the active pane assigns shortcuts with a bare letter, so the cue is a
+    // hint on the active pane instead of a row the Reasoning pane must reserve.
+    let pane_hints = model_picker_hints(app.model_picker.active_pane);
+    let mut hints = footer_hint_line(pane_hints);
+    // The hint row never wraps, so the Reasoning-only cue is what yields when it
+    // would push `Esc` past the footer's edge.
+    if hints.width() > footer_width {
+        hints = footer_hint_line(MODEL_PICKER_CHOOSE);
+    }
+    // Two footer rows, always: the selected model's summary and price above, the
+    // key hints below. Neither pane spends a body row on text of its own.
+    let price = selected_model
+        .map(selected_model_price_text)
+        .unwrap_or_default();
     f.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::styled(
-                truncate_ascii(&summary, footer_width),
-                theme::dim(),
-            )),
+            model_picker_summary_line(&summary, &price, footer_width),
             hints_with_shortcut_usage(hints, selected_model, footer_width),
         ]),
-        chunks[2],
+        layout.footer,
     );
 }
 
-pub(crate) fn model_picker_capacities(area: Rect) -> (usize, usize, usize) {
+/// Provider, model and reasoning pane indices, in the order [`ModelPickerLayout`]
+/// stores them.
+pub(super) const MODEL_PICKER_PANE_PROVIDER: usize = 0;
+pub(super) const MODEL_PICKER_PANE_MODEL: usize = 1;
+pub(super) const MODEL_PICKER_PANE_REASONING: usize = 2;
+
+/// The picker's geometry. The renderer and [`model_picker_capacities`] both read
+/// it, so the panes a list is windowed against are the panes that get drawn — a
+/// split change can no longer leave the offset clamps on a stale height.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ModelPickerLayout {
+    /// The filter row above the panes.
+    pub filter: Rect,
+    /// Provider, model and reasoning panes, left to right, all spanning the full
+    /// body height.
+    pub panes: [Rect; 3],
+    /// The two-row summary/hint footer.
+    pub footer: Rect,
+}
+
+pub(super) fn model_picker_layout(area: Rect) -> ModelPickerLayout {
     let inner = theme::frame("Models", true).inner(area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -242,18 +228,21 @@ pub(crate) fn model_picker_capacities(area: Rect) -> (usize, usize, usize) {
             Constraint::Percentage(24),
         ])
         .split(chunks[1]);
-    let model_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(columns[1]);
-    let reasoning_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(columns[2]);
+    ModelPickerLayout {
+        filter: chunks[0],
+        panes: [columns[0], columns[1], columns[2]],
+        footer: chunks[2],
+    }
+}
+
+/// `(provider, model, reasoning)` rows each pane can show: its framed inner height,
+/// measured by the same layout the renderer uses.
+pub(crate) fn model_picker_capacities(area: Rect) -> (usize, usize, usize) {
+    let layout = model_picker_layout(area);
     (
-        picker_body_height(columns[0]),
-        picker_body_height(model_area[0]),
-        picker_body_height(reasoning_area[0]),
+        pane_line_budget(layout.panes[MODEL_PICKER_PANE_PROVIDER]),
+        pane_line_budget(layout.panes[MODEL_PICKER_PANE_MODEL]),
+        pane_line_budget(layout.panes[MODEL_PICKER_PANE_REASONING]),
     )
 }
 
@@ -312,7 +301,7 @@ fn model_picker_filter_line(filter: &str, width: usize) -> Line<'static> {
 }
 
 /// One compact row per model: name first, then context + capability icons.
-fn model_picker_line(selected: bool, entry: &ModelOption, width: usize) -> Line<'static> {
+fn model_row_line(selected: bool, entry: &ModelOption, width: usize) -> Line<'static> {
     use unicode_width::UnicodeWidthStr;
 
     let marker = if selected { "> " } else { "  " };
@@ -345,6 +334,8 @@ fn model_picker_line(selected: bool, entry: &ModelOption, width: usize) -> Line<
             )
         };
     let metadata = if metadata_budget >= MODEL_METADATA_MIN_WIDTH {
+        // Model metadata (metadata): context window and capability icons are a
+        // summary; the footer summary spells the selected model out in full.
         truncate_ascii(&metadata, metadata_budget)
     } else {
         String::new()
@@ -357,6 +348,8 @@ fn model_picker_line(selected: bool, entry: &ModelOption, width: usize) -> Line<
 
     let mut spans = vec![
         Span::styled(marker, theme::muted()),
+        // Model label (identifier): the row's metadata and badges keep their
+        // cells, and the picker column wraps the whole row if it still overflows.
         Span::styled(
             truncate_ascii(entry.picker_model_label(), name_width),
             label_style,
@@ -409,24 +402,51 @@ fn selected_model_summary(
     parts.join(" · ")
 }
 
-fn selected_model_price_line(entry: Option<&ModelOption>, width: usize) -> Line<'static> {
-    let detail = entry
-        .map(|entry| {
-            let mut parts = vec![format!("price: {}", entry.pricing_label())];
-            if !entry.catalog_drift.is_empty() {
-                parts.push("⚠ catalog drift".to_string());
-            }
-            if entry.unverified {
-                parts.push("⚠ unverified live model".to_string());
-            }
-            let sources = entry.metadata_sources.compact_label();
-            if !sources.is_empty() {
-                parts.push(format!("sources: {sources}"));
-            }
-            parts.join(" · ")
-        })
-        .unwrap_or_else(|| "price: n/a".to_string());
-    Line::from(Span::styled(truncate_ascii(&detail, width), theme::dim()))
+/// The selected model's price and provenance, as one line of metadata. It joins
+/// the summary in the picker footer instead of sitting under the model list, so
+/// no pane spends a body row on text.
+fn selected_model_price_text(entry: &ModelOption) -> String {
+    let mut parts = vec![format!("price: {}", entry.pricing_label())];
+    if !entry.catalog_drift.is_empty() {
+        parts.push("⚠ catalog drift".to_string());
+    }
+    if entry.unverified {
+        parts.push("⚠ unverified live model".to_string());
+    }
+    let sources = entry.metadata_sources.compact_label();
+    if !sources.is_empty() {
+        parts.push(format!("sources: {sources}"));
+    }
+    parts.join(" · ")
+}
+
+/// The footer's first row: the selected model's summary, then its price when the
+/// row can hold both. When it cannot, the price drops rather than pushing the
+/// footer onto a third row. Both halves are clipped on purpose: this is
+/// single-row chrome, not a table cell.
+fn model_picker_summary_line(summary: &str, price: &str, width: usize) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+
+    // Cells the summary keeps when the price shares the row.
+    const MIN_SUMMARY_WIDTH: usize = 12;
+    const SEPARATOR: &str = " · ";
+
+    let price = truncate_ascii(
+        price,
+        width.saturating_sub(MIN_SUMMARY_WIDTH + SEPARATOR.len()),
+    );
+    let price_width = UnicodeWidthStr::width(price.as_str());
+    if price.is_empty() || price_width + MIN_SUMMARY_WIDTH + SEPARATOR.len() > width {
+        return Line::from(Span::styled(truncate_ascii(summary, width), theme::dim()));
+    }
+    Line::from(vec![
+        Span::styled(
+            truncate_ascii(summary, width - price_width - SEPARATOR.len()),
+            theme::dim(),
+        ),
+        Span::styled(SEPARATOR, theme::muted()),
+        Span::styled(price, theme::muted()),
+    ])
 }
 
 /// Append the shortcut *invocation* hint to the button row, right-aligned so
@@ -573,5 +593,72 @@ mod tests {
 
         assert!(text.contains("> Parent default"));
         assert!(text.contains("/authorize <provider>"));
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, width: u16, row: u16) -> String {
+        buffer
+            .content()
+            .iter()
+            .skip(row as usize * width as usize)
+            .take(width as usize)
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn panes_share_one_border_row_and_the_footer_holds_price_and_hints() {
+        let area = Rect::new(0, 0, 100, 30);
+        let layout = model_picker_layout(area);
+        let pane_bottom = layout.panes[MODEL_PICKER_PANE_PROVIDER].bottom();
+        for pane in layout.panes {
+            assert_eq!(pane.y, layout.panes[0].y, "every pane starts on one row");
+            assert_eq!(
+                pane.height, layout.panes[0].height,
+                "every pane is one height"
+            );
+            assert_eq!(pane.bottom(), pane_bottom, "every pane ends on one row");
+        }
+        assert_eq!(layout.footer.height, 2, "the footer is exactly two rows");
+        assert!(
+            layout.footer.y >= pane_bottom,
+            "the footer starts below the panes"
+        );
+
+        let entries = vec![
+            crate::tui::test_utils::model_option("opencode", "OpenCode Go", "glm-5.2"),
+            crate::tui::test_utils::model_option("opencode", "OpenCode Go", "kimi-k2"),
+        ];
+        let app = AppState::new("codex", "model".to_string(), ".".to_string(), None);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test backend should initialize");
+        terminal
+            .draw(|frame| render_model_picker(frame, area, &app, &entries))
+            .expect("picker should render");
+        let buffer = terminal.backend().buffer();
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("reasoning"), "the summary renders: {text}");
+        assert!(
+            text.contains("price:"),
+            "the price joins the summary: {text}"
+        );
+        assert!(text.contains("select"), "the key hints render: {text}");
+
+        // The regression this layout fixes: the price used to be drawn on the
+        // panes' bottom border row.
+        let border_row = row_text(buffer, area.width, pane_bottom - 1);
+        assert!(
+            !border_row.contains("price:") && !border_row.contains("reasoning"),
+            "the shared border row stays a border: {border_row:?}"
+        );
+        let footer_row = row_text(buffer, area.width, layout.footer.y);
+        assert!(
+            footer_row.contains("price:"),
+            "the price draws on the footer's first row: {footer_row:?}"
+        );
     }
 }

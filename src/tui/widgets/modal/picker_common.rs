@@ -1,3 +1,5 @@
+use ratatui::widgets::Block;
+
 use super::*;
 
 // ---- Axis pickers (/mode and /settings) --------------------------------
@@ -9,26 +11,10 @@ use super::*;
 
 /// Width of the `> ` / `  ` focus marker.
 pub(super) const AXIS_MARKER_WIDTH: usize = 2;
-/// Indent that nests value rows under their group header.
-pub(super) const AXIS_VALUE_INDENT: usize = 4;
 /// Gap between the key column and the values column.
 pub(super) const AXIS_KEY_GAP: usize = 2;
 /// Separator rendered between adjacent options in the expanded layout.
 pub(super) const AXIS_OPTION_GAP: &str = "  ";
-
-/// The `marker + indent + key + gap` prefix shared by every axis value row.
-pub(super) fn axis_row_prefix(
-    marker: &'static str,
-    key: &str,
-    key_width: usize,
-) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(marker, theme::muted()),
-        Span::styled(" ".repeat(AXIS_VALUE_INDENT), theme::muted()),
-        Span::styled(format!("{key:<key_width$}"), theme::dim()),
-        Span::styled(" ".repeat(AXIS_KEY_GAP), theme::muted()),
-    ]
-}
 
 /// Rendered width of every option laid out side by side, separated by
 /// [`AXIS_OPTION_GAP`] — used to decide whether the expanded layout fits.
@@ -249,7 +235,9 @@ pub(super) fn status_style(color: Color) -> Style {
 
 /// Truncate then pad `text` to exactly `width` display cells. Wide (CJK/emoji)
 /// graphemes count as 2 cells and are never split, so picker columns stay
-/// aligned even for non-ASCII session titles.
+/// aligned even for non-ASCII session titles. Metadata columns and single-row
+/// chrome go through this; prose columns wrap instead (see
+/// [`super::table::CellRender::Wrapped`]).
 pub(super) fn pad_ascii(text: &str, width: usize) -> String {
     let mut value = truncate_ascii(text, width);
     let used = unicode_width::UnicodeWidthStr::width(value.as_str());
@@ -329,6 +317,17 @@ pub(super) fn render_list_picker(
     render_windowed_body(f, regions.body, &body_lines);
 }
 
+/// The frame a picker pane draws. The active-column marker lives here and only
+/// here, so the ` *` suffix cannot drift between panes.
+pub(super) fn pane_block(title: &str, active: bool) -> Block<'static> {
+    let title = if active {
+        format!("{title} *")
+    } else {
+        title.to_string()
+    };
+    theme::frame(title, active)
+}
+
 pub(super) fn render_picker_column(
     f: &mut Frame,
     area: Rect,
@@ -336,12 +335,7 @@ pub(super) fn render_picker_column(
     active: bool,
     lines: Vec<Line<'static>>,
 ) {
-    let title = if active {
-        format!("{title} *")
-    } else {
-        title.to_string()
-    };
-    let frame = theme::frame(&title, active);
+    let frame = pane_block(title, active);
     let inner = frame.inner(area);
     // Wrap each row inside the column with the marker's indent on the
     // continuation row, so a long label reads as one wrapped entry instead of
@@ -366,8 +360,88 @@ pub(super) fn render_picker_column(
     f.render_widget(panel, area);
 }
 
-pub(super) fn picker_body_height(area: Rect) -> usize {
-    area.height.saturating_sub(2) as usize
+/// Rows one picker row draws at `width`: a wrapped row costs the lines it draws, not
+/// one. `continuation_indent` mirrors the renderer — [`render_picker_column`]
+/// re-indents continuation rows by `TABLE_MARKER_WIDTH`, so a continuation wraps two
+/// cells earlier than the first line, while a flat body drawn through
+/// `render_windowed_body` wraps at the full width with no prefix. Miscounting either
+/// one is how a cursor ends up below the fold, or how a pane shows one row fewer than
+/// it could.
+pub(super) fn row_line_height(
+    line: &Line<'static>,
+    width: u16,
+    continuation_indent: usize,
+) -> usize {
+    let width = width.max(1) as usize;
+    let parts = wrap_line(line, width);
+    if continuation_indent == 0 {
+        return parts.len().max(1);
+    }
+    let mut rows = 0;
+    for (index, part) in parts.into_iter().enumerate() {
+        if index == 0 {
+            rows += 1;
+            continue;
+        }
+        let mut spans = vec![Span::raw(" ".repeat(continuation_indent))];
+        spans.extend(part.spans);
+        rows += usize::from(wrapped_line_count(&Line::from(spans), width)).max(1);
+    }
+    rows.max(1)
+}
+
+/// The window of rows whose rendered lines fit `body`, with the cursor inside it.
+/// The caller measures `heights` with [`row_line_height`], so a wrapped row can no
+/// longer push the cursor below the fold.
+pub(super) fn visible_rows(body: Rect, heights: &[usize], cursor: usize) -> std::ops::Range<usize> {
+    visible_weighted_rows(heights, cursor, body.height.max(1) as usize)
+}
+
+/// The sticky counterpart of [`visible_rows`]: the window keeps its start until the
+/// cursor leaves it, then re-anchors so the cursor row sits at the trailing edge —
+/// the "shift only at the edge" feel of `reconcile_viewport`, counted in terminal
+/// lines so a wrapped row can never hide the cursor.
+pub(super) fn sticky_rows(
+    heights: &[usize],
+    cursor: usize,
+    offset: usize,
+    budget: usize,
+) -> std::ops::Range<usize> {
+    if heights.is_empty() {
+        return 0..0;
+    }
+    let budget = budget.max(1);
+    let cursor = cursor.min(heights.len() - 1);
+    // Keep the existing start while the rows between it and the cursor still fit;
+    // otherwise end the window at the cursor and grow upward.
+    let mut start = offset.min(cursor);
+    let mut used: usize = heights[start..=cursor].iter().sum();
+    if used > budget {
+        start = cursor;
+        used = heights[cursor];
+        while start > 0 && used + heights[start - 1] <= budget {
+            start -= 1;
+            used += heights[start];
+        }
+    }
+    let mut end = cursor + 1;
+    while end < heights.len() && used + heights[end] <= budget {
+        used += heights[end];
+        end += 1;
+    }
+    start..end
+}
+
+/// The drawable rect inside a bordered pane — exactly the rect
+/// `render_picker_column` draws into, so its rows are measured against the width and
+/// height they really get (the shared frame adds borders *and* padding).
+pub(super) fn pane_body(area: Rect) -> Rect {
+    theme::frame(String::new(), false).inner(area)
+}
+
+/// Lines a framed pane can draw: its inner height.
+pub(super) fn pane_line_budget(area: Rect) -> usize {
+    pane_body(area).height as usize
 }
 
 pub(super) fn visible_picker_rows(
@@ -427,17 +501,6 @@ pub(super) fn visible_weighted_rows(
         }
     }
     lo..hi + 1
-}
-
-/// The picker-facing alias of [`row_line`]: one selectable row with an optional
-/// trailing subtitle, through the shared row vocabulary.
-pub(super) fn picker_line(
-    selected: bool,
-    label: String,
-    subtitle: Option<String>,
-    enabled: bool,
-) -> Line<'static> {
-    row_line(selected, label, subtitle, enabled)
 }
 
 #[cfg(test)]
@@ -553,7 +616,7 @@ mod tests {
         let area = Rect::new(0, 0, 26, 6);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test backend should initialize");
-        let lines = vec![picker_line(
+        let lines = vec![row_line(
             true,
             "Xiaomi MiMo Coding Plan".to_string(),
             None,
@@ -586,5 +649,85 @@ mod tests {
         // Inside -> unchanged.
         let pos = clamp_cursor(inner, 7, 3);
         assert_eq!((pos.x, pos.y), (7, 3));
+    }
+
+    #[test]
+    fn sticky_rows_windows_by_lines_and_keeps_the_cursor_inside() {
+        let heights = [2, 2, 2, 1, 3, 2];
+        // A five-line budget from the top holds two rows; a third would overrun.
+        assert_eq!(sticky_rows(&heights, 0, 0, 5), 0..2);
+        // The cursor moving inside the window does not shift it.
+        assert_eq!(sticky_rows(&heights, 1, 0, 5), 0..2);
+        // A cursor past the window re-anchors so its own row ends the window.
+        let window = sticky_rows(&heights, 4, 0, 5);
+        assert!(window.contains(&4), "the cursor stays inside: {window:?}");
+        let spent: usize = heights[window.clone()].iter().sum();
+        assert!(spent <= 5, "the window spends the line budget: {spent}");
+        // A row taller than the whole budget is still drawn.
+        assert_eq!(sticky_rows(&[9], 0, 0, 3), 0..1);
+    }
+
+    #[test]
+    fn a_wrapped_picker_row_keeps_the_cursor_visible_without_a_scrollbar() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let area = Rect::new(0, 0, 24, 8);
+        let body = pane_body(area);
+        let rows = (0..12)
+            .map(|index| {
+                row_line(
+                    false,
+                    format!("row {index} with a label long enough to wrap"),
+                    None,
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        let heights = rows
+            .iter()
+            .map(|line| row_line_height(line, body.width, TABLE_MARKER_WIDTH))
+            .collect::<Vec<_>>();
+        assert!(
+            heights.iter().all(|height| *height >= 2),
+            "every row wraps onto more than one line: {heights:?}"
+        );
+
+        let cursor = 11;
+        let window = visible_rows(body, &heights, cursor);
+        assert!(
+            window.contains(&cursor),
+            "the cursor row stays inside the window: {window:?}"
+        );
+        let spent: usize = heights[window.clone()].iter().sum();
+        assert!(
+            spent <= body.height as usize,
+            "the window spends at most the body's lines: {spent}"
+        );
+
+        let lines = window.map(|index| rows[index].clone()).collect::<Vec<_>>();
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test backend");
+        terminal
+            .draw(|frame| render_picker_column(frame, area, "Rows", true, lines))
+            .expect("column renders");
+        let buffer = terminal.backend().buffer();
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("row 11"), "the cursor row is drawn: {text}");
+
+        // A windowed list draws no scrollbar: the pane's border column stays a
+        // border all the way down.
+        let border_x = area.x + area.width - 1;
+        for y in area.y..area.y + area.height {
+            let symbol = buffer[(border_x, y)].symbol();
+            assert!(
+                matches!(symbol, "╭" | "╮" | "╰" | "╯" | "│"),
+                "no scrollbar glyph in the border column, found {symbol:?} at ({border_x},{y})"
+            );
+        }
     }
 }
