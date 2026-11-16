@@ -385,7 +385,6 @@ pub(crate) fn closing_message(description: &str, path: &Path) -> String {
 /// multi-select question when an interactive surface exists; defaults
 /// otherwise), render, write. Returns the user-facing closing lines, or the
 /// cancel notice — the only error is failing to write the file.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_bug_flow(
     description: &str,
     agent: &crate::agent::Agent,

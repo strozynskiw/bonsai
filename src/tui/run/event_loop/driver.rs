@@ -870,10 +870,12 @@ impl TuiLoop {
                     &mut self.tasks,
                     runtime_action_deps!(self),
                     &mut persistence,
-                    &self.subagents,
-                    &self.peer_bus,
-                    &self.update_config,
-                    &self.goal_service,
+                    ToplevelCommandCtx {
+                        subagents: &self.subagents,
+                        peer_bus: &self.peer_bus,
+                        update_config: &self.update_config,
+                        goal: &self.goal_service,
+                    },
                 )
                 .await
                 {
@@ -976,10 +978,12 @@ impl TuiLoop {
             &mut self.tasks,
             runtime_action_deps!(self),
             &mut persistence,
-            &self.subagents,
-            &self.peer_bus,
-            &self.update_config,
-            &self.goal_service,
+            ToplevelCommandCtx {
+                subagents: &self.subagents,
+                peer_bus: &self.peer_bus,
+                update_config: &self.update_config,
+                goal: &self.goal_service,
+            },
         )
         .await
         {

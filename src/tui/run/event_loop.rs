@@ -1028,6 +1028,15 @@ fn take_safe_plan_start_confirmation(app: &mut AppState, input: &str) -> bool {
         )
 }
 
+/// Read-only handles the top-level submit commands need besides the app,
+/// task controller and runtime deps.
+struct ToplevelCommandCtx<'a> {
+    subagents: &'a crate::subagent::SubagentRegistry,
+    peer_bus: &'a crate::peer::PeerBus,
+    update_config: &'a crate::config::UpdateConfig,
+    goal: &'a crate::goal::GoalService,
+}
+
 /// Handle the always-available and running-state submit commands (the `/`
 /// commands that work in any task state, plus running-slash-command routing and
 /// queueing). Returns `true` when the submit was fully handled and the caller
@@ -1035,21 +1044,17 @@ fn take_safe_plan_start_confirmation(app: &mut AppState, input: &str) -> bool {
 /// slash-command dispatch / starting a run. Extracted from `run`'s Submit
 /// handling; the wide local list collapses into the `RuntimeActionDeps` bundle
 /// plus the persistence cursor and three registries not carried by it.
-#[allow(clippy::too_many_arguments)]
 async fn handle_toplevel_submit_command(
     input: &str,
     app: &mut AppState,
     tasks: &mut TaskController,
     deps: RuntimeActionDeps<'_>,
     persistence: &mut PersistenceCommandState<'_>,
-    subagents: &crate::subagent::SubagentRegistry,
-    peer_bus: &crate::peer::PeerBus,
-    update_config: &crate::config::UpdateConfig,
-    goal: &crate::goal::GoalService,
+    ctx: ToplevelCommandCtx<'_>,
 ) -> bool {
     if let Some(command) = crate::goal::GoalCommand::parse(input) {
         app.reduce(AppAction::SubmitCommandInput(input.to_string()));
-        if let Err(error) = super::goal::handle_goal_command(command, app, tasks, goal).await {
+        if let Err(error) = super::goal::handle_goal_command(command, app, tasks, ctx.goal).await {
             push_command_message(app, CommandOutputKind::Error, &format!("{error:#}"));
         }
         return true;
@@ -1078,14 +1083,14 @@ async fn handle_toplevel_submit_command(
     if matches!(input.trim(), "/subagents" | "/subtasks") {
         app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
         app.reduce(AppAction::RefreshSubtaskList {
-            subtasks: subagents.list(),
+            subtasks: ctx.subagents.list(),
         });
         app.reduce(AppAction::OpenSubtaskList);
         return true;
     }
     if input.trim() == "/peers" {
         app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));
-        let peers = peer_bus.overview().await.unwrap_or_default();
+        let peers = ctx.peer_bus.overview().await.unwrap_or_default();
         app.reduce(AppAction::OpenPeerList { peers });
         return true;
     }
@@ -1178,7 +1183,7 @@ async fn handle_toplevel_submit_command(
             app,
             tasks.runtime_sender(),
             deps.storage.home_dir().to_path_buf(),
-            update_config.clone(),
+            ctx.update_config.clone(),
         );
         return true;
     }
@@ -2083,7 +2088,6 @@ async fn maybe_recheck_peer_wait(
 /// the policy gate ([`peer_wake_gate_allows`]), the actionable-inbox re-check
 /// (never start a turn with nothing left to inject), and — for unsolicited
 /// wakes — the rolling-hour wake budget.
-#[allow(clippy::too_many_arguments)]
 async fn maybe_start_peer_wake(
     pending_peer_wake: &mut Option<PendingPeerWake>,
     app: &mut AppState,
