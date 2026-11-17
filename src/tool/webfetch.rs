@@ -13,7 +13,7 @@
 //! - Output is framed by [`ToolOutput::untrusted_context`]: instructions inside a
 //!   fetched page are data, not directives.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -121,6 +121,8 @@ pub struct WebFetchTool {
     /// all domain prompts, matching the TUI's one-modal-at-a-time constraint.
     prompt_gate: Mutex<()>,
     authorization_ledger: AuthorizationLedger,
+    /// robots.txt per origin, fetched once per tool lifetime (≈ session).
+    robots: std::sync::Mutex<HashMap<String, super::robots::Robots>>,
 }
 
 impl WebFetchTool {
@@ -138,6 +140,7 @@ impl WebFetchTool {
             sandbox,
             limits: FetchLimits::default(),
             prompt_gate: Mutex::new(()),
+            robots: std::sync::Mutex::new(HashMap::new()),
             authorization_ledger,
         }
     }
@@ -157,6 +160,7 @@ impl WebFetchTool {
             sandbox,
             limits,
             prompt_gate: Mutex::new(()),
+            robots: std::sync::Mutex::new(HashMap::new()),
             authorization_ledger: AuthorizationLedger::disabled(),
         }
     }
@@ -181,6 +185,7 @@ impl WebFetchTool {
             sandbox,
             limits,
             prompt_gate: Mutex::new(()),
+            robots: std::sync::Mutex::new(HashMap::new()),
             authorization_ledger: AuthorizationLedger::disabled(),
         }
     }
@@ -230,6 +235,8 @@ impl WebFetchTool {
             .await?;
             deadline += auth_start.elapsed();
 
+            self.check_robots(&current, deadline, cancellation.as_ref())
+                .await?;
             let response = self.send(&current, deadline, cancellation.as_ref()).await?;
             let status = response.status();
 
@@ -593,6 +600,67 @@ impl WebFetchTool {
         result
             .with_context(|| format!("web fetch timed out after {:?}", self.limits.total_timeout))?
             .with_context(|| format!("request to {url} failed"))
+    }
+
+    /// Refuse a path the site's robots.txt disallows for bonsai. Etiquette,
+    /// not security: any failure to obtain or parse robots.txt allows.
+    async fn check_robots(
+        &self,
+        url: &Url,
+        deadline: Instant,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<()> {
+        let origin = url.origin().ascii_serialization();
+        let cached = self
+            .robots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&origin)
+            .cloned();
+        let robots = match cached {
+            Some(robots) => robots,
+            None => {
+                let robots = self.fetch_robots(url, deadline, cancellation).await;
+                self.robots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(origin.clone(), robots.clone());
+                robots
+            }
+        };
+        let mut target = url.path().to_string();
+        if let Some(query) = url.query() {
+            target.push('?');
+            target.push_str(query);
+        }
+        anyhow::ensure!(
+            robots.allows(&target),
+            "skipped: {origin}/robots.txt disallows {target} for user-agent \"{}\"; \
+             the page was not fetched",
+            super::robots::AGENT_TOKEN
+        );
+        Ok(())
+    }
+
+    async fn fetch_robots(
+        &self,
+        url: &Url,
+        deadline: Instant,
+        cancellation: Option<&CancellationToken>,
+    ) -> super::robots::Robots {
+        use super::robots::Robots;
+        let Ok(robots_url) = url.join("/robots.txt") else {
+            return Robots::allow_all();
+        };
+        match self.send(&robots_url, deadline, cancellation).await {
+            Ok(response) if response.status().is_success() => {
+                match self.read_body(response, deadline, cancellation).await {
+                    Ok((bytes, _)) => Robots::parse(&String::from_utf8_lossy(&bytes)),
+                    Err(_) => Robots::allow_all(),
+                }
+            }
+            _ => Robots::allow_all(),
+        }
     }
 
     /// Resolve a request host once, reject local/private targets, and pin the
@@ -1051,6 +1119,58 @@ mod tests {
             text.contains("UNTRUSTED external data"),
             "framed untrusted: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn honors_robots_txt_and_fetches_it_once_per_site() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/robots.txt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("User-agent: *\nDisallow: /private\n", "text/plain"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/public"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("open page", "text/plain"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/private/page"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("secret", "text/plain"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let (service, rx) = InteractionService::new();
+        drop(rx);
+        let tool = tool_allowing_all(Arc::new(service), tiny_limits());
+        let blocked = tool
+            .run(
+                serde_json::json!({ "url": format!("{}/private/page", server.uri()) }),
+                None,
+                None,
+            )
+            .await
+            .expect_err("robots.txt disallows /private");
+        let message = format!("{blocked:#}");
+        assert!(
+            message.contains("robots.txt disallows /private/page"),
+            "{message}"
+        );
+        let open = tool
+            .run(
+                serde_json::json!({ "url": format!("{}/public", server.uri()) }),
+                None,
+                None,
+            )
+            .await
+            .expect("allowed path is fetched");
+        assert!(untrusted_text(&open).contains("open page"));
+        // `expect(1)` / `expect(0)` are verified when the server drops.
     }
 
     #[tokio::test]

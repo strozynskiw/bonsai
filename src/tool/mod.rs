@@ -29,6 +29,7 @@ pub(crate) mod recall;
 pub(crate) mod registry_assembly;
 mod repo_map;
 mod risk;
+mod robots;
 pub(crate) mod schema;
 pub(crate) mod search;
 #[cfg(unix)]

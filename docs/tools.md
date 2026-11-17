@@ -282,6 +282,9 @@ pass through; binary is refused; ≤5 redirects with each new domain re-checked.
 Fetching a fresh domain is **High** risk: `balanced` and below prompt per
 domain (allow once / session / project / deny / never); domain rules live in their own
 permission namespace. SSRF protection validates resolved addresses are public.
+Each site's `robots.txt` is read once per session and honored for the
+`bonsai` user-agent (falling back to `*`): a disallowed path is skipped with a
+clear message. A missing or unreadable `robots.txt` allows the fetch.
 
 ### `websearch` (aliases `web_search`, `WebSearch`)
 Search via Brave, Tavily, or SearXNG (`query` ≤400 chars, `count` ≤10,
