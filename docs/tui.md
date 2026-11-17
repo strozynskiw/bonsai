@@ -97,6 +97,16 @@ Multi-tool groups fold to their one-line summary. Nothing is lost: Enter
 opens the full reasoning, and copying copies the real text. The choice is a
 global preference and survives restarts.
 
+### Notifications
+
+When a run that took 10 s or longer finishes, or an approval or question
+starts waiting on you, the TUI rings the terminal bell and sets the window
+title (`bonsai · done` / `bonsai · needs your input`); the title goes back to
+`bonsai` once work resumes. `BONSAI_NOTIFY=desktop` also sends a desktop
+notification (`osascript` on macOS, `notify-send` on Linux) and
+`BONSAI_NOTIFY=off` turns all of it off. Notification text is fixed and never
+includes prompts, paths, or code.
+
 ### Accessibility
 
 `--reduced-motion` freezes spinners and shimmer animations;

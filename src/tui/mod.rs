@@ -1,6 +1,7 @@
 pub(crate) mod accessibility;
 pub(crate) mod agent_composer;
 pub mod app;
+pub(crate) mod attention;
 pub mod completion;
 pub mod event;
 pub(crate) mod image_paste;

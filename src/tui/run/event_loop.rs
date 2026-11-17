@@ -3190,6 +3190,8 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         persisted_signatures,
         pending_snapshot_flush,
         snapshot_flush_gate,
+        attention: crate::tui::attention::AttentionTracker::default(),
+        notify: crate::tui::attention::NotifyMode::from_env(),
     };
     frame_loop.drive().await?;
     shutdown_tui(frame_loop).await?;

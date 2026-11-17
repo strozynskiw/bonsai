@@ -210,6 +210,7 @@ variables are listed in [Providers](providers.md#built-in-connections).
 | `BONSAI_MODELS_DEV_URL` / `_PATH` / `_TTL_SECS`, `BONSAI_DISABLE_MODELS_FETCH` | [Model catalog](models.md#modelsdev) source |
 | `BONSAI_CODEX_CLIENT_VERSION`, `BONSAI_CODEX_REASONING_PERSIST` | Codex transport tuning |
 | `BONSAI_COLOR_MODE`, `NO_COLOR` | [Terminal color](theming.md#terminal-color-modes) |
+| `BONSAI_NOTIFY` | `bell` (default), `desktop`, or `off` — [run-end and approval notifications](tui.md#notifications) |
 | `BONSAI_LOG` / `RUST_LOG` | Tracing verbosity (defaults `warn`) |
 | `BONSAI_TRANSCRIPT_LOG` | Write every request/response to disk (debugging; large) |
 | `BONSAI_SYMBOL_RESPECT_GITIGNORE`, `BONSAI_REPO_MAP_RESPECT_GITIGNORE` | Symbol/repo-map gitignore handling |

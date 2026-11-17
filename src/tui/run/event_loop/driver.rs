@@ -122,6 +122,8 @@ pub(super) struct TuiLoop {
     pub(super) persisted_signatures: PersistedSnapshotSignatures,
     pub(super) pending_snapshot_flush: Option<tokio::task::JoinHandle<PersistenceFlushResult>>,
     pub(super) snapshot_flush_gate: SnapshotFlushGate,
+    pub(super) attention: crate::tui::attention::AttentionTracker,
+    pub(super) notify: crate::tui::attention::NotifyMode,
 }
 
 impl TuiLoop {
@@ -158,6 +160,7 @@ impl TuiLoop {
         if let Some(flow) = self.draw_and_watch(&mut frame).await? {
             return Ok(flow);
         }
+        self.signal_attention();
         if let Some(flow) = self.poll_terminal(&mut frame).await? {
             return Ok(flow);
         }
@@ -168,6 +171,18 @@ impl TuiLoop {
             return Ok(flow);
         }
         Ok(Flow::Continue)
+    }
+
+    /// Bell/title (and opt-in desktop) notice when a long run ends or a
+    /// prompt starts waiting on the user.
+    fn signal_attention(&mut self) {
+        use crate::tui::attention;
+        let (event, reset) = self.attention.observe(
+            attention::is_running(self.app.task_state),
+            attention::needs_input(self.app.modal.as_ref()),
+            Instant::now(),
+        );
+        attention::signal(self.notify, event, reset);
     }
 
     /// Restores raw mode, reaps a finished snapshot flush, and handles
