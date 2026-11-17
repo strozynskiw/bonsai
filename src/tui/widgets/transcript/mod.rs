@@ -69,6 +69,7 @@ use common::*;
 use layout::resolved_scroll;
 use message::*;
 use selection::item_selection_state;
+pub(crate) use tool_card::patch_target_paths;
 use tool_card::pending_permission_command;
 
 pub fn render(f: &mut Frame, area: Rect, app: &AppState) {

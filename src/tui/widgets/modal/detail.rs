@@ -335,19 +335,17 @@ pub(super) fn tool_detail_lines(
         None => (Vec::new(), None),
     };
 
-    let mut lines = vec![
-        kv(
-            "status",
-            activity.status.label(),
-            tool_status_color(activity.status),
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("{} ", activity.status.label()),
+            theme::body(tool_status_color(activity.status)).add_modifier(Modifier::BOLD),
         ),
-        kv("id", &activity.id, theme::palette().muted),
-        kv(
-            "duration",
-            &format_duration(activity.duration()),
-            theme::palette().text,
+        Span::styled(
+            format!("· {}", format_duration(activity.duration())),
+            theme::body(theme::palette().text),
         ),
-    ];
+        Span::styled(format!("  · {}", activity.id), theme::dim()),
+    ])];
 
     // The model of the subagent run an `agent` call launched (its override or
     // the inherited model) — the parent turn's model would be the same for
@@ -356,7 +354,45 @@ pub(super) fn tool_detail_lines(
         lines.push(kv("model", model, theme::palette().text));
     }
 
-    let args = tool_argument_lines(activity);
+    if let Some(diff) = &activity.diff {
+        let stats = diff.stats();
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("▎ ", theme::body(theme::palette().tool)),
+            Span::styled("changes", theme::label(theme::palette().tool)),
+            Span::styled(
+                format!("  {}", plural_count(diff.file_count(), "file")),
+                theme::dim(),
+            ),
+            Span::styled(
+                format!("  +{}", stats.added),
+                theme::body(theme::palette().added),
+            ),
+            Span::styled(
+                format!(" -{}", stats.removed),
+                theme::body(theme::palette().removed),
+            ),
+        ]));
+        for (index, file) in diff.files().enumerate() {
+            if index > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.push(transcript::diff_header_line(file));
+            lines.extend(transcript::diff_lines(file, TOOL_DETAIL_DIFF_MAX_ROWS));
+        }
+    }
+
+    // A file mutation's payload is the diff above; repeating it as a quoted,
+    // truncated argument preview only adds noise.
+    let args = if activity.diff.is_some()
+        && matches!(activity.name.as_str(), "write" | "edit" | "apply_patch")
+    {
+        Vec::new()
+    } else if activity.name == "apply_patch" {
+        apply_patch_argument_lines(&activity.arguments)
+    } else {
+        tool_argument_lines(activity)
+    };
     if !args.is_empty() {
         lines.push(Line::from(""));
         lines.push(section_header("arguments"));
@@ -367,18 +403,6 @@ pub(super) fn tool_detail_lines(
         lines.push(Line::from(""));
         lines.push(section_header("authorization"));
         lines.extend(authorization_section_lines(&authorization));
-    }
-
-    if let Some(diff) = &activity.diff {
-        lines.push(Line::from(""));
-        lines.push(section_header("changes"));
-        for (index, file) in diff.files().enumerate() {
-            if index > 0 {
-                lines.push(Line::from(""));
-            }
-            lines.push(transcript::diff_header_line(file));
-            lines.extend(transcript::diff_lines(file, TOOL_DETAIL_DIFF_MAX_ROWS));
-        }
     }
 
     lines.push(Line::from(""));
@@ -441,8 +465,6 @@ fn authorization_entry_lines(entry: &str) -> Vec<Line<'static>> {
     } else {
         palette.text
     };
-    let mut lines = vec![kv("decision", decision, decision_color)];
-
     let mut autonomy = None;
     let mut sandbox = None;
     let mut positional = Vec::new();
@@ -456,25 +478,36 @@ fn authorization_entry_lines(entry: &str) -> Vec<Line<'static>> {
         }
     }
 
+    // Line 1: the verdict and why it matters (decision, risk, effects).
+    // Line 2: where it came from (rule, autonomy, sandbox, notes) — dimmed.
+    let mut verdict = vec![Span::styled(
+        decision.to_string(),
+        theme::body(decision_color).add_modifier(Modifier::BOLD),
+    )];
+    let mut origin: Vec<String> = Vec::new();
     if positional.len() >= 3 {
-        lines.push(kv("risk", positional[0], palette.text));
-        lines.push(kv(
-            "effects",
-            &positional[1].replace(',', ", "),
-            palette.text,
+        verdict.push(Span::styled(
+            format!("  {} risk", positional[0]),
+            theme::body(palette.text),
         ));
-        lines.push(kv("rule", positional[2], palette.text));
-        if positional.len() > 3 {
-            lines.push(kv("note", &positional[3..].join(" · "), palette.muted));
-        }
+        verdict.push(Span::styled(
+            format!("  · {}", positional[1].replace(',', ", ")),
+            theme::body(palette.text),
+        ));
+        origin.push(format!("rule {}", positional[2]));
+        origin.extend(positional[3..].iter().map(|note| note.to_string()));
     } else if !positional.is_empty() {
-        lines.push(kv("detail", &positional.join(" · "), palette.text));
+        origin.push(positional.join(" · "));
     }
     if let Some(autonomy) = autonomy {
-        lines.push(kv("autonomy", autonomy, palette.text));
+        origin.push(autonomy.to_string());
     }
     if let Some(sandbox) = sandbox {
-        lines.push(kv("sandbox", sandbox, palette.text));
+        origin.push(format!("sandbox {sandbox}"));
+    }
+    let mut lines = vec![Line::from(verdict)];
+    if !origin.is_empty() {
+        lines.push(Line::from(Span::styled(origin.join(" · "), theme::dim())));
     }
     lines
 }
@@ -501,6 +534,31 @@ pub(super) fn tool_argument_lines(activity: &ToolActivity) -> Vec<Line<'static>>
             .unwrap_or_else(|| generic_tool_argument_lines(&activity.arguments)),
         _ => generic_tool_argument_lines(&activity.arguments),
     }
+}
+
+fn apply_patch_argument_lines(arguments: &str) -> Vec<Line<'static>> {
+    let patch = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|value| value.get("input")?.as_str().map(str::to_string));
+    let Some(patch) = patch else {
+        return generic_tool_argument_lines(arguments);
+    };
+    let files = transcript::patch_target_paths(&patch);
+    let mut lines = vec![argument_value_line(
+        "patch",
+        &format!(
+            "{}, {}",
+            plural_count(files.len(), "file"),
+            plural_count(text_line_count(&patch), "line")
+        ),
+        theme::palette().text,
+    )];
+    lines.extend(
+        files
+            .iter()
+            .map(|path| argument_value_line("file", path, theme::palette().path)),
+    );
+    lines
 }
 
 pub(super) fn write_argument_lines(arguments: &str) -> Option<Vec<Line<'static>>> {

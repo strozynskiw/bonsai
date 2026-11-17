@@ -259,7 +259,8 @@ pub(super) fn render_tool_activity(
 ) -> Vec<Line<'static>> {
     let (_, block_bg) = tool_status_style(activity.status);
     let card_accent = theme::palette().tool;
-    let spans = tool_activity_summary_spans(activity, permission_command, tick);
+    let spans =
+        tool_activity_summary_spans(activity, permission_command, tick, width.saturating_sub(4));
     let inner_width = width.saturating_sub(4).max(8);
     let is_selected = !matches!(selected, ItemSelection::None);
     let (line_style, bg) = if is_selected {
@@ -304,6 +305,7 @@ pub(super) fn render_nested_tool_activity(
         activity,
         permission_command,
         tick,
+        width.saturating_sub(8),
     ));
 
     let inner_width = width.saturating_sub(4).max(8);
@@ -336,6 +338,7 @@ pub(super) fn tool_activity_summary_spans(
     activity: &ToolActivity,
     permission_command: Option<&str>,
     tick: u64,
+    max_width: usize,
 ) -> Vec<Span<'static>> {
     let (accent, _) = tool_status_style(activity.status);
     let waiting_for_permission = tool_waits_for_permission(activity, permission_command);
@@ -368,16 +371,8 @@ pub(super) fn tool_activity_summary_spans(
         ));
     }
 
-    if activity.name == "question" {
-        spans.extend(question_summary_spans(&activity.arguments));
-    } else if let Some((key, text)) = primary_arg_value(&activity.arguments) {
-        spans.push(Span::raw(" ".to_string()));
-        spans.extend(primary_arg_spans(
-            &key,
-            &serde_json::Value::String(compact_text(&text, 64)),
-        ));
-    }
-
+    let head_width = spans_width(&spans);
+    let arg_index = spans.len();
     // Compact reuse is model-visible work avoided, whether the retained result
     // came from a file read or an exact repository inspection.
     if activity.result.as_deref().is_some_and(|result| {
@@ -440,7 +435,93 @@ pub(super) fn tool_activity_summary_spans(
         ));
     }
 
+    // The primary argument takes whatever width the fixed head and tail leave,
+    // so a long command is cut with `…` instead of wrapping the duration and
+    // result summary onto a second row.
+    let tail_width = spans_width(&spans[arg_index..]);
+    let budget = max_width
+        .saturating_sub(head_width + tail_width + 1)
+        .clamp(16, 96);
+    let mut arg_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(target) = edit_target_spans(activity, budget) {
+        arg_spans.push(Span::raw(" ".to_string()));
+        arg_spans.extend(target);
+    } else if activity.name == "question" {
+        arg_spans.extend(question_summary_spans(&activity.arguments));
+    } else if let Some((key, text)) = primary_arg_value(&activity.arguments) {
+        arg_spans.push(Span::raw(" ".to_string()));
+        arg_spans.extend(primary_arg_spans(
+            &key,
+            &serde_json::Value::String(compact_text(&text, budget)),
+        ));
+    }
+    spans.splice(arg_index..arg_index, arg_spans);
     spans
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    spans.iter().map(|span| span.content.width()).sum()
+}
+
+/// Files a `*** Begin Patch` body touches, in order of appearance.
+pub(crate) fn patch_target_paths(patch: &str) -> Vec<String> {
+    const MARKERS: [&str; 3] = ["*** Update File:", "*** Add File:", "*** Delete File:"];
+    patch
+        .lines()
+        .filter_map(|line| {
+            MARKERS
+                .iter()
+                .find_map(|marker| line.trim().strip_prefix(marker))
+                .map(|path| path.trim().to_string())
+        })
+        .collect()
+}
+
+/// Left-truncates a path so the file name always stays visible.
+fn shorten_path_left(path: &str, max_chars: usize) -> String {
+    let count = path.chars().count();
+    if count <= max_chars || max_chars < 2 {
+        return path.to_string();
+    }
+    let tail: String = path.chars().skip(count - (max_chars - 1)).collect();
+    format!("…{tail}")
+}
+
+/// The target of a file-mutating call: its path (or `first +N more` for a
+/// multi-file patch) instead of the raw patch/edit payload.
+fn edit_target_spans(activity: &ToolActivity, budget: usize) -> Option<Vec<Span<'static>>> {
+    let mut paths: Vec<String> = match &activity.diff {
+        Some(diff) => diff.files().map(|file| file.path.clone()).collect(),
+        None => Vec::new(),
+    };
+    if paths.is_empty() && activity.name == "apply_patch" {
+        let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_str::<serde_json::Value>(&activity.arguments)
+        else {
+            return None;
+        };
+        paths = patch_target_paths(map.get("input")?.as_str()?);
+    }
+    let first = paths.first()?;
+    let extra = paths.len() - 1;
+    let suffix = if extra > 0 {
+        format!("  · {} files", extra + 1)
+    } else {
+        String::new()
+    };
+    let room = budget.saturating_sub(suffix.chars().count());
+    let mut spans = vec![Span::styled(
+        shorten_path_left(first, room),
+        Style::default().fg(theme::palette().path),
+    )];
+    if !suffix.is_empty() {
+        spans.push(Span::styled(
+            suffix,
+            Style::default().fg(theme::palette().muted),
+        ));
+    }
+    Some(spans)
 }
 
 pub(super) fn question_summary_spans(arguments: &str) -> Vec<Span<'static>> {
@@ -1012,9 +1093,11 @@ fn is_warning_line(line: &str) -> bool {
 }
 
 fn last_live_output_line(text: &str) -> Option<&str> {
-    text.lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty() && !line.starts_with("[Live output truncated:"))
+    text.lines().map(str::trim).rfind(|line| {
+        !line.is_empty()
+            && !line.starts_with("[Live output truncated:")
+            && !line.starts_with("[authorization]")
+    })
 }
 
 /// The (key, value) pair promoted to the tool one-liner: the first
@@ -1234,7 +1317,7 @@ mod reused_read_label_tests {
     }
 
     fn summary_text(activity: &ToolActivity) -> String {
-        tool_activity_summary_spans(activity, None, 0)
+        tool_activity_summary_spans(activity, None, 0, 200)
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
@@ -1321,5 +1404,27 @@ mod command_workflow_tests {
             Some(CommandWorkflow::Git)
         );
         assert_eq!(classify_command_workflow("git push origin main"), None);
+    }
+}
+
+#[cfg(test)]
+mod edit_row_tests {
+    use super::*;
+
+    #[test]
+    fn patch_target_paths_lists_every_touched_file() {
+        let patch = "*** Begin Patch\n*** Update File: a/b.rs\n@@\n-x\n+y\n*** Add File: c.txt\n+hi\n*** End Patch";
+        assert_eq!(patch_target_paths(patch), vec!["a/b.rs", "c.txt"]);
+    }
+
+    #[test]
+    fn long_paths_keep_their_file_name() {
+        assert_eq!(shorten_path_left("src/very/deep/file.rs", 10), "…p/file.rs");
+    }
+
+    #[test]
+    fn live_output_ignores_authorization_markers() {
+        let text = "partial output\n[authorization] allow · high · x";
+        assert_eq!(last_live_output_line(text), Some("partial output"));
     }
 }

@@ -770,21 +770,22 @@ fn tool_detail_extracts_authorization_into_its_own_section() {
     let text = rendered_lines_text(&tool_detail_lines(&activity, None, 100));
 
     assert!(text.contains("authorization"), "{text}");
-    assert!(text.contains("decision   allow"), "{text}");
-    assert!(text.contains("risk       high"), "{text}");
     assert!(
-        text.contains("effects    network, code-execution"),
+        text.contains("allow  high risk  · network, code-execution"),
         "{text}"
     );
-    assert!(text.contains("rule       built-in-default"), "{text}");
-    assert!(text.contains("autonomy   ask"), "{text}");
-    assert!(text.contains("sandbox    none:off,network:allow"), "{text}");
-    assert!(text.contains("note       delegated tools"), "{text}");
+    assert!(text.contains("rule built-in-default"), "{text}");
+    assert!(
+        text.contains("autonomy=ask") || text.contains("ask"),
+        "{text}"
+    );
+    assert!(text.contains("sandbox none:off,network:allow"), "{text}");
+    assert!(text.contains("delegated tools retain"), "{text}");
     assert!(text.contains("test result: ok"), "{text}");
     // The marker line must not leak into the result section.
     assert!(!text.contains("[authorization]"), "{text}");
     // The authorization section renders above the result section.
-    let auth_at = text.find("decision").expect("decision row");
+    let auth_at = text.find("high risk").expect("decision row");
     let result_at = text.find("test result: ok").expect("result body");
     assert!(auth_at < result_at, "{text}");
 }
