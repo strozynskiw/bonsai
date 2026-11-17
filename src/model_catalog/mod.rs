@@ -1926,7 +1926,7 @@ mod tests {
         let catalog = load_builtin_catalog().unwrap();
 
         assert_eq!(catalog.connections.len(), 23);
-        assert_eq!(catalog.targets.len(), 256);
+        assert_eq!(catalog.targets.len(), 262);
         assert!(
             catalog
                 .connections
@@ -2730,7 +2730,7 @@ default_base_url = "http://localhost:11434/v1"
         }
 
         let catalog = ModelCatalog::load_builtin().unwrap();
-        assert_eq!(catalog.list_resolved_models().unwrap().len(), 256);
+        assert_eq!(catalog.list_resolved_models().unwrap().len(), 262);
 
         let cases = [
             EquivalenceCase {
@@ -4396,6 +4396,10 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.available_models_for_connection(&openai_id, Vec::new()),
             vec![
+                "gpt-6.2-sol",
+                "openai/gpt-6.2-sol-1m",
+                "gpt-6.2-astra",
+                "openai/gpt-6.2-astra-1m",
                 "gpt-6.1-sol",
                 "openai/gpt-6.1-sol-1m",
                 "gpt-6-astra",
@@ -4420,6 +4424,10 @@ default_base_url = "http://localhost:11434/v1"
         );
 
         let cases = [
+            ("openai/gpt-6.2-sol", 272_000, 2_000_000, 10_000_000),
+            ("openai/gpt-6.2-sol-1m", 1_050_000, 4_000_000, 15_000_000),
+            ("openai/gpt-6.2-astra", 272_000, 8_000_000, 40_000_000),
+            ("openai/gpt-6.2-astra-1m", 1_050_000, 16_000_000, 60_000_000),
             ("openai/gpt-6.1-sol", 272_000, 2_000_000, 10_000_000),
             ("openai/gpt-6.1-sol-1m", 1_050_000, 4_000_000, 15_000_000),
             ("openai/gpt-6-astra", 272_000, 10_000_000, 50_000_000),
@@ -4463,7 +4471,10 @@ default_base_url = "http://localhost:11434/v1"
             ] {
                 assert!(resolved.features.contains(&feature), "{model}: {feature:?}");
             }
-            if model.contains("gpt-6-astra") || model.contains("gpt-6.1-sol") {
+            if model.contains("gpt-6-astra")
+                || model.contains("gpt-6.1-sol")
+                || model.contains("gpt-6.2-")
+            {
                 // Astra and 6.1 Sol offer no Off toggle: models.dev lists
                 // effort only (low…max) and the Codex catalog agrees for Astra.
                 assert!(
@@ -5360,6 +5371,8 @@ default_base_url = "http://localhost:11434/v1"
         assert_eq!(
             catalog.target_remote_models_for_connection(&codex_id),
             vec![
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
                 "gpt-6.1-sol",
                 "gpt-6-astra",
                 "gpt-5.6-sol",
@@ -5371,6 +5384,8 @@ default_base_url = "http://localhost:11434/v1"
             ]
         );
         for remote_model in [
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
             "gpt-6.1-sol",
             "gpt-6-astra",
             "gpt-5.6-sol",

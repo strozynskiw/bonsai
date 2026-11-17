@@ -9,9 +9,43 @@
 # working-window cap so flat per-target cost accounting never silently applies
 # low-context prices to a long-context request.
 #
-# Codex 0.159 exposes GPT-6.1 Sol. This entry remains useful offline;
+# Codex 0.159 exposes GPT-6.1 Sol. GPT-6.2 Sol and Astra (released
+# 2026-11-17) are bundled ahead of the backend serving them to every account;
 # authenticated `/models` still controls live visibility and Responses Lite
-# routing.
+# routing. Efforts follow models.dev (low…max) until the live list says more.
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-6.2-sol"
+remote_model = "gpt-6.2-sol"
+recommended = true
+recommended_effort = "medium"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+pinned_fields = ["context-window"]
+context_window = 272000
+output_limit = 128000
+pricing = { input_micros_per_million = 2000000, output_micros_per_million = 10000000, cache_read_micros_per_million = 100000, cache_write_micros_per_million = 2500000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
+
+[[targets]]
+connection = "codex"
+model = "openai/gpt-6.2-astra"
+remote_model = "gpt-6.2-astra"
+recommended_effort = "medium"
+endpoint_path = "responses"
+token_counter = "tiktoken"
+pinned_fields = ["context-window"]
+context_window = 272000
+output_limit = 128000
+pricing = { input_micros_per_million = 8000000, output_micros_per_million = 40000000, cache_read_micros_per_million = 400000, cache_write_micros_per_million = 10000000 }
+
+[[targets.reasoning_options]]
+type = "effort"
+values = ["low", "medium", "high", "xhigh", "max"]
 
 [[targets]]
 connection = "codex"
