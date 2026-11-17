@@ -388,9 +388,11 @@ async fn tool_call_permission_and_edit_diff() -> Result<()> {
     assert_eq!(started[0]["kind"], "execute");
     assert_eq!(started[1]["kind"], "read");
     assert_eq!(started[2]["kind"], "edit");
-    // Paths use the client's own spelling of cwd (macOS temp dirs are symlinks).
+    // Paths use the client's own spelling of cwd. On macOS the temp root is a
+    // symlink, so the raw spelling differs from the canonical one and this
+    // comparison proves the server did not canonicalize; on Linux the temp root
+    // is already canonical and both spellings coincide.
     let report = workspace.path().join("report.txt");
-    assert_ne!(workspace.path(), workspace.path().canonicalize()?);
     assert_eq!(started[2]["locations"][0]["path"], json!(report));
 
     let edit = started[2]["toolCallId"].clone();
