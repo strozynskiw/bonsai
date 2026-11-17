@@ -109,9 +109,10 @@ See [Configuration](configuration.md), [MCP](mcp.md), [Hooks](hooks.md),
 
 ## What bonsai is not (yet)
 
-A browser/desktop UI, Windows support, an SDK, a plugin marketplace, hosted
-agents, and a stable (v1) server API are explicitly post-1.0 — the local
-server preview above ships now, deliberately outside the 1.0 stability
-contract. See the GitHub
+Windows support and a stable (v1) server API are planned for after 1.0; a
+small built-in web UI for `bonsai serve` is planned sooner. A hosted service,
+an SDK, and a plugin marketplace are not planned. The local server and the
+editor (ACP) surface ship now as previews, deliberately outside the 1.0
+stability contract. See the GitHub
 [milestones](https://github.com/strozynskiw/bonsai/milestones) for the live
 plan; shipped behavior is documented here and in the top-level README.
