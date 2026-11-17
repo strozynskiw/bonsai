@@ -20,6 +20,8 @@ pub(crate) enum ResumeTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CliMode {
+    /// `bonsai acp` — Agent Client Protocol v1 agent over stdio.
+    Acp,
     Serve {
         command: crate::server::config::Command,
     },
@@ -66,6 +68,15 @@ pub(crate) enum CliMode {
 }
 
 pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliMode> {
+    if args.get(1).is_some_and(|arg| arg == "acp") {
+        return match &args[2..] {
+            [] => Ok(CliMode::Acp),
+            [flag] if matches!(flag.as_str(), "--help" | "-h") => {
+                anyhow::bail!("{}", crate::acp::USAGE)
+            }
+            _ => anyhow::bail!("{}", crate::acp::USAGE),
+        };
+    }
     if args.get(1).is_some_and(|arg| arg == "serve") {
         return Ok(CliMode::Serve {
             command: crate::server::config::parse(&args[2..])?,

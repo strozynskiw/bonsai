@@ -75,6 +75,19 @@ impl SessionFactory for SessionRuntime {
     }
 }
 
+/// Why `resume` could not claim a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ClaimError {
+    /// Another process holds the claim, or its heartbeat is still inside the
+    /// liveness fence (a crashed owner becomes claimable once it goes stale).
+    #[error("Session is still owned by another live bonsai process")]
+    Live,
+    #[error("Session does not exist")]
+    NotFound,
+    #[error("Session belongs to a different workspace")]
+    DifferentProject,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ControlSnapshot {
     pub(crate) session_id: SessionId,
@@ -291,14 +304,21 @@ impl Controller {
         let owner = self
             .storage
             .try_session_owner(id)?
-            .context("Session has a live runtime owner")?;
-        anyhow::ensure!(
-            self.storage
-                .claim_session_with_owner(&self.root, id, Some(selection), &owner)
-                .await?
-                == crate::storage::ResumeSessionOutcome::Resumed,
-            "Session cannot be claimed"
-        );
+            .ok_or(ClaimError::Live)?;
+        match self
+            .storage
+            .claim_session_with_owner(&self.root, id, Some(selection), &owner)
+            .await?
+        {
+            crate::storage::ResumeSessionOutcome::Resumed => {}
+            crate::storage::ResumeSessionOutcome::Live => return Err(ClaimError::Live.into()),
+            crate::storage::ResumeSessionOutcome::NotFound => {
+                return Err(ClaimError::NotFound.into());
+            }
+            crate::storage::ResumeSessionOutcome::DifferentProject => {
+                return Err(ClaimError::DifferentProject.into());
+            }
+        }
         let result = tokio::time::timeout(Duration::from_secs(30), self.load(id, owner))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Session initialization timed out")));

@@ -29,44 +29,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
 async fn listen(root: &Path, storage: Storage, config: Config) -> Result<()> {
     config.validate()?;
     let owner = workspace_owner(storage.home_dir(), root)?;
-    let project = storage.ensure_project(root).await?;
-    let trust = crate::workspace_trust::WorkspaceTrustGate::load(storage.clone(), project).await?;
-    let trusted = matches!(
-        trust.state(),
-        crate::workspace_trust::WorkspaceTrust::Trusted
-    );
-    let catalog = Arc::new(
-        crate::model_catalog::load_catalog_from_home_and_project_with_refresh(
-            storage.home_dir(),
-            trusted.then_some(root),
-        )
-        .await?,
-    );
-    let registry = Arc::new(crate::provider::ProviderRegistry::from_catalog(&catalog));
-    let mut session =
-        crate::session::SessionStore::load_with_storage_and_catalog(&storage, Some(&catalog))
-            .await?;
-    crate::headless::select_provider(
-        &registry,
-        &mut session,
-        std::env::var("BONSAI_PROVIDER").ok().as_deref(),
-    )?;
-    let selected = session.current_session();
-    let selection = SessionRunSelection {
-        provider_id: session.current_kind_id().into(),
-        model: selected.model.clone(),
-        reasoning: selected.reasoning,
-    };
-    let factory = SessionRuntime {
-        root: root.into(),
-        storage: storage.clone(),
-        catalog,
-        registry,
-        session,
-        budget: storage.run_budget().await?,
-        autonomy: crate::yolo::YoloMode::with_level(crate::tool::ApprovalLevel::Ask),
-        trust,
-    };
+    let (factory, selection) = prepare_runtime(root, &storage).await?;
     let controller = Arc::new(Controller::new(root, storage.clone(), Arc::new(factory))?);
     let listener = std::net::TcpListener::bind(config.bind)?;
     listener.set_nonblocking(true)?;
@@ -149,6 +112,60 @@ async fn listen(root: &Path, storage: Storage, config: Config) -> Result<()> {
     drop(owner);
     result.context("Server listener failed")
 }
+/// Operator-owned session construction for one canonical workspace root: trust,
+/// catalog, provider selection, budget and a fixed `Ask` autonomy level. Shared
+/// by every out-of-process surface (`serve`, `acp`) so none can diverge on
+/// authority. Nothing a client sends reaches these inputs.
+pub(crate) async fn prepare_runtime(
+    root: &Path,
+    storage: &Storage,
+) -> Result<(SessionRuntime, SessionRunSelection)> {
+    let project = storage.ensure_project(root).await?;
+    let trust = crate::workspace_trust::WorkspaceTrustGate::load(storage.clone(), project).await?;
+    let trusted = matches!(
+        trust.state(),
+        crate::workspace_trust::WorkspaceTrust::Trusted
+    );
+    let catalog = Arc::new(
+        crate::model_catalog::load_catalog_from_home_and_project_with_refresh(
+            storage.home_dir(),
+            trusted.then_some(root),
+        )
+        .await?,
+    );
+    let registry = Arc::new(crate::provider::ProviderRegistry::from_catalog(&catalog));
+    let mut session =
+        crate::session::SessionStore::load_with_storage_and_catalog(storage, Some(&catalog))
+            .await?;
+    crate::headless::select_provider(
+        &registry,
+        &mut session,
+        std::env::var("BONSAI_PROVIDER").ok().as_deref(),
+    )?;
+    let selected = session.current_session();
+    let selection = SessionRunSelection {
+        provider_id: session.current_kind_id().into(),
+        model: selected.model.clone(),
+        reasoning: selected.reasoning,
+    };
+    let factory = SessionRuntime {
+        root: root.into(),
+        storage: storage.clone(),
+        catalog,
+        registry,
+        session,
+        budget: storage.run_budget().await?,
+        autonomy: crate::yolo::YoloMode::with_level(SURFACE_APPROVAL_LEVEL),
+        trust,
+    };
+    Ok((factory, selection))
+}
+
+/// The only autonomy level an out-of-process surface runs at. Clients answer
+/// prompts; they never choose how many prompts there are.
+pub(crate) const SURFACE_APPROVAL_LEVEL: crate::tool::ApprovalLevel =
+    crate::tool::ApprovalLevel::Ask;
+
 struct WorkspaceOwner(std::fs::File);
 
 impl Drop for WorkspaceOwner {

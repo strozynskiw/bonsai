@@ -1225,7 +1225,7 @@ fn sink_retracts_attempts_preserves_typed_results_and_orders_subscription() {
     sink.assistant_delta("retained");
     sink.assistant_done();
     sink.attempt_started();
-    sink.thinking("discarded reasoning");
+    sink.reasoning_delta("discarded reasoning");
     sink.assistant_delta("discarded response");
     sink.attempt_discarded();
     sink.tool_started("call", "read", "{}");
@@ -1252,6 +1252,31 @@ fn sink_retracts_attempts_preserves_typed_results_and_orders_subscription() {
         }
         event => panic!("unexpected event {event:?}"),
     }
+}
+
+#[test]
+fn progress_lines_are_transient_status_not_reasoning() {
+    use crate::output::OutputSink;
+    let sink = super::sink::SessionSink::new(Vec::new());
+    let (_, _, mut events) = sink.subscribe();
+    sink.thinking("Calling model");
+    sink.reasoning_delta("real reasoning");
+    sink.assistant_delta("answer");
+    sink.assistant_done();
+    assert!(matches!(
+        events.try_recv().unwrap().event,
+        super::sink::SessionEvent::Status(ref text) if text == "Calling model"
+    ));
+    assert!(matches!(
+        events.try_recv().unwrap().event,
+        super::sink::SessionEvent::ReasoningDelta(ref text) if text == "real reasoning"
+    ));
+    let json = serde_json::to_string(&sink.transcript()).unwrap();
+    assert!(json.contains("real reasoning"));
+    assert!(
+        !json.contains("Calling model"),
+        "progress is never persisted: {json}"
+    );
 }
 
 #[tokio::test]

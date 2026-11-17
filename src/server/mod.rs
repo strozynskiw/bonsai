@@ -7,6 +7,6 @@ pub(crate) mod controller;
 pub(crate) mod http;
 pub(crate) mod sink;
 mod startup;
-pub(crate) use startup::run;
+pub(crate) use startup::{prepare_runtime, run};
 #[cfg(test)]
 mod tests;

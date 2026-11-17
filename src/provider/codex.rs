@@ -2792,17 +2792,17 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "wire-include",
-                "wire-input",
-                "wire-instructions",
                 "wire-model",
+                "wire-instructions",
+                "wire-input",
+                "wire-tools",
+                "wire-tool-choice",
                 "wire-parallel-tool-calls",
-                "wire-prompt-cache-key",
-                "wire-reasoning",
                 "wire-store",
                 "wire-stream",
-                "wire-tool-choice",
-                "wire-tools",
+                "wire-include",
+                "wire-prompt-cache-key",
+                "wire-reasoning",
             ]
         );
         let paths = preview

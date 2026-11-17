@@ -190,7 +190,7 @@ pub(crate) fn snapshot(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
     /// One representative event per `SessionEvent` variant. This list, plus the
     /// exhaustive `event_kind` match, is what makes the published-kind check
     /// cover the whole enum rather than the convenient half of it.
-    fn representative_events() -> Vec<SessionEvent> {
+    pub(crate) fn representative_events() -> Vec<SessionEvent> {
         vec![
             SessionEvent::ResyncRequired,
             SessionEvent::UserMessage("Hello".into()),
@@ -304,7 +304,7 @@ mod tests {
     }
 
     /// A successful mutation result, so the published diff shape stays pinned.
-    fn edit_result() -> crate::protocol::ToolResult {
+    pub(crate) fn edit_result() -> crate::protocol::ToolResult {
         let diff = crate::diff::FileDiff {
             path: "src/main.rs".into(),
             status: crate::diff::DiffStatus::Modified,

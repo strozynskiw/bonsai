@@ -1,3 +1,4 @@
+mod acp;
 mod agent;
 mod background;
 mod background_wake;
@@ -88,6 +89,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     match cli_mode {
+        CliMode::Acp => {
+            logging::init_headless_tracing();
+            block_on_with_shutdown(acp::run())?
+        }
         CliMode::Serve { command } => {
             logging::init_headless_tracing();
             block_on_with_shutdown(server::run(command))?

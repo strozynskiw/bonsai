@@ -1889,12 +1889,12 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "wire-max-tokens",
-                "wire-messages",
                 "wire-model",
-                "wire-stream",
                 "wire-system",
+                "wire-messages",
                 "wire-tools",
+                "wire-max-tokens",
+                "wire-stream",
             ]
         );
         let paths = preview

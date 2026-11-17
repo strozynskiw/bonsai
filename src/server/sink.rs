@@ -364,8 +364,11 @@ impl OutputSink for SessionSink {
             TranscriptRecorder::assistant_done,
         );
     }
+    /// Agent progress lines ("Calling model", "Running bash") are transient
+    /// status, as in the TUI and headless surfaces: published live, never
+    /// recorded as model reasoning or persisted into the transcript.
     fn thinking(&self, text: &str) {
-        self.reasoning_delta(text);
+        self.publish(SessionEvent::Status(text.into()));
     }
     fn context_updated(&self, report: crate::agent::ContextReport) {
         let usage = (

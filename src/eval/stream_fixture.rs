@@ -112,6 +112,10 @@ pub(super) struct StreamAttempt {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+// One record per fixture line, decoded and consumed immediately; boxing would
+// only add churn. (`serde_json/preserve_order`, pulled in by the ACP schema
+// crate, makes `Value` maps larger.)
+#[allow(clippy::large_enum_variant)]
 pub(super) enum StreamRecord {
     Header(StreamHeader),
     Attempt(StreamAttempt),

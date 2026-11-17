@@ -54,6 +54,7 @@ split by topic.
 | --- | --- |
 | [Headless mode](headless.md) | `bonsai -p` print mode, output formats, event stream, exit codes, CI recipes |
 | [Server preview](server.md) | `bonsai serve`: authenticated loopback HTTP + SSE, scopes, limits, artifacts, and the full event contract (experimental) |
+| [Agent Client Protocol](acp.md) | `bonsai acp`: run bonsai inside ACP editors such as Zed, the event and permission mapping, and what ACP cannot carry (experimental) |
 | [Server changelog](server-changelog.md) | Every breaking change in the `experimental-v0` server contract, with client migration notes |
 | [Recovery worktrees](recovery.md) | Isolated runs, `bonsai recovery` commands, merge semantics |
 | [Eval harness](eval.md) | The deterministic eval suite, graders, live mode, reports |

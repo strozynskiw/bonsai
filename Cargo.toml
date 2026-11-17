@@ -51,10 +51,11 @@ incremental = false
 async-openai = { version = "0.42.1", features = ["chat-completion", "model"] }
 reqwest = { version = "0.13.5", features = ["stream", "json", "gzip", "brotli"] }
 http = "1"
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal", "net"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "process", "signal", "net", "io-std"] }
+tokio-util = { version = "0.7", features = ["io", "compat"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+agent-client-protocol = { version = "5.3.0", default-features = false }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 toml = "1.1.6"
 directories = "6.0.0"

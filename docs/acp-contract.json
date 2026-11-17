@@ -1,0 +1,48 @@
+{
+  "protocol_version": 1,
+  "updates": [
+    {
+      "sessionUpdate": "agent_message_chunk",
+      "content": { "type": "text", "text": "Hi" }
+    },
+    {
+      "sessionUpdate": "agent_thought_chunk",
+      "content": { "type": "text", "text": "thinking" }
+    },
+    {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "call-1",
+      "title": "bash: cargo test",
+      "kind": "execute",
+      "status": "in_progress",
+      "rawInput": { "command": "cargo test" }
+    },
+    {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call-1",
+      "status": "in_progress",
+      "content": [
+        { "type": "content", "content": { "type": "text", "text": "running 1 test" } }
+      ]
+    },
+    {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call-2",
+      "status": "completed",
+      "content": [
+        {
+          "type": "diff",
+          "path": "/workspace/src/main.rs",
+          "oldText": "fn old() {}",
+          "newText": "fn new() {}"
+        }
+      ]
+    },
+    {
+      "sessionUpdate": "plan",
+      "entries": [
+        { "content": "Ship it", "priority": "medium", "status": "in_progress" }
+      ]
+    }
+  ]
+}
