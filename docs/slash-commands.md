@@ -33,6 +33,7 @@ completion popup; `Tab` completes names and arguments.
 | `/questions` | — | reopen a pending question, preserving its deadline | no |
 | `/compact` | `[preview] [target=<tokens>] [fallback\|provider\|deterministic]` | compact context now / preview the plan | yes |
 | `/copy` | `[all]` | copy focused row / entire transcript | no |
+| `/select` | — | toggle copy mode: release the mouse for native terminal selection (also `Ctrl+G`) | no |
 | `/quit` | — | exit | yes |
 
 ### Persistent goals
@@ -114,6 +115,7 @@ their explicit approval requirements.
 | `/test`, `/build` | — | run the [verification profiles](configuration.md#verification) | yes (`bonsai -p /test`) |
 | `/commit` | — | create a git commit | no |
 | `/pr` | — | create/update a pull request | no |
+| `/pure` | `[on\|off\|status]` | zero-tool conversational persona: the model gets no tools until you turn it off | yes |
 
 ## Agents, tasks, peers
 
@@ -136,6 +138,7 @@ their explicit approval requirements.
 | `/memory` | `[<name> \| forget <name>]` | [memory](memory.md) manager | yes |
 | `/remember` | `[project] <fact>` | pin a memory | yes |
 | `/init` | — | generate a starter `AGENTS.md` (won't overwrite) | yes |
+| `/lsp` | `restart <path>` | restart the language server that owns `<path>` ([Language intelligence](language-intelligence.md)) | yes |
 
 ## Appearance
 

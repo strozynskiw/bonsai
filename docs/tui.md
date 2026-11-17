@@ -14,7 +14,10 @@ moves into the header. The main area depends on the active view:
 - **Agent (todo) view** — transcript plus a right **TODO sidebar** (on
   terminals ≥104 columns) showing the live task list with phase position.
 - **Plan view** — transcript shrinks to the left third; the **plan canvas**
-  (sections, tasks, phases, review findings) takes the rest.
+  (sections, tasks, phases, review findings) takes the rest. While the
+  planner writes, the canvas follows the newest edit; when the planning run
+  finishes it snaps back to the plan's summary (a later manual scroll is
+  kept).
 
 The **header** shows the bonsai brand, session id and status, workspace
 badges (cwd, git branch, elapsed), and a right-pinned **context chip** — a
@@ -58,12 +61,22 @@ reports, errors, and blue peer-message cards.
 
 - **Tool cards** show a status glyph (`?` awaiting permission, spinner,
   `✓`/`✗`), per-tool argument previews, live durations, and workflow
-  classification (format/lint/test/build/check/git).
+  classification (format/lint/test/build/check/git). File edits
+  (`edit`/`write`/`apply_patch`) show the target path, or `first · N files`
+  for multi-file patches, instead of the raw patch; long commands are cut to
+  the free width so duration and result stay on one line.
 - **Execution groups** fold a multi-tool turn into one card with a summary
   row (`done/failed/running`, `+N more tools`); Enter expands, arrow keys
   select a tool inside, Enter opens its detail, `d` opens its diff.
 - **Detail views** — Enter on any focused block opens the full scrollable
-  text (complete reasoning, full tool output, diff preview).
+  text (complete reasoning, full tool output, diff preview). A tool's detail
+  modal leads with a one-line status header and, for edits, the changes
+  (file count and +/− totals) before anything else; authorization shows as
+  one verdict line rather than the raw audit record.
+- **Run endings** — a turn that ends normally adds nothing. A run that is
+  interrupted, blocked, or fails ends with one plain-language status line
+  saying what happened; the technical detail stays in the completion report
+  and logs.
 - **Scrolling** — the view follows the bottom; scrolling up shows a floating
   `↓ N new messages (Ctrl+End)` pill. `Shift+↑/↓` extends keyboard
   selection; `Ctrl+A` selects all.
@@ -145,9 +158,11 @@ Full editing/selection/scroll tables are in `/keys` inside the app.
 Modal conventions: `Esc`/`q` close, `Enter` confirms, arrows move,
 `PgUp/PgDn` scroll. Permission prompts use `a` (once), `s`/`m` (session),
 `p` (project), `d` (deny); sandbox-escape prompts have no project option.
-In the model picker, `←/→` switch the provider/model/reasoning panes and a
-bare letter in the reasoning pane binds a
-[model shortcut](models.md#model-shortcuts). In the `/ctx` ledger view:
+In the model picker, `←/→` switch the provider/model/reasoning panes, typing
+filters, and a bare letter in the reasoning pane binds a
+[model shortcut](models.md#model-shortcuts); the picker's footer spells these
+keys out and only shows where the model list came from when that matters
+(catalog drift or an unverified live model). In the `/ctx` ledger view:
 `p` pin, `d` drop, `s` stub, `r` restore.
 
 ## Modals and pickers

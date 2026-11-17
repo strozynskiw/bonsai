@@ -127,6 +127,7 @@ With onboarding done, just type. A few things worth knowing on day one:
 ## Next steps
 
 - Wire it into CI: [Headless mode](headless.md).
+- Use it from your editor (Zed, VS Code): [Agent Client Protocol](acp.md).
 - Understand the safety model: [Autonomy and permissions](autonomy-and-permissions.md),
   [Sandbox](sandbox.md), [Security model](security.md).
 - Extend it: [Configuration](configuration.md), [Skills](skills.md),

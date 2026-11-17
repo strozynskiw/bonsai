@@ -48,7 +48,7 @@ plus the standard toolchain lints.
 src/
   main.rs               thin entry point; bootstrap.rs does the real wiring
   bootstrap.rs          wires Agent + TUI, builds registries + model catalog
-  cli/                  arg parsing, subcommands (serve, eval, headless, recovery, doctor)
+  cli/                  arg parsing, subcommands (serve, acp, eval, headless, recovery, doctor)
   agent/                agent loop, parallel tool batching, retry, compaction
   session/              on-disk provider/session state, env-var normalization
   model_catalog/        models.dev catalog + connections.toml loader, pricing
@@ -72,6 +72,8 @@ src/
   headless/             `bonsai -p` print mode
   server/               `bonsai serve`: loopback HTTP + SSE, scoped tokens, admission,
                         artifacts, and the checked wire contract (docs/server.md)
+  acp/                  `bonsai acp`: Agent Client Protocol v1 over stdio, a projection
+                        of the server controller (docs/acp.md + acp-contract.json)
   protocol/             surface-neutral session/tool protocol types shared by the surfaces
   eval/                 eval runner (suite, graders, mock provider, report)
   provider/             provider trait, metadata, SSE, transforms; three wire
@@ -84,7 +86,8 @@ src/
   util/                 small shared helpers
 models/                 builtin/connections.toml + example connector/model TOML
 tests/                  integration layers needing a real binary:
-                        server_preview.rs, surface_smoke.rs, performance_baseline.rs,
+                        server_preview.rs, acp_smoke.rs, surface_smoke.rs,
+                        performance_baseline.rs,
                         plus fixtures/upgrade runtime snapshots
 ```
 
@@ -97,7 +100,8 @@ Several modules that were single files are now directories (`agent/`,
 Most tests are inline `#[cfg(test)]` modules next to the code they cover — that
 is still the default for new tests. `tests/` is reserved for layers that need a
 real process: `server_preview.rs` launches `bonsai serve` with an isolated
-HOME/DB and drives it end to end, `surface_smoke.rs` guards the headless/TUI
+HOME/DB and drives it end to end, `acp_smoke.rs` drives `bonsai acp` over stdio
+the way Zed does, `surface_smoke.rs` guards the headless/TUI
 surfaces, and `performance_baseline.rs` is `--ignored` and run by the release
 workflow per target.
 
@@ -264,6 +268,14 @@ next agent doesn't have to relearn them:
   when a new `SessionEvent` variant is neither published nor documented — add a
   variant and `cargo test` tells you what to update. Release binaries are
   re-qualified by `scripts/qualify_artifact.py` inside the release workflow.
+- **`bonsai acp` is a projection of the server controller.** `src/acp/` maps
+  ACP v1 (`session/new|load|list|prompt|cancel|set_config_option`) onto the
+  same `Controller` and `prepare_runtime` as `bonsai serve`; it never builds a
+  runtime of its own. `projection::carrier` is an exhaustive match over
+  `SessionEvent`, checked against the `docs/acp.md` event table and the
+  `docs/acp-contract.json` samples, so a new event variant forces an ACP
+  decision. Permission answers fail closed (`acp/permission.rs`); the editor's
+  autonomy selector is capped at the operator's saved TUI level.
 - **Untrusted content stays data.** Web/MCP/file-derived content is untrusted
   and must not become executable instruction without explicit user, config, or
   permission gating. Tool calls triggered by untrusted output re-enter the same

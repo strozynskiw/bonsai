@@ -17,6 +17,7 @@ in [Autonomy and permissions](autonomy-and-permissions.md) and
 | Skill bodies | trusted once loaded | the only tool output injected as trusted context |
 | Web pages, search results, MCP results, recalled archives, PTY/background output, peer messages, hook-added context | **untrusted** | wrapped in an escape-proof data frame; never promoted to system messages |
 | Project-tier memory | untrusted background data | injected as data notes, never as instructions; excluded from the system prompt |
+| Editor clients over ACP | user decisions only | answers a pending prompt; cannot raise autonomy above the saved level, add MCP servers, or open an untrusted foreign workspace ([ACP](acp.md)) |
 
 ## Workspace trust
 

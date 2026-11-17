@@ -41,6 +41,14 @@ bonsai eval --mode live --provider anthropic --out target/eval-live
 - `--fail-on-task-failure` makes task, grader, and budget failures exit
   nonzero — use it in CI and release gates. Harness, suite, CLI, fixture, or
   auth/config errors always exit nonzero regardless.
+- `--seed <u64>` overrides the suite seed for the run.
+- `--record-provider-streams <dir>` (live mode) captures the provider streams a
+  run consumed; `--mode replay --replay-dir <dir>` replays them keylessly with
+  the same suite, seed and build. Replay checks the agent, not HTTP/SSE
+  parsing. See [provider stream capture](../eval/README.md#provider-stream-capture-and-keyless-replay).
+- `bonsai eval adapter run --request <path>` and
+  `bonsai eval adapter import-harbor --result <path> --out <path>` drive and
+  import external benchmark runs ([adapters](../eval/README.md)).
 - `--baseline <path>` compares the run against a versioned baseline profile
   (exact suite/provider/model/effort identity) and fails below the
   correctness floor or above any configured efficiency tolerance.

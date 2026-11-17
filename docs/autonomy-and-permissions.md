@@ -206,6 +206,15 @@ project allow rule, and the `question` tool fails instead of blocking.
 Sandbox escapes remain prompt-gated in headless mode at every autonomy level;
 the interactive safe-retry exception never applies.
 
+## Editor clients (ACP)
+
+`bonsai acp` threads start at `ask` regardless of the saved level. The editor's
+**Autonomy** selector can raise a thread only up to the level saved in the TUI
+(`balanced` when none is saved); `yolo` is offered only to an operator who saved
+it. ACP permission answers map to *allow once*, *allow for this session*, or
+*reject*. No editor answer writes a persistent project rule, and anything
+unrecognized is a denial. See [Agent Client Protocol](acp.md#permissions).
+
 ## Where this lives in the code
 
 | Concern | Location |

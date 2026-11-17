@@ -992,6 +992,9 @@ Usage:
   bonsai bug --description <text> [--include-log]
   bonsai recovery list|inspect <id>|merge <id>|keep <id> [branch]|discard <id>
   bonsai completions bash|zsh|fish
+  bonsai serve [--bind <addr>] [--tls-cert <pem> --tls-key <pem>] [--allow-host <host>] [--allow-origin <origin>] [--allow-remote]
+  bonsai serve token mint --output <path> [--ttl <secs>] [--scope read|control|respond|artifacts] [--session <id>] | token revoke <id>
+  bonsai acp                   Agent Client Protocol (v1) agent over stdio, for editors such as Zed
 
 Install from source:
   cargo install --git https://github.com/strozynskiw/bonsai --locked

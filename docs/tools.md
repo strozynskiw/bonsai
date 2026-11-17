@@ -247,15 +247,25 @@ Returns `TrustedContext` — skills are trusted operator/project content, the
 only tool output that may be promoted to instructions. See
 [Skills](skills.md).
 
+### `start_new_plan` (coding registry only)
+The lever a coding turn uses to start fresh planning work on the plan canvas.
+Absent from the planning profile, subagents, and SMOL.
+
+### `goal_complete` (only while a goal is active)
+Claim that the active [goal](slash-commands.md#persistent-goals) is complete,
+with brief `evidence`. Called alone, after all other work; the completion gate
+still checks outstanding work and verification before the goal closes.
+
 ### Plan-canvas tools (planning registry only)
-Sixteen `plan_*` tools maintain the live plan canvas:
-`plan_replace_draft`, `plan_patch_section`, `plan_remove_section`,
-`plan_move_section`, `plan_insert_task`, `plan_update_task`,
-`plan_remove_task`, `plan_check_task`, `plan_uncheck_task`,
-`plan_remove_phase`, `plan_move_phase`, `plan_add_question`,
-`plan_remove_question`, `plan_add_finding`, `plan_associate_finding`,
-`plan_resolve_finding` (findings are kept on record, never deleted).
-Phases enter via `plan_replace_draft`'s phased form.
+Nineteen `plan_*` tools maintain the live plan canvas:
+`plan_replace_draft`, `plan_set_title`, `plan_set_section`,
+`plan_patch_section`, `plan_remove_section`, `plan_move_section`,
+`plan_add_task`, `plan_insert_task`, `plan_update_task`, `plan_remove_task`,
+`plan_check_task`, `plan_uncheck_task`, `plan_add_phase`,
+`plan_remove_phase`, `plan_move_phase`, `plan_remove_question`,
+`plan_add_finding`, `plan_associate_finding`, `plan_resolve_finding`
+(findings are kept on record, never deleted). Phases enter through
+`plan_replace_draft`'s phased form or `plan_add_phase`.
 
 ---
 
@@ -303,7 +313,7 @@ collision with a built-in visibly degrades that server rather than shadowing.
 | --- | --- |
 | `ReadPath` | read, read_region, read_symbol, glob, grep, symbol_search, definition, references, hover, workspace_symbol; read-only `agent` delegations |
 | `WritePath` | write, edit, rename_symbol (→ `GlobalWrite` in yolo) |
-| `GlobalWrite` | apply_patch, bash (default), terminal, diagnostics, todowrite, set_session_title, tasks, peers, question, memory_write, recall, all `plan_*`, write-capable/unresolvable `agent`, unparseable/unknown calls, blocking-hook-matched tools |
+| `GlobalWrite` | apply_patch, bash (default), terminal, diagnostics, todowrite, set_session_title, tasks, peers, question, memory_write, recall, start_new_plan, goal_complete, all `plan_*`, write-capable/unresolvable `agent`, unparseable/unknown calls, blocking-hook-matched tools |
 | `ParallelBash` | bash with `parallel:true` or `run_in_background:true` |
 | `Independent` | project_info, git, skill, webfetch, websearch |
 

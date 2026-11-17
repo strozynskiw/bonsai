@@ -60,8 +60,8 @@ the thread toolbar (the ACP `autonomy` config option, category `mode`) offers
 every level from `ask` **up to the level the operator saved in the bonsai TUI**,
 which defaults to `balanced` when none is saved. The editor can never select
 above that ceiling. `yolo` appears only for an operator who already saved `yolo`;
-it removes the sandbox, the destructive floor and read-before-edit, exactly as in
-the TUI. The choice applies live to the thread's later tool calls and is not
+as in the TUI, it lifts project confinement, the destructive floor and
+read-before-edit, while the OS [sandbox](sandbox.md) keeps its configured posture. The choice applies live to the thread's later tool calls and is not
 persisted: a reloaded thread starts at `ask` again.
 
 Sandbox posture, workspace trust and run budgets always come from bonsai's

@@ -10,7 +10,7 @@ together.
 ```
 src/
   main.rs               thin entry; parses CLI, dispatches mode
-  cli/                  hand-rolled arg parser (Serve / Run / Print / eval / recovery / doctor / completions)
+  cli/                  hand-rolled arg parser (Serve / Acp / Run / Print / eval / recovery / doctor / completions)
   bootstrap.rs          TUI startup + tool-registry construction
   runtime.rs            RuntimeBuilder — surface-neutral assembly + the TUI/headless capability contract
   agent/                turn coordinator, batching, retry, compaction, episodes, guards, self-review
@@ -23,6 +23,7 @@ src/
   tui/                  event loop (run/), reducer (app/), views, widgets, keymap, themes
   headless/             bonsai -p driver + versioned output sink
   server/               bonsai serve: loopback HTTP + SSE, scoped tokens, admission, artifacts, wire contract
+  acp/                  bonsai acp: Agent Client Protocol v1 over stdio, projected from the server controller
   protocol/             surface-neutral session/tool protocol types shared by the surfaces
   eval/                 deterministic eval runner, graders, mock provider, adapters
   hooks/ mcp/ extension/ resource/   extensibility: hooks, MCP, gates, file-based resources
@@ -155,7 +156,8 @@ From `AGENTS.md`, enforced in review:
 - Tests live inline in `#[cfg(test)]` modules next to the code; the batching
   and agent tests are the spec for their subsystems. `tests/` holds only the
   layers that need a real binary: `server_preview.rs` (drives `bonsai serve`
-  end to end), `surface_smoke.rs`, and `performance_baseline.rs`.
+  end to end), `acp_smoke.rs` (drives `bonsai acp` over stdio as an editor
+  would), `surface_smoke.rs`, and `performance_baseline.rs`.
 
 See [Development](development.md) for build/test workflow and extension
 recipes.

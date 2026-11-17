@@ -36,7 +36,9 @@ git config core.hooksPath .githooks
 Most tests are inline `#[cfg(test)]` modules next to the code. The top-level
 `tests/` directory holds the layers that need a real binary:
 `server_preview.rs` (launches `bonsai serve` against an isolated HOME/DB and
-raises approvals through the Python example client), `surface_smoke.rs`, and
+raises approvals through the Python example client), `acp_smoke.rs` (drives
+`bonsai acp` over stdio as an editor would, against a mock provider),
+`surface_smoke.rs`, and
 `performance_baseline.rs` (`--ignored`; the release workflow measures it per
 target). The crate is binary-only, so inline test filters run as
 `cargo test --bin bonsai <filter>`. Use

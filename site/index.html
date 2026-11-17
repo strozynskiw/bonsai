@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bonsai — grow code with care</title>
-  <meta name="description" content="Bonsai is a provider-independent terminal coding agent that plans, edits, runs, verifies, remembers, coordinates, and recovers—with autonomy you control.">
+  <meta name="description" content="Bonsai is a provider-independent coding agent for your terminal and your editor. It plans, edits, runs, verifies, remembers, coordinates, and recovers—with autonomy you control.">
   <meta name="theme-color" content="#080d09">
   <meta property="og:title" content="Bonsai — grow code with care">
-  <meta property="og:description" content="A capable, careful terminal coding agent. Nineteen connections, one Rust binary, autonomy you control.">
+  <meta property="og:description" content="A capable, careful coding agent for the terminal and your editor. Twenty-three connections, one Rust binary, autonomy you control.">
   <meta property="og:type" content="website">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' shape-rendering='crispEdges'%3E%3Cpath fill='%2321301e' d='M4 4h24v24H4z'/%3E%3Cpath fill='%23a8d66d' d='M8 7h6v4H8zm10-2h6v6h-6zm-6 7h10v5H12z'/%3E%3Cpath fill='%23835d3c' d='M14 16h4v8h-4z'/%3E%3Cpath fill='%23d7a75f' d='M9 23h14v3H9z'/%3E%3C/svg%3E">
   <style>
@@ -759,6 +759,76 @@
     .bullet span:first-child { color: var(--leaf); }
     .bullet strong { color: var(--ink); }
 
+    .feature:nth-child(12) { grid-column: span 8; }
+
+    .editor-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+    .editor-copy {
+      padding: 28px;
+      background: var(--panel);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+    .editor-copy h3 { margin: 0 0 10px; font-size: 19px; letter-spacing: -.03em; }
+    .editor-copy > p { margin: 0; color: var(--muted); font-size: 12px; }
+    .new-badge {
+      display: inline-block;
+      margin-bottom: 18px;
+      padding: 3px 8px;
+      color: #1a1205;
+      background: var(--amber);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    .editor-list { list-style: none; margin: 20px 0 0; padding: 0; display: grid; gap: 11px; }
+    .editor-list li { position: relative; padding-left: 20px; color: var(--muted); font-size: 12px; }
+    .editor-list li::before { content: "▸"; position: absolute; left: 0; color: var(--leaf); }
+    .editor-list strong { color: var(--ink); }
+    .editor-clients { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 22px; }
+    .editor-clients span {
+      padding: 5px 9px;
+      color: var(--leaf-hi);
+      background: #080d09;
+      box-shadow: inset 0 0 0 1px var(--line-hi);
+      font-size: 10px;
+      letter-spacing: .06em;
+    }
+    .editor-clients span.soft { color: var(--dim); box-shadow: inset 0 0 0 1px var(--line); }
+    .editor-pane { display: flex; flex-direction: column; min-width: 0; }
+    .editor-code {
+      display: none;
+      position: relative;
+      flex: 1;
+      margin: 0;
+      padding: 26px 28px;
+      overflow-x: auto;
+      color: var(--muted);
+      background: #050806;
+      box-shadow: inset 0 0 0 1px var(--line-hi), 4px 4px 0 var(--shadow);
+      font-size: 12px;
+      line-height: 1.8;
+      white-space: pre;
+    }
+    .editor-code.active { display: block; }
+    .editor-code .c { color: var(--dim); }
+    .editor-code .k { color: var(--blue); }
+    .editor-code .s { color: var(--leaf-hi); }
+    .editor-code .ok { color: var(--leaf); }
+    .editor-code .ask { color: var(--amber); }
+    .editor-code .add { color: var(--leaf-hi); }
+    .editor-code .del { color: var(--red); }
+    .editor-code .you { color: var(--ink); }
+    .editor-code .copy { position: absolute; top: 10px; right: 10px; min-height: 31px; border: 1px solid var(--line); }
+    @media (max-width: 1000px) {
+      .editor-grid { grid-template-columns: 1fr; }
+      .feature:nth-child(12) { grid-column: span 4; }
+    }
+
     .example-tabs {
       display: flex;
       flex-wrap: wrap;
@@ -964,6 +1034,7 @@
       <nav class="nav-links" aria-label="Primary navigation">
         <a href="#workflow">Workflow</a>
         <a href="#features">Features</a>
+        <a href="#editors">Editors</a>
         <a href="#safety">Safety</a>
         <a href="#examples">Examples</a>
         <a href="#install">Install</a>
@@ -976,12 +1047,13 @@
   <main id="main">
     <section class="shell hero" id="top">
       <div class="hero-copy">
-        <p class="eyebrow">provider-independent terminal agent</p>
+        <p class="eyebrow">provider-independent coding agent · terminal + editor</p>
         <h1>Grow code.<span>With care.</span></h1>
         <p class="hero-lede">
           Bonsai is a local-first coding agent that can <strong>inspect, plan, edit, run,
           diagnose, verify, review, remember, and coordinate</strong>. Switch models without
-          losing the conversation, and choose how much runs without asking.
+          losing the conversation, choose how much runs without asking, and run it in your
+          terminal or right inside Zed and VS Code.
         </p>
 
         <div class="hero-actions">
@@ -999,6 +1071,7 @@
           <span>macOS + Linux</span>
           <span>23 connections</span>
           <span>18 themes</span>
+          <span>Zed + VS Code</span>
         </div>
       </div>
 
@@ -1019,7 +1092,7 @@
       <div class="shell signals">
         <div class="signal"><strong>5 levels</strong><span>one autonomy ladder</span></div>
         <div class="signal"><strong>3 phases</strong><span>plan · code · review</span></div>
-        <div class="signal"><strong>3 surfaces</strong><span>TUI · headless/CI · local server API</span></div>
+        <div class="signal"><strong>4 surfaces</strong><span>TUI · headless/CI · server API · editors</span></div>
         <div class="signal"><strong>1 session</strong><span>switch models without starting over</span></div>
       </div>
     </section>
@@ -1179,7 +1252,7 @@
           <span class="feature-icon" aria-hidden="true">▟▙</span>
           <span class="branch-no">BRANCH 01</span>
           <h3>Inspect → edit → run → verify</h3>
-          <p>Read, grep, glob, Rust symbols, rust-analyzer navigation, atomic patches, shell commands, Git inspection, web fetch, image input for compatible models, background jobs, and todos—batched when their access paths do not conflict.</p>
+          <p>Read, grep, glob, tree-sitter symbols for Rust, TypeScript/JavaScript, Python, and Go, managed language servers for navigation and diagnostics, atomic patches, shell commands, Git inspection, web fetch, image input for compatible models, background jobs, and todos—batched when their access paths do not conflict.</p>
           <div class="tags"><span>atomic edits</span><span>LSP</span><span>background tasks</span><span>verification</span></div>
         </article>
 
@@ -1261,6 +1334,96 @@
           <p><code>bonsai serve</code> exposes one workspace over loopback HTTP and Server-Sent Events: sessions, streamed events, approvals, artifacts, and durable goals—behind short-lived scoped tokens, exact Host/Origin policy, and bounded admission. It is experimental, documented end to end, and enforces the same workspace trust and sandbox policy as the TUI.</p>
           <div class="tags"><span>experimental-v0</span><span>SSE</span><span>scoped tokens</span><span>goal control</span></div>
         </article>
+        <article class="feature reveal">
+          <span class="feature-icon" aria-hidden="true">{}⟩</span>
+          <span class="branch-no">BRANCH 12</span>
+          <h3>Inside your editor (preview)</h3>
+          <p><code>bonsai acp</code> speaks the Agent Client Protocol, so Zed and VS Code run real bonsai threads: streamed replies and reasoning, tool cards, diffs you can review, permission prompts, cancel, thread history, and model and autonomy pickers. Same engine, same sandbox—authority never leaves bonsai.</p>
+          <div class="tags"><span>ACP v1</span><span>Zed</span><span>VS Code</span><span>thread history</span><span>capped autonomy</span></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="shell content" id="editors">
+      <div class="section-head reveal">
+        <p class="eyebrow">bring it to your editor</p>
+        <h2>Same agent. Your editor's panel.</h2>
+        <p>Editors that speak the Agent Client Protocol spawn <code>bonsai acp</code> and drive the exact engine the TUI runs—no second agent, no weaker rules.</p>
+      </div>
+
+      <div class="editor-grid">
+        <div class="editor-copy reveal">
+          <span class="new-badge">preview · on master · ships with 0.6</span>
+          <h3>Everything a thread needs, nothing it shouldn't have.</h3>
+          <p>Your providers, models, sandbox, and budgets come from bonsai's own configuration. The editor renders the work and carries your decisions.</p>
+          <ul class="editor-list">
+            <li><strong>Streams the work</strong> — replies, reasoning, todo plans, and tool cards with real diffs.</li>
+            <li><strong>Asks before acting</strong> — permission prompts in the editor: allow once, for the session, or reject. Unknown answers deny.</li>
+            <li><strong>Pick model and autonomy</strong> — every model of every authorized connection; autonomy never above the level you saved in bonsai.</li>
+            <li><strong>Picks up where you left off</strong> — thread history from bonsai's sessions, reloadable after a restart.</li>
+            <li><strong>Stops cleanly</strong> — cancel kills running commands and says so in the thread.</li>
+          </ul>
+          <div class="editor-clients" aria-label="Tested editors">
+            <span>Zed · native</span><span>VS Code · ACP Client extension</span><span class="soft">any ACP v1 client</span>
+          </div>
+        </div>
+
+        <div class="editor-pane reveal">
+          <div class="example-tabs" role="tablist" aria-label="Editor setup">
+            <button class="tab" role="tab" aria-selected="true" aria-controls="editor-thread" id="editor-tab-thread" data-editor="editor-thread">a thread</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="editor-zed" id="editor-tab-zed" data-editor="editor-zed" tabindex="-1">zed</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="editor-vscode" id="editor-tab-vscode" data-editor="editor-vscode" tabindex="-1">vs code</button>
+          </div>
+
+          <pre class="editor-code active" id="editor-thread" role="tabpanel" aria-labelledby="editor-tab-thread"><span class="c">bonsai · deepseek/deepseek-flash · autonomy: ask</span>
+
+<span class="you">› change the greeting in main.rs, then run ls</span>
+
+<span class="c">◆ thinking  find the greeting, edit it, list the dir</span>
+<span class="k">▸ read</span>  main.rs                                   <span class="ok">✓</span>
+<span class="k">▸ edit</span>  main.rs  <span class="ask">⏸ allow once · always · reject</span>
+     <span class="del">-     println!("hello");</span>
+     <span class="add">+     println!("hi from bonsai");</span>          <span class="ok">✓</span>
+<span class="k">▸ bash</span>  ls                                        <span class="ok">✓</span>
+     README.md  main.rs
+
+Updated the greeting in main.rs and listed the files.
+
+<span class="you">› run sleep 30 then summarize</span>
+<span class="k">▸ bash</span>  sleep 30                                  <span class="del">✕ interrupted</span>
+<span class="c">Stopped.</span></pre>
+
+          <pre class="editor-code" id="editor-zed" role="tabpanel" aria-labelledby="editor-tab-zed" hidden><button class="copy" type="button" data-copy='"agent_servers": { "bonsai": { "type": "custom", "command": "bonsai", "args": ["acp"], "env": {} } }'>copy</button><span class="c">// ~/.config/zed/settings.json</span>
+{
+  <span class="k">"agent_servers"</span>: {
+    <span class="k">"bonsai"</span>: {
+      <span class="k">"type"</span>: <span class="s">"custom"</span>,
+      <span class="k">"command"</span>: <span class="s">"bonsai"</span>,
+      <span class="k">"args"</span>: [<span class="s">"acp"</span>],
+      <span class="k">"env"</span>: {}
+    }
+  }
+}
+
+<span class="c">// Agent Panel → + → bonsai. Model and autonomy pickers
+// appear in the thread toolbar; past threads in history.</span></pre>
+
+          <pre class="editor-code" id="editor-vscode" role="tabpanel" aria-labelledby="editor-tab-vscode" hidden><button class="copy" type="button" data-copy="code --install-extension formulahendry.acp-client">copy</button><span class="c"># the community ACP Client extension</span>
+<span class="you">$ code --install-extension formulahendry.acp-client</span>
+
+<span class="c">// settings.json</span>
+{
+  <span class="k">"acp.agents"</span>: {
+    <span class="k">"bonsai"</span>: {
+      <span class="k">"command"</span>: <span class="s">"bonsai"</span>,
+      <span class="k">"args"</span>: [<span class="s">"acp"</span>],
+      <span class="k">"env"</span>: {}
+    }
+  }
+}
+
+<span class="c">// ACP view → bonsai. Escape cancels a running turn.</span></pre>
+        </div>
       </div>
     </section>
 
@@ -1335,7 +1498,7 @@
       <div class="section-head reveal">
         <p class="eyebrow">use it your way</p>
         <h2>Interactive when you want it. Scriptable when you need it.</h2>
-        <p>The TUI and headless mode share the same agent, persistence, permissions, budgets, and verification semantics.</p>
+        <p>The TUI, headless mode, and editor threads share the same agent, persistence, permissions, budgets, and verification semantics.</p>
       </div>
 
       <div class="example-tabs reveal" role="tablist" aria-label="Usage examples">
@@ -1406,11 +1569,15 @@
           <span class="provider">Z.AI Coding Plan</span>
           <span class="provider">Moonshot AI API</span>
           <span class="provider">Kimi Coding Plan</span>
-          <span class="provider">MiMo API</span>
-          <span class="provider">MiMo Coding Plan</span>
+          <span class="provider">Xiaomi MiMo API</span>
+          <span class="provider">Xiaomi MiMo Coding Plan</span>
           <span class="provider">DeepSeek API</span>
           <span class="provider">Qwen Cloud API</span>
           <span class="provider">Qwen Cloud Token Plan</span>
+          <span class="provider">Google Gemini</span>
+          <span class="provider">xAI Grok</span>
+          <span class="provider">Mistral AI</span>
+          <span class="provider">Tencent Hunyuan</span>
           <span class="provider">OpenRouter</span>
           <span class="provider custom">OpenAI-compatible</span>
           <span class="provider custom">Anthropic-compatible</span>
@@ -1509,6 +1676,7 @@
 
       setupTabs("[data-tui]", ".tui-panel", "data-tui");
       setupTabs("[data-example]", ".example-code", "data-example");
+      setupTabs("[data-editor]", ".editor-code", "data-editor");
 
       if ("IntersectionObserver" in window && !reducedMotion) {
         const observer = new IntersectionObserver((entries) => {

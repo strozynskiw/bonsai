@@ -39,6 +39,16 @@ Unlock the OS credential store and restart Bonsai. Native credential reads stop
 waiting after 10 seconds; a timed-out read leaves the stored credential reference
 intact. Check the Bonsai log for credential-store errors if the problem persists.
 
+**An editor can't start or reload a bonsai thread (ACP).** The editor's ACP log
+has the traffic (`dev: open acp logs` in Zed, `ACP: Show Protocol Traffic` in
+VS Code), and bonsai writes its own session log for every `bonsai acp`
+process. `-32602 … not a trusted bonsai workspace` means the editor sent a
+folder other than the one it launched bonsai in; trust that folder once in the
+TUI. `-32602 … client-supplied MCP servers` means the editor forwarded its own
+MCP servers; configure them in bonsai instead. Reopening a thread right after
+the editor was killed can take up to ~20 s while the dead process's claim
+expires. See [Agent Client Protocol](acp.md).
+
 **Config edits don't apply.** Run `/config validate` — it re-parses both
 layers from disk and prints diagnostics naming the entry and field. One
 malformed entry never hides healthy ones. Most config changes take effect on
@@ -92,6 +102,11 @@ Manual backup/rollback procedure: [Compatibility](compatibility.md).
 ## Support checklist
 
 1. `bonsai doctor --json` (redacted, machine-readable).
+1. `bonsai bug --description "<what happened>"` (or `/bug` in the TUI) builds
+   a local support bundle under `$BONSAI_HOME/support/`. Nothing is sent;
+   every section is redacted and reviewable, and raw prompts, code and
+   credentials are never included. `--include-log` adds a short, redacted
+   session-log tail.
 2. `/config validate` output if config-related.
 3. The `$BONSAI_HOME/logs/` file covering the session.
 4. For provider issues: provider id, model, and whether `--online` doctor

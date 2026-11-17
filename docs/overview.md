@@ -29,7 +29,7 @@ entry, not a code change. See [Providers](providers.md).
 | Trust | Secrets never enter SQLite; credentials live in a protected file, the OS credential store, or session memory — your choice. Effectful actions are authorized before their first side effect. Sandboxes fail safely and explain their posture. |
 | Correctness | Release-gating agent evals and a completion report that states what was and was not verified, derived from bonsai's own ledgers rather than the model's recollection. |
 | Breadth | First-class Rust, TypeScript/JavaScript, Python, and Go workflows, with graceful grep/bash fallback for everything else. |
-| Surfaces | The TUI and headless/CI mode share permissions, budgets, persistence, cancellation, recovery, and completion semantics. |
+| Surfaces | The TUI, headless/CI mode, the local server, and editor clients over ACP share permissions, budgets, persistence, cancellation, recovery, and completion semantics. |
 | Extensibility | Trusted skills, custom agents, hooks, and MCP over stdio/HTTP — including authenticated remote MCP. |
 | Operations | Reproducible signed releases, documented upgrades, diagnostics, and tested recovery from interruption and provider failure. |
 
@@ -90,6 +90,15 @@ admission. It drives the same engine, workspace trust, sandbox, budgets, and
 persistence as the TUI — there is no privileged server-only path — and every
 response carries an `experimental-v0` marker. See [Server preview](server.md)
 and [Server changelog](server-changelog.md).
+
+**Editors (preview).** `bonsai acp` runs bonsai as an
+[Agent Client Protocol](https://agentclientprotocol.com) agent, so editors
+that speak ACP — Zed natively, VS Code through the ACP Client extension — drive
+the same engine over stdio: streamed replies and reasoning, tool cards with
+diffs, permission prompts, cancel, thread history, and model and autonomy
+selectors. Authority stays in bonsai: threads start at `ask`, the editor can
+raise autonomy only up to the level the operator saved, and client-supplied MCP
+servers are refused. See [Agent Client Protocol](acp.md).
 
 **Extensibility.** Layered `.bonsai/config.toml`, MCP servers (stdio +
 Streamable HTTP + OAuth), lifecycle hooks (shell/HTTP/LLM-judge actions),

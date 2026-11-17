@@ -45,7 +45,7 @@ const BASH: &str = r#"_bonsai() {
   esac
 
   if (( COMP_CWORD == 1 )); then
-    COMPREPLY=( $(compgen -W "eval model-catalog doctor update recovery completions -h --help -V --version -c --continue -p --print --isolation --reduced-motion --screen-reader" -- "$cur") )
+    COMPREPLY=( $(compgen -W "eval model-catalog doctor update recovery completions serve acp bug -h --help -V --version -c --continue -p --print --isolation --reduced-motion --screen-reader" -- "$cur") )
     return
   fi
 
@@ -105,6 +105,9 @@ _bonsai() {
       'update:install the newest signed release'
       'recovery:manage recovery worktrees'
       'completions:generate a shell completion script'
+      'serve:run the local HTTP + SSE server (preview)'
+      'acp:run as an Agent Client Protocol agent for editors'
+      'bug:build a local support bundle'
       '-h:show help'
       '--help:show help'
       '-V:show version'
@@ -142,6 +145,9 @@ complete -c bonsai -n __fish_bonsai_needs_command -a doctor -d 'Run release diag
 complete -c bonsai -n __fish_bonsai_needs_command -a update -d 'Install the newest signed release'
 complete -c bonsai -n __fish_bonsai_needs_command -a recovery -d 'Manage recovery worktrees'
 complete -c bonsai -n __fish_bonsai_needs_command -a completions -d 'Generate a shell completion script'
+complete -c bonsai -n __fish_bonsai_needs_command -a serve -d 'Run the local HTTP + SSE server (preview)'
+complete -c bonsai -n __fish_bonsai_needs_command -a acp -d 'Run as an Agent Client Protocol agent for editors'
+complete -c bonsai -n __fish_bonsai_needs_command -a bug -d 'Build a local support bundle'
 complete -c bonsai -s h -l help -d 'Show help'
 complete -c bonsai -s V -l version -d 'Show version'
 complete -c bonsai -s c -l continue -d 'Resume the latest or selected session'
@@ -179,6 +185,9 @@ mod tests {
                 "update",
                 "recovery",
                 "completions",
+                "serve",
+                "acp",
+                "bug",
             ] {
                 assert!(script.contains(token), "{shell:?} omits {token}");
             }

@@ -15,8 +15,9 @@ headless command.
 - **Durable goals** — `/goal <objective>` records an objective and its lifecycle
   in SQLite, so long runs can be paused, resumed, replaced, or cleared, and
   completion needs evidence from the run.
-- **Broad model support** — OpenAI, Codex, Anthropic, OpenCode, MiniMax, Z.AI,
-  Moonshot/Kimi, OpenRouter, and compatible endpoints.
+- **Broad model support** — OpenAI, Codex, Anthropic, Google Gemini, DeepSeek,
+  xAI, Mistral, OpenCode, MiniMax, Z.AI, Moonshot/Kimi, Qwen, MiMo, Tencent,
+  OpenRouter, and compatible endpoints.
 - **Real coding tools** — structured file edits, shell and PTY execution, Git,
   diagnostics, web access, todos, plans, and background tasks.
 - **Language intelligence** — built-in symbol search for Rust, TypeScript,
@@ -30,6 +31,9 @@ headless command.
 - **Local server API (preview)** — `bonsai serve` exposes the same engine over
   authenticated loopback HTTP + Server-Sent Events for custom UIs, with scoped
   tokens, approvals, artifacts, and live goal state.
+- **Editor integration (preview)** — `bonsai acp` speaks the Agent Client
+  Protocol, so Zed (and VS Code via the ACP Client extension) can run bonsai
+  threads with diffs, permission prompts, history, and model/autonomy pickers.
 
 ## Install
 
@@ -126,6 +130,7 @@ Full guides and reference documentation are at
 - [Tools and language intelligence](https://docs.bonsaicode.ai/tools.html)
 - [Safety and permissions](https://docs.bonsaicode.ai/security.html)
 - [Headless mode](https://docs.bonsaicode.ai/headless.html)
+- [Editors (ACP)](https://docs.bonsaicode.ai/acp.html)
 - [Development](https://docs.bonsaicode.ai/development.html)
 
 The documentation source also lives in [`docs/`](docs/README.md).
