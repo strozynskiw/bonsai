@@ -271,6 +271,39 @@ fn command_help_renders_command_board_with_provider_manager() {
 }
 
 #[test]
+fn command_help_lists_custom_commands_and_skipped_files() {
+    let root = tempfile::TempDir::new().unwrap();
+    let home = tempfile::TempDir::new().unwrap();
+    let commands = root.path().join(".bonsai/commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("review-pr.md"),
+        "---\ndescription: Review a pull request\nargument-hint: <number>\n---\nReview $ARGUMENTS",
+    )
+    .unwrap();
+    std::fs::write(commands.join("help.md"), "shadow").unwrap();
+    let registry = crate::resource::command::CommandRegistry::load_from(
+        root.path(),
+        home.path(),
+        true,
+        crate::commands::is_builtin_command,
+    );
+
+    let rows = command_help_rows(&registry);
+    assert!(rows.iter().any(|row| row.label == "/review-pr <number>"
+        && row.description == "Review a pull request (custom)"));
+    assert!(
+        rows.iter()
+            .any(|row| row.label == "! help.md" && row.description.contains("built-in /help"))
+    );
+    // Built-ins keep their place ahead of custom rows.
+    assert_eq!(
+        rows[0].label,
+        command_help_label(&crate::commands::COMMANDS[0])
+    );
+}
+
+#[test]
 fn picker_selection_is_arrow_only_without_row_highlight() {
     // Selection is signalled by the `> ` marker alone; the label carries no
     // reversed-row highlight and its style is identical whether selected or not.

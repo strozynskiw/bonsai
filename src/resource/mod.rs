@@ -1,11 +1,12 @@
-//! Shared substrate for project and global on-disk resources: skills and
-//! custom subagents. It owns discovery, [`frontmatter`] parsing, activation,
+//! Shared substrate for project and global on-disk resources: skills,
+//! custom subagents and custom slash commands. It owns discovery, [`frontmatter`] parsing, activation,
 //! atomic repository updates, and the byte-stable [`render_index_section`]
 //! used in the cacheable prompt prefix.
 
 pub(crate) mod activation;
 pub(crate) mod agent;
 pub(crate) mod builtin;
+pub(crate) mod command;
 pub(crate) mod discovery;
 #[cfg(test)]
 mod drift_tests;

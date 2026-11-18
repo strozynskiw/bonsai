@@ -140,6 +140,44 @@ their explicit approval requirements.
 | `/init` | — | generate a starter `AGENTS.md` (won't overwrite) | yes |
 | `/lsp` | `restart <path>` | restart the language server that owns `<path>` ([Language intelligence](language-intelligence.md)) | yes |
 
+## Custom commands
+
+A markdown file becomes a reusable prompt: `.bonsai/commands/review-pr.md`
+is `/review-pr`. Running it submits the file's body as an ordinary user turn,
+so it goes through the normal model, budget and permission path.
+
+```markdown
+---
+description: Review a pull request
+argument-hint: <pr-number>
+---
+Review pull request $ARGUMENTS. Check correctness first, then tests.
+```
+
+- **Where.** `<project>/.bonsai/commands/`, `.claude/commands/`,
+  `.agents/commands/`, then `$BONSAI_HOME/commands/` (global). A project
+  command shadows a global one of the same name; a `.disabled` file in any of
+  these directories suppresses names, as for other
+  [resources](configuration.md#resource-directories).
+- **Names** come from the file name: lowercase letters, digits, `-` and `_`.
+  A name that a built-in uses (including aliases and one-letter model
+  shortcuts) is rejected rather than overriding it.
+- **Frontmatter** is optional. `description` shows in `/help` and the `/`
+  popup (default: the first body line); `argument-hint` shows next to the name.
+  `allowed-tools` and `model` are recognized and rejected: bonsai cannot scope
+  tools or the model to a single prompt.
+- **Arguments.** Every `$ARGUMENTS` is replaced by the text after the command
+  name. A body without the placeholder gets the arguments appended as an
+  `Arguments:` paragraph. A body is sent as written (no shell or file
+  interpolation), and one that expands to another slash command is refused.
+- **Trust.** Project commands are inert until the workspace is trusted, like
+  project skills and hooks; global commands always load.
+- **Surfaces.** In the TUI they appear in `/help` (marked `(custom)`, with any
+  skipped files and the reason) and in the `/` popup; files are re-read on
+  every slash submit, so edits apply without a restart. A custom command runs
+  only while the agent is idle. `bonsai -p "/review-pr 42"` runs one headless,
+  and [ACP](acp.md) editors receive them as `available_commands_update`.
+
 ## Appearance
 
 | Command | Arguments | Does | Headless |
@@ -159,7 +197,8 @@ open a **busy-command** modal offering queue / open read-only / cancel run /
 dismiss. Plain text typed mid-run queues as the next user message
 (withdrawable with `Up` on an empty composer).
 
-Command names match case-insensitively; `/subtasks` is the one legacy alias.
+Built-in command names match case-insensitively; custom command names are
+lowercase. `/subtasks` is the one legacy alias.
 The single-source registry for all of this is
 `src/commands/metadata.rs`; shared TUI/headless handlers live in
 `src/commands/handlers/common.rs`.

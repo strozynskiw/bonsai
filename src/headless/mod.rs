@@ -500,6 +500,20 @@ async fn run_inner_with_provider_runtime(
         workspace_trust.state(),
         crate::workspace_trust::WorkspaceTrust::Trusted
     );
+    // `bonsai -p "/<name> args"` runs a custom command: the prompt becomes the
+    // command's expanded body. Project commands load only in a trusted
+    // workspace, like every other project-authored instruction.
+    let prompt =
+        match crate::resource::command::CommandRegistry::load(&project_root, workspace_trusted)
+            .resolve(&prompt)
+        {
+            Ok(Some(expansion)) => {
+                tracing::debug!(command = %expansion.name, "expanded custom command");
+                expansion.prompt
+            }
+            Ok(None) => prompt,
+            Err(err) => return Err(HeadlessError::Runtime(anyhow::anyhow!("{err}"))),
+        };
     let provider_runtime = match provider_runtime {
         Some(runtime) => runtime,
         None => {

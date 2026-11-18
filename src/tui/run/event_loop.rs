@@ -2783,6 +2783,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         permissions,
         domain_permissions,
         peer_bus,
+        commands,
         project_root,
         session_project_root,
         recovery_id,
@@ -2885,6 +2886,7 @@ pub(super) async fn run(runtime: TuiRuntime) -> Result<()> {
         // and a running turn holds the agent lock for its entire duration, so
         // their rows build from these instead of locking the agent.
         app.skills = agent.skills_handle();
+        app.custom_commands = commands;
         app.builtin_subagents = agent.builtin_subagent_settings_handle();
         app
     };

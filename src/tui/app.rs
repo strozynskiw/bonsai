@@ -213,6 +213,9 @@ pub struct AppState {
     /// Shared skill registry handle, so `/skills` can snapshot rows without the
     /// agent lock — a running turn holds that lock for its entire duration.
     pub(crate) skills: crate::resource::skill::SharedSkillRegistry,
+    /// Custom slash commands (`.bonsai/commands/*.md`). Re-scanned on every
+    /// slash submit and `/help`, so edited files apply without a restart.
+    pub(crate) custom_commands: crate::resource::command::SharedCommandRegistry,
     /// Shared built-in subagent settings, so `/agents` browser rows build
     /// without the agent lock (same hot-swap handle the resolver reads).
     pub(crate) builtin_subagents: crate::subagent::SharedBuiltinSubagentSettings,
@@ -451,6 +454,7 @@ impl AppState {
             skills: crate::resource::skill::shared_registry(
                 crate::resource::skill::SkillRegistry::empty(),
             ),
+            custom_commands: crate::resource::command::SharedCommandRegistry::empty(),
             builtin_subagents: crate::subagent::SharedBuiltinSubagentSettings::default(),
             loaded_skills: std::collections::BTreeSet::new(),
             skills_index_refresh_pending: false,

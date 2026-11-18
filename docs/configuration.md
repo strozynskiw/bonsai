@@ -175,7 +175,9 @@ conventional directories, highest precedence first:
 4. `$BONSAI_HOME/<kind>/` (global)
 
 where `<kind>` is `agents/` (flat `<name>.md` — [custom agents](agents.md)),
-`skills/` (`<name>/SKILL.md` — [skills](skills.md)), `themes/` (flat
+`skills/` (`<name>/SKILL.md` — [skills](skills.md)), `commands/` (flat
+`<name>.md` — [custom slash commands](slash-commands.md#custom-commands)),
+`themes/` (flat
 `<name>.toml` — [theming](theming.md)), and `memory/`
 ([memory](memory.md), `.bonsai` + `$BONSAI_HOME` only). A project resource
 shadows a global (and built-in) one of the same name; within a project,

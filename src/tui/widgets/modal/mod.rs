@@ -139,7 +139,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         }
         ModalKind::Detail(crate::tui::event::DetailModal::Help) => render_help(f, modal, app),
         ModalKind::Detail(crate::tui::event::DetailModal::CommandHelp) => {
-            render_command_help(f, modal)
+            render_command_help(f, modal, app)
         }
         ModalKind::Detail(crate::tui::event::DetailModal::Context(report)) => {
             render_context(f, modal, app, report)

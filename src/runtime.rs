@@ -168,6 +168,8 @@ pub(crate) struct RuntimeCore {
     pub(crate) peer_bus: Arc<crate::peer::PeerBus>,
     pub(crate) hooks: Arc<crate::hooks::HookEngine>,
     pub(crate) run_budget: RunBudget,
+    /// Custom slash commands, loaded within the workspace trust boundary.
+    pub(crate) commands: crate::resource::command::SharedCommandRegistry,
 }
 
 /// Builds the surface-neutral runtime services and applies the explicit surface
@@ -288,6 +290,8 @@ impl RuntimeBuilder {
 
         let skills = load_skills(&project_root, workspace_trusted);
         let custom_agents = load_custom_agents(&project_root, workspace_trusted);
+        let commands =
+            crate::resource::command::SharedCommandRegistry::load(&project_root, workspace_trusted);
         let memory = Arc::new(crate::memory::MemoryService::load(
             storage.home_dir(),
             &project_root,
@@ -537,6 +541,7 @@ impl RuntimeBuilder {
             peer_bus,
             hooks,
             run_budget,
+            commands,
         })
     }
 }

@@ -971,6 +971,22 @@ impl TuiLoop {
         if input.is_empty() {
             return Ok(Some(Flow::Continue));
         }
+        // A custom command (`.bonsai/commands/<name>.md`) becomes an ordinary
+        // prompt before routing, so it shares the budget gate, vision gate
+        // and run start of a typed prompt. Busy states keep the existing
+        // slash-command handling (blocked as a follow-up).
+        let (submission, input) = if matches!(self.app.task_state, TaskState::Idle) {
+            match resolve_custom_command_submit(&mut self.app, &submission, &input) {
+                CustomCommandSubmit::NotCustom => (submission, input),
+                CustomCommandSubmit::Rejected => return Ok(Some(Flow::Continue)),
+                CustomCommandSubmit::Run {
+                    submission,
+                    routing_input,
+                } => (submission, routing_input),
+            }
+        } else {
+            (submission, input)
+        };
         if matches!(self.app.task_state, TaskState::Idle)
             && submitted_input_dispatches_model_work(&input)
             && open_budget_warning_if_reached(

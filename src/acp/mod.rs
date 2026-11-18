@@ -61,17 +61,23 @@ pub(crate) async fn run() -> Result<()> {
         .on_receive_request(
             {
                 let sessions = sessions.clone();
-                async move |request: NewSessionRequest, responder, _cx| {
+                async move |request: NewSessionRequest, responder, cx| {
                     let sessions = sessions.clone();
                     tokio::spawn(async move {
-                        let created = sessions
-                            .create(&request.cwd, &request.mcp_servers)
-                            .await
-                            .map(|handle| {
-                                NewSessionResponse::new(handle.acp_id.clone())
-                                    .config_options(config_options(&handle))
-                            });
-                        let _ = responder.respond_with_result(created);
+                        match sessions.create(&request.cwd, &request.mcp_servers).await {
+                            Ok(handle) => {
+                                let response = NewSessionResponse::new(handle.acp_id.clone())
+                                    .config_options(config_options(&handle));
+                                // The client learns the session id from the
+                                // response, so the command list follows it.
+                                if responder.respond_with_result(Ok(response)).is_ok() {
+                                    turn::announce_commands(&cx, &handle);
+                                }
+                            }
+                            Err(error) => {
+                                let _ = responder.respond_with_result(Err(error));
+                            }
+                        }
                     });
                     Ok(())
                 }
@@ -103,10 +109,22 @@ pub(crate) async fn run() -> Result<()> {
                                     update,
                                 ))?;
                             }
-                            Ok(LoadSessionResponse::new().config_options(config_options(&handle)))
+                            Ok((
+                                LoadSessionResponse::new().config_options(config_options(&handle)),
+                                handle,
+                            ))
                         }
                         .await;
-                        let _ = responder.respond_with_result(loaded);
+                        match loaded {
+                            Ok((response, handle)) => {
+                                if responder.respond_with_result(Ok(response)).is_ok() {
+                                    turn::announce_commands(&cx, &handle);
+                                }
+                            }
+                            Err(error) => {
+                                let _ = responder.respond_with_result(Err(error));
+                            }
+                        }
                     });
                     Ok(())
                 }
@@ -122,6 +140,7 @@ pub(crate) async fn run() -> Result<()> {
                         let result = async {
                             let text = turn::prompt_text(&request.prompt)?;
                             let handle = sessions.handle(&request.session_id).await?;
+                            let text = turn::expand_custom_command(&handle, text)?;
                             turn::run(handle, cx, text).await
                         }
                         .await;

@@ -19,6 +19,7 @@ use agent_client_protocol::v1::schema::{McpServer, SessionId as AcpSessionId};
 use agent_client_protocol::{Error, ErrorCode};
 use tokio::sync::Mutex;
 
+use crate::resource::command::CommandRegistry;
 use crate::server::controller::{ClaimError, Controller};
 use crate::storage::{SessionId, SessionRunSelection, Storage};
 use crate::tool::ApprovalLevel;
@@ -50,6 +51,9 @@ pub(crate) struct Handle {
     /// Highest level the client may select: the level the operator saved in
     /// the TUI. Yolo is reachable only when the operator already chose it.
     pub(crate) autonomy_ceiling: ApprovalLevel,
+    /// Custom slash commands for this workspace, loaded within its trust
+    /// boundary and advertised as `available_commands_update`.
+    pub(crate) commands: Arc<CommandRegistry>,
 }
 
 /// One authorized connection and the models it offers.
@@ -155,6 +159,12 @@ impl Sessions {
             .map_err(internal)?;
         let models = model_groups(&factory);
         let autonomy = factory.autonomy.clone();
+        // Project commands are repository-authored prompts: inert until the
+        // workspace is trusted, the same rule the runtime applies to skills.
+        let commands = Arc::new(CommandRegistry::load(
+            root,
+            matches!(factory.trust.state(), WorkspaceTrust::Trusted),
+        ));
         let saved = self
             .storage
             .approval_level()
@@ -169,6 +179,7 @@ impl Sessions {
             models,
             autonomy,
             autonomy_ceiling: saved,
+            commands,
         })
     }
 
@@ -185,6 +196,7 @@ impl Sessions {
             models,
             autonomy,
             autonomy_ceiling,
+            commands,
         } = prepared;
         // An owner that died without draining (an editor killed on quit)
         // leaves a fresh heartbeat; the session becomes claimable once it
@@ -222,6 +234,7 @@ impl Sessions {
             selection: Arc::new(std::sync::Mutex::new(selection)),
             autonomy,
             autonomy_ceiling,
+            commands,
         };
         let mut loaded = self.loaded.lock().await;
         loaded.push(handle.clone());
@@ -423,6 +436,7 @@ struct Prepared {
     models: Vec<ModelGroup>,
     autonomy: crate::yolo::YoloMode,
     autonomy_ceiling: ApprovalLevel,
+    commands: Arc<CommandRegistry>,
 }
 
 /// Separates connection id and model id in a config value; model ids may

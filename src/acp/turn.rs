@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    ContentBlock, ContentChunk, EmbeddedResourceResource, PromptResponse, RequestPermissionRequest,
-    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, ContentBlock, ContentChunk,
+    EmbeddedResourceResource, PromptResponse, RequestPermissionRequest, SessionNotification,
+    SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
 };
 use agent_client_protocol::{Client, Error, ErrorCode};
 use tokio::sync::broadcast::error::RecvError;
@@ -19,6 +20,51 @@ use crate::interaction::InteractionRequest;
 use crate::server::sink::SessionEvent;
 
 type Connection = ConnectionTo<Client>;
+
+/// Rewrite a prompt that invokes a custom command (`/<name> args`) into the
+/// command's expanded body. Anything else passes through unchanged; bonsai's
+/// built-in slash commands are not offered over ACP.
+pub(crate) fn expand_custom_command(handle: &Handle, text: String) -> Result<String, Error> {
+    match handle.commands.resolve(&text) {
+        Ok(Some(expansion)) => Ok(expansion.prompt),
+        Ok(None) => Ok(text),
+        Err(error) => Err(invalid(&error.to_string())),
+    }
+}
+
+/// The workspace's custom commands as an `available_commands_update`, or
+/// `None` when there are none to offer.
+pub(crate) fn available_commands(handle: &Handle) -> Option<SessionUpdate> {
+    if handle.commands.is_empty() {
+        return None;
+    }
+    let commands = handle
+        .commands
+        .iter()
+        .map(|def| {
+            let command = AvailableCommand::new(def.name.clone(), def.description.clone());
+            match &def.argument_hint {
+                Some(hint) => command.input(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new(hint.clone()),
+                )),
+                None => command,
+            }
+        })
+        .collect();
+    Some(SessionUpdate::AvailableCommandsUpdate(
+        AvailableCommandsUpdate::new(commands),
+    ))
+}
+
+/// Send the command list after `session/new` or `session/load` responded.
+/// A failed send only costs the editor its command menu, so it is logged.
+pub(crate) fn announce_commands(connection: &Connection, handle: &Handle) {
+    if let Some(update) = available_commands(handle)
+        && let Err(error) = notify(connection, handle, update)
+    {
+        tracing::debug!(%error, "failed to announce ACP custom commands");
+    }
+}
 
 /// Flatten ACP prompt blocks into the user turn bonsai runs. Only text and
 /// embedded/linked context are advertised; anything else is refused.

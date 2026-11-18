@@ -2,7 +2,48 @@ use super::common::{ModalCaches, ModalLines, ModalScrollView};
 use super::picker_common::*;
 use super::*;
 
-pub(super) fn render_command_help(f: &mut Frame, area: Rect) {
+/// One row of the `/help` board: the label column and its description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HelpRow {
+    pub(super) label: String,
+    pub(super) description: String,
+}
+
+/// Built-in commands followed by the project's custom commands and any
+/// command files that were skipped (with the reason), so a clash with a
+/// built-in is visible where users look for commands.
+pub(super) fn command_help_rows(
+    custom: &crate::resource::command::CommandRegistry,
+) -> Vec<HelpRow> {
+    let mut rows: Vec<HelpRow> = crate::commands::COMMANDS
+        .iter()
+        .map(|command| HelpRow {
+            label: command_help_label(command),
+            description: command.description.to_string(),
+        })
+        .collect();
+    rows.extend(custom.iter().map(|def| HelpRow {
+        label: match &def.argument_hint {
+            Some(hint) => format!("{} {hint}", def.slash_name()),
+            None => def.slash_name(),
+        },
+        description: format!("{} (custom)", def.description),
+    }));
+    rows.extend(custom.diagnostics().iter().map(|diagnostic| HelpRow {
+        label: format!(
+            "! {}",
+            diagnostic
+                .path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+        ),
+        description: format!("skipped: {}", diagnostic.message),
+    }));
+    rows
+}
+
+pub(super) fn render_command_help(f: &mut Frame, area: Rect, app: &AppState) {
+    let rows = command_help_rows(&app.custom_commands.snapshot());
     let panel = theme::frame("Commands", true).style(theme::panel());
     let inner = panel.inner(area);
     f.render_widget(panel, area);
@@ -28,11 +69,8 @@ pub(super) fn render_command_help(f: &mut Frame, area: Rect) {
     const TWO_COLUMN_MIN_WIDTH: u16 = 110;
     if chunks[1].width < TWO_COLUMN_MIN_WIDTH {
         f.render_widget(
-            Paragraph::new(command_help_lines(
-                crate::commands::COMMANDS,
-                chunks[1].width as usize,
-            ))
-            .style(theme::panel()),
+            Paragraph::new(command_help_lines(&rows, chunks[1].width as usize))
+                .style(theme::panel()),
             chunks[1],
         );
     } else {
@@ -40,11 +78,8 @@ pub(super) fn render_command_help(f: &mut Frame, area: Rect) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[1]);
-        let split = crate::commands::COMMANDS.len().div_ceil(2);
-        for (area, commands) in [
-            (columns[0], &crate::commands::COMMANDS[..split]),
-            (columns[1], &crate::commands::COMMANDS[split..]),
-        ] {
+        let split = rows.len().div_ceil(2);
+        for (area, commands) in [(columns[0], &rows[..split]), (columns[1], &rows[split..])] {
             f.render_widget(
                 Paragraph::new(command_help_lines(commands, area.width as usize))
                     .style(theme::panel()),
@@ -65,16 +100,13 @@ pub(super) fn render_command_help(f: &mut Frame, area: Rect) {
     );
 }
 
-pub(super) fn command_help_lines(
-    commands: &[crate::commands::CommandMetadata],
-    width: usize,
-) -> Vec<Line<'static>> {
+pub(super) fn command_help_lines(commands: &[HelpRow], width: usize) -> Vec<Line<'static>> {
     // Fit the label column to the longest command usage so hints are not cut
     // while the description column has room to spare; cap it so descriptions
     // keep at least ~45% of the pane.
     let longest = commands
         .iter()
-        .map(|command| command_help_label(command).chars().count())
+        .map(|command| command.label.chars().count())
         .max()
         .unwrap_or(10);
     let label_cap = width.saturating_mul(55).saturating_div(100).max(10);
@@ -91,7 +123,7 @@ pub(super) fn command_help_lines(
     ]));
     for command in commands {
         let label = Span::styled(
-            pad_ascii(&command_help_label(command), label_width),
+            pad_ascii(&command.label, label_width),
             theme::body(theme::palette().text),
         );
         // A zero-width detail column (very narrow pane) keeps the single-line row:
@@ -102,7 +134,7 @@ pub(super) fn command_help_lines(
             continue;
         }
         let mut wrapped = wrapped_cell(
-            command.description,
+            &command.description,
             detail_width,
             label_width + gap_width,
             theme::dim(),

@@ -17,6 +17,7 @@ pub(crate) enum ResourceKind {
     Skills,
     Agents,
     Themes,
+    Commands,
 }
 
 impl ResourceKind {
@@ -25,6 +26,7 @@ impl ResourceKind {
             ResourceKind::Skills => "skills",
             ResourceKind::Agents => "agents",
             ResourceKind::Themes => "themes",
+            ResourceKind::Commands => "commands",
         }
     }
 }
@@ -248,8 +250,8 @@ fn enumerate_root(root: &Path, kind: ResourceKind) -> Vec<(String, PathBuf)> {
                     out.push((file_name, manifest));
                 }
             }
-            ResourceKind::Agents => {
-                // A subagent is a flat <name>.md file.
+            ResourceKind::Agents | ResourceKind::Commands => {
+                // A subagent or custom command is a flat <name>.md file.
                 let path = entry.path();
                 if path.is_file()
                     && let Some(stem) = file_name.strip_suffix(".md")

@@ -51,7 +51,7 @@ pub(crate) use memory::{
 pub use metadata::complete_command;
 pub(crate) use metadata::{
     BusyCommandBehavior, COMMANDS, CommandMetadata, busy_behavior_for, command_completion_preview,
-    command_description, command_usage_hint,
+    command_description, command_usage_hint, is_builtin_command,
 };
 pub(crate) use model_switch::{
     apply_model_selection, context_window_downgrade_warning, rebuild_agent_provider,

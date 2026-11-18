@@ -1340,6 +1340,64 @@ fn todo_markdown(todos: &[crate::todo::TodoItem]) -> String {
     markdown
 }
 
+/// Outcome of matching a composer submit against the custom slash commands.
+#[derive(Debug)]
+pub(in crate::tui::run) enum CustomCommandSubmit {
+    /// Not a custom command; route the submit as usual.
+    NotCustom,
+    /// A custom command that cannot run; the error is already in the
+    /// transcript and the composer is left intact.
+    Rejected,
+    /// Run this rewritten submission as an ordinary prompt. `routing_input`
+    /// replaces the display text for summary labels and routing.
+    Run {
+        submission: crate::tui::app::ComposerSubmission,
+        routing_input: String,
+    },
+}
+
+/// Resolve an idle composer submit that invokes a custom command
+/// (`.bonsai/commands/<name>.md`). The command files are re-scanned first so
+/// edits apply without a restart. The transcript keeps what the user typed;
+/// the model receives the expanded prompt, with pasted chips already spliced
+/// into the arguments.
+pub(in crate::tui::run) fn resolve_custom_command_submit(
+    app: &mut AppState,
+    submission: &crate::tui::app::ComposerSubmission,
+    input: &str,
+) -> CustomCommandSubmit {
+    let Some(name) = slash_command_name(input) else {
+        return CustomCommandSubmit::NotCustom;
+    };
+    // Re-scan on every slash submit (cheap: a handful of directory reads), so
+    // `/help` and a just-written command file reflect the disk immediately.
+    let registry = app.custom_commands.reload();
+    if crate::commands::is_builtin_command(name) {
+        return CustomCommandSubmit::NotCustom;
+    }
+    // Expand from the model payload so pasted chips in the arguments carry
+    // their content; fall back to the display text.
+    let resolved = match registry.resolve(&submission.input.text) {
+        Ok(None) => registry.resolve(input),
+        other => other,
+    };
+    let expansion = match resolved {
+        Ok(Some(expansion)) => expansion,
+        Ok(None) => return CustomCommandSubmit::NotCustom,
+        Err(err) => {
+            push_command_message(app, CommandOutputKind::Error, &format!("{err}."));
+            return CustomCommandSubmit::Rejected;
+        }
+    };
+    let mut rewritten = submission.clone();
+    rewritten.transcript_text = input.trim().to_string();
+    rewritten.input.text = expansion.prompt.clone();
+    CustomCommandSubmit::Run {
+        submission: rewritten,
+        routing_input: expansion.prompt,
+    }
+}
+
 fn submit_running_command(app: &mut AppState, input: &str) {
     app.reduce(AppAction::ScrollBottom);
     app.reduce(AppAction::SubmitCommandInput(input.trim().to_string()));

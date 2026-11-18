@@ -366,7 +366,10 @@ fn slash_command_docs_mentions_resolve_to_registered_commands() {
         };
         // Paths have another slash. Single-character model shortcuts such as
         // `/f` are runtime bindings rather than registered command names.
+        // `/review-pr` is the custom-command example in the "Custom commands"
+        // section, not a built-in.
         if token == "/command"
+            || token == "/review-pr"
             || rest.len() < 2
             || rest.contains('/')
             || !rest

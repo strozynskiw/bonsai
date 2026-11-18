@@ -94,6 +94,15 @@ workspace, outlives the connection, and can be resumed from the TUI
 (`bonsai -c <id>`) or loaded again over ACP, including from a new process. Closing
 stdin drains every session and exits.
 
+**Custom commands.** After answering `session/new` or `session/load`, bonsai sends
+an `available_commands_update` listing the workspace's
+[custom slash commands](slash-commands.md#custom-commands) (names without the
+leading `/`, with the `argument-hint` as unstructured input). Project commands are
+listed only in a trusted workspace. A prompt whose text starts with `/<name>` is
+replaced by that command's expanded body before the turn starts; a command that
+cannot be expanded fails the prompt with `-32602`. Nothing is sent when the
+workspace has no commands.
+
 Prompt content: text blocks are concatenated. `resource_link` blocks become `@uri`
 mentions. Embedded text resources are inlined as fenced blocks labeled with their
 URI. Images, audio and binary resources are refused with `-32602`.
@@ -166,8 +175,9 @@ them.
 - **Plan canvas**: plan mode, plan sections and tasks, plan execution. Todo lists
   *are* shown, as the ACP plan.
 - **Artifacts**: the server's artifact store.
-- **Slash commands**: no `available_commands_update` is sent. Text starting with
-  `/` is sent to the model as a prompt.
+- **Built-in slash commands**: only [custom commands](slash-commands.md#custom-commands)
+  are offered (see Sessions). Any other text starting with `/` is sent to the
+  model as a prompt.
 - **Mode and settings switching**: agent/plan/review modes and reasoning
   effort. ACP sessions run in the coding agent with the model's saved reasoning
   effort. (Model and autonomy can be switched; see above.)

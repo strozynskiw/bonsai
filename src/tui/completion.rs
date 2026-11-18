@@ -52,12 +52,47 @@ struct CommandMatchRank {
 /// it, ahead of match quality and name order.
 const PINNED_COMMAND: &str = "/model";
 
-fn command_completion(_app: &AppState, prefix: &str) -> Option<Completion> {
-    let mut matches: Vec<(&crate::commands::CommandMetadata, CommandMatchRank)> =
-        crate::commands::COMMANDS
-            .iter()
-            .filter_map(|command| command_match_rank(command, prefix).map(|rank| (command, rank)))
-            .collect();
+/// One `/` picker entry: a built-in from `COMMANDS` or a custom command.
+struct CommandEntry {
+    name: String,
+    description: String,
+    preview: String,
+}
+
+fn command_entries(app: &AppState) -> Vec<CommandEntry> {
+    let mut entries: Vec<CommandEntry> = crate::commands::COMMANDS
+        .iter()
+        .map(|command| CommandEntry {
+            name: command.name.to_string(),
+            description: command.description.to_string(),
+            preview: crate::commands::command_completion_preview(command.name)
+                .unwrap_or_else(|| command.description.to_string()),
+        })
+        .collect();
+    // The snapshot, not a re-scan: this runs per keystroke. The registry is
+    // re-scanned on every slash submit.
+    entries.extend(app.custom_commands.snapshot().iter().map(|def| {
+        let description = format!("{} (custom)", def.description);
+        CommandEntry {
+            name: def.slash_name(),
+            preview: match &def.argument_hint {
+                Some(hint) => format!("{description} [{hint}]"),
+                None => description.clone(),
+            },
+            description,
+        }
+    }));
+    entries
+}
+
+fn command_completion(app: &AppState, prefix: &str) -> Option<Completion> {
+    let entries = command_entries(app);
+    let mut matches: Vec<(&CommandEntry, CommandMatchRank)> = entries
+        .iter()
+        .filter_map(|entry| {
+            command_match_rank(&entry.name, &entry.description, prefix).map(|rank| (entry, rank))
+        })
+        .collect();
     // Pin only when the user is actually filtering: the bare `/` menu browses
     // every command and keeps its natural order.
     let pinning = prefix.len() > 1;
@@ -71,19 +106,18 @@ fn command_completion(_app: &AppState, prefix: &str) -> Option<Completion> {
         };
         // `false` (a floated command) sorts before `true`; everything else keeps
         // match-quality, then name, order.
-        (!floated(left.name, left_rank))
-            .cmp(&!floated(right.name, right_rank))
+        (!floated(&left.name, left_rank))
+            .cmp(&!floated(&right.name, right_rank))
             .then_with(|| left_rank.cmp(right_rank))
-            .then_with(|| left.name.cmp(right.name))
+            .then_with(|| left.name.cmp(&right.name))
     });
 
     let candidates: Vec<CompletionCandidate> = matches
         .iter()
         .take(MAX_COMPLETION_CANDIDATES)
-        .map(|(command, _rank)| CompletionCandidate::Command {
-            label: command.name.to_string(),
-            description: crate::commands::command_completion_preview(command.name)
-                .unwrap_or_else(|| command.description.to_string()),
+        .map(|(entry, _rank)| CompletionCandidate::Command {
+            label: entry.name.clone(),
+            description: entry.preview.clone(),
         })
         .collect();
     let hidden = matches.len().saturating_sub(MAX_COMPLETION_CANDIDATES);
@@ -99,14 +133,11 @@ fn command_completion(_app: &AppState, prefix: &str) -> Option<Completion> {
     })
 }
 
-fn command_match_rank(
-    command: &crate::commands::CommandMetadata,
-    prefix: &str,
-) -> Option<CommandMatchRank> {
+fn command_match_rank(name: &str, description: &str, prefix: &str) -> Option<CommandMatchRank> {
     let name_needle = prefix.to_lowercase();
     let description_needle = name_needle.strip_prefix('/').unwrap_or(&name_needle);
-    let name = command.name.to_lowercase();
-    let description = command.description.to_lowercase();
+    let name = name.to_lowercase();
+    let description = description.to_lowercase();
 
     if name == name_needle {
         return Some(CommandMatchRank {

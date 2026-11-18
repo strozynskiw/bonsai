@@ -150,6 +150,7 @@ pub(crate) struct TuiRuntime {
     permissions: crate::permissions::PermissionManager,
     domain_permissions: crate::permissions::PermissionManager,
     peer_bus: Arc<crate::peer::PeerBus>,
+    commands: crate::resource::command::SharedCommandRegistry,
     project_root: PathBuf,
     session_project_root: PathBuf,
     recovery_id: Option<crate::storage::RecoveryId>,
@@ -183,6 +184,7 @@ impl TuiRuntime {
             permissions,
             domain_permissions,
             peer_bus,
+            commands,
             ..
         } = runtime;
         let TuiRunContext {
@@ -210,6 +212,7 @@ impl TuiRuntime {
             permissions,
             domain_permissions,
             peer_bus,
+            commands,
             project_root,
             session_project_root,
             recovery_id,

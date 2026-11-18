@@ -660,6 +660,15 @@ pub(crate) fn canonical_command_name(name: &str) -> &str {
     }
 }
 
+/// Whether `name` (with its leading `/`) is taken by bonsai itself: a listed
+/// command, a legacy alias, or a one-letter model shortcut. Custom commands
+/// with such a name are rejected so they can never override a built-in.
+pub(crate) fn is_builtin_command(name: &str) -> bool {
+    command_metadata(name).is_some()
+        || canonical_command_name(name) != name
+        || ModelShortcutKey::from_command(name).is_some()
+}
+
 fn command_metadata(name: &str) -> Option<&'static CommandMetadata> {
     let name = canonical_command_name(name);
     COMMANDS

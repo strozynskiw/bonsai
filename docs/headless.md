@@ -156,6 +156,7 @@ The surface contract is explicit (`src/runtime.rs`):
 | Sandbox preferences | persisted interactive choices restored | read from config/env only |
 | Session binding | created after startup | **session id exists before runtime assembly** |
 | Workspace trust | can prompt | keeps restricted posture until an interactive session trusted the workspace |
+| Custom commands | `/<name>` from the composer | a prompt starting with `/<name>` is expanded from the [custom command](slash-commands.md#custom-commands) before the run; project commands need a trusted workspace |
 
 ## Recovery and CI
 
