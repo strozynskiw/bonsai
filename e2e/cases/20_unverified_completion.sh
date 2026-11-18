@@ -23,7 +23,7 @@ tui_start 160 50 || e2e_done
 tui_keys "/model openai-compatible:mock-model" Enter
 expect_meta "mock model selected" "Coding · mock-model"
 tui_keys "Verify the project" Enter
-expect "missing evidence is explained without rejection" "Work completed; verification not confirmed"
+expect "missing evidence is explained without rejection" "Agent finished without confirmed verification."
 expect "session has an unverified status" "#1 unverified"
 forbid "missing evidence is not rejection" "Completion rejected"
 forbid "missing evidence is not a failed report" "✗ completion"
