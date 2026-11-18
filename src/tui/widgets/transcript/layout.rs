@@ -31,6 +31,13 @@
 //! generation — form a fingerprint; when any changes the whole cache drops
 //! and rebuilds on the next read.
 //!
+//! The cache is bounded: every item keeps its key and row count for the
+//! session (scroll math and hit-testing need the full row map), but only items
+//! within [`evict_distance`] rows of the viewport keep their rendered lines.
+//! Paint re-renders an evicted item the moment it scrolls back into the window
+//! — one item, not the transcript — and the last item, the streaming tail, is
+//! never evicted.
+//!
 //! Windowed painting is exact because every line is pre-wrapped to at most
 //! `content_width` cells (card mode also pads to exactly that width), so an
 //! item's post-wrap row count equals `lines.len()`. [`enforce_line_width`]
@@ -101,8 +108,13 @@ struct ItemLayout {
     /// `None` marks a slot that has never been rendered (fresh or salvaged
     /// placeholder), forcing the first key comparison to miss.
     key: Option<ItemKey>,
+    /// Rendered lines while the item is resident; empty once evicted.
     lines: Vec<Line<'static>>,
+    /// Post-wrap row count, kept across eviction so the row map stays exact.
     rows: usize,
+    /// Whether `lines` holds the rendering for `key`. An evicted item keeps its
+    /// key (its inputs have not changed) but must be re-rendered before paint.
+    resident: bool,
 }
 
 impl ItemLayout {
@@ -112,8 +124,32 @@ impl ItemLayout {
             key: None,
             lines: Vec::new(),
             rows: 0,
+            resident: false,
         }
     }
+
+    fn store(&mut self, key: ItemKey, lines: Vec<Line<'static>>) {
+        self.rows = lines.len();
+        self.lines = lines;
+        self.key = Some(key);
+        self.resident = true;
+    }
+
+    fn evict(&mut self) {
+        // A fresh Vec, not `clear()`: clearing keeps the allocation.
+        self.lines = Vec::new();
+        self.resident = false;
+    }
+}
+
+/// Minimum rows of rendered lines kept on each side of the viewport.
+const MIN_RESIDENT_ROWS: usize = 400;
+
+/// How far (in rows) beyond the viewport an item's lines stay cached. Wide
+/// enough that ordinary scrolling and paging re-render nothing; anything
+/// farther is redrawn on demand when the user scrolls back.
+pub(super) fn evict_distance(viewport: usize) -> usize {
+    viewport.saturating_mul(4).max(MIN_RESIDENT_ROWS)
 }
 
 /// The per-frame answer `render` needs, resolved under a single cache pass.
@@ -141,10 +177,10 @@ impl TranscriptLayoutCache {
     /// borrow before returning. Public queries never nest (nothing reachable
     /// from `ensure` or `read` touches the cache again), and every query
     /// returns owned data, so no borrow can leak or panic.
-    fn with<R>(&self, app: &AppState, width: usize, read: impl FnOnce(&LayoutState) -> R) -> R {
+    fn with<R>(&self, app: &AppState, width: usize, read: impl FnOnce(&mut LayoutState) -> R) -> R {
         let mut state = self.state.borrow_mut();
         ensure(&mut state, app, width);
-        read(&state)
+        read(&mut state)
     }
 
     /// Total post-wrap rows of the whole transcript. `0` means "no visible
@@ -154,11 +190,21 @@ impl TranscriptLayoutCache {
         self.with(app, width, |state| state.total_rows())
     }
 
-    /// Scroll resolution plus the visible window's lines in one pass.
+    /// Scroll resolution plus the visible window's lines in one pass. This is
+    /// the paint path, so it is also where the cache is bounded: evicted items
+    /// in the window are re-rendered and far-away items are evicted.
     pub(super) fn view_window(&self, app: &AppState, width: usize, viewport: usize) -> ViewWindow {
         self.with(app, width, |state| {
             let total_rows = state.total_rows();
             let (scroll, max_scroll) = resolved_scroll(app, total_rows, viewport);
+            let end_row = scroll.saturating_add(viewport).min(total_rows);
+            if let (Some((first, _)), Some((last, _))) = (
+                state.locate(scroll),
+                end_row.checked_sub(1).and_then(|row| state.locate(row)),
+            ) {
+                materialize(state, app, width, first..=last);
+            }
+            evict_far(state, scroll, end_row, evict_distance(viewport));
             ViewWindow {
                 total_rows,
                 scroll,
@@ -200,6 +246,7 @@ impl TranscriptLayoutCache {
     #[cfg(test)]
     pub(super) fn all_lines(&self, app: &AppState, width: usize) -> Vec<Line<'static>> {
         self.with(app, width, |state| {
+            materialize(state, app, width, 0..=state.items.len().saturating_sub(1));
             state
                 .items
                 .iter()
@@ -213,9 +260,29 @@ impl TranscriptLayoutCache {
     pub(crate) fn render_count(&self) -> usize {
         self.state.borrow().renders
     }
+
+    /// Rows whose rendered lines are currently held, to assert the bound.
+    #[cfg(test)]
+    pub(super) fn resident_rows(&self) -> usize {
+        self.state
+            .borrow()
+            .items
+            .iter()
+            .filter(|entry| entry.resident)
+            .map(|entry| entry.lines.len())
+            .sum()
+    }
 }
 
 impl LayoutState {
+    /// Bumps the test-only render counter; a no-op in release builds.
+    fn count_render(&mut self) {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
+    }
+
     fn total_rows(&self) -> usize {
         self.row_offsets.last().copied().unwrap_or(0)
     }
@@ -334,55 +401,112 @@ fn sync_structure(state: &mut LayoutState, stamps: &[ItemStamp]) {
 
 /// Re-renders every item whose key no longer matches. The common frame
 /// re-renders nothing (idle) or one item (streaming tail / animated card).
+/// An evicted item whose key still matches is left evicted: its row count is
+/// current, and paint re-renders it only if it scrolls into view.
 fn refresh_items(state: &mut LayoutState, app: &AppState, width: usize) {
     let stamps = app.transcript.stamps();
-    let permission_command = pending_permission_command(app);
     for (index, item) in app.transcript.iter().enumerate() {
-        let selected = item_selection_state(app, index, width);
-        let focused = app.transcript_focus == Some(index);
-        let expanded = execution_group_expanded_for_item(app, item);
-        let reasoning_active = serenity_reasoning_is_active(app, index, item);
-        let key = ItemKey {
-            rev: stamps[index].rev,
-            selected,
-            focused,
-            expanded,
-            reasoning_active,
-            group_tool_selected: group_tool_selection(app, item),
-            animated_tick: (!app.modes.reduced_motion && item_is_animated(item, reasoning_active))
-                .then_some(app.animation_tick()),
-        };
+        let key = item_key(app, index, item, width, stamps[index].rev);
         if state.items[index].key == Some(key) {
             continue;
         }
-
-        #[cfg(test)]
-        {
-            state.renders += 1;
-        }
-        let lines = enforce_line_width(
-            render_transcript_item(
-                item,
-                width,
-                TranscriptRenderOptions {
-                    selected,
-                    focused,
-                    active_group_tool_selection: app.active_group_tool_selection.as_ref(),
-                    serenity_mode: app.modes.serenity_mode,
-                    linear_output: app.modes.screen_reader_mode,
-                    execution_group_expanded: expanded,
-                    reasoning_active,
-                    permission_command,
-                    tick: app.animation_tick(),
-                },
-            ),
-            width,
-        );
-        let entry = &mut state.items[index];
-        entry.rows = lines.len();
-        entry.lines = lines;
-        entry.key = Some(key);
+        let lines = render_item(state, app, index, item, width);
+        state.items[index].store(key, lines);
     }
+}
+
+/// Re-renders the evicted items in `range` so their lines can be painted.
+fn materialize(
+    state: &mut LayoutState,
+    app: &AppState,
+    width: usize,
+    range: std::ops::RangeInclusive<usize>,
+) {
+    for index in range {
+        let (Some(entry), Some(item)) = (state.items.get(index), app.transcript.get(index)) else {
+            continue;
+        };
+        if entry.resident {
+            continue;
+        }
+        let Some(key) = entry.key else {
+            continue;
+        };
+        let lines = render_item(state, app, index, item, width);
+        // Same key, same inputs: the row count cannot move. If it ever did, the
+        // row map built this frame would be stale; the next `ensure` rebuilds it.
+        debug_assert_eq!(lines.len(), state.items[index].rows);
+        state.items[index].store(key, lines);
+    }
+}
+
+/// Drops the lines of every item whose rows lie more than `distance` rows
+/// outside `[first_row, end_row)`. The last item is the streaming tail and
+/// stays resident so appending to it never pays for a full re-render.
+fn evict_far(state: &mut LayoutState, first_row: usize, end_row: usize, distance: usize) {
+    let keep_from = first_row.saturating_sub(distance);
+    let keep_to = end_row.saturating_add(distance);
+    let tail = state.items.len().saturating_sub(1);
+    for (index, entry) in state.items.iter_mut().enumerate() {
+        if !entry.resident || index == tail {
+            continue;
+        }
+        let start = state.row_offsets[index];
+        let end = state.row_offsets[index + 1];
+        if end <= keep_from || start >= keep_to {
+            entry.evict();
+        }
+    }
+}
+
+fn item_key(
+    app: &AppState,
+    index: usize,
+    item: &TranscriptItem,
+    width: usize,
+    rev: u32,
+) -> ItemKey {
+    let reasoning_active = serenity_reasoning_is_active(app, index, item);
+    ItemKey {
+        rev,
+        selected: item_selection_state(app, index, width),
+        focused: app.transcript_focus == Some(index),
+        expanded: execution_group_expanded_for_item(app, item),
+        reasoning_active,
+        group_tool_selected: group_tool_selection(app, item),
+        animated_tick: (!app.modes.reduced_motion && item_is_animated(item, reasoning_active))
+            .then_some(app.animation_tick()),
+    }
+}
+
+/// Renders one item with options rebuilt from `app` (never from the cached
+/// key, which is change detection only).
+fn render_item(
+    state: &mut LayoutState,
+    app: &AppState,
+    index: usize,
+    item: &TranscriptItem,
+    width: usize,
+) -> Vec<Line<'static>> {
+    state.count_render();
+    enforce_line_width(
+        render_transcript_item(
+            item,
+            width,
+            TranscriptRenderOptions {
+                selected: item_selection_state(app, index, width),
+                focused: app.transcript_focus == Some(index),
+                active_group_tool_selection: app.active_group_tool_selection.as_ref(),
+                serenity_mode: app.modes.serenity_mode,
+                linear_output: app.modes.screen_reader_mode,
+                execution_group_expanded: execution_group_expanded_for_item(app, item),
+                reasoning_active: serenity_reasoning_is_active(app, index, item),
+                permission_command: pending_permission_command(app),
+                tick: app.animation_tick(),
+            },
+        ),
+        width,
+    )
 }
 
 /// Whether the item's rendered output depends on time. Decides per-tool

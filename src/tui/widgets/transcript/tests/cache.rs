@@ -463,3 +463,103 @@ fn scroll_domain_is_not_capped_at_u16_rows() {
     app.clamp_current_scroll(bottom);
     assert_eq!(app.current_scroll(), bottom);
 }
+
+/// A marathon transcript: enough items that the eviction bound matters.
+fn long_app(items: usize) -> AppState {
+    let mut app = test_app();
+    for i in 0..items {
+        app.transcript.push(assistant(&format!(
+            "Reply {i} with **markdown** and a paragraph long enough to wrap \
+             across a couple of rows at sixty columns."
+        )));
+    }
+    app
+}
+
+#[test]
+fn far_items_are_evicted_and_the_resident_set_stays_bounded() {
+    let _guard = theme_guard();
+    let app = long_app(2_000);
+    let (width, viewport) = (60, 40);
+
+    let window = app.transcript_layout.view_window(&app, width, viewport);
+    let total = window.total_rows;
+    let resident = app.transcript_layout.resident_rows();
+    // Both sides of the viewport may keep `distance` rows, plus one item of
+    // slack at each edge.
+    let bound = 2 * super::super::layout::evict_distance(viewport) + viewport + 16;
+    assert!(
+        total > 4 * bound,
+        "the fixture must outgrow the bound: {total}"
+    );
+    assert!(
+        resident <= bound,
+        "resident {resident} rows > bound {bound}"
+    );
+    assert_eq!(window.lines.len(), viewport, "the viewport still paints");
+}
+
+#[test]
+fn scrolling_back_redraws_only_the_evicted_items_in_view() {
+    let _guard = theme_guard();
+    let mut app = long_app(2_000);
+    let (width, viewport) = (60, 40);
+
+    let full = transcript_lines(&app, width);
+    // Paint at the bottom: everything near the top is evicted.
+    let _ = app.transcript_layout.view_window(&app, width, viewport);
+
+    app.scroll.transcript_autoscroll = false;
+    app.scroll.transcript_scroll = 0;
+    let before = app.transcript_layout.render_count();
+    let window = app.transcript_layout.view_window(&app, width, viewport);
+    let redrawn = app.transcript_layout.render_count() - before;
+
+    assert_eq!(window.lines, full[..viewport], "a redrawn window is exact");
+    assert!(redrawn > 0, "the top had been evicted");
+    assert!(
+        redrawn <= viewport,
+        "only the items in view are redrawn, not the transcript: {redrawn}"
+    );
+
+    // The next idle frame finds them resident again.
+    let before = app.transcript_layout.render_count();
+    let _ = app.transcript_layout.view_window(&app, width, viewport);
+    assert_eq!(app.transcript_layout.render_count(), before);
+}
+
+#[test]
+fn the_streaming_tail_stays_resident_while_scrolled_away() {
+    let _guard = theme_guard();
+    let mut app = long_app(2_000);
+    let (width, viewport) = (60, 40);
+    app.scroll.transcript_autoscroll = false;
+    app.scroll.transcript_scroll = 0;
+    let _ = app.transcript_layout.view_window(&app, width, viewport);
+
+    let tail = app.transcript.len() - 1;
+    let tail_rows = {
+        let (start, end) = app
+            .transcript_layout
+            .item_row_span(&app, width, tail)
+            .expect("tail span");
+        end - start
+    };
+    let before = app.transcript_layout.resident_rows();
+    // Evicting the tail would drop its rows from the resident set; scrolling
+    // around the top keeps it.
+    for scroll in [10, 200, 0] {
+        app.scroll.transcript_scroll = scroll;
+        let _ = app.transcript_layout.view_window(&app, width, viewport);
+    }
+    assert!(app.transcript_layout.resident_rows() >= tail_rows);
+    assert!(before >= tail_rows);
+
+    // Streaming into the tail costs one render, not a re-render of the window.
+    let before = app.transcript_layout.render_count();
+    if let Some(TranscriptItem::AssistantMessage { text }) = app.transcript.get_mut(tail) {
+        text.push_str(" delta");
+    }
+    let _ = app.transcript_layout.view_window(&app, width, viewport);
+    assert_eq!(app.transcript_layout.render_count() - before, 1);
+}
