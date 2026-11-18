@@ -998,3 +998,72 @@ async fn session_list_feeds_thread_history() -> Result<()> {
     assert_eq!(foreign["code"], -32602);
     acp.close().await
 }
+
+/// Custom slash commands: after `session/new` the editor gets an
+/// `available_commands_update` with the workspace's commands, and a prompt
+/// starting with `/<name>` reaches the model as the expanded body. The launch
+/// directory is untrusted here, so only global commands are offered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn custom_commands_are_announced_and_expanded() -> Result<()> {
+    let (mock, _) = provider(|_| sse(DONE)).await;
+    let home = tempfile::tempdir()?;
+    let workspace = tempfile::tempdir()?;
+    let global = home.path().join("state/commands");
+    std::fs::create_dir_all(&global)?;
+    std::fs::write(
+        global.join("greet.md"),
+        "---\ndescription: Greet someone\nargument-hint: <name>\n---\nSay hello to $ARGUMENTS politely.\n",
+    )?;
+    std::fs::write(global.join("blank.md"), "---\ndescription: empty\n---\n\n")?;
+    let project = workspace.path().join(".bonsai/commands");
+    std::fs::create_dir_all(&project)?;
+    std::fs::write(project.join("inject.md"), "PROJECT_COMMAND_BODY_SENTINEL")?;
+    let mut acp = Acp::spawn(home.path(), workspace.path(), &mock.uri())?;
+    acp.initialize().await?;
+    let session = acp.new_session(workspace.path()).await?;
+
+    let done = acp.prompt(&session, "/greet Ada").await?;
+    assert_eq!(done["stopReason"], "end_turn");
+    let announced: Vec<&Value> = acp.updates_of("available_commands_update").collect();
+    let [update] = announced.as_slice() else {
+        bail!("expected one available_commands_update: {:?}", acp.updates);
+    };
+    let commands = update["availableCommands"]
+        .as_array()
+        .context("availableCommands")?;
+    let names: Vec<&str> = commands.iter().filter_map(|c| c["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        ["blank", "greet"],
+        "untrusted project commands stay hidden"
+    );
+    let greet = &commands[1];
+    assert_eq!(greet["description"], "Greet someone");
+    assert_eq!(greet["input"]["hint"], "<name>");
+
+    let requests = mock
+        .received_requests()
+        .await
+        .context("mock records requests")?;
+    let [request] = requests.as_slice() else {
+        bail!("expected one provider request, got {}", requests.len());
+    };
+    let body = String::from_utf8_lossy(&request.body);
+    assert!(body.contains("Say hello to Ada politely."), "{body}");
+    assert!(!body.contains("/greet"), "raw slash line leaked: {body}");
+
+    let refused = acp
+        .error(
+            "session/prompt",
+            json!({"sessionId":session,"prompt":[{"type":"text","text":"/blank"}]}),
+        )
+        .await?;
+    assert_eq!(refused["code"], -32602);
+    assert!(
+        refused["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("empty prompt body")),
+        "{refused}"
+    );
+    acp.close().await
+}

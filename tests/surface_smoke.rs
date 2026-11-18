@@ -108,6 +108,113 @@ async fn real_binary_headless_task_runs_tool_and_emits_completion_contract() -> 
     Ok(())
 }
 
+/// `bonsai -p "/<name> args"` runs a custom command: the provider receives the
+/// expanded body, never the slash line. A project command stays inert in a
+/// workspace no interactive session has trusted, so its text reaches the
+/// model verbatim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_binary_headless_expands_custom_commands_within_trust() -> Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(COMPLETION_RESPONSE),
+        )
+        .mount(&server)
+        .await;
+    let home = tempfile::TempDir::new()?;
+    let project = tempfile::TempDir::new()?;
+    let bonsai_home = home.path().join("bonsai-home");
+    std::fs::create_dir_all(bonsai_home.join("commands"))?;
+    std::fs::write(
+        bonsai_home.join("commands/greet.md"),
+        "---\ndescription: Greet someone\nargument-hint: <name>\n---\nSay hello to $ARGUMENTS politely.\n",
+    )?;
+    std::fs::create_dir_all(project.path().join(".bonsai/commands"))?;
+    std::fs::write(
+        project.path().join(".bonsai/commands/inject.md"),
+        "PROJECT_COMMAND_BODY_SENTINEL",
+    )?;
+
+    for prompt in ["/greet Ada", "/inject now"] {
+        let mut command = tokio::process::Command::new(surface_binary()?);
+        command
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", inherited_path())
+            .env("BONSAI_HOME", &bonsai_home)
+            .kill_on_drop(true)
+            .env("BONSAI_DISABLE_KEYRING", "1")
+            .env(
+                "OPENAI_COMPATIBLE_API_KEY",
+                "sk-qualification-synthetic-not-a-real-key",
+            )
+            .env("BONSAI_DOTENV", "0")
+            .env("BONSAI_DISABLE_MODELS_FETCH", "1")
+            .env("BONSAI_MEMORY_EMBEDDINGS", "off")
+            .env("BONSAI_EPISODES", "0")
+            .env("BONSAI_PROVIDER", "openai-compatible")
+            .env("OPENAI_COMPATIBLE_MODEL", "acceptance-model")
+            .env("OPENAI_COMPATIBLE_BASE_URL", format!("{}/v1", server.uri()))
+            .args([
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
+                "--isolation",
+                "off",
+            ]);
+        let output = tokio::time::timeout(Duration::from_secs(20), command.output())
+            .await
+            .context("headless custom-command run timed out")??;
+        if !output.status.success() {
+            bail!(
+                "headless `{prompt}` failed with {}:\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("mock server should record requests")?;
+    let user_text = |request: &Request| -> Result<String> {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        Ok(body["messages"]
+            .as_array()
+            .context("chat request carries messages")?
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .map(|message| message["content"].to_string())
+            .collect::<Vec<_>>()
+            .join("\n"))
+    };
+    let greet = requests.iter().map(user_text).collect::<Result<Vec<_>>>()?;
+    assert!(
+        greet
+            .iter()
+            .any(|text| text.contains("Say hello to Ada politely.") && !text.contains("/greet")),
+        "global command was not expanded: {greet:#?}"
+    );
+    assert!(
+        greet.iter().any(|text| text.contains("/inject now")),
+        "untrusted project command should reach the model verbatim: {greet:#?}"
+    );
+    assert!(
+        greet
+            .iter()
+            .all(|text| !text.contains("PROJECT_COMMAND_BODY_SENTINEL")),
+        "untrusted project command body leaked into a prompt: {greet:#?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn real_binary_tui_opens_native_terminal_and_exits_cleanly() -> Result<()> {
     let home = tempfile::TempDir::new()?;
