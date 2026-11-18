@@ -50,6 +50,10 @@ tui_keys "/help" Enter
 expect "/help lists the custom command with its hint" "/greet <name>"
 expect "/help marks it as custom" "Greet someone warmly (custom)"
 expect "/help reports the built-in clash" "! help.md"
+# The roster outgrows the board; End scrolls it to the last built-in.
+forbid "the last built-in starts below the fold" "Exit bonsai"
+tui_keys End
+expect "/help scrolls to the last built-in" "Exit bonsai"
 tui_keys Escape
 
 tui_keys "/gre"

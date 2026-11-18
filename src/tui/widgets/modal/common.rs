@@ -416,6 +416,9 @@ pub(crate) fn max_modal_scroll(app: &AppState, area: Rect) -> Option<u16> {
         ModalKind::Detail(crate::tui::event::DetailModal::PerfReport { lines, .. }) => {
             Some(perf_report_max_scroll(modal, lines))
         }
+        ModalKind::Detail(crate::tui::event::DetailModal::CommandHelp) => {
+            Some(super::help::command_help_max_scroll(app, modal))
+        }
         ModalKind::Detail(crate::tui::event::DetailModal::ToolDetail { tool_id }) => {
             app.tool_activity(tool_id).map(|activity| {
                 max_tool_detail_scroll(modal, activity, app.subagent_model_for(tool_id))

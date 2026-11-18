@@ -271,6 +271,48 @@ fn command_help_renders_command_board_with_provider_manager() {
 }
 
 #[test]
+fn command_help_scrolls_to_the_last_command_on_a_short_terminal() {
+    let _guard = crate::tui::theme::TEST_LOCK.blocking_lock();
+    let last = crate::commands::COMMANDS
+        .last()
+        .map(command_help_label)
+        .expect("the built-in roster is not empty");
+    for area in [Rect::new(0, 0, 100, 24), Rect::new(0, 0, 160, 24)] {
+        let mut app = AppState::new("codex", "m".to_string(), ".".to_string(), None);
+        app.modal = Some(ModalKind::Detail(
+            crate::tui::event::DetailModal::CommandHelp,
+        ));
+        let draw = |app: &AppState| {
+            let mut terminal =
+                Terminal::new(TestBackend::new(area.width, area.height)).expect("test backend");
+            terminal
+                .draw(|frame| render(frame, area, app))
+                .expect("command help renders");
+            buffer_text(terminal.backend().buffer())
+        };
+
+        let top = draw(&app);
+        assert!(
+            !top.contains(&last),
+            "{area:?}: the roster overflows: {top}"
+        );
+        assert!(top.contains("Up/Down scroll"), "{area:?}: {top}");
+
+        let max = max_modal_scroll(&app, area).expect("the board reports its clamp");
+        assert!(max > 0, "{area:?}");
+        app.modal_ui.modal_scroll = max;
+        let bottom = draw(&app);
+        assert!(
+            bottom.contains(&last),
+            "{area:?}: last command reachable: {bottom}"
+        );
+        // The chrome stays put while the body scrolls.
+        assert!(bottom.contains("Slash commands"), "{area:?}");
+        assert!(bottom.contains("Esc close"), "{area:?}");
+    }
+}
+
+#[test]
 fn command_help_lists_custom_commands_and_skipped_files() {
     let root = tempfile::TempDir::new().unwrap();
     let home = tempfile::TempDir::new().unwrap();

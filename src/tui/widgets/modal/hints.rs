@@ -57,7 +57,8 @@ pub(super) fn memory_wizard_hints(
 
 /// The command board's keys. `Tab` is deliberately absent: the board is a reading
 /// surface and its mapper ignores it, which the two-way hint test enforces.
-pub(super) const COMMAND_HELP_HINTS: &[(&str, &str)] = &[("Enter", "run"), ("Esc", "close")];
+pub(super) const COMMAND_HELP_HINTS: &[(&str, &str)] =
+    &[("Up/Down", "scroll"), ("Enter", "run"), ("Esc", "close")];
 /// The review-scope choice's keys.
 pub(super) const REVIEW_SCOPE_HINTS: &[(&str, &str)] =
     &[("Up/Down", "move"), ("Enter", "review"), ("Esc", "cancel")];

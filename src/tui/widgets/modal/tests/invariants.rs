@@ -203,6 +203,11 @@ fn measured_popups_fit_the_height_they_asked_for() {
     // report no clamp by design, so they are skipped rather than counted as a fit.
     let area = Rect::new(0, 0, 160, 60);
     for kind in fixture_kinds() {
+        // The command board keeps the fixed wide footprint and scrolls a roster
+        // that outgrows even this viewport; it measures nothing for itself.
+        if matches!(kind, ModalKind::Detail(DetailModal::CommandHelp)) {
+            continue;
+        }
         let app = app_with_modal(kind.clone());
         let Some(max_scroll) = max_modal_scroll(&app, area) else {
             continue;

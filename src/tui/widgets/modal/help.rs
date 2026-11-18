@@ -10,10 +10,9 @@ pub(super) struct HelpRow {
 }
 
 /// The project's custom commands and any command files that were skipped
-/// (with the reason), followed by the built-ins. Custom rows lead because the
-/// built-in board already fills a typical terminal and this modal does not
-/// scroll; they are also the rows a user opening `/help` after adding a file
-/// is looking for, and a clash with a built-in is visible right there.
+/// (with the reason), followed by the built-ins. Custom rows lead because they
+/// are the rows a user opening `/help` after adding a file is looking for, and a
+/// clash with a built-in is visible right there without scrolling.
 pub(super) fn command_help_rows(
     custom: &crate::resource::command::CommandRegistry,
 ) -> Vec<HelpRow> {
@@ -44,12 +43,13 @@ pub(super) fn command_help_rows(
     rows
 }
 
-pub(super) fn render_command_help(f: &mut Frame, area: Rect, app: &AppState) {
-    let rows = command_help_rows(&app.custom_commands.snapshot());
-    let panel = theme::frame("Commands", true).style(theme::panel());
-    let inner = panel.inner(area);
-    f.render_widget(panel, area);
+/// Two command columns need room for a legible description beside each label;
+/// below this width the board reads better as one wider column.
+const TWO_COLUMN_MIN_WIDTH: u16 = 110;
 
+/// The board's title row, scrollable body and footer inside the modal frame.
+fn command_help_regions(area: Rect) -> (Rect, Rect, Rect) {
+    let inner = theme::frame("Commands", true).inner(area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -58,36 +58,58 @@ pub(super) fn render_command_help(f: &mut Frame, area: Rect, app: &AppState) {
             Constraint::Length(2),
         ])
         .split(inner);
+    (chunks[0], chunks[1], chunks[2])
+}
+
+/// Each column's area and its fully laid-out lines. The columns scroll together
+/// under one offset, so the taller column decides how far the board scrolls.
+fn command_help_columns(rows: &[HelpRow], body: Rect) -> Vec<(Rect, Vec<Line<'static>>)> {
+    if body.width < TWO_COLUMN_MIN_WIDTH {
+        return vec![(body, command_help_lines(rows, body.width as usize))];
+    }
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(body);
+    let split = rows.len().div_ceil(2);
+    [(columns[0], &rows[..split]), (columns[1], &rows[split..])]
+        .into_iter()
+        .map(|(area, commands)| (area, command_help_lines(commands, area.width as usize)))
+        .collect()
+}
+
+/// How far the command board scrolls before its last row reaches the bottom.
+pub(super) fn command_help_max_scroll(app: &AppState, area: Rect) -> u16 {
+    let rows = command_help_rows(&app.custom_commands.snapshot());
+    let (_, body, _) = command_help_regions(area);
+    let tallest = command_help_columns(&rows, body)
+        .iter()
+        .map(|(_, lines)| lines.len())
+        .max()
+        .unwrap_or(0);
+    u16::try_from(tallest.saturating_sub(usize::from(body.height))).unwrap_or(u16::MAX)
+}
+
+pub(super) fn render_command_help(f: &mut Frame, area: Rect, app: &AppState) {
+    let rows = command_help_rows(&app.custom_commands.snapshot());
+    f.render_widget(theme::frame("Commands", true).style(theme::panel()), area);
+    let (title, body, footer) = command_help_regions(area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Slash commands", theme::label(theme::palette().tool)),
             Span::styled("  /keys for keyboard shortcuts", theme::dim()),
         ])),
-        chunks[0],
+        title,
     );
 
-    // Two command columns need room for a legible description beside each label;
-    // below this width the board reads better as one wider column.
-    const TWO_COLUMN_MIN_WIDTH: u16 = 110;
-    if chunks[1].width < TWO_COLUMN_MIN_WIDTH {
+    let scroll = app.modal_ui.modal_scroll;
+    for (column, lines) in command_help_columns(&rows, body) {
         f.render_widget(
-            Paragraph::new(command_help_lines(&rows, chunks[1].width as usize))
-                .style(theme::panel()),
-            chunks[1],
+            Paragraph::new(lines)
+                .style(theme::panel())
+                .scroll((scroll, 0)),
+            column,
         );
-    } else {
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(chunks[1]);
-        let split = rows.len().div_ceil(2);
-        for (area, commands) in [(columns[0], &rows[..split]), (columns[1], &rows[split..])] {
-            f.render_widget(
-                Paragraph::new(command_help_lines(commands, area.width as usize))
-                    .style(theme::panel()),
-                area,
-            );
-        }
     }
 
     f.render_widget(
@@ -98,7 +120,7 @@ pub(super) fn render_command_help(f: &mut Frame, area: Rect, app: &AppState) {
                 theme::dim(),
             )),
         ]),
-        chunks[2],
+        footer,
     );
 }
 
