@@ -3,16 +3,12 @@
 
 use super::*;
 
-const REVIEW_TOOL_NAMES: [&str; 14] = [
+const REVIEW_TOOL_NAMES: [&str; 10] = [
     "project_info",
     "read",
     "glob",
     "grep",
     "symbol_search",
-    "definition",
-    "references",
-    "hover",
-    "workspace_symbol",
     "git",
     "skill",
     "question",
@@ -25,16 +21,12 @@ const REVIEW_TOOL_NAMES: [&str; 14] = [
 
 /// Read-only conversational tools a custom switcher persona may scope from: no
 /// write/edit/bash, no plan-canvas tools.
-const READ_ONLY_TOOL_NAMES: [&str; 13] = [
+const READ_ONLY_TOOL_NAMES: [&str; 9] = [
     "project_info",
     "read",
     "glob",
     "grep",
     "symbol_search",
-    "definition",
-    "references",
-    "hover",
-    "workspace_symbol",
     "git",
     "skill",
     "question",

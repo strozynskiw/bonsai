@@ -48,11 +48,6 @@ pub(crate) enum ToolFactoryKey {
     Glob,
     Grep,
     SymbolSearch,
-    Definition,
-    References,
-    Hover,
-    WorkspaceSymbol,
-    RenameSymbol,
     Git,
     ReadRegion,
     ReadSymbol,
@@ -153,6 +148,9 @@ use ToolFactoryKey::*;
 
 /// Canonical built-in tool catalog. Profile-specific ordinals preserve the
 /// existing provider-wire order even where historical profiles differ.
+///
+/// Retired ordinals (never reuse): 10–14 (`definition`, `references`,
+/// `hover`, `workspace_symbol`, `rename_symbol`; removed in #243).
 pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
     descriptor(
         0,
@@ -251,56 +249,6 @@ pub(crate) const TOOL_DESCRIPTORS: &[ToolDescriptor] = &[
         ReadOnly,
         PathScoped,
         [4, 4, ABSENT, 4, 4],
-        [false; 5],
-        Standard,
-    ),
-    descriptor(
-        10,
-        Definition,
-        "definition",
-        ReadOnly,
-        PathScoped,
-        [5, 5, ABSENT, 5, 5],
-        [false; 5],
-        Standard,
-    ),
-    descriptor(
-        11,
-        References,
-        "references",
-        ReadOnly,
-        PathScoped,
-        [6, 6, ABSENT, 6, 6],
-        [false; 5],
-        Standard,
-    ),
-    descriptor(
-        12,
-        Hover,
-        "hover",
-        ReadOnly,
-        PathScoped,
-        [7, 7, ABSENT, 7, 7],
-        [false; 5],
-        Standard,
-    ),
-    descriptor(
-        13,
-        WorkspaceSymbol,
-        "workspace_symbol",
-        ReadOnly,
-        PathScoped,
-        [8, 8, ABSENT, 8, 8],
-        [false; 5],
-        Standard,
-    ),
-    descriptor(
-        14,
-        RenameSymbol,
-        "rename_symbol",
-        SelfAuthorized,
-        Serialized,
-        [17, ABSENT, ABSENT, ABSENT, 17],
         [false; 5],
         Standard,
     ),
@@ -685,8 +633,8 @@ mod tests {
         let builtin_subagent = names(ToolProfile::BuiltinSubagent);
         let custom_subagent = names(ToolProfile::CustomSubagent);
 
-        assert_eq!(&coding[..12], &planning[..12]);
-        assert_eq!(&coding[..12], builtin_subagent.as_slice());
-        assert_eq!(&coding[..12], &custom_subagent[..12]);
+        assert_eq!(&coding[..8], &planning[..8]);
+        assert_eq!(&coding[..8], builtin_subagent.as_slice());
+        assert_eq!(&coding[..8], &custom_subagent[..8]);
     }
 }

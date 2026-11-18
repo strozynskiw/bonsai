@@ -31,8 +31,8 @@ pub(super) const AGENTS_INDEX_MAX: usize = 50;
 const AGENTS_INDEX_HEADING: &str = "## Subagents\nRead-only helpers you can delegate a scoped sub-task to with the `agent` tool (agent: <name>). Each returns only its conclusion, keeping your context lean.";
 
 /// The tool names a custom agent may be granted via its `tools:` frontmatter —
-/// the full read/search/LSP/git set plus the mutating tools (`write`/`edit`/
-/// `bash`/`rename_symbol`), PTY control, and `skill`/`question`. Mutating tools prompt under
+/// the full read/search/git set plus the mutating tools (`write`/`edit`/
+/// `bash`), PTY control, and `skill`/`question`. Mutating tools prompt under
 /// the current approval policy at run time, exactly like the main agent.
 /// Excludes recursion/session-internal tools (`agent`/`task`/`set_session_title`/
 /// plan/`tasks`). Used by the composer, the persona/subagent scoping, and
@@ -45,16 +45,11 @@ pub(crate) const GRANTABLE_AGENT_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "symbol_search",
-    "definition",
-    "references",
-    "hover",
-    "workspace_symbol",
     "git",
     "write",
     "edit",
     "bash",
     "terminal",
-    "rename_symbol",
     "skill",
     "question",
 ];
@@ -123,16 +118,11 @@ pub(crate) fn canonical_agent_tool(name: &str) -> Option<&'static str> {
         "glob" => "glob",
         "grep" => "grep",
         "symbolsearch" => "symbol_search",
-        "definition" => "definition",
-        "references" => "references",
-        "hover" => "hover",
-        "workspacesymbol" => "workspace_symbol",
         "git" => "git",
         "write" => "write",
         "edit" => "edit",
         "bash" => "bash",
         "terminal" => "terminal",
-        "renamesymbol" => "rename_symbol",
         "skill" => "skill",
         "question" => "question",
         _ => return None,
@@ -337,10 +327,8 @@ pub(super) fn registry_grants_mutation(registry: &ToolRegistry) -> bool {
     registry.names().any(|name| {
         // Terminal control can send commands to an existing shell even without
         // a Bash grant. Named guards also protect against a misdeclared tool.
-        matches!(
-            name,
-            "write" | "edit" | "apply_patch" | "bash" | "terminal" | "rename_symbol"
-        ) || crate::extension::is_mcp_wire_name(name)
+        matches!(name, "write" | "edit" | "apply_patch" | "bash" | "terminal")
+            || crate::extension::is_mcp_wire_name(name)
             || registry.get(name).is_none_or(|tool| {
                 matches!(
                     tool.effect_policy(),

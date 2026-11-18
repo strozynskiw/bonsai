@@ -52,7 +52,7 @@ network denial via Seatbelt or Bubblewrap). See
 
 **Tools.** File read/write/edit with read-before-write freshness guards, shell
 with risk classification, interactive PTY terminals, background tasks, search
-(grep/glob), tree-sitter symbol tools, LSP-backed navigation and diagnostics,
+(grep/glob), tree-sitter symbol tools, LSP-backed diagnostics,
 web search and fetch with untrusted-content framing, todos, a plan canvas,
 subagent delegation, skills, and persistent memory. See [Tools](tools.md).
 

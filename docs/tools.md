@@ -92,11 +92,6 @@ Tree-sitter symbol definitions across the project (`query`, `kind`, `path`,
 `glob`, `language`, `limit`); cheap outline of a file with `path=<file>`.
 Output capped at 20,000 chars.
 
-### LSP tools — `definition`, `references`, `hover`, `workspace_symbol`
-Language-server-backed navigation at a `path`/`line`/`character` position
-(`references` adds `include_declaration`). Available when a managed server is
-installed; see [Language intelligence](language-intelligence.md).
-
 ### `git`
 Read-only git: `op` ∈ `status | diff | log | blame | show`, with `path`,
 `target`, `staged`, `stat_only`, `limit` (log ≤200). Mutation ops are
@@ -134,10 +129,6 @@ recovery paths repair near-miss matches and common argument mistakes.
 One V4A patch (`*** Begin Patch` … `*** End Patch`) creating/updating/moving/
 deleting several files atomically — if any hunk fails, nothing is written.
 Updated files must have been read. Serializes globally in batching.
-
-### `rename_symbol`
-LSP-backed rename at a position; applies only in-project edits and requires
-every touched file to have been read and to be unchanged since.
 
 ---
 
@@ -314,8 +305,8 @@ collision with a built-in visibly degrades that server rather than shadowing.
 
 | Class | Tools |
 | --- | --- |
-| `ReadPath` | read, read_region, read_symbol, glob, grep, symbol_search, definition, references, hover, workspace_symbol; read-only `agent` delegations |
-| `WritePath` | write, edit, rename_symbol (→ `GlobalWrite` in yolo) |
+| `ReadPath` | read, read_region, read_symbol, glob, grep, symbol_search; read-only `agent` delegations |
+| `WritePath` | write, edit (→ `GlobalWrite` in yolo) |
 | `GlobalWrite` | apply_patch, bash (default), terminal, diagnostics, todowrite, set_session_title, tasks, peers, question, memory_write, recall, start_new_plan, goal_complete, all `plan_*`, write-capable/unresolvable `agent`, unparseable/unknown calls, blocking-hook-matched tools |
 | `ParallelBash` | bash with `parallel:true` or `run_in_background:true` |
 | `Independent` | project_info, git, skill, webfetch, websearch |

@@ -118,7 +118,7 @@ Do not modify anything.
 | `name` | yes | definition id; match the filename; built-in ids reserved |
 | `description` | yes | one line for `/agents` and the model's Subagents index |
 | `surface` | no | `[subagent]` (default), `[mode]`, or `[mode, subagent]` |
-| `tools` | no | grant scope; omit for the read-only default. Grantable: the read-only core plus `write`, `edit`, `apply_patch`, `bash`, `terminal`, `rename_symbol`, `skill`, `question`, `webfetch`, and any discovered MCP tool by wire name (`mcp__github__create_issue`) or dotted id (`mcp.github.create_issue`). Unknown names are ignored and reported by `/agents`. |
+| `tools` | no | grant scope; omit for the read-only default. Grantable: the read-only core plus `write`, `edit`, `apply_patch`, `bash`, `terminal`, `skill`, `question`, `webfetch`, and any discovered MCP tool by wire name (`mcp__github__create_issue`) or dotted id (`mcp.github.create_issue`). Unknown names are ignored and reported by `/agents`. |
 | `model` | no | model selector — a shortcut letter (follows the live binding) or a full `/model` selector. Applies on both surfaces: as a subagent and as a `Shift+Tab` persona. Omit to inherit the parent/session model. |
 | `effort` | no | reasoning-effort override for subagent invocations (persona runs follow the session's remembered reasoning) |
 | `fallback_model` / `fallback_effort` | no | backup used when the primary is unavailable or fails after normal retries (subagent invocations) |

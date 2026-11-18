@@ -294,6 +294,9 @@ fn text_content(text: &str) -> ToolCallContent {
 }
 
 fn tool_kind(name: &str) -> ToolKind {
+    // `definition`, `hover`, `rename_symbol`, `workspace_symbol` and
+    // `references` were retired in #243 but stay mapped: `session/load`
+    // replays older transcripts that still contain their calls.
     match name {
         "read" | "read_region" | "read_symbol" | "recall" | "project_info" | "definition"
         | "hover" | "diagnostics" => ToolKind::Read,

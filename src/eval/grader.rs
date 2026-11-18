@@ -31,12 +31,11 @@ impl EvalToolEffect {
     /// Classify the effect boundary exposed by a tool name for eval evidence.
     pub(crate) fn for_tool_name(name: &str) -> Self {
         match name {
-            "read" | "read_region" | "read_symbol" | "glob" | "grep" | "symbol_search"
-            | "definition" | "references" | "hover" | "workspace_symbol" | "git"
+            "read" | "read_region" | "read_symbol" | "glob" | "grep" | "symbol_search" | "git"
             | "diagnostics" | "project_info" | "recall" | "skill" | "image_view" => {
                 Self::Inspection
             }
-            "write" | "edit" | "apply_patch" | "rename_symbol" => Self::WorkspaceMutation,
+            "write" | "edit" | "apply_patch" => Self::WorkspaceMutation,
             "bash" | "terminal" => Self::CommandExecution,
             "question" => Self::Interaction,
             "agent" | "task" => Self::Delegation,

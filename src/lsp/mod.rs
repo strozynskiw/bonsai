@@ -1,18 +1,18 @@
-//! Managed language-server support for code intelligence tools.
+//! Managed language-server support. The model-facing surface is the
+//! `diagnostics` tool (plus post-edit diagnostic hooks); the navigation tools
+//! (`definition`, `references`, `hover`, `workspace_symbol`, `rename_symbol`)
+//! were retired in #243 because models navigate with grep and symbol tools.
 //!
 //! Extension contract:
 //! - Add a [`LanguageServerSpec`] to [`LanguageServerRegistry::builtin`] with
 //!   file extensions, root markers, command, environment, and initialization
 //!   options.
 //! - Add fake-server tests for descriptor matching, initialization, document
-//!   sync, diagnostics, navigation, symbols, and rename edits.
-//! - Keep model-facing tools generic. Normal definition/references/hover/
-//!   workspace-symbol/rename support should not require a new tool name.
+//!   sync, diagnostics, and symbols.
 //! - Add an adapter only when a server has a protocol quirk that cannot be
 //!   represented in the descriptor or normalized DTO parsing.
 
 pub(crate) mod client;
-mod edit;
 mod protocol;
 mod spec;
 #[cfg(test)]
@@ -28,17 +28,12 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-pub(crate) use edit::EditedFile;
-pub(crate) use edit::plan_workspace_edit;
-pub(crate) use protocol::{
-    LspDiagnostic, LspDiagnosticSeverity, LspHover, LspLocation, LspPosition, LspSymbol,
-    LspWorkspaceEdit,
-};
+pub(crate) use protocol::{LspDiagnostic, LspDiagnosticSeverity, LspSymbol};
 pub(crate) use spec::{LanguageServerRegistry, LanguageServerSpec};
 
 use crate::tool::{PathEvidence, ProjectPathResolver, ToolPathError};
 use client::{LspClient, LspLifecycleFailure, LspServerError};
-use protocol::{path_to_file_uri, uri_to_path};
+use protocol::path_to_file_uri;
 
 const TOOL_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const DIAGNOSTIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -112,104 +107,6 @@ impl LspHub {
         self
     }
 
-    pub(crate) fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn definition(
-        &self,
-        path: &str,
-        line: u32,
-        character: u32,
-    ) -> Result<LspReadResult<Vec<LspLocation>>, LspError> {
-        self.definition_with_recheck(path, line, character, false)
-            .await
-    }
-
-    pub(crate) async fn definition_with_recheck(
-        &self,
-        path: &str,
-        line: u32,
-        character: u32,
-        recheck: bool,
-    ) -> Result<LspReadResult<Vec<LspLocation>>, LspError> {
-        let file = self.resolve_existing_file(path, "look up definition", recheck)?;
-        let client = self.client_for_file(&file).await?;
-        let outcome = self
-            .safe_request(
-                Some(&file),
-                &client,
-                "textDocument/definition",
-                json!({
-                    "textDocument": { "uri": path_to_file_uri(&file)? },
-                    "position": tool_position(line, character)?,
-                }),
-                TOOL_REQUEST_TIMEOUT,
-            )
-            .await?;
-        Ok(LspReadResult {
-            value: protocol::parse_locations(outcome.response?)?,
-            recovery_notice: outcome.recovery_notice,
-        })
-    }
-
-    pub(crate) async fn references_with_recheck(
-        &self,
-        path: &str,
-        line: u32,
-        character: u32,
-        include_declaration: bool,
-        recheck: bool,
-    ) -> Result<LspReadResult<Vec<LspLocation>>, LspError> {
-        let file = self.resolve_existing_file(path, "look up references", recheck)?;
-        let client = self.client_for_file(&file).await?;
-        let outcome = self
-            .safe_request(
-                Some(&file),
-                &client,
-                "textDocument/references",
-                json!({
-                    "textDocument": { "uri": path_to_file_uri(&file)? },
-                    "position": tool_position(line, character)?,
-                    "context": { "includeDeclaration": include_declaration },
-                }),
-                TOOL_REQUEST_TIMEOUT,
-            )
-            .await?;
-        Ok(LspReadResult {
-            value: protocol::parse_locations(outcome.response?)?,
-            recovery_notice: outcome.recovery_notice,
-        })
-    }
-
-    pub(crate) async fn hover_with_recheck(
-        &self,
-        path: &str,
-        line: u32,
-        character: u32,
-        recheck: bool,
-    ) -> Result<LspReadResult<Option<LspHover>>, LspError> {
-        let file = self.resolve_existing_file(path, "look up hover", recheck)?;
-        let client = self.client_for_file(&file).await?;
-        let outcome = self
-            .safe_request(
-                Some(&file),
-                &client,
-                "textDocument/hover",
-                json!({
-                    "textDocument": { "uri": path_to_file_uri(&file)? },
-                    "position": tool_position(line, character)?,
-                }),
-                TOOL_REQUEST_TIMEOUT,
-            )
-            .await?;
-        Ok(LspReadResult {
-            value: protocol::parse_hover(outcome.response?)?,
-            recovery_notice: outcome.recovery_notice,
-        })
-    }
-
     pub(crate) async fn workspace_symbol_with_recheck(
         &self,
         path: &str,
@@ -232,68 +129,6 @@ impl LspHub {
             value: protocol::parse_workspace_symbols(outcome.response?)?,
             recovery_notice: outcome.recovery_notice,
         })
-    }
-
-    pub(crate) async fn prepare_rename(
-        &self,
-        path: &str,
-        line: u32,
-        character: u32,
-    ) -> Result<(), LspError> {
-        let file = self.resolve_existing_file(path, "prepare rename", true)?;
-        let client = self.client_for_file(&file).await?;
-        client.sync_document(&file).await?;
-        let result = client
-            .request(
-                "textDocument/prepareRename",
-                json!({
-                    "textDocument": { "uri": path_to_file_uri(&file)? },
-                    "position": tool_position(line, character)?,
-                }),
-                TOOL_REQUEST_TIMEOUT,
-            )
-            .await;
-        match result {
-            Ok(value) if value.is_null() => Err(LspError::Protocol(
-                "language server rejected rename at this position".to_string(),
-            )),
-            Ok(_) => Ok(()),
-            Err(LspError::Server(error)) if error.code == -32601 => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
-
-    pub(crate) async fn rename(
-        &self,
-        path: &str,
-        line: u32,
-        character: u32,
-        new_name: &str,
-    ) -> Result<LspWorkspaceEdit, LspError> {
-        let file = self.resolve_existing_file(path, "rename symbol", true)?;
-        let client = self.client_for_file(&file).await?;
-        client.sync_document(&file).await?;
-        let result = client
-            .request(
-                "textDocument/rename",
-                json!({
-                    "textDocument": { "uri": path_to_file_uri(&file)? },
-                    "position": tool_position(line, character)?,
-                    "newName": new_name,
-                }),
-                TOOL_REQUEST_TIMEOUT,
-            )
-            .await?;
-        protocol::parse_workspace_edit(result)
-    }
-
-    pub(crate) async fn sync_after_files_changed(&self, files: &[PathBuf]) -> Result<(), LspError> {
-        for file in files {
-            if let Ok(client) = self.client_for_file(file).await {
-                client.sync_document(file).await?;
-            }
-        }
-        Ok(())
     }
 
     pub(crate) async fn diagnostics_for_path(
@@ -895,18 +730,6 @@ impl From<std::io::Error> for LspError {
     }
 }
 
-fn tool_position(line: u32, character: u32) -> Result<LspPosition, LspError> {
-    if line == 0 || character == 0 {
-        return Err(LspError::Protocol(
-            "line and character are 1-based; both must be greater than zero".to_string(),
-        ));
-    }
-    Ok(LspPosition {
-        line: line - 1,
-        character: character - 1,
-    })
-}
-
 fn filter_diagnostics(
     diagnostics: Vec<LspDiagnostic>,
     include_warnings: bool,
@@ -1040,11 +863,11 @@ mod recovery_tests {
         );
 
         let first = hub
-            .definition(file.to_str().unwrap(), 1, 1)
+            .workspace_symbol_with_recheck(file.to_str().unwrap(), "", false)
             .await
             .unwrap_err();
         let second = hub
-            .definition(file.to_str().unwrap(), 1, 1)
+            .workspace_symbol_with_recheck(file.to_str().unwrap(), "", false)
             .await
             .unwrap_err();
 
@@ -1069,7 +892,10 @@ mod recovery_tests {
         );
 
         let message = hub.restart_for_path(file.to_str().unwrap()).await.unwrap();
-        let outcome = hub.definition(file.to_str().unwrap(), 1, 1).await.unwrap();
+        let outcome = hub
+            .workspace_symbol_with_recheck(file.to_str().unwrap(), "", false)
+            .await
+            .unwrap();
 
         assert!(message.contains("Restarted Rust"));
         assert!(outcome.value.is_empty());
@@ -1174,14 +1000,4 @@ pub(crate) fn relative_path(project_root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
-}
-
-pub(crate) fn workspace_edit_paths(edit: &LspWorkspaceEdit) -> Result<Vec<PathBuf>, LspError> {
-    let mut paths = Vec::new();
-    for uri in edit.changes.keys() {
-        paths.push(uri_to_path(uri)?);
-    }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
 }

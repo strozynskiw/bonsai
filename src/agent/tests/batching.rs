@@ -302,65 +302,6 @@ fn unresolvable_agent_target_serializes() {
 }
 
 #[test]
-fn lsp_navigation_tools_are_path_scoped_reads() {
-    let calls = vec![
-        test_tool_call(
-            "call-1",
-            "definition",
-            r#"{"path":"src/main.rs","line":1,"character":1}"#,
-        ),
-        test_tool_call(
-            "call-2",
-            "hover",
-            r#"{"path":"src/main.rs","line":1,"character":1}"#,
-        ),
-        test_tool_call(
-            "call-3",
-            "references",
-            r#"{"path":"src/lib.rs","line":1,"character":1}"#,
-        ),
-        test_tool_call("call-4", "write", r#"{"path":"src/main.rs","content":"x"}"#),
-    ];
-    let registry = registry_with_policies(&[
-        ("definition", crate::tool::ParallelPolicy::PathScoped),
-        ("hover", crate::tool::ParallelPolicy::PathScoped),
-        ("references", crate::tool::ParallelPolicy::PathScoped),
-        ("write", crate::tool::ParallelPolicy::PathScoped),
-    ]);
-
-    let batches = super::tool_call_batches(&calls, &registry, batch_root());
-
-    assert_eq!(
-        batch_ids(&batches),
-        vec![vec!["call-1", "call-2", "call-3"], vec!["call-4"]]
-    );
-}
-
-#[test]
-fn rename_symbol_serializes_as_global_write() {
-    let calls = vec![
-        test_tool_call("call-1", "read", r#"{"path":"src/main.rs"}"#),
-        test_tool_call(
-            "call-2",
-            "rename_symbol",
-            r#"{"path":"src/main.rs","line":1,"character":1,"new_name":"renamed"}"#,
-        ),
-        test_tool_call("call-3", "read", r#"{"path":"src/lib.rs"}"#),
-    ];
-    let registry = registry_with_policies(&[
-        ("read", crate::tool::ParallelPolicy::PathScoped),
-        ("rename_symbol", crate::tool::ParallelPolicy::Serialized),
-    ]);
-
-    let batches = super::tool_call_batches(&calls, &registry, batch_root());
-
-    assert_eq!(
-        batch_ids(&batches),
-        vec![vec!["call-1"], vec!["call-2"], vec!["call-3"]]
-    );
-}
-
-#[test]
 fn batches_overlapping_writes_after_prior_conflicts() {
     let calls = vec![
         test_tool_call("call-1", "write", r#"{"path":"src"}"#),

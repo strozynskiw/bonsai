@@ -766,20 +766,6 @@ mod tests {
         .unwrap();
 
         client.sync_document(&file).await.unwrap();
-        let definition = client
-            .request(
-                "textDocument/definition",
-                json!({
-                    "textDocument": { "uri": file_uri },
-                    "position": { "line": 0, "character": 3 },
-                }),
-                Duration::from_secs(1),
-            )
-            .await
-            .unwrap();
-        let locations = protocol::parse_locations(definition).unwrap();
-        assert_eq!(locations.len(), 1);
-
         let diagnostics = client
             .request(
                 "textDocument/diagnostic",

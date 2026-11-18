@@ -9,7 +9,7 @@ use super::*;
 /// before the single-`path` scoping here is ever reached. It appears in this
 /// list so the run loop's self-review and Rust-diagnostic hooks recognize it
 /// as a mutation (they extract its multiple target paths separately).
-const MUTATION_TOOL_NAMES: [&str; 4] = ["write", "edit", "apply_patch", "rename_symbol"];
+const MUTATION_TOOL_NAMES: [&str; 3] = ["write", "edit", "apply_patch"];
 
 pub(super) fn is_mutation_tool(name: &str) -> bool {
     MUTATION_TOOL_NAMES.contains(&name)
@@ -226,8 +226,7 @@ fn path_scoped_accesses(
                 ))]
             })
             .unwrap_or_else(|| vec![ToolAccess::Independent]),
-        "glob" | "grep" | "symbol_search" | "definition" | "references" | "hover"
-        | "workspace_symbol" => {
+        "glob" | "grep" | "symbol_search" => {
             vec![ToolAccess::ReadPath(normalize_tool_path(
                 path_arg(args).unwrap_or("."),
                 project_root,

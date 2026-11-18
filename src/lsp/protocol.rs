@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -55,12 +54,6 @@ pub(crate) struct LspDiagnostic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LspHover {
-    pub(crate) contents: String,
-    pub(crate) range: Option<LspRange>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LspSymbol {
     pub(crate) name: String,
     pub(crate) kind: String,
@@ -68,32 +61,10 @@ pub(crate) struct LspSymbol {
     pub(crate) container_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct LspTextEdit {
-    pub(crate) range: LspRange,
-    #[serde(rename = "newText")]
-    pub(crate) new_text: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct LspWorkspaceEdit {
-    pub(crate) changes: BTreeMap<String, Vec<LspTextEdit>>,
-}
-
 #[derive(Debug, Deserialize)]
 struct RawLocation {
     uri: String,
     range: LspRange,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawLocationLink {
-    #[serde(rename = "targetUri")]
-    target_uri: String,
-    #[serde(rename = "targetSelectionRange")]
-    target_selection_range: Option<LspRange>,
-    #[serde(rename = "targetRange")]
-    target_range: LspRange,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,99 +96,11 @@ struct RawWorkspaceSymbol {
     container_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawWorkspaceEdit {
-    changes: Option<BTreeMap<String, Vec<LspTextEdit>>>,
-    #[serde(rename = "documentChanges")]
-    document_changes: Option<Vec<Value>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawTextDocumentEdit {
-    #[serde(rename = "textDocument")]
-    text_document: RawVersionedTextDocumentIdentifier,
-    edits: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawVersionedTextDocumentIdentifier {
-    uri: String,
-}
-
-pub(crate) fn parse_locations(value: Value) -> Result<Vec<LspLocation>, LspError> {
-    if value.is_null() {
-        return Ok(Vec::new());
-    }
-    if let Ok(location) = serde_json::from_value::<RawLocation>(value.clone()) {
-        return Ok(vec![location_from_raw(location)?]);
-    }
-    let array = value
-        .as_array()
-        .ok_or_else(|| LspError::Protocol("location result must be an object or array".into()))?;
-    let mut locations = Vec::new();
-    for item in array {
-        if let Ok(location) = serde_json::from_value::<RawLocation>(item.clone()) {
-            locations.push(location_from_raw(location)?);
-        } else if let Ok(link) = serde_json::from_value::<RawLocationLink>(item.clone()) {
-            locations.push(LspLocation {
-                path: uri_to_path(&link.target_uri)?,
-                range: link.target_selection_range.unwrap_or(link.target_range),
-            });
-        }
-    }
-    Ok(locations)
-}
-
 fn location_from_raw(raw: RawLocation) -> Result<LspLocation, LspError> {
     Ok(LspLocation {
         path: uri_to_path(&raw.uri)?,
         range: raw.range,
     })
-}
-
-pub(crate) fn parse_hover(value: Value) -> Result<Option<LspHover>, LspError> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    let contents = value
-        .get("contents")
-        .ok_or_else(|| LspError::Protocol("hover result missing contents".into()))?;
-    let text = hover_contents_to_string(contents);
-    if text.trim().is_empty() {
-        return Ok(None);
-    }
-    let range = value
-        .get("range")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|err| LspError::Protocol(format!("invalid hover range: {err}")))?;
-    Ok(Some(LspHover {
-        contents: text,
-        range,
-    }))
-}
-
-fn hover_contents_to_string(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(hover_contents_to_string)
-            .filter(|text| !text.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        Value::Object(map) => {
-            if let Some(value) = map.get("value").and_then(Value::as_str) {
-                return value.to_string();
-            }
-            if let Some(value) = map.get("language").and_then(Value::as_str) {
-                return value.to_string();
-            }
-            String::new()
-        }
-        _ => String::new(),
-    }
 }
 
 pub(crate) fn parse_workspace_symbols(value: Value) -> Result<Vec<LspSymbol>, LspError> {
@@ -258,48 +141,6 @@ fn parse_symbol_location(value: Value) -> Result<LspLocation, LspError> {
         range: serde_json::from_value(range)
             .map_err(|err| LspError::Protocol(format!("invalid symbol range: {err}")))?,
     })
-}
-
-pub(crate) fn parse_workspace_edit(value: Value) -> Result<LspWorkspaceEdit, LspError> {
-    if value.is_null() {
-        return Ok(LspWorkspaceEdit::default());
-    }
-    let raw = serde_json::from_value::<RawWorkspaceEdit>(value)
-        .map_err(|err| LspError::Protocol(format!("invalid workspace edit: {err}")))?;
-    let mut changes = raw.changes.unwrap_or_default();
-    if let Some(document_changes) = raw.document_changes {
-        for change in document_changes {
-            if change.get("kind").is_some() {
-                return Err(LspError::Protocol(
-                    "workspace edit contains file create/delete/rename operations, which are not supported yet".into(),
-                ));
-            }
-            let document_edit = serde_json::from_value::<RawTextDocumentEdit>(change)
-                .map_err(|err| LspError::Protocol(format!("invalid document edit: {err}")))?;
-            let mut edits = Vec::new();
-            for edit in document_edit.edits {
-                if edit.get("annotationId").is_some() {
-                    let mut edit = edit;
-                    if let Some(object) = edit.as_object_mut() {
-                        object.remove("annotationId");
-                    }
-                    edits.push(text_edit_from_value(edit)?);
-                } else {
-                    edits.push(text_edit_from_value(edit)?);
-                }
-            }
-            changes
-                .entry(document_edit.text_document.uri)
-                .or_default()
-                .extend(edits);
-        }
-    }
-    Ok(LspWorkspaceEdit { changes })
-}
-
-fn text_edit_from_value(value: Value) -> Result<LspTextEdit, LspError> {
-    serde_json::from_value::<LspTextEdit>(value)
-        .map_err(|err| LspError::Protocol(format!("invalid text edit: {err}")))
 }
 
 pub(crate) fn parse_publish_diagnostics(
@@ -445,47 +286,6 @@ fn percent_decode(input: &str) -> Result<String, LspError> {
     String::from_utf8(out).map_err(|err| LspError::Protocol(format!("invalid UTF-8 in URI: {err}")))
 }
 
-pub(crate) fn offset_at_position(text: &str, position: LspPosition) -> Result<usize, LspError> {
-    let mut byte_offset = 0usize;
-    for (line_index, segment) in text.split_inclusive('\n').enumerate() {
-        if line_index as u32 == position.line {
-            let line = segment.strip_suffix('\n').unwrap_or(segment);
-            return offset_in_line(line, byte_offset, position.character);
-        }
-        byte_offset += segment.len();
-    }
-    if position.line == text.lines().count() as u32 && position.character == 0 {
-        return Ok(text.len());
-    }
-    Err(LspError::Protocol(format!(
-        "position {}:{} is outside the file",
-        position.line + 1,
-        position.character + 1
-    )))
-}
-
-fn offset_in_line(line: &str, line_start_offset: usize, character: u32) -> Result<usize, LspError> {
-    let mut utf16_units = 0u32;
-    for (byte_index, ch) in line.char_indices() {
-        if utf16_units == character {
-            return Ok(line_start_offset + byte_index);
-        }
-        utf16_units += ch.len_utf16() as u32;
-        if utf16_units > character {
-            return Err(LspError::Protocol(
-                "position falls inside a multi-unit UTF-16 character".into(),
-            ));
-        }
-    }
-    if utf16_units == character {
-        return Ok(line_start_offset + line.len());
-    }
-    Err(LspError::Protocol(format!(
-        "character {} is outside the line",
-        character + 1
-    )))
-}
-
 impl fmt::Display for LspLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -510,31 +310,5 @@ mod tests {
         assert!(uri.contains("%20"), "{uri}");
         assert_eq!(uri_to_path(&uri).unwrap(), path.canonicalize().unwrap());
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn utf16_offset_handles_multibyte_chars() {
-        let text = "a😀b\nnext";
-        assert_eq!(
-            offset_at_position(
-                text,
-                LspPosition {
-                    line: 0,
-                    character: 3
-                }
-            )
-            .unwrap(),
-            "a😀".len()
-        );
-        assert!(matches!(
-            offset_at_position(
-                text,
-                LspPosition {
-                    line: 0,
-                    character: 2
-                }
-            ),
-            Err(LspError::Protocol(message)) if message == "position falls inside a multi-unit UTF-16 character"
-        ));
     }
 }

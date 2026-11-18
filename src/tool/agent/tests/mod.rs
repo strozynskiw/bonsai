@@ -259,7 +259,7 @@ struct DummyTool(&'static str);
 impl Tool for DummyTool {
     fn effect_policy(&self) -> crate::tool::ToolEffectPolicy {
         match self.0 {
-            "write" | "edit" | "bash" | "rename_symbol" | "future_effect" => {
+            "write" | "edit" | "bash" | "future_effect" => {
                 crate::tool::ToolEffectPolicy::SelfAuthorized
             }
             "future_delegate" => crate::tool::ToolEffectPolicy::Delegated,

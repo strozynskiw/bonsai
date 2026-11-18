@@ -15,9 +15,6 @@ use crate::tool::diagnostics::DiagnosticsTool;
 use crate::tool::git::GitTool;
 use crate::tool::glob::GlobTool;
 use crate::tool::grep::GrepTool;
-use crate::tool::lsp::{
-    DefinitionTool, HoverTool, ReferencesTool, RenameSymbolTool, WorkspaceSymbolTool,
-};
 use crate::tool::memory_write::MemoryWriteTool;
 use crate::tool::peers::PeersTool;
 use crate::tool::plan::{
@@ -116,10 +113,6 @@ pub(crate) struct ToolRegistryDeps {
 struct ReadOnlyCore {
     glob: Arc<GlobTool>,
     symbol: Arc<SymbolSearchTool>,
-    definition: Arc<DefinitionTool>,
-    references: Arc<ReferencesTool>,
-    hover: Arc<HoverTool>,
-    workspace_symbol: Arc<WorkspaceSymbolTool>,
     git: Arc<GitTool>,
 }
 
@@ -182,13 +175,6 @@ impl ReadOnlyCore {
         instances.insert(ToolFactoryKey::Glob, self.glob.clone());
         instances.insert(ToolFactoryKey::Grep, grep);
         instances.insert(ToolFactoryKey::SymbolSearch, self.symbol.clone());
-        instances.insert(ToolFactoryKey::Definition, self.definition.clone());
-        instances.insert(ToolFactoryKey::References, self.references.clone());
-        instances.insert(ToolFactoryKey::Hover, self.hover.clone());
-        instances.insert(
-            ToolFactoryKey::WorkspaceSymbol,
-            self.workspace_symbol.clone(),
-        );
         instances.insert(ToolFactoryKey::Git, self.git.clone());
         instances.insert(ToolFactoryKey::ReadRegion, read_region);
         instances.insert(ToolFactoryKey::ReadSymbol, read_symbol);
@@ -403,10 +389,6 @@ pub(crate) fn build_tool_registries(
         symbol: Arc::new(
             SymbolSearchTool::new(project_root.clone()).with_path_evidence(path_evidence.clone()),
         ),
-        definition: Arc::new(DefinitionTool::new(lsp_hub.clone())),
-        references: Arc::new(ReferencesTool::new(lsp_hub.clone())),
-        hover: Arc::new(HoverTool::new(lsp_hub.clone())),
-        workspace_symbol: Arc::new(WorkspaceSymbolTool::new(lsp_hub.clone())),
         git: Arc::new(if path_evidence.allows_git_inspection() {
             GitTool::new(project_root.clone())
         } else {
@@ -514,18 +496,6 @@ pub(crate) fn build_tool_registries(
             ))),
         );
         full_sub_instances.insert(ToolFactoryKey::Terminal, terminal_tool.clone());
-        full_sub_instances.insert(
-            ToolFactoryKey::RenameSymbol,
-            Arc::new(RenameSymbolTool::with_hooks_and_locks(
-                project_root.clone(),
-                lsp_hub.clone(),
-                subagent_read_tracker.clone(),
-                yolo_mode.clone(),
-                hooks.clone(),
-                workspace_locks.clone(),
-                action_policy.clone(),
-            )),
-        );
         full_sub_instances.insert(ToolFactoryKey::Skill, skill_tool.clone());
         full_sub_instances.insert(ToolFactoryKey::Question, question_tool.clone());
         full_sub_instances.insert(ToolFactoryKey::WebFetch, webfetch_tool.clone());
@@ -549,7 +519,6 @@ pub(crate) fn build_tool_registries(
         crate::mcp::register_mcp_tools(&mut full_sub_registry, &mcp_tools, &extensions);
         let registry_factory = subagent_tool_registry_factory(SubagentToolRunDeps {
             project_root: project_root.clone(),
-            lsp_hub: lsp_hub.clone(),
             permissions: permissions.clone(),
             interaction: interaction.clone(),
             background_tasks: background_tasks.clone(),
@@ -622,25 +591,6 @@ pub(crate) fn build_tool_registries(
     coding_instances.insert(ToolFactoryKey::Glob, core.glob.clone());
     coding_instances.insert(ToolFactoryKey::Grep, grep_tool.clone());
     coding_instances.insert(ToolFactoryKey::SymbolSearch, core.symbol.clone());
-    coding_instances.insert(ToolFactoryKey::Definition, core.definition.clone());
-    coding_instances.insert(ToolFactoryKey::References, core.references.clone());
-    coding_instances.insert(ToolFactoryKey::Hover, core.hover.clone());
-    coding_instances.insert(
-        ToolFactoryKey::WorkspaceSymbol,
-        core.workspace_symbol.clone(),
-    );
-    coding_instances.insert(
-        ToolFactoryKey::RenameSymbol,
-        Arc::new(RenameSymbolTool::with_hooks_and_locks(
-            project_root.clone(),
-            lsp_hub.clone(),
-            read_tracker.clone(),
-            yolo_mode.clone(),
-            hooks.clone(),
-            workspace_locks.clone(),
-            action_policy.clone(),
-        )),
-    );
     coding_instances.insert(ToolFactoryKey::Git, core.git.clone());
     coding_instances.insert(ToolFactoryKey::ReadRegion, read_region_tool.clone());
     coding_instances.insert(ToolFactoryKey::ReadSymbol, read_symbol_tool.clone());
@@ -822,7 +772,6 @@ pub(crate) fn build_tool_registries(
 #[derive(Clone)]
 struct SubagentToolRunDeps {
     project_root: PathBuf,
-    lsp_hub: Arc<LspHub>,
     permissions: PermissionManager,
     interaction: Arc<crate::interaction::InteractionService>,
     background_tasks: Arc<BackgroundTaskRegistry>,
@@ -930,20 +879,6 @@ impl SubagentToolRunDeps {
                     self.authorization_ledger.clone(),
                 ),
             ))),
-            "rename_symbol" => Arc::new(RenameSymbolTool::with_hooks_and_locks(
-                self.project_root.clone(),
-                self.lsp_hub.clone(),
-                read_tracker,
-                self.yolo_mode.clone(),
-                self.hooks.clone(),
-                self.workspace_locks.clone(),
-                ActionPolicy::with_ledger(
-                    self.permissions.clone(),
-                    self.interaction.clone(),
-                    self.yolo_mode.clone(),
-                    self.authorization_ledger.clone(),
-                ),
-            )),
             _ => source.get(name).ok_or_else(|| {
                 anyhow::anyhow!(
                     "subagent registry entry '{name}' disappeared while preparing a run"
@@ -1053,10 +988,6 @@ mod tests {
             "glob",
             "grep",
             "symbol_search",
-            "definition",
-            "references",
-            "hover",
-            "workspace_symbol",
             "git",
             "read_region",
             "read_symbol",
@@ -1065,7 +996,6 @@ mod tests {
             "edit",
             "bash",
             "terminal",
-            "rename_symbol",
             "skill",
             "diagnostics",
             "todowrite",
@@ -1086,10 +1016,6 @@ mod tests {
             "glob",
             "grep",
             "symbol_search",
-            "definition",
-            "references",
-            "hover",
-            "workspace_symbol",
             "git",
             "read_region",
             "read_symbol",
@@ -1178,10 +1104,6 @@ mod tests {
             "glob",
             "grep",
             "symbol_search",
-            "definition",
-            "references",
-            "hover",
-            "workspace_symbol",
             "git",
             "question",
             "skill",
@@ -1216,15 +1138,18 @@ mod tests {
             "planning registry must not include {tool}"
         );
 
-        let tool = "rename_symbol";
-        assert!(
-            coding.get(tool).is_some(),
-            "coding registry must include {tool}"
-        );
-        assert!(
-            planning.get(tool).is_none(),
-            "planning registry must not include {tool}"
-        );
+        // The LSP navigation tools were retired in #243; only `diagnostics`
+        // keeps the managed language servers on the tool surface.
+        for tool in [
+            "definition",
+            "references",
+            "hover",
+            "workspace_symbol",
+            "rename_symbol",
+        ] {
+            assert!(coding.get(tool).is_none(), "{tool} must stay retired");
+            assert!(planning.get(tool).is_none(), "{tool} must stay retired");
+        }
 
         for tool in [
             "plan_replace_draft",
@@ -1472,10 +1397,6 @@ mod tests {
                 "glob",
                 "grep",
                 "symbol_search",
-                "definition",
-                "references",
-                "hover",
-                "workspace_symbol",
                 "git",
                 "read_region",
                 "read_symbol",
@@ -1489,10 +1410,6 @@ mod tests {
                 "glob",
                 "grep",
                 "symbol_search",
-                "definition",
-                "references",
-                "hover",
-                "workspace_symbol",
                 "git",
                 "read_region",
                 "read_symbol",
@@ -1501,7 +1418,6 @@ mod tests {
                 "edit",
                 "bash",
                 "terminal",
-                "rename_symbol",
                 "skill",
                 "question",
                 "webfetch",

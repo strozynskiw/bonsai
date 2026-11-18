@@ -34,8 +34,8 @@ turn; headless builds it eagerly. Smol mode omits it.
 
 ## Language servers
 
-Definition, references, hover, workspace-symbol, rename, and diagnostics use
-a managed server when its command is installed:
+The `diagnostics` tool and the automatic post-edit diagnostics use a managed
+server when its command is installed:
 
 | Language | Server | Install | Override |
 | --- | --- | --- | --- |
@@ -50,12 +50,13 @@ Mechanics:
   root found by walking up to the nearest manifest (`Cargo.toml`,
   `tsconfig.json`/`package.json`, `pyproject.toml`/…, `go.mod`/`go.work`).
   Documents sync incrementally and only when content changed.
-- If a server is absent, the tools return one setup hint and the
+- If a server is absent, `diagnostics` returns one setup hint and the
   tree-sitter/grep path stays available — nothing degrades silently.
-- **Tools**: `definition`, `references`, `hover`, `workspace_symbol`
-  (read-only) and `rename_symbol` (self-authorized: in-project edits only,
-  every touched file must have been read and unchanged, overlaps rejected,
-  guarded commit with rollback).
+- There are no LSP navigation tools. `definition`, `references`, `hover`,
+  `workspace_symbol` and `rename_symbol` were removed in 0.7: across 222
+  sessions they were called 9 times in total, while models navigated with
+  `grep`, `symbol_search`, `read_symbol` and `read_region`. Dropping them
+  removes five schemas from every prompt.
 - **`diagnostics`** runs the project's checker: with a `path` it uses the
   file's language server (pull diagnostics, falling back to pushed ones);
   pathless Rust runs `cargo check` through the normal authorization and

@@ -1803,7 +1803,7 @@ fn may_mutate_workspace_for_self_review(call: &ToolCall, registry: &ToolRegistry
     }
     if matches!(
         tool.name(),
-        "write" | "edit" | "apply_patch" | "rename_symbol" | "bash" | "terminal"
+        "write" | "edit" | "apply_patch" | "bash" | "terminal"
     ) {
         return true;
     }
@@ -1818,7 +1818,7 @@ fn may_mutate_workspace_for_self_review(call: &ToolCall, registry: &ToolRegistry
     }
 }
 
-/// The file paths a successful mutation call wrote. write/edit/rename_symbol
+/// The file paths a successful mutation call wrote. write/edit
 /// expose a single `path` arg (0 or 1 path); `apply_patch` carries many inside
 /// its patch body, extracted by parsing it. Centralizes the single-vs-multi-file
 /// split so the LSP-diagnostic hooks treat every mutation tool uniformly.
@@ -1860,15 +1860,13 @@ pub(super) fn scoped_instruction_paths(tool_call: &ToolCall) -> Vec<String> {
         return Vec::new();
     };
     match tool_call.name.as_str() {
-        "read" | "read_region" | "read_symbol" | "hover" | "write" | "edit" => {
+        "read" | "read_region" | "read_symbol" | "write" | "edit" => {
             path_arg(&args).map(str::to_string).into_iter().collect()
         }
         "glob" | "symbol_search" => vec![path_arg(&args).unwrap_or(".").to_string()],
         // These operations may inspect or mutate files outside the source
         // path. Resolve the entire explicit workspace before they run.
-        "definition" | "references" | "workspace_symbol" | "diagnostics" | "rename_symbol" => {
-            vec![".".to_string()]
-        }
+        "diagnostics" => vec![".".to_string()],
         "grep" => path_arg(&args)
             .unwrap_or(".")
             .split_whitespace()
@@ -1897,16 +1895,7 @@ fn scoped_instruction_recurses(tool_call: &ToolCall) -> bool {
     }
     matches!(
         tool_call.name.as_str(),
-        "glob"
-            | "grep"
-            | "symbol_search"
-            | "definition"
-            | "references"
-            | "workspace_symbol"
-            | "diagnostics"
-            | "rename_symbol"
-            | "git"
-            | "bash"
+        "glob" | "grep" | "symbol_search" | "diagnostics" | "git" | "bash"
     )
 }
 
@@ -4164,10 +4153,6 @@ fn repeated_inspection_tool(name: &str) -> bool {
                 | "glob"
                 | "grep"
                 | "symbol_search"
-                | "definition"
-                | "references"
-                | "hover"
-                | "workspace_symbol"
                 | "git"
                 | "diagnostics"
                 | "websearch"
@@ -4758,17 +4743,6 @@ mod tests {
         assert_eq!(
             completed_tool_workspace_effect(
                 &call("write", r#"{"path":"src/lib.rs","content":"x"}"#),
-                &plain,
-                vec!["src/lib.rs".to_string()],
-            ),
-            crate::tool::ToolWorkspaceEffect::ScopedMutation(vec!["src/lib.rs".to_string()])
-        );
-        assert_eq!(
-            completed_tool_workspace_effect(
-                &call(
-                    "rename_symbol",
-                    r#"{"path":"src/lib.rs","line":1,"character":1,"new_name":"renamed"}"#,
-                ),
                 &plain,
                 vec!["src/lib.rs".to_string()],
             ),

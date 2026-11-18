@@ -21,7 +21,7 @@ headless command.
 - **Real coding tools** — structured file edits, shell and PTY execution, Git,
   diagnostics, web access, todos, plans, and background tasks.
 - **Language intelligence** — built-in symbol search for Rust, TypeScript,
-  JavaScript, Python, and Go, plus managed LSP tools.
+  JavaScript, Python, and Go, plus managed language-server diagnostics.
 - **Safe execution** — configurable autonomy, permissions, command
   classification, sandboxing, recovery worktrees, hooks, and verification.
 - **Extensible by configuration** — custom agents, subagents, skills, themes,

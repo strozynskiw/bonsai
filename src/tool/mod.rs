@@ -11,7 +11,6 @@ pub(crate) mod git;
 pub(crate) mod glob;
 pub(crate) mod goal_complete;
 pub(crate) mod grep;
-pub(crate) mod lsp;
 pub(crate) mod memory_write;
 mod output;
 pub(crate) mod path_evidence;

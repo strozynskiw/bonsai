@@ -139,8 +139,8 @@ the observed result. Do not broaden the change without evidence.
   stem. Provide a non-empty prompt body. `enabled` defaults to `true`.
 - Omit `tools` for the default read-only set. Exact grantable names are
   `project_info`, `read`, `read_region`, `read_symbol`, `glob`, `grep`,
-  `symbol_search`, `definition`, `references`, `hover`, `workspace_symbol`,
-  `git`, `write`, `edit`, `bash`, `rename_symbol`, `skill`, and `question`.
+  `symbol_search`, `git`, `write`, `edit`, `bash`, `terminal`, `skill`, and
+  `question`.
   Unknown or session-internal tools are ignored and shown by `/agents`.
 - A custom agent may receive mutating tools such as `write`, `edit`, or `bash`;
   their calls still pass through the parent's permission and sandbox policy.

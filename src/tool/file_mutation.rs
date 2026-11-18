@@ -532,13 +532,6 @@ impl FileMutationContext {
         guard
     }
 
-    /// The shared freshness ledger used to plan mutations before the guard
-    /// commits them. Callers must still use [`Self::guard`] for authorization,
-    /// hooks, atomic writes, and workspace locking.
-    pub(crate) fn read_tracker(&self) -> &ReadTracker {
-        &self.read_tracker
-    }
-
     pub(crate) fn project_root(&self) -> &Path {
         &self.project_root
     }
