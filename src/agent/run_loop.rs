@@ -134,6 +134,9 @@ struct ToolExecutionOutcome {
 struct ToolCallObservation {
     signature: String,
     tool_name: String,
+    /// `plan_findings` with `operation: resolve`: closing a finding is
+    /// progress even though it returns only a text acknowledgement.
+    resolves_plan_finding: bool,
     status: crate::output::ToolExecutionStatus,
     makes_progress: bool,
     progress_reason: Option<String>,
@@ -2985,11 +2988,24 @@ impl RepeatedFailureGuard {
     }
 }
 
+fn resolves_plan_finding(tool_call: &ToolCall) -> bool {
+    tool_call.name == "plan_findings"
+        && serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+            .ok()
+            .and_then(|args| {
+                args.get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|operation| operation == "resolve")
+            })
+            .unwrap_or(false)
+}
+
 impl ToolCallObservation {
     fn new(tool_call: &ToolCall, status: crate::output::ToolExecutionStatus) -> Self {
         Self {
             signature: tool_call_failure_signature(tool_call),
             tool_name: tool_call.name.clone(),
+            resolves_plan_finding: resolves_plan_finding(tool_call),
             status,
             makes_progress: false,
             progress_reason: None,
@@ -3037,7 +3053,7 @@ impl ToolCallObservation {
             self.mark_progress("user decision resolved");
             return;
         }
-        if self.tool_name == "plan_resolve_finding" {
+        if self.resolves_plan_finding {
             self.mark_progress("plan finding resolved");
             return;
         }
@@ -5026,6 +5042,29 @@ mod tests {
     }
 
     #[test]
+    fn only_resolving_a_plan_finding_counts_as_progress() {
+        let succeeded = crate::output::ToolExecutionStatus::Succeeded;
+        let output = ToolOutput::Text("ok".to_string());
+        let local = Some(crate::tool::ToolEffectPolicy::LocalState);
+
+        let mut resolve = stall_observation(
+            "plan_findings",
+            r#"{"operation":"resolve","finding":"race"}"#,
+            succeeded,
+        );
+        resolve.observe_result(&output, local);
+        assert!(resolve.makes_progress);
+
+        let mut add = stall_observation(
+            "plan_findings",
+            r#"{"operation":"add","severity":"major","issue":"race","required_fix":"lock"}"#,
+            succeeded,
+        );
+        add.observe_result(&output, local);
+        assert!(!add.makes_progress);
+    }
+
+    #[test]
     fn session_title_guard_rejects_then_stops_a_title_only_loop() {
         let mut guard = SessionTitleGuard::new(SessionTitleRunPolicy::ContinuationOrAutomatic);
         let title = call(
@@ -5870,10 +5909,7 @@ mod tests {
             rejections.message_for(&call("git", r#"{"op":"status"}"#)),
             None
         );
-        assert_eq!(
-            rejections.message_for(&call("plan_add_finding", "{}")),
-            None
-        );
+        assert_eq!(rejections.message_for(&call("plan_findings", "{}")), None);
         assert_eq!(
             rejections.message_for(&call("agent", r#"{"agent":"review","prompt":"x"}"#)),
             None

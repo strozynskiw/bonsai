@@ -379,7 +379,7 @@ fn coding_prompt_keeps_progress_in_todowrite() {
     ));
     assert!(content.contains("Do not use plan-canvas tools to mark implementation progress"));
     assert!(content.contains("review findings in the prompt as implementation work"));
-    assert!(!content.contains("plan_resolve_finding"));
+    assert!(!content.contains("plan_findings"));
 }
 
 #[test]
@@ -539,7 +539,7 @@ fn planning_prompt_synthesizes_detail_into_a_decision_complete_draft() {
         assert!(content.contains(requirement), "missing {requirement}");
     }
     assert!(content.contains("Later user details refine the existing draft"));
-    assert!(content.contains("granular patch/insert/remove/move tools"));
+    assert!(content.contains("instead of replacing the whole draft"));
 }
 
 #[test]
@@ -575,7 +575,7 @@ fn review_prompt_requires_read_only_evidence_and_severity_definitions() {
     assert!(content.contains("You are a code reviewer"));
     assert!(content.contains("Do not modify files, run mutating commands, or update todos"));
     assert!(
-        content.contains("plan_add_finding"),
+        content.contains("plan_findings with operation add"),
         "review prompt should instruct structured finding capture"
     );
     assert!(content.contains("Base findings on evidence"));
@@ -594,11 +594,12 @@ fn review_prompt_requires_read_only_evidence_and_severity_definitions() {
 }
 
 #[test]
-fn planning_prompt_mentions_reorder_and_question_tools() {
+fn planning_prompt_names_the_consolidated_canvas_tools() {
     let content = system_content(AgentMode::Planning, "");
-    assert!(content.contains("plan_move_section"));
-    assert!(!content.contains("plan_add_question"));
-    assert!(content.contains("plan_remove_question"));
+    assert!(content.contains("plan_patch_section's move operation"));
+    assert!(content.contains("plan_tasks"));
+    assert!(!content.contains("plan_move_section"));
+    assert!(!content.contains("plan_remove_question"));
     assert!(content.contains("repeats the section's own heading"));
 }
 
@@ -1439,14 +1440,7 @@ async fn review_registry_omits_agent_even_with_a_configured_subagent_runner() {
     let mut agent = Agent::builder(
         MockProvider::empty(),
         mock_registry(&["read", "write", "agent"]),
-        mock_registry(&[
-            "read",
-            "glob",
-            "grep",
-            "symbol_search",
-            "plan_add_finding",
-            "plan_associate_finding",
-        ]),
+        mock_registry(&["read", "glob", "grep", "symbol_search", "plan_findings"]),
         fixture.read_tracker.clone(),
         fixture.project_root.clone(),
     )
@@ -1456,8 +1450,7 @@ async fn review_registry_omits_agent_even_with_a_configured_subagent_runner() {
 
     assert!(agent.review_pending_changes(ReviewScope::Uncommitted).await);
     assert!(agent.tool_registry.get("read").is_some());
-    assert!(agent.tool_registry.get("plan_add_finding").is_some());
-    assert!(agent.tool_registry.get("plan_associate_finding").is_some());
+    assert!(agent.tool_registry.get("plan_findings").is_some());
     assert!(agent.tool_registry.get("agent").is_none());
 }
 

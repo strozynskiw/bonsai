@@ -78,17 +78,14 @@ struct SetSectionArgs {
 }
 
 #[derive(Deserialize)]
-struct RemoveSectionArgs {
-    heading: String,
-}
-
-#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PatchSectionOperationArg {
     Replace,
     Append,
     Prepend,
     ReplaceText,
+    Remove,
+    Move,
 }
 
 #[derive(Deserialize)]
@@ -98,37 +95,60 @@ struct PatchSectionArgs {
     text: Option<String>,
     old_text: Option<String>,
     new_text: Option<String>,
+    position: Option<InsertPositionArg>,
+    target: Option<String>,
+}
+
+/// A validated `plan_patch_section` request.
+enum SectionEdit {
+    Patch(SectionPatch),
+    Remove,
+    Move {
+        position: InsertPosition,
+        target: Option<String>,
+    },
 }
 
 impl PatchSectionArgs {
-    /// Normalize the flat wire fields into a typed `SectionPatch`, validating
+    /// Normalize the flat wire fields into a typed [`SectionEdit`], validating
     /// that the operands required by the chosen operation are present. This is
     /// the single boundary where illegal field combinations are rejected, so
     /// everything downstream works with a value that cannot be malformed.
-    fn into_heading_and_patch(self) -> Result<(String, SectionPatch)> {
+    fn into_heading_and_edit(self) -> Result<(String, SectionEdit)> {
         let PatchSectionArgs {
             heading,
             operation,
             text,
             old_text,
             new_text,
+            position,
+            target,
         } = self;
-        let patch = match operation {
+        let edit = match operation {
             PatchSectionOperationArg::Replace => {
-                SectionPatch::Replace(require_operand(text, "text")?)
+                SectionEdit::Patch(SectionPatch::Replace(require_operand(text, "text")?))
             }
             PatchSectionOperationArg::Append => {
-                SectionPatch::Append(require_operand(text, "text")?)
+                SectionEdit::Patch(SectionPatch::Append(require_operand(text, "text")?))
             }
             PatchSectionOperationArg::Prepend => {
-                SectionPatch::Prepend(require_operand(text, "text")?)
+                SectionEdit::Patch(SectionPatch::Prepend(require_operand(text, "text")?))
             }
-            PatchSectionOperationArg::ReplaceText => SectionPatch::ReplaceText {
-                old: require_operand(old_text, "old_text")?,
-                new: new_text.unwrap_or_default(),
+            PatchSectionOperationArg::ReplaceText => {
+                SectionEdit::Patch(SectionPatch::ReplaceText {
+                    old: require_operand(old_text, "old_text")?,
+                    new: new_text.unwrap_or_default(),
+                })
+            }
+            PatchSectionOperationArg::Remove => SectionEdit::Remove,
+            PatchSectionOperationArg::Move => SectionEdit::Move {
+                position: position
+                    .ok_or_else(|| anyhow::anyhow!("move requires position"))?
+                    .into(),
+                target,
             },
         };
-        Ok((heading, patch))
+        Ok((heading, edit))
     }
 }
 
@@ -171,42 +191,12 @@ impl From<InsertPositionArg> for InsertPosition {
     }
 }
 
-#[derive(Deserialize)]
-struct InsertTaskArgs {
-    text: String,
-    position: InsertPositionArg,
-    target: Option<String>,
-    /// When set, the task is inserted into this phase's checklist (relative to
-    /// that phase's own tasks) instead of the flat top-level list.
-    #[serde(default)]
-    phase: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct MoveSectionArgs {
-    heading: String,
-    position: InsertPositionArg,
-    target: Option<String>,
-}
-
 #[cfg(test)]
 #[derive(Deserialize)]
 struct AddPhaseArgs {
     name: String,
     #[serde(default)]
     tasks: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct RemovePhaseArgs {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct MovePhaseArgs {
-    name: String,
-    position: InsertPositionArg,
-    target: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -292,14 +282,169 @@ impl ReplaceDraftArgs {
 }
 
 #[derive(Deserialize)]
-struct UpdateTaskArgs {
-    target: String,
-    text: String,
+#[serde(rename_all = "snake_case")]
+enum TaskOperationArg {
+    Insert,
+    Update,
+    Remove,
+    Check,
+    Uncheck,
+    RemovePhase,
+    MovePhase,
 }
 
 #[derive(Deserialize)]
-struct TargetTaskArgs {
-    target: String,
+struct TasksArgs {
+    operation: TaskOperationArg,
+    text: Option<String>,
+    target: Option<String>,
+    position: Option<InsertPositionArg>,
+    phase: Option<String>,
+}
+
+/// Trims an optional selector and drops it when blank.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+impl TasksArgs {
+    /// Apply one task or phase operation, validating its required fields.
+    fn apply(self, doc: &mut PlanDoc) -> Result<String> {
+        let TasksArgs {
+            operation,
+            text,
+            target,
+            position,
+            phase,
+        } = self;
+        let phase = non_blank(phase);
+        match operation {
+            TaskOperationArg::Insert => {
+                let text = require_operand(text, "text")?;
+                let position = position.map_or(InsertPosition::End, Into::into);
+                match phase {
+                    Some(phase) => {
+                        doc.edit()
+                            .insert_task_to_phase(&phase, &text, position, target.as_deref())
+                    }
+                    None => doc.edit().insert_task(&text, position, target.as_deref()),
+                }
+            }
+            TaskOperationArg::Update => {
+                let target = require_operand(target, "target")?;
+                let text = require_operand(text, "text")?;
+                doc.edit().update_task(&target, &text)
+            }
+            TaskOperationArg::Remove => {
+                let target = require_operand(target, "target")?;
+                doc.edit().remove_task(&target)
+            }
+            TaskOperationArg::Check => {
+                let target = require_operand(target, "target")?;
+                match doc.edit().check_task(&target) {
+                    Some(text) => Ok(format!("Checked off: {text}")),
+                    None => anyhow::bail!("No unchecked task matching '{target}' found."),
+                }
+            }
+            TaskOperationArg::Uncheck => {
+                let target = require_operand(target, "target")?;
+                match doc.edit().uncheck_task(&target) {
+                    Some(text) => Ok(format!("Unchecked: {text}")),
+                    None => anyhow::bail!("No checked task matching '{target}' found."),
+                }
+            }
+            TaskOperationArg::RemovePhase => {
+                let phase = phase.ok_or_else(|| anyhow::anyhow!("remove_phase requires phase"))?;
+                if doc.edit().remove_phase(&phase) {
+                    Ok(format!("Plan phase '{phase}' removed."))
+                } else {
+                    anyhow::bail!("No plan phase named '{phase}' found.")
+                }
+            }
+            TaskOperationArg::MovePhase => {
+                let phase = phase.ok_or_else(|| anyhow::anyhow!("move_phase requires phase"))?;
+                let position =
+                    position.ok_or_else(|| anyhow::anyhow!("move_phase requires position"))?;
+                doc.edit()
+                    .move_phase(&phase, position.into(), target.as_deref())
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FindingOperationArg {
+    Add,
+    Associate,
+    Resolve,
+}
+
+#[derive(Deserialize)]
+struct FindingsArgs {
+    operation: FindingOperationArg,
+    severity: Option<String>,
+    issue: Option<String>,
+    required_fix: Option<String>,
+    file: Option<String>,
+    line: Option<u32>,
+    acceptance_tests: Option<Vec<String>>,
+    source_ids: Option<Vec<String>>,
+    task: Option<String>,
+    finding: Option<String>,
+}
+
+impl FindingsArgs {
+    /// Apply one finding operation, validating its required fields.
+    fn apply(self, doc: &mut PlanDoc) -> Result<String> {
+        let FindingsArgs {
+            operation,
+            severity,
+            issue,
+            required_fix,
+            file,
+            line,
+            acceptance_tests,
+            source_ids,
+            task,
+            finding,
+        } = self;
+        match operation {
+            FindingOperationArg::Add => {
+                let severity_text = require_operand(severity, "severity")?;
+                let severity = Severity::from_db_str(&severity_text).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid severity {severity_text:?}; expected one of blocker|major|minor|nit"
+                    )
+                })?;
+                let finding = Finding {
+                    severity,
+                    file: non_blank(file),
+                    line,
+                    issue: require_operand(issue, "issue")?,
+                    required_fix: require_operand(required_fix, "required_fix")?,
+                    acceptance_tests: acceptance_tests.unwrap_or_default(),
+                    source_ids: source_ids.unwrap_or_default(),
+                    task: non_blank(task),
+                    resolved: false,
+                };
+                doc.edit().add_finding_checked(finding)?;
+                let open = doc.findings.iter().filter(|f| !f.resolved).count();
+                Ok(format!("Finding recorded ({open} open)."))
+            }
+            FindingOperationArg::Associate => {
+                let finding = require_operand(finding, "finding")?;
+                let task = require_operand(task, "task")?;
+                doc.edit().associate_finding(&finding, &task)
+            }
+            FindingOperationArg::Resolve => {
+                let finding = require_operand(finding, "finding")?;
+                doc.edit().resolve_finding(&finding)
+            }
+        }
+    }
 }
 
 /// Update the plan canvas title and mirror it to the active session so the
@@ -552,79 +697,21 @@ plan_tool!(
 );
 
 plan_tool!(
-    PlanRemoveSectionTool,
-    RemoveSectionArgs,
-    name: "plan_remove_section",
-    description: "Remove a section from the plan canvas by its heading.",
-    schema: closed_object(
-        [(
-            "heading",
-            string_property("Heading of the section to remove"),
-        )],
-        &["heading"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        if doc.edit().remove_section(&args.heading) {
-            Ok(ToolOutput::Text(format!(
-                "Plan section '{}' removed.",
-                args.heading.trim()
-            )))
-        } else {
-            anyhow::bail!("No plan section named '{}' found.", args.heading.trim())
-        }
-    }
-);
-
-plan_tool!(
-    PlanMoveSectionTool,
-    MoveSectionArgs,
-    name: "plan_move_section",
-    description: "Reorder a section: move it to the start, end, before a target section, or \
-         after a target section. Matches headings case-insensitively.",
-    schema: closed_object(
-        [
-            ("heading", string_property("Heading of the section to move")),
-            (
-                "position",
-                string_enum_property(
-                    "Where to move the section",
-                    &["start", "end", "before", "after"],
-                ),
-            ),
-            (
-                "target",
-                string_property("Section heading to move before/after"),
-            ),
-        ],
-        &["heading", "position"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = doc.edit().move_section(
-            &args.heading,
-            args.position.into(),
-            args.target.as_deref(),
-        )?;
-        Ok(ToolOutput::Text(message))
-    }
-);
-
-plan_tool!(
     PlanPatchSectionTool,
     PatchSectionArgs,
     name: "plan_patch_section",
-    description: "Patch one plan section without rewriting the whole section. Operations: \
-         replace, append, prepend, replace_text. replace/append/prepend require text; \
-         replace_text requires old_text and accepts new_text.",
+    description: "Edit one plan section by heading (matched case-insensitively). Operations: \
+         replace, append, prepend (require text); replace_text (requires old_text, accepts \
+         new_text); remove; move (requires position: start|end|before|after, plus target \
+         heading for before/after). Use plan_replace_draft for wholesale rewrites.",
     schema: closed_object(
         [
-            ("heading", string_property("Section heading to patch")),
+            ("heading", string_property("Section heading to edit")),
             (
                 "operation",
                 string_enum_property(
-                    "Patch operation to apply",
-                    &["replace", "append", "prepend", "replace_text"],
+                    "Section operation to apply",
+                    &["replace", "append", "prepend", "replace_text", "remove", "move"],
                 ),
             ),
             (
@@ -639,14 +726,166 @@ plan_tool!(
                 "new_text",
                 string_property("Replacement text for replace_text"),
             ),
+            (
+                "position",
+                string_enum_property(
+                    "Where to move the section (move only)",
+                    &["start", "end", "before", "after"],
+                ),
+            ),
+            (
+                "target",
+                string_property("Section heading to move before/after (move only)"),
+            ),
         ],
         &["heading", "operation"],
     ),
     execute: |store, args| {
-        let (heading, patch) = args.into_heading_and_patch()?;
+        let (heading, edit) = args.into_heading_and_edit()?;
         let mut doc = store.lock().await;
-        let message = doc.edit().patch_section(&heading, patch)?;
+        let message = match edit {
+            SectionEdit::Patch(patch) => doc.edit().patch_section(&heading, patch)?,
+            SectionEdit::Remove => {
+                if doc.edit().remove_section(&heading) {
+                    format!("Plan section '{}' removed.", heading.trim())
+                } else {
+                    anyhow::bail!("No plan section named '{}' found.", heading.trim())
+                }
+            }
+            SectionEdit::Move { position, target } => {
+                doc.edit().move_section(&heading, position, target.as_deref())?
+            }
+        };
         Ok(ToolOutput::Text(message))
+    }
+);
+
+plan_tool!(
+    PlanTasksTool,
+    TasksArgs,
+    name: "plan_tasks",
+    description: "Edit the plan's task checklist and phases after the initial draft. Keep task \
+         text a short verb-first todo label; detailed context lives in sections. Operations: \
+         insert (text; position start|end|before|after, default end; target task for \
+         before/after; phase to insert into that phase's checklist); update (target, text; \
+         keeps done state); remove, check, uncheck (target); remove_phase (phase, removes its \
+         tasks); move_phase (phase, position, target phase for before/after). A target \
+         matches the first task whose text contains it.",
+    schema: closed_object(
+        [
+            (
+                "operation",
+                string_enum_property(
+                    "Task or phase operation to apply",
+                    &[
+                        "insert",
+                        "update",
+                        "remove",
+                        "check",
+                        "uncheck",
+                        "remove_phase",
+                        "move_phase",
+                    ],
+                ),
+            ),
+            (
+                "text",
+                string_property(
+                    "Task label for insert/update, anchored to its file or function when one exists",
+                ),
+            ),
+            (
+                "target",
+                string_property(
+                    "Existing task text to match (update/remove/check/uncheck, insert before/after) or phase name (move_phase before/after)",
+                ),
+            ),
+            (
+                "position",
+                string_enum_property(
+                    "Placement for insert and move_phase",
+                    &["start", "end", "before", "after"],
+                ),
+            ),
+            (
+                "phase",
+                string_property(
+                    "Phase name: the checklist for insert, or the phase for remove_phase/move_phase",
+                ),
+            ),
+        ],
+        &["operation"],
+    ),
+    execute: |store, args| {
+        let mut doc = store.lock().await;
+        Ok(ToolOutput::Text(args.apply(&mut doc)?))
+    }
+);
+
+plan_tool!(
+    PlanFindingsTool,
+    FindingsArgs,
+    name: "plan_findings",
+    description: "Record and track review findings as structured plan data, so they survive the \
+         handoff to implementation and cannot be silently dropped; prefer this over only \
+         describing an issue in prose. Operations: add (severity, issue, required_fix; \
+         optional file, line, acceptance_tests, source_ids, task); associate (finding, task: \
+         link a finding to the plan task that addresses it); resolve (finding: mark it \
+         addressed; findings are kept, never deleted). `finding` matches the issue text or \
+         unique ordered keywords.",
+    schema: closed_object(
+        [
+            (
+                "operation",
+                string_enum_property("Finding operation to apply", &["add", "associate", "resolve"]),
+            ),
+            (
+                "severity",
+                string_enum_property(
+                    "Finding severity, most-to-least urgent (add)",
+                    &["blocker", "major", "minor", "nit"],
+                ),
+            ),
+            (
+                "issue",
+                string_property("What is wrong — the problem and supporting evidence (add)"),
+            ),
+            (
+                "required_fix",
+                string_property("The concrete change required to address the finding (add)"),
+            ),
+            ("file", string_property("Path of the file the finding refers to (add)")),
+            ("line", integer_property("Line number within `file` (add)")),
+            (
+                "acceptance_tests",
+                array_property(
+                    "How to confirm the finding is fixed (add)",
+                    string_property("An acceptance check"),
+                ),
+            ),
+            (
+                "source_ids",
+                array_property(
+                    "Source tool-call or transcript ids that evidence this finding (add)",
+                    string_property("A source id"),
+                ),
+            ),
+            (
+                "task",
+                string_property("Text of the plan task that addresses the finding (add, associate)"),
+            ),
+            (
+                "finding",
+                string_property(
+                    "Text or ordered keywords matching an existing finding's issue (associate, resolve)",
+                ),
+            ),
+        ],
+        &["operation"],
+    ),
+    execute: |store, args| {
+        let mut doc = store.lock().await;
+        Ok(ToolOutput::Text(args.apply(&mut doc)?))
     }
 );
 
@@ -698,143 +937,6 @@ plan_tool!(
     }
 );
 
-plan_tool!(
-    PlanInsertTaskTool,
-    InsertTaskArgs,
-    name: "plan_insert_task",
-    description: "Insert a short implementation todo label at the start, end, before a target task, \
-         or after a target task. Put detailed context in plan sections, not in the task text. \
-         Pass `phase` to insert into a specific phase's checklist (relative to that phase's tasks).",
-    schema: closed_object(
-        [
-            (
-                "text",
-                string_property(
-                    "Short verb-first action label for the implementation todo, anchored to its file or function when one exists; rationale, edge cases, and validation details live in section bodies",
-                ),
-            ),
-            (
-                "position",
-                string_enum_property(
-                    "Where to insert the task",
-                    &["start", "end", "before", "after"],
-                ),
-            ),
-            ("target", string_property("Task text to match for before/after")),
-            (
-                "phase",
-                string_property(
-                    "Optional phase name to insert this task under; omit for the flat top-level list",
-                ),
-            ),
-        ],
-        &["text", "position"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = match args
-            .phase
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-        {
-            Some(phase) => doc.edit().insert_task_to_phase(
-                phase,
-                &args.text,
-                args.position.into(),
-                args.target.as_deref(),
-            )?,
-            None => doc.edit().insert_task(
-                &args.text,
-                args.position.into(),
-                args.target.as_deref(),
-            )?,
-        };
-        Ok(ToolOutput::Text(message))
-    }
-);
-
-plan_tool!(
-    PlanUpdateTaskTool,
-    UpdateTaskArgs,
-    name: "plan_update_task",
-    description: "Update the first task whose text contains target, preserving its done state. \
-         Keep replacement task text as a short todo label.",
-    schema: closed_object(
-        [
-            (
-                "target",
-                string_property("Text to match in the existing task"),
-            ),
-            (
-                "text",
-                string_property(
-                    "Replacement short action label; keep detailed implementation context in section bodies",
-                ),
-            ),
-        ],
-        &["target", "text"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = doc.edit().update_task(&args.target, &args.text)?;
-        Ok(ToolOutput::Text(message))
-    }
-);
-
-plan_tool!(
-    PlanRemoveTaskTool,
-    TargetTaskArgs,
-    name: "plan_remove_task",
-    description: "Remove the first task whose text contains target.",
-    schema: closed_object(
-        [("target", string_property("Text to match in the task to remove"))],
-        &["target"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = doc.edit().remove_task(&args.target)?;
-        Ok(ToolOutput::Text(message))
-    }
-);
-
-plan_tool!(
-    PlanUncheckTaskTool,
-    TargetTaskArgs,
-    name: "plan_uncheck_task",
-    description: "Mark a completed plan task as not done. Matches the first checked task whose text contains target.",
-    schema: closed_object(
-        [("target", string_property("Text to match in the checked task"))],
-        &["target"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        match doc.edit().uncheck_task(&args.target) {
-            Some(text) => Ok(ToolOutput::Text(format!("Unchecked: {text}"))),
-            None => anyhow::bail!("No checked task matching '{}' found.", args.target.trim()),
-        }
-    }
-);
-
-plan_tool!(
-    PlanCheckTaskTool,
-    TargetTaskArgs,
-    name: "plan_check_task",
-    description: "Mark a plan task as done. Matches the first unchecked task whose text \
-         contains target (case-insensitive).",
-    schema: closed_object(
-        [("target", string_property("Text to match in the task to check off"))],
-        &["target"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        match doc.edit().check_task(&args.target) {
-            Some(text) => Ok(ToolOutput::Text(format!("Checked off: {text}"))),
-            None => anyhow::bail!("No unchecked task matching '{}' found.", args.target.trim()),
-        }
-    }
-);
-
 #[cfg(test)]
 plan_tool!(
     PlanAddPhaseTool,
@@ -873,229 +975,6 @@ plan_tool!(
             "Phase added ({} phases total, {task_count} tasks).",
             doc.phases.len(),
         )))
-    }
-);
-
-plan_tool!(
-    PlanRemovePhaseTool,
-    RemovePhaseArgs,
-    name: "plan_remove_phase",
-    description: "Remove a phase from the plan canvas by name, along with its tasks.",
-    schema: closed_object(
-        [("name", string_property("Name of the phase to remove"))],
-        &["name"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        if doc.edit().remove_phase(&args.name) {
-            Ok(ToolOutput::Text(format!(
-                "Plan phase '{}' removed.",
-                args.name.trim()
-            )))
-        } else {
-            anyhow::bail!("No plan phase named '{}' found.", args.name.trim())
-        }
-    }
-);
-
-plan_tool!(
-    PlanMovePhaseTool,
-    MovePhaseArgs,
-    name: "plan_move_phase",
-    description: "Reorder a phase: move it to the start, end, before a target phase, or after a \
-         target phase. Phase order is execution order. Matches names case-insensitively.",
-    schema: closed_object(
-        [
-            ("name", string_property("Name of the phase to move")),
-            (
-                "position",
-                string_enum_property(
-                    "Where to move the phase",
-                    &["start", "end", "before", "after"],
-                ),
-            ),
-            ("target", string_property("Phase name to move before/after")),
-        ],
-        &["name", "position"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = doc.edit().move_phase(
-            &args.name,
-            args.position.into(),
-            args.target.as_deref(),
-        )?;
-        Ok(ToolOutput::Text(message))
-    }
-);
-
-plan_tool!(
-    PlanRemoveQuestionTool,
-    TargetTaskArgs,
-    name: "plan_remove_question",
-    description: "Remove the first open question whose text contains target, e.g. once it has been answered.",
-    schema: closed_object(
-        [(
-            "target",
-            string_property("Text to match in the open question to remove"),
-        )],
-        &["target"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = doc.edit().remove_question(&args.target)?;
-        Ok(ToolOutput::Text(message))
-    }
-);
-
-#[derive(Deserialize)]
-struct AddFindingArgs {
-    severity: String,
-    issue: String,
-    required_fix: String,
-    #[serde(default)]
-    file: Option<String>,
-    #[serde(default)]
-    line: Option<u32>,
-    #[serde(default)]
-    acceptance_tests: Option<Vec<String>>,
-    #[serde(default)]
-    source_ids: Option<Vec<String>>,
-    #[serde(default)]
-    task: Option<String>,
-}
-
-plan_tool!(
-    PlanAddFindingTool,
-    AddFindingArgs,
-    name: "plan_add_finding",
-    description: "Record a review finding as structured data on the plan so it survives the \
-         handoff to implementation, persists, and stays traceable to its source. Prefer this \
-         over only describing the issue in prose — findings recorded here are guaranteed to reach \
-         the coding agent on /start and cannot be silently dropped.",
-    schema: closed_object(
-        [
-            (
-                "severity",
-                string_enum_property(
-                    "Finding severity, most-to-least urgent",
-                    &["blocker", "major", "minor", "nit"],
-                ),
-            ),
-            (
-                "issue",
-                string_property("What is wrong — the problem and supporting evidence"),
-            ),
-            (
-                "required_fix",
-                string_property("The concrete change required to address the finding"),
-            ),
-            (
-                "file",
-                string_property("Path of the file the finding refers to (optional)"),
-            ),
-            (
-                "line",
-                integer_property("Line number within `file` (optional)"),
-            ),
-            (
-                "acceptance_tests",
-                array_property(
-                    "How to confirm the finding is fixed (optional)",
-                    string_property("An acceptance check"),
-                ),
-            ),
-            (
-                "source_ids",
-                array_property(
-                    "Source tool-call or transcript ids that evidence this finding (optional)",
-                    string_property("A source id"),
-                ),
-            ),
-            (
-                "task",
-                string_property("Text of the plan task that will address this finding (optional)"),
-            ),
-        ],
-        &["severity", "issue", "required_fix"],
-    ),
-    execute: |store, args| {
-        let severity = Severity::from_db_str(&args.severity).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid severity {:?}; expected one of blocker|major|minor|nit",
-                args.severity
-            )
-        })?;
-        let finding = Finding {
-            severity,
-            file: args.file.filter(|s| !s.trim().is_empty()),
-            line: args.line,
-            issue: args.issue,
-            required_fix: args.required_fix,
-            acceptance_tests: args.acceptance_tests.unwrap_or_default(),
-            source_ids: args.source_ids.unwrap_or_default(),
-            task: args.task.filter(|s| !s.trim().is_empty()),
-            resolved: false,
-        };
-        let mut doc = store.lock().await;
-        doc.edit().add_finding_checked(finding)?;
-        let open = doc.findings.iter().filter(|f| !f.resolved).count();
-        Ok(ToolOutput::Text(format!("Finding recorded ({open} open).")))
-    }
-);
-
-#[derive(Deserialize)]
-struct AssociateFindingArgs {
-    finding: String,
-    task: String,
-}
-
-plan_tool!(
-    PlanAssociateFindingTool,
-    AssociateFindingArgs,
-    name: "plan_associate_finding",
-    description: "Link an existing review finding to the plan task that will address it, so the \
-         finding is traceable from that task. Matches the finding by exact issue text or a unique \
-         ordered keyword match, and the task by text.",
-    schema: closed_object(
-        [
-            ("finding", string_property("Text or ordered keywords matching the finding's issue")),
-            ("task", string_property("Text to match in the target task")),
-        ],
-        &["finding", "task"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = doc
-            .edit()
-            .associate_finding(&args.finding, &args.task)?;
-        Ok(ToolOutput::Text(message))
-    }
-);
-
-#[derive(Deserialize)]
-struct ResolveFindingArgs {
-    finding: String,
-}
-
-plan_tool!(
-    PlanResolveFindingTool,
-    ResolveFindingArgs,
-    name: "plan_resolve_finding",
-    description: "Mark a review finding resolved once it has been addressed. Findings are kept on \
-         the record rather than deleted, so nothing is ever silently lost. Matches by text in the \
-         finding's issue, allowing unique ordered keyword matches.",
-    schema: closed_object(
-        [(
-            "finding",
-            string_property("Text or ordered keywords matching the finding's issue to resolve"),
-        )],
-        &["finding"],
-    ),
-    execute: |store, args| {
-        let mut doc = store.lock().await;
-        let message = doc.edit().resolve_finding(&args.finding)?;
-        Ok(ToolOutput::Text(message))
     }
 );
 
@@ -1323,8 +1202,8 @@ mod tests {
             .execute(serde_json::json!({"text": "Write tests"}))
             .await
             .unwrap();
-        let result = PlanCheckTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "tests"}))
+        let result = PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "check", "target": "tests"}))
             .await
             .unwrap();
 
@@ -1381,28 +1260,28 @@ mod tests {
     #[tokio::test]
     async fn insert_update_remove_and_uncheck_task_tools_mutate_store() {
         let store = store();
-        PlanInsertTaskTool::new(store.clone())
-            .execute(serde_json::json!({"text": "B", "position": "end"}))
+        PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "insert", "text": "B", "position": "end"}))
             .await
             .unwrap();
-        PlanInsertTaskTool::new(store.clone())
-            .execute(serde_json::json!({"text": "A", "position": "before", "target": "B"}))
+        PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "insert", "text": "A", "position": "before", "target": "B"}))
             .await
             .unwrap();
-        PlanUpdateTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "B", "text": "B revised"}))
+        PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "update", "target": "B", "text": "B revised"}))
             .await
             .unwrap();
-        PlanCheckTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "revised"}))
+        PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "check", "target": "revised"}))
             .await
             .unwrap();
-        let unchecked = PlanUncheckTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "revised"}))
+        let unchecked = PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "uncheck", "target": "revised"}))
             .await
             .unwrap();
-        let removed = PlanRemoveTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "A"}))
+        let removed = PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "remove", "target": "A"}))
             .await
             .unwrap();
 
@@ -1417,8 +1296,8 @@ mod tests {
     #[tokio::test]
     async fn insert_task_validates_relative_target() {
         let store = store();
-        let result = PlanInsertTaskTool::new(store)
-            .execute(serde_json::json!({"text": "A", "position": "before"}))
+        let result = PlanTasksTool::new(store)
+            .execute(serde_json::json!({"operation": "insert", "text": "A", "position": "before"}))
             .await;
 
         assert!(result.is_err());
@@ -1468,8 +1347,8 @@ mod tests {
     #[tokio::test]
     async fn remove_section_errors_on_miss() {
         let store = store();
-        let result = PlanRemoveSectionTool::new(store)
-            .execute(serde_json::json!({"heading": "Ghost"}))
+        let result = PlanPatchSectionTool::new(store)
+            .execute(serde_json::json!({"operation": "remove", "heading": "Ghost"}))
             .await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("No plan section"), "got: {err}");
@@ -1481,23 +1360,25 @@ mod tests {
         // plan tool, not a success-looking no-op the model could misread.
         let store = store();
 
-        let check = PlanCheckTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "ghost"}))
+        let check = PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "check", "target": "ghost"}))
             .await;
         assert!(check.unwrap_err().to_string().contains("No unchecked task"));
 
-        let update = PlanUpdateTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "ghost", "text": "revised"}))
+        let update = PlanTasksTool::new(store.clone())
+            .execute(
+                serde_json::json!({"operation": "update", "target": "ghost", "text": "revised"}),
+            )
             .await;
         assert!(update.unwrap_err().to_string().contains("No task matching"));
 
-        let remove = PlanRemoveTaskTool::new(store.clone())
-            .execute(serde_json::json!({"target": "ghost"}))
+        let remove = PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "remove", "target": "ghost"}))
             .await;
         assert!(remove.unwrap_err().to_string().contains("No task matching"));
 
-        let remove_section = PlanRemoveSectionTool::new(store)
-            .execute(serde_json::json!({"heading": "ghost"}))
+        let remove_section = PlanPatchSectionTool::new(store)
+            .execute(serde_json::json!({"operation": "remove", "heading": "ghost"}))
             .await;
         assert!(
             remove_section
@@ -1508,10 +1389,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tasks_tool_moves_and_removes_phases() {
+        let store = store();
+        for name in ["Storage", "Wiring"] {
+            PlanAddPhaseTool::new(store.clone())
+                .execute(serde_json::json!({"name": name, "tasks": ["step"]}))
+                .await
+                .unwrap();
+        }
+        PlanTasksTool::new(store.clone())
+            .execute(
+                serde_json::json!({"operation": "insert", "text": "Add index", "phase": "Storage"}),
+            )
+            .await
+            .unwrap();
+        PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "move_phase", "phase": "Wiring", "position": "start"}))
+            .await
+            .unwrap();
+        {
+            let doc = store.lock().await;
+            let names: Vec<&str> = doc.phases.iter().map(|phase| phase.name.as_str()).collect();
+            assert_eq!(names, ["Wiring", "Storage"]);
+            assert_eq!(doc.phases[1].tasks.len(), 2);
+        }
+        PlanTasksTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "remove_phase", "phase": "Wiring"}))
+            .await
+            .unwrap();
+        assert_eq!(store.lock().await.phases.len(), 1);
+
+        let miss = PlanTasksTool::new(store)
+            .execute(serde_json::json!({"operation": "remove_phase", "phase": "Ghost"}))
+            .await;
+        assert!(miss.unwrap_err().to_string().contains("No plan phase"));
+    }
+
+    #[tokio::test]
+    async fn consolidated_tools_name_missing_operands() {
+        let store = store();
+        let cases = [
+            (
+                PlanTasksTool::new(store.clone())
+                    .execute(serde_json::json!({"operation": "update", "target": "x"}))
+                    .await,
+                "text must not be empty",
+            ),
+            (
+                PlanTasksTool::new(store.clone())
+                    .execute(serde_json::json!({"operation": "check"}))
+                    .await,
+                "target must not be empty",
+            ),
+            (
+                PlanTasksTool::new(store.clone())
+                    .execute(serde_json::json!({"operation": "move_phase", "phase": "P"}))
+                    .await,
+                "move_phase requires position",
+            ),
+            (
+                PlanPatchSectionTool::new(store.clone())
+                    .execute(serde_json::json!({"heading": "Goal", "operation": "move"}))
+                    .await,
+                "move requires position",
+            ),
+            (
+                PlanFindingsTool::new(store.clone())
+                    .execute(
+                        serde_json::json!({"operation": "add", "severity": "major", "issue": "x"}),
+                    )
+                    .await,
+                "required_fix must not be empty",
+            ),
+            (
+                PlanFindingsTool::new(store)
+                    .execute(serde_json::json!({"operation": "resolve"}))
+                    .await,
+                "finding must not be empty",
+            ),
+        ];
+        for (result, expected) in cases {
+            let err = result.expect_err(expected).to_string();
+            assert!(err.contains(expected), "expected {expected:?}, got {err:?}");
+        }
+    }
+
+    #[test]
+    fn planning_surface_has_at_most_six_plan_tools() {
+        let names: Vec<&str> = crate::tool::profile::descriptors_for(
+            crate::tool::profile::ToolProfile::Planning,
+            crate::tool::profile::RegistrationStage::Standard,
+        )
+        .into_iter()
+        .map(|descriptor| descriptor.name)
+        .filter(|name| name.starts_with("plan_"))
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "plan_replace_draft",
+                "plan_patch_section",
+                "plan_tasks",
+                "plan_findings"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn uncheck_task_errors_on_miss() {
         let store = store();
-        let result = PlanUncheckTaskTool::new(store)
-            .execute(serde_json::json!({"target": "ghost"}))
+        let result = PlanTasksTool::new(store)
+            .execute(serde_json::json!({"operation": "uncheck", "target": "ghost"}))
             .await;
         assert!(result.unwrap_err().to_string().contains("No checked task"));
     }
@@ -1616,8 +1604,10 @@ mod tests {
                 .unwrap();
         }
 
-        PlanMoveSectionTool::new(store.clone())
-            .execute(serde_json::json!({"heading": "Risks", "position": "start"}))
+        PlanPatchSectionTool::new(store.clone())
+            .execute(
+                serde_json::json!({"operation": "move", "heading": "Risks", "position": "start"}),
+            )
             .await
             .unwrap();
 
@@ -1638,42 +1628,19 @@ mod tests {
             .execute(serde_json::json!({"heading": "Goal", "body": "x"}))
             .await
             .unwrap();
-        let result = PlanMoveSectionTool::new(store)
+        let result = PlanPatchSectionTool::new(store)
             .execute(
-                serde_json::json!({"heading": "Goal", "position": "before", "target": "Ghost"}),
+                serde_json::json!({"operation": "move", "heading": "Goal", "position": "before", "target": "Ghost"}),
             )
             .await;
         assert!(result.unwrap_err().to_string().contains("No plan section"));
     }
 
     #[tokio::test]
-    async fn remove_question_handles_legacy_canvas_questions() {
-        let store = store();
-        store
-            .lock()
-            .await
-            .edit()
-            .add_question_checked("Which auth method?")
-            .unwrap();
-
-        let removed = PlanRemoveQuestionTool::new(store.clone())
-            .execute(serde_json::json!({"target": "auth"}))
-            .await
-            .unwrap();
-        assert!(matches!(removed, ToolOutput::Text(text) if text.contains("Which auth method?")));
-        assert!(store.lock().await.questions.is_empty());
-
-        let miss = PlanRemoveQuestionTool::new(store)
-            .execute(serde_json::json!({"target": "ghost"}))
-            .await;
-        assert!(miss.unwrap_err().to_string().contains("No open question"));
-    }
-
-    #[tokio::test]
     async fn add_finding_records_structured_finding() {
         let store = store();
-        PlanAddFindingTool::new(store.clone())
-            .execute(serde_json::json!({
+        PlanFindingsTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "add",
                 "severity": "blocker",
                 "file": "src/foo.rs",
                 "line": 42,
@@ -1695,8 +1662,8 @@ mod tests {
     #[tokio::test]
     async fn add_finding_rejects_invalid_severity() {
         let store = store();
-        let err = PlanAddFindingTool::new(store)
-            .execute(serde_json::json!({
+        let err = PlanFindingsTool::new(store)
+            .execute(serde_json::json!({"operation": "add",
                 "severity": "catastrophic",
                 "issue": "x",
                 "required_fix": "y",
@@ -1712,16 +1679,16 @@ mod tests {
             .execute(serde_json::json!({"text": "Patch the parser"}))
             .await
             .unwrap();
-        PlanAddFindingTool::new(store.clone())
-            .execute(serde_json::json!({
+        PlanFindingsTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "add",
                 "severity": "major",
                 "issue": "parser regression",
                 "required_fix": "restore the branch",
             }))
             .await
             .unwrap();
-        PlanAssociateFindingTool::new(store.clone())
-            .execute(serde_json::json!({"finding": "regression", "task": "parser"}))
+        PlanFindingsTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "associate", "finding": "regression", "task": "parser"}))
             .await
             .unwrap();
         assert_eq!(
@@ -1729,8 +1696,8 @@ mod tests {
             Some("Patch the parser")
         );
 
-        PlanResolveFindingTool::new(store.clone())
-            .execute(serde_json::json!({"finding": "regression"}))
+        PlanFindingsTool::new(store.clone())
+            .execute(serde_json::json!({"operation": "resolve", "finding": "regression"}))
             .await
             .unwrap();
         let doc = store.lock().await;

@@ -3,7 +3,7 @@
 
 use super::*;
 
-const REVIEW_TOOL_NAMES: [&str; 10] = [
+const REVIEW_TOOL_NAMES: [&str; 9] = [
     "project_info",
     "read",
     "glob",
@@ -15,8 +15,7 @@ const REVIEW_TOOL_NAMES: [&str; 10] = [
     // Findings tools: review is read-only w.r.t. *files*, but recording a
     // structured finding on the plan canvas (like the planner writes the canvas)
     // is allowed, so review output survives as data, not just transcript prose.
-    "plan_add_finding",
-    "plan_associate_finding",
+    "plan_findings",
 ];
 
 /// Read-only conversational tools a custom switcher persona may scope from: no

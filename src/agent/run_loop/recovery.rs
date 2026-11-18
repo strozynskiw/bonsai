@@ -161,6 +161,7 @@ mod tests {
                 format!("{tool}:{}", serde_json::json!({"command": signature}))
             },
             tool_name: tool.into(),
+            resolves_plan_finding: false,
             status,
             makes_progress: false,
             progress_reason: None,

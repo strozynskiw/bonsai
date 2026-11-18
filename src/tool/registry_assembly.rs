@@ -18,10 +18,7 @@ use crate::tool::grep::GrepTool;
 use crate::tool::memory_write::MemoryWriteTool;
 use crate::tool::peers::PeersTool;
 use crate::tool::plan::{
-    PlanAddFindingTool, PlanAssociateFindingTool, PlanCheckTaskTool, PlanInsertTaskTool,
-    PlanMovePhaseTool, PlanMoveSectionTool, PlanPatchSectionTool, PlanRemovePhaseTool,
-    PlanRemoveQuestionTool, PlanRemoveSectionTool, PlanRemoveTaskTool, PlanReplaceDraftTool,
-    PlanResolveFindingTool, PlanUncheckTaskTool, PlanUpdateTaskTool,
+    PlanFindingsTool, PlanPatchSectionTool, PlanReplaceDraftTool, PlanTasksTool,
 };
 use crate::tool::profile::{RegistrationStage, ToolFactoryKey, ToolProfile, descriptors_for};
 use crate::tool::question::QuestionTool;
@@ -260,60 +257,16 @@ fn insert_plan_tools(
         )),
     );
     instances.insert(
-        ToolFactoryKey::PlanRemoveSection,
-        Arc::new(PlanRemoveSectionTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanMoveSection,
-        Arc::new(PlanMoveSectionTool::new(plan_store.clone())),
-    );
-    instances.insert(
         ToolFactoryKey::PlanPatchSection,
         Arc::new(PlanPatchSectionTool::new(plan_store.clone())),
     );
     instances.insert(
-        ToolFactoryKey::PlanRemovePhase,
-        Arc::new(PlanRemovePhaseTool::new(plan_store.clone())),
+        ToolFactoryKey::PlanTasks,
+        Arc::new(PlanTasksTool::new(plan_store.clone())),
     );
     instances.insert(
-        ToolFactoryKey::PlanMovePhase,
-        Arc::new(PlanMovePhaseTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanInsertTask,
-        Arc::new(PlanInsertTaskTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanUpdateTask,
-        Arc::new(PlanUpdateTaskTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanRemoveTask,
-        Arc::new(PlanRemoveTaskTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanCheckTask,
-        Arc::new(PlanCheckTaskTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanUncheckTask,
-        Arc::new(PlanUncheckTaskTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanRemoveQuestion,
-        Arc::new(PlanRemoveQuestionTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanAddFinding,
-        Arc::new(PlanAddFindingTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanAssociateFinding,
-        Arc::new(PlanAssociateFindingTool::new(plan_store.clone())),
-    );
-    instances.insert(
-        ToolFactoryKey::PlanResolveFinding,
-        Arc::new(PlanResolveFindingTool::new(plan_store)),
+        ToolFactoryKey::PlanFindings,
+        Arc::new(PlanFindingsTool::new(plan_store)),
     );
 }
 
@@ -1023,20 +976,9 @@ mod tests {
             "question",
             "skill",
             "plan_replace_draft",
-            "plan_remove_section",
-            "plan_move_section",
             "plan_patch_section",
-            "plan_remove_phase",
-            "plan_move_phase",
-            "plan_insert_task",
-            "plan_update_task",
-            "plan_remove_task",
-            "plan_check_task",
-            "plan_uncheck_task",
-            "plan_remove_question",
-            "plan_add_finding",
-            "plan_associate_finding",
-            "plan_resolve_finding",
+            "plan_tasks",
+            "plan_findings",
             "webfetch",
         ];
         if websearch_configured {
@@ -1153,20 +1095,9 @@ mod tests {
 
         for tool in [
             "plan_replace_draft",
-            "plan_remove_section",
-            "plan_move_section",
             "plan_patch_section",
-            "plan_remove_phase",
-            "plan_move_phase",
-            "plan_insert_task",
-            "plan_update_task",
-            "plan_remove_task",
-            "plan_check_task",
-            "plan_uncheck_task",
-            "plan_remove_question",
-            "plan_add_finding",
-            "plan_associate_finding",
-            "plan_resolve_finding",
+            "plan_tasks",
+            "plan_findings",
         ] {
             assert!(
                 planning.get(tool).is_some(),

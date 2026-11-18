@@ -1272,6 +1272,7 @@ mod tests {
             tool_observations: vec![ToolCallObservation {
                 signature: "read:{}".to_string(),
                 tool_name: "read".to_string(),
+                resolves_plan_finding: false,
                 status: crate::output::ToolExecutionStatus::Succeeded,
                 makes_progress: false,
                 progress_reason: None,

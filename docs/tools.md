@@ -248,15 +248,20 @@ with brief `evidence`. Called alone, after all other work; the completion gate
 still checks outstanding work and verification before the goal closes.
 
 ### Plan-canvas tools (planning registry only)
-Nineteen `plan_*` tools maintain the live plan canvas:
-`plan_replace_draft`, `plan_set_title`, `plan_set_section`,
-`plan_patch_section`, `plan_remove_section`, `plan_move_section`,
-`plan_add_task`, `plan_insert_task`, `plan_update_task`, `plan_remove_task`,
-`plan_check_task`, `plan_uncheck_task`, `plan_add_phase`,
-`plan_remove_phase`, `plan_move_phase`, `plan_remove_question`,
-`plan_add_finding`, `plan_associate_finding`, `plan_resolve_finding`
-(findings are kept on record, never deleted). Phases enter through
-`plan_replace_draft`'s phased form or `plan_add_phase`.
+Four `plan_*` tools maintain the live plan canvas:
+
+| Tool | Operations |
+| --- | --- |
+| `plan_replace_draft` | write the whole draft atomically: title, sections (with a non-empty `Implementation details`), and flat tasks or phases; review findings are preserved |
+| `plan_patch_section` | `replace`, `append`, `prepend`, `replace_text`, `remove`, `move` one section by heading |
+| `plan_tasks` | `insert` (optionally into a phase), `update`, `remove`, `check`, `uncheck` a task; `remove_phase`, `move_phase` |
+| `plan_findings` | `add`, `associate` (link to a task), `resolve` a review finding; findings are kept on record, never deleted |
+
+Each call names one `operation`; missing operands are rejected with the field
+name. Phases enter through `plan_replace_draft`'s phased form. Review mode gets
+`plan_findings` only. Plans never hold open questions (ask with `question`
+instead); a legacy canvas that still has some is cleared by the next
+`plan_replace_draft`.
 
 ---
 

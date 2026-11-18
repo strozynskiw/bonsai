@@ -393,16 +393,6 @@ impl PlanDoc {
         self.revision += 1;
     }
 
-    /// Validates and appends an open question, rejecting blank input.
-    #[cfg(test)]
-    fn add_question_checked(&mut self, text: &str) -> anyhow::Result<()> {
-        if text.trim().is_empty() {
-            anyhow::bail!("question text must not be empty");
-        }
-        self.add_question(text);
-        Ok(())
-    }
-
     /// Records a finding. A re-record with the same identity (severity, file,
     /// line, issue text) is treated as a *refinement*: the existing entry's
     /// required fix, acceptance tests, evidence, and task link are updated in
@@ -479,6 +469,7 @@ impl PlanDoc {
 
     /// Removes the first open question whose text contains `target`
     /// (case-insensitive). Returns the removed question text.
+    #[cfg(test)]
     fn remove_question(&mut self, target: &str) -> anyhow::Result<String> {
         let target = target.trim();
         if target.is_empty() {

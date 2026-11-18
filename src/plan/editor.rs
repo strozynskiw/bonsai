@@ -130,12 +130,6 @@ impl PlanEditor<'_> {
         self.apply(|doc| doc.add_question(text));
     }
 
-    /// Adds a non-empty open question.
-    #[cfg(test)]
-    pub fn add_question_checked(&mut self, text: &str) -> anyhow::Result<()> {
-        self.try_apply(|doc| doc.add_question_checked(text))
-    }
-
     /// Adds or refines a structured finding.
     #[cfg(test)]
     pub fn add_finding(&mut self, finding: Finding) {
@@ -159,11 +153,6 @@ impl PlanEditor<'_> {
     /// Marks a finding resolved without deleting its evidence.
     pub fn resolve_finding(&mut self, target: &str) -> anyhow::Result<String> {
         self.try_apply(|doc| doc.resolve_finding(target))
-    }
-
-    /// Removes a matching open question.
-    pub fn remove_question(&mut self, target: &str) -> anyhow::Result<String> {
-        self.try_apply(|doc| doc.remove_question(target))
     }
 
     /// Inserts a flat task at a typed position.

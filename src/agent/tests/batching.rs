@@ -392,8 +392,8 @@ fn plan_tools_serialize_around_other_calls() {
         ),
         test_tool_call(
             "call-3",
-            "plan_insert_task",
-            r#"{"text":"Write tests","position":"end"}"#,
+            "plan_tasks",
+            r#"{"operation":"insert","text":"Write tests"}"#,
         ),
         test_tool_call("call-4", "read", r#"{"path":"src/agent.rs"}"#),
     ];
@@ -402,7 +402,7 @@ fn plan_tools_serialize_around_other_calls() {
             "plan_replace_draft",
             crate::tool::ParallelPolicy::Serialized,
         ),
-        ("plan_insert_task", crate::tool::ParallelPolicy::Serialized),
+        ("plan_tasks", crate::tool::ParallelPolicy::Serialized),
     ]);
 
     let batches = super::tool_call_batches(&calls, &registry, batch_root());
