@@ -296,9 +296,11 @@ fn command_help_lists_custom_commands_and_skipped_files() {
         rows.iter()
             .any(|row| row.label == "! help.md" && row.description.contains("built-in /help"))
     );
-    // Built-ins keep their place ahead of custom rows.
+    // Custom rows lead so they stay visible on a board the built-ins fill.
+    assert_eq!(rows[0].label, "/review-pr <number>");
+    assert_eq!(rows[1].label, "! help.md");
     assert_eq!(
-        rows[0].label,
+        rows[2].label,
         command_help_label(&crate::commands::COMMANDS[0])
     );
 }

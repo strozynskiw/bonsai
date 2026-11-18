@@ -172,8 +172,8 @@ Review pull request $ARGUMENTS. Check correctness first, then tests.
   interpolation), and one that expands to another slash command is refused.
 - **Trust.** Project commands are inert until the workspace is trusted, like
   project skills and hooks; global commands always load.
-- **Surfaces.** In the TUI they appear in `/help` (marked `(custom)`, with any
-  skipped files and the reason) and in the `/` popup; files are re-read on
+- **Surfaces.** In the TUI they lead the `/help` board (marked `(custom)`, followed
+  by any skipped files and the reason) and in the `/` popup; files are re-read on
   every slash submit, so edits apply without a restart. A custom command runs
   only while the agent is idle. `bonsai -p "/review-pr 42"` runs one headless,
   and [ACP](acp.md) editors receive them as `available_commands_update`.

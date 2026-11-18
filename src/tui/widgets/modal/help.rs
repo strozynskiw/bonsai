@@ -9,26 +9,24 @@ pub(super) struct HelpRow {
     pub(super) description: String,
 }
 
-/// Built-in commands followed by the project's custom commands and any
-/// command files that were skipped (with the reason), so a clash with a
-/// built-in is visible where users look for commands.
+/// The project's custom commands and any command files that were skipped
+/// (with the reason), followed by the built-ins. Custom rows lead because the
+/// built-in board already fills a typical terminal and this modal does not
+/// scroll; they are also the rows a user opening `/help` after adding a file
+/// is looking for, and a clash with a built-in is visible right there.
 pub(super) fn command_help_rows(
     custom: &crate::resource::command::CommandRegistry,
 ) -> Vec<HelpRow> {
-    let mut rows: Vec<HelpRow> = crate::commands::COMMANDS
+    let mut rows: Vec<HelpRow> = custom
         .iter()
-        .map(|command| HelpRow {
-            label: command_help_label(command),
-            description: command.description.to_string(),
+        .map(|def| HelpRow {
+            label: match &def.argument_hint {
+                Some(hint) => format!("{} {hint}", def.slash_name()),
+                None => def.slash_name(),
+            },
+            description: format!("{} (custom)", def.description),
         })
         .collect();
-    rows.extend(custom.iter().map(|def| HelpRow {
-        label: match &def.argument_hint {
-            Some(hint) => format!("{} {hint}", def.slash_name()),
-            None => def.slash_name(),
-        },
-        description: format!("{} (custom)", def.description),
-    }));
     rows.extend(custom.diagnostics().iter().map(|diagnostic| HelpRow {
         label: format!(
             "! {}",
@@ -38,6 +36,10 @@ pub(super) fn command_help_rows(
                 .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
         ),
         description: format!("skipped: {}", diagnostic.message),
+    }));
+    rows.extend(crate::commands::COMMANDS.iter().map(|command| HelpRow {
+        label: command_help_label(command),
+        description: command.description.to_string(),
     }));
     rows
 }
