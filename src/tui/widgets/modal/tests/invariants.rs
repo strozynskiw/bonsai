@@ -183,6 +183,10 @@ fn fixture_kinds() -> Vec<ModalKind> {
 
 #[test]
 fn every_popup_keeps_the_shell_contract_at_four_sizes() {
+    // The theme picker's rows come from the process-wide registry, which theme
+    // tests mutate while they hold TEST_LOCK. Without it a concurrent custom
+    // theme adds a row and the picker legitimately overflows 150x45.
+    let _guard = crate::tui::theme::TEST_LOCK.blocking_lock();
     for (width, height) in SIZES {
         let area = Rect::new(0, 0, width, height);
         for kind in fixture_kinds() {
@@ -193,6 +197,7 @@ fn every_popup_keeps_the_shell_contract_at_four_sizes() {
 
 #[test]
 fn measured_popups_fit_the_height_they_asked_for() {
+    let _guard = crate::tui::theme::TEST_LOCK.blocking_lock();
     // 160x60 is far larger than any content-sized popup: when the height comes from
     // the renderer's own builders there is nothing left to scroll. Reading surfaces
     // report no clamp by design, so they are skipped rather than counted as a fit.
@@ -233,6 +238,7 @@ fn the_sandbox_popup_reaches_its_writable_paths_heading() {
 
 #[test]
 fn every_fixture_footer_draws_the_shared_hint_table() {
+    let _guard = crate::tui::theme::TEST_LOCK.blocking_lock();
     // The renderer must actually use the table: every pair it lists has to show up
     // in the rows the popup draws its footer into.
     let area = Rect::new(0, 0, 150, 45);
@@ -332,6 +338,7 @@ fn every_fixture_popup_advertises_hints() {
 
 #[test]
 fn every_popup_footer_advertises_escape() {
+    let _guard = crate::tui::theme::TEST_LOCK.blocking_lock();
     // The dismiss key is the one hint no popup may drop: it comes straight from
     // the keymap's `Esc` arm, so a footer that loses it means the hints drifted
     // from the binding.
@@ -351,6 +358,7 @@ fn every_popup_footer_advertises_escape() {
 
 #[test]
 fn popups_never_touch_the_terminal_edge_on_a_wide_screen() {
+    let _guard = crate::tui::theme::TEST_LOCK.blocking_lock();
     let area = Rect::new(0, 0, 100, 30);
     for kind in fixture_kinds() {
         let modal = modal_area(area, &kind);
