@@ -24,6 +24,7 @@ const RELEASE_SCRIPT: &str = include_str!("../../scripts/release.sh");
 const RELEASE_WORKFLOW: &str = include_str!("../../.github/workflows/release.yml");
 const SITE: &str = include_str!("../../site/index.html");
 const CONNECTIONS: &str = include_str!("../../models/builtin/connections.toml");
+const PROVIDERS_DOCS: &str = include_str!("../../docs/providers.md");
 
 /// A tagged fenced example: which skill it came from, its `bonsai:*` tag, and
 /// the fence body.
@@ -427,6 +428,121 @@ fn release_platform_claims_match_installer_and_workflow() {
     }
 }
 
+const NUMBER_ONES: [&str; 20] = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+];
+const NUMBER_TENS: [&str; 8] = [
+    "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+];
+
+/// The English spelling of a count under 100, so a page that says "Twenty-three
+/// connections" is checked exactly like one that says "23 connections".
+fn number_word(count: usize) -> Option<String> {
+    if let Some(word) = NUMBER_ONES.get(count) {
+        return Some((*word).to_string());
+    }
+    let tens = count / 10;
+    let ones = count % 10;
+    let tens_word = NUMBER_TENS.get(tens.checked_sub(2)?)?;
+    Some(if ones == 0 {
+        (*tens_word).to_string()
+    } else {
+        format!("{tens_word}-{}", NUMBER_ONES.get(ones)?)
+    })
+}
+
+/// Every number word the claim scanner recognizes (0-99); tokens outside this
+/// vocabulary ("active", "new") are prose, not counts.
+fn number_vocabulary() -> BTreeSet<String> {
+    (0..100).filter_map(number_word).collect()
+}
+
+/// Every count written directly before `noun` in `source`, lowercased, both
+/// digit and spelled-out forms. Scans all occurrences, so a page carrying one
+/// correct and one stale claim fails instead of passing on the first hit.
+fn count_claims(source: &str, noun: &str, vocabulary: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut claims = BTreeSet::new();
+    let mut rest = source;
+    while let Some(index) = rest.find(noun) {
+        let token = rest[..index]
+            .trim_end()
+            .rsplit(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !token.is_empty()
+            && (token.chars().all(|character| character.is_ascii_digit())
+                || vocabulary.contains(&token))
+        {
+            claims.insert(token);
+        }
+        rest = &rest[index + noun.len()..];
+    }
+    claims
+}
+
+fn assert_count_claims(
+    name: &str,
+    source: &str,
+    noun: &str,
+    expected: usize,
+    vocabulary: &BTreeSet<String>,
+) {
+    let claims = count_claims(source, noun, vocabulary);
+    assert!(
+        !claims.is_empty(),
+        "{name} states no `{noun}` count, so the drift guard went blind"
+    );
+    let mut accepted: BTreeSet<String> = BTreeSet::from([expected.to_string()]);
+    if let Some(word) = number_word(expected) {
+        accepted.insert(word);
+    }
+    for claim in claims {
+        assert!(
+            accepted.contains(&claim),
+            "{name} claims `{claim} {noun}` but the binary ships {expected} \
+             (accepted spellings: {accepted:?})"
+        );
+    }
+}
+
+#[test]
+fn count_claims_reads_digits_words_and_ignores_prose() {
+    let vocabulary = number_vocabulary();
+    let claims = count_claims(
+        "<span>23 connections</span> Twenty-three connections. Active connections. 18 themes",
+        "connection",
+        &vocabulary,
+    );
+    assert_eq!(
+        claims,
+        BTreeSet::from(["23".to_string(), "twenty-three".to_string()]),
+        "the scanner must see both spellings and skip prose that is not a count"
+    );
+    assert_eq!(number_word(18).as_deref(), Some("eighteen"));
+    assert_eq!(number_word(23).as_deref(), Some("twenty-three"));
+    assert_eq!(number_word(120), None);
+}
+
 #[test]
 fn website_feature_counts_follow_builtin_registries() {
     let connection_count = CONNECTIONS.matches("[[connections]]").count();
@@ -446,7 +562,19 @@ fn website_feature_counts_follow_builtin_registries() {
         })
         .expect("settings screen has an autonomy row");
 
-    assert!(SITE.contains(&format!("{connection_count} connections")));
-    assert!(SITE.contains(&format!("{theme_count} themes")));
-    assert!(SITE.contains(&format!("{autonomy_count} levels")));
+    let vocabulary = number_vocabulary();
+    for (name, source) in [
+        ("site/index.html", SITE),
+        ("docs/providers.md", PROVIDERS_DOCS),
+    ] {
+        assert_count_claims(name, source, "connection", connection_count, &vocabulary);
+    }
+    assert_count_claims("site/index.html", SITE, "theme", theme_count, &vocabulary);
+    assert_count_claims(
+        "site/index.html",
+        SITE,
+        "level",
+        autonomy_count,
+        &vocabulary,
+    );
 }
