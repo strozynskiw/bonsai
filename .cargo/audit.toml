@@ -2,4 +2,10 @@
 # Hugging Face Tokenizers retains the stable, dependency-free `paste` macro after
 # deliberately reverting its pastey migration: https://github.com/huggingface/tokenizers/issues/1833.
 # Remove this exception when upstream releases a maintained replacement.
-ignore = ["RUSTSEC-2024-0436"]
+ignore = [
+    "RUSTSEC-2024-0436",
+    # `chrono` is unmaintained with no maintained release to move to, and we do
+    # not depend on it directly: rmcp→oauth2, schemars and serde_with pull it
+    # in. Drop this once an upstream release on those chains stops requiring it.
+    "RUSTSEC-2026-0543",
+]
