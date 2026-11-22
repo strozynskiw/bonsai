@@ -115,7 +115,7 @@ connection = "opencode-zen"
 model = "opencode-zen/gemini-3.6-flash"
 metadata_model = "opencode/gemini-3.6-flash"
 remote_model = "gemini-3.6-flash"
-pricing = { input_micros_per_million = 1500000, output_micros_per_million = 7500000, cache_read_micros_per_million = 150000 }
+pricing = { input_micros_per_million = 750000, output_micros_per_million = 3750000, cache_read_micros_per_million = 75000 }
 
 [[targets.reasoning_options]]
 type = "effort"

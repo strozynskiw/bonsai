@@ -2701,6 +2701,47 @@ default_base_url = "http://localhost:11434/v1"
         assert!(models_dev_drift_lines(pinned, models_dev_model).is_empty());
     }
 
+    /// The builtin catalog is checked against a models.dev snapshot the caller
+    /// supplies through `BONSAI_MODELS_DEV_SNAPSHOT`, so the upkeep ritual
+    /// (`curl -sSL https://models.dev/api.json -o /tmp/models-dev.json` then
+    /// `BONSAI_MODELS_DEV_SNAPSHOT=/tmp/models-dev.json cargo test
+    /// builtin_catalog_has_no_unpinned_models_dev_drift`) catches new drift
+    /// without pinning a multi-megabyte fixture in the repo or reaching the
+    /// network from CI. Every flagged line is either a TOML value to correct or
+    /// a field to add to `pinned_fields` with the reason it is deliberate.
+    #[test]
+    fn builtin_catalog_has_no_unpinned_models_dev_drift() {
+        let Ok(snapshot) = std::env::var("BONSAI_MODELS_DEV_SNAPSHOT") else {
+            return;
+        };
+        let content = std::fs::read_to_string(&snapshot)
+            .unwrap_or_else(|err| panic!("cannot read models.dev snapshot {snapshot}: {err}"));
+        let models_dev = parse_models_dev_catalog(&snapshot, &content).unwrap();
+        assert!(
+            !models_dev.is_empty(),
+            "models.dev snapshot {snapshot} parsed to zero models"
+        );
+
+        let spec = load_builtin_catalog().unwrap();
+        let mut drift = Vec::new();
+        for target in &spec.targets {
+            let metadata_id = target.metadata_model.as_ref().unwrap_or(&target.model);
+            let Some(models_dev_model) = models_dev.model(metadata_id) else {
+                continue;
+            };
+            for line in models_dev_drift_lines(target, models_dev_model) {
+                drift.push(format!("{}: {line}", target.model));
+            }
+        }
+
+        assert!(
+            drift.is_empty(),
+            "builtin catalog drifts from models.dev ({} lines):\n{}",
+            drift.len(),
+            drift.join("\n")
+        );
+    }
+
     #[test]
     fn models_dev_refresh_notice_is_actionable_and_clears_on_success() {
         let catalog = ModelCatalog::load_builtin().unwrap();
