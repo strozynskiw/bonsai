@@ -49,6 +49,20 @@ Notes that save you time:
 - Comments explain *why* something is the way it is — especially anything that
   looks simplifiable but isn't (those carry "deliberate, don't simplify" notes;
   please keep them).
+- **Monthly upkeep** (issue #242): `cargo update`, then `cargo audit`. Advisories
+  we deliberately accept belong in `.cargo/audit.toml` with the reason. For the
+  model catalog, run `/refresh`, and re-check the builtin entries against a fresh
+  models.dev snapshot:
+
+  ```sh
+  curl -sSL https://models.dev/api.json -o /tmp/models-dev.json
+  BONSAI_MODELS_DEV_SNAPSHOT=/tmp/models-dev.json \
+    cargo test builtin_catalog_has_no_unpinned_models_dev_drift
+  ```
+
+  Each flagged line is either a value to correct or a field to add to
+  `pinned_fields` with the comment explaining why the local value wins. The
+  snapshot is never committed — the test skips without the variable.
 
 ## Pull requests
 
