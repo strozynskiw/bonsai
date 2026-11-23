@@ -81,7 +81,7 @@ flate2 = "1"
 tar = "0.4"
 # HTML → Markdown for the WebFetch tool (M5.5). html5ever-based, so it tolerates
 # the truncated HTML we may hand it after enforcing the response byte cap.
-htmd = "0.5"
+htmd = "0.6"
 # Charset decoding for fetched pages (M5.5). Also compiled transitively via
 # reqwest's default `charset` feature; declared directly so WebFetch owns it.
 encoding_rs = "0.8"
