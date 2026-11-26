@@ -5,6 +5,10 @@
 - `screenshot-task.png` — the same session as a still.
 - `screenshot-onboarding.png` — the last onboarding step.
 - `screenshot-models.png` — the `/model` picker (provider → model → reasoning).
+- `screenshot-plan.png` — the planning agent's canvas: sections drafted from the
+  codebase beside the chat, with the `plan_replace_draft` tool card.
+- `screenshot-plan-question.png` — the planner asking a design question before
+  it commits to an approach.
 - `social-preview.png` — 1280×640 card for the repository's social preview.
 
 ## Social preview

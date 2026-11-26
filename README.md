@@ -127,6 +127,13 @@ bonsai -p "review the current changes" --model anthropic:anthropic/claude-sonnet
 | --- | --- |
 | ![onboarding: the last step of first-run setup](.github/assets/screenshot-onboarding.png) | ![the model picker with provider, model, and reasoning panes](.github/assets/screenshot-models.png) |
 
+`Tab` switches to the planning agent: it explores the repository, asks before it
+commits to an approach, and drafts the plan on a canvas beside the chat.
+
+| Plan canvas | The planner asking a design question |
+| --- | --- |
+| ![the planning agent's plan canvas, with sections drafted from the codebase](.github/assets/screenshot-plan.png) | ![the planner asking a clarifying question with three options](.github/assets/screenshot-plan-question.png) |
+
 ## Documentation
 
 Full guides and reference documentation are at
