@@ -4,6 +4,8 @@ A fast, extensible terminal coding agent built in Rust. Bonsai can inspect,
 edit, run, debug, verify, and review software from an interactive TUI or a
 headless command.
 
+![bonsai diagnosing a failing test, editing the code, and re-running the tests](.github/assets/task-flow.gif)
+
 > [!WARNING]
 > Bonsai is pre-1.0 software. It can modify files, execute commands, and call
 > external services. Use version control, review changes, and keep backups.
@@ -118,6 +120,12 @@ Use a specific model for one headless run:
 ```sh
 bonsai -p "review the current changes" --model anthropic:anthropic/claude-sonnet-4-6
 ```
+
+## Screenshots
+
+| First run | `/model` — provider, model, reasoning |
+| --- | --- |
+| ![onboarding: the last step of first-run setup](.github/assets/screenshot-onboarding.png) | ![the model picker with provider, model, and reasoning panes](.github/assets/screenshot-models.png) |
 
 ## Documentation
 
